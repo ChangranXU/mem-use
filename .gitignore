@@ -1,0 +1,23 @@
+# Secrets
+.env
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Test and lint caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# Packaging artifacts
+*.egg-info/
+build/
+dist/
+
+# OS files
+.DS_Store
