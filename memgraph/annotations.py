@@ -109,9 +109,14 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
         seq = event.get("seq")
         annotation_id = event.get("annotation_id")
         if annotation_id is not None:
-            if annotation_id in seen_annotation_ids:
-                index.problems.append(f"seq {seq}: duplicate recorded annotation_id {annotation_id}")
-            seen_annotation_ids.add(annotation_id)
+            try:
+                if annotation_id in seen_annotation_ids:
+                    index.problems.append(f"seq {seq}: duplicate recorded annotation_id {annotation_id}")
+                seen_annotation_ids.add(annotation_id)
+            except TypeError:
+                # Corrupted log: an unhashable annotation_id (list/dict) must
+                # not take down the pass.
+                index.problems.append(f"seq {seq}: unhashable annotation_id {annotation_id!r}")
         payload = event.get("payload")
         if not isinstance(payload, dict):
             index.problems.append(f"seq {seq}: {event_type} has a missing or non-object payload")
@@ -132,6 +137,9 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
             continue
         if event_type == "memory_role_bind":
             role = payload.get("logical_role")
+            if not isinstance(role, str):
+                index.problems.append(f"seq {seq}: memory_role_bind has a non-string logical_role")
+                continue
             binds = index.binds.setdefault(sid, {})
             if role in binds:
                 index.problems.append(f"seq {seq}: session {sid} binds {role} twice")
@@ -139,6 +147,11 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
             continue
         if event_type == "memory_delivery":
             delivery_id = payload.get("delivery_id")
+            if not isinstance(delivery_id, str):
+                index.problems.append(
+                    f"seq {seq}: memory_delivery has a missing or non-string delivery_id"
+                )
+                continue
             if delivery_id in seen_delivery_ids:
                 index.problems.append(f"seq {seq}: duplicate delivery_id {delivery_id}")
                 continue
@@ -162,7 +175,9 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
             )
             operation.start = event
             continue
-        if event_type == "memory_change":
+        if event_type in ("memory_generate_start", "memory_search_start"):
+            index.problems.append(f"seq {seq}: operation {operation_id} starts twice")
+        elif event_type == "memory_change":
             if operation.end is not None:
                 index.problems.append(f"seq {seq}: memory_change after the operation end")
             operation.changes.append(event)
@@ -173,8 +188,6 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
 
     index.deliveries.sort(key=lambda e: e.get("seq") or 0)
     for operation in index.operations.values():
-        if operation.start is None:
-            index.problems.append(f"operation {operation.operation_id}: missing start event")
         if operation.end is None:
             index.problems.append(f"operation {operation.operation_id}: missing end event")
     for sid in index.sessions:

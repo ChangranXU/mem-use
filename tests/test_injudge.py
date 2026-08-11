@@ -22,6 +22,12 @@ from eval.injudge.judge import (
     resolve_config,
 )
 from eval.injudge.model import AgentStep, InjectionSpan, ToolExec
+from eval.injudge.report import (
+    build_artifact,
+    operation_record,
+    print_summary,
+    render_markdown,
+)
 from eval.injudge.spans import content_fingerprint, group_spans
 from eval.injudge.steps import build_step_stream
 from eval.memgraph.parse_trajectory import parse_trajectory
@@ -39,11 +45,11 @@ RECALL_CONTENT = "## CURE Memory Policy\n\n## Relevant Approved Memories\n- …\
 
 def make_steps(b: TrajBuilder, lane=MEM):
     warnings = []
-    return build_step_stream(b.events, lane, warnings), warnings
+    return build_step_stream(b.events, {lane}, warnings), warnings
 
 
 def _recall_ops(b: TrajBuilder, tmp_path, name="t1"):
-    _, ops = parse_trajectory(b.write(tmp_path / name), [])
+    _, ops, _events = parse_trajectory(b.write(tmp_path / name), [])
     return [op for op in ops if op.kind == "recall"]
 
 
@@ -66,7 +72,7 @@ def test_step_stream_interleaved_memory_lane(tmp_path):
     assert steps[0].tools[0].result == "ok"
     assert warnings == []
     # parity with memgraph's attribution
-    traj, _ = parse_trajectory(b.write(tmp_path / "t"), [])
+    traj, _, _events = parse_trajectory(b.write(tmp_path / "t"), [])
     assert traj.n_steps == len(steps)
 
 
@@ -130,6 +136,59 @@ def test_turnless_tool_end_attributed_by_id():
             name="bash", status="interrupted", result="partial")
     steps, _ = make_steps(b)
     assert steps[0].tools[0].result == "partial" and steps[0].tools[0].status == "interrupted"
+
+
+def test_step_stream_lane_parity_with_memgraph(tmp_path):
+    """injudge classifies against the same memory-lane set memgraph uses:
+    no bound lane ⇒ every turn is an agent turn (None is not a wildcard),
+    several bound memory lanes ⇒ all of them consume no step."""
+    # unannotated, unprefixed run: nothing is a memory turn
+    plain = [
+        {"seq": 1, "type": "turn_start", "turn": 1, "call_id": "c1"},
+        {"seq": 2, "type": "message_end", "role": "assistant", "turn": 1, "content": "a"},
+        {"seq": 3, "type": "turn_end", "turn": 1},
+        {"seq": 4, "type": "turn_start", "turn": 2, "call_id": "c2"},
+        {"seq": 5, "type": "message_end", "role": "assistant", "turn": 2, "content": "b"},
+        {"seq": 6, "type": "turn_end", "turn": 2},
+    ]
+    d = tmp_path / "plain"
+    d.mkdir()
+    (d / "trajectory.jsonl").write_text(
+        "\n".join(json.dumps(e) for e in plain) + "\n", encoding="utf-8"
+    )
+    traj, _, events = parse_trajectory(d, [])
+    assert traj.memory_lanes == set()
+    steps = build_step_stream(events, traj.memory_lanes, [])
+    assert len(steps) == traj.n_steps == 2
+
+    # two sessions bound to two memory lanes: both are memory turns
+    multi = [
+        {"seq": 1, "type": "memory_session", "payload": {"trace_session_id": "S1"}},
+        {"seq": 2, "type": "memory_role_bind", "proxy_source": "M1",
+         "payload": {"trace_session_id": "S1", "logical_role": "memory"}},
+        {"seq": 3, "type": "memory_role_bind", "proxy_source": "MAIN",
+         "payload": {"trace_session_id": "S1", "logical_role": "main"}},
+        {"seq": 4, "type": "memory_session", "payload": {"trace_session_id": "S2"}},
+        {"seq": 5, "type": "memory_role_bind", "proxy_source": "M2",
+         "payload": {"trace_session_id": "S2", "logical_role": "memory"}},
+        {"seq": 6, "type": "memory_role_bind", "proxy_source": "MAIN",
+         "payload": {"trace_session_id": "S2", "logical_role": "main"}},
+        {"seq": 7, "type": "turn_start", "turn": 1, "call_id": "c1"},
+        {"seq": 8, "type": "message_end", "role": "assistant", "turn": 1,
+         "proxy_source": "MAIN", "content": "a"},
+        {"seq": 9, "type": "turn_end", "turn": 1},
+        {"seq": 10, "type": "turn_start", "turn": 2, "call_id": "c2"},
+        {"seq": 11, "type": "message_end", "role": "assistant", "turn": 2,
+         "proxy_source": "M2", "content": "m"},
+        {"seq": 12, "type": "turn_end", "turn": 2},
+    ]
+    (d / "trajectory.jsonl").write_text(
+        "\n".join(json.dumps(e) for e in multi) + "\n", encoding="utf-8"
+    )
+    traj, _, events = parse_trajectory(d, [])
+    assert traj.memory_lanes == {"M1", "M2"}
+    steps = build_step_stream(events, traj.memory_lanes, [])
+    assert len(steps) == traj.n_steps == 1  # the M2 turn consumes no step
 
 
 # ---------------------------------------------------------------- spans
@@ -233,8 +292,8 @@ class _FakeSpan:
     memories = [{"key": "key_a", "value": "v"}, {"key": "key_b", "value": "w"}]
 
 
-def _signals(rel=True, acc="uncontradicted", nov=True, inf="none", pe=None):
-    """v3 rubric entry: bools for relevance/novelty, enums elsewhere."""
+def _signals(rel=True, acc="uncontradicted", nov="novel", inf="none", pe=None):
+    """v4 rubric entry: bool for relevance, enums elsewhere."""
     return {
         "relevance": {"value": rel, "note": ""},
         "accuracy": {"value": acc, "note": ""},
@@ -249,14 +308,14 @@ GOOD = json.dumps({
         "key_a": {
             "relevance": {"value": True, "note": "task is about this bug"},
             "accuracy": {"value": "corroborated", "note": "consistent with the file at step 2"},
-            "novelty": {"value": True, "note": "agent had not seen this before"},
+            "novelty": {"value": "novel", "note": "agent had not seen this before"},
             "influence": {"value": "acted_on", "note": "agent grepped it at step 3"},
             "positive_effect": {"value": "improved", "note": "saved exploration"},
         },
         "key_b": {
             "relevance": {"value": False, "note": "unrelated to the task"},
             "accuracy": {"value": "uncontradicted", "note": "plausible, uncontradicted"},
-            "novelty": {"value": True, "note": "new content"},
+            "novelty": {"value": "novel", "note": "new content"},
             "influence": {"value": "none", "note": "never referenced"},
             "positive_effect": {"value": None, "note": "n/a"},
         },
@@ -325,21 +384,25 @@ def test_parse_verdict_coercions():
 
 
 def test_parse_verdict_enum_synonyms_and_bool_map():
-    """v2-style bools and loose spellings land on the v3 enums."""
+    """v2-style bools and loose spellings land on the enum signals."""
     payload = json.loads(GOOD)
     ka, kb = payload["memories"]["key_a"], payload["memories"]["key_b"]
     ka["accuracy"] = {"value": True}              # bool → uncontradicted
     ka["influence"] = {"value": "critical"}       # synonym → decisive
     ka["positive_effect"] = {"value": "helped"}   # synonym → improved
+    ka["novelty"] = {"value": "corroborating"}    # synonym → confirming
     kb["accuracy"] = {"value": "wrong"}           # synonym → contradicted
     kb["influence"] = {"value": "mentioned"}      # synonym → referenced
     kb["positive_effect"] = {"value": True}       # n/a at reference level → nulled
+    kb["novelty"] = {"value": False}              # bool → redundant
     warnings = []
     v = parse_verdict(json.dumps(payload), _FakeSpan(), warnings)
     assert v["rubric"]["key_a"]["accuracy"]["value"] == "uncontradicted"
     assert v["rubric"]["key_a"]["influence"]["value"] == "decisive"
     assert v["rubric"]["key_a"]["positive_effect"]["value"] == "improved"
+    assert v["rubric"]["key_a"]["novelty"]["value"] == "confirming"
     assert v["rubric"]["key_b"]["accuracy"]["value"] == "contradicted"
+    assert v["rubric"]["key_b"]["novelty"]["value"] == "redundant"
     assert v["memory_usage"]["key_b"]["usage"] == "noted"  # mere reference
     # referenced (not acted-on) + a pe value → pe nulled with a warning
     assert v["rubric"]["key_b"]["positive_effect"]["value"] is None
@@ -386,7 +449,7 @@ def test_footprint_reason_taxonomy():
     payload = json.dumps({
         "memories": {
             "key_a": _signals(rel=False),           # irrelevant
-            "key_b": _signals(nov=False),           # redundant (relevant, not novel)
+            "key_b": _signals(nov="redundant"),     # redundant (relevant, not novel)
         },
         "confidence": 0.9,
     })
@@ -397,10 +460,21 @@ def test_footprint_reason_taxonomy():
     assert v["memory_usage"]["key_b"] == {
         "usage": "ignored", "evidence": "", "reason": "redundant"}
     assert v["verdict"] == "neutral"
+    # a confirming memory nobody acted on is a manual-review bucket
+    payload = json.dumps({"memories": {"key_a": _signals(nov="confirming"),
+                                       "key_b": _signals(nov="confirming")},
+                          "confidence": 0.9})
+    v = parse_verdict(payload, _FakeSpan(), [])
+    assert all(e["reason"] == "confirming_ignored" for e in v["memory_usage"].values())
     payload = json.dumps({"memories": {"key_a": _signals(), "key_b": _signals()},
                           "confidence": 0.9})
     v = parse_verdict(payload, _FakeSpan(), [])
     assert all(e["reason"] == "ignored_novel" for e in v["memory_usage"].values())
+    # novelty unknown (null/unparseable) → no taxonomy claim, never a guess
+    payload = json.dumps({"memories": {"key_a": _signals(nov=None)}, "confidence": 0.9})
+    v = parse_verdict(payload, _FakeSpan(), [])
+    assert v["memory_usage"]["key_a"]["usage"] == "ignored"
+    assert v["memory_usage"]["key_a"]["reason"] is None
 
 
 def test_missing_memory_key_is_unclear_not_ignored():
@@ -465,9 +539,10 @@ def test_aggregate_rubric_rates():
     ops = [
         _op("T1:S1", "positive", 0.9,
             rubric={"ka": _signals(inf="acted_on", pe="improved"),
-                    "kb": _signals(rel=False, acc=None)},
+                    "kb": _signals(rel=False, acc=None, nov="redundant")},
             usage={"kb": {"usage": "ignored", "evidence": "", "reason": "irrelevant"}}),
-        _op("T1:S2", "neutral", 0.9, rubric={"ka": _signals(acc="contradicted")},
+        _op("T1:S2", "neutral", 0.9, rubric={"ka": _signals(acc="contradicted",
+                                                            nov="confirming")},
             usage={"ka": {"usage": "ignored", "evidence": "", "reason": "redundant"}}),
         _op("T1:S3", "error", rubric={"ka": _signals()}),  # error span: excluded
     ]
@@ -475,7 +550,9 @@ def test_aggregate_rubric_rates():
     assert rub["deliveries"] == 3
     assert rub["rates"]["relevance"] == round(2 / 3, 4)
     assert rub["rates"]["accuracy"] == 0.5  # nulls never dilute
-    assert rub["rates"]["novelty"] == 1.0
+    # novelty projection: novel+confirming count as true, redundant as false
+    assert rub["rates"]["novelty"] == round(2 / 3, 4)
+    assert rub["counts"]["novelty"] == {"novel": 1, "confirming": 1, "redundant": 1}
     assert rub["rates"]["influence"] == round(1 / 3, 4)  # any footprint ≠ none
     assert rub["rates"]["positive_effect"] == 1.0  # over judged effects only
     assert rub["counts"]["accuracy"] == {"uncontradicted": 1, "null": 1, "contradicted": 1}
@@ -483,6 +560,35 @@ def test_aggregate_rubric_rates():
     assert rub["no_footprint_reasons"] == {"irrelevant": 1, "redundant": 1}
     assert rub["inaccurate_keys"] == [{"key": "ka", "spans": ["T1:S2"]}]
     assert rub["irrelevant_keys"] == [{"key": "kb", "spans": ["T1:S1"]}]
+
+
+def test_rubric_rollup_excludes_auto_neutral_placeholders(capsys):
+    """Auto-neutral (rule-judged) spans carry all-null placeholder rubrics:
+    they must not inflate `deliveries`, and the renderers must not crash on
+    the resulting all-None rates (regression: TypeError on None.__format__)."""
+    span = InjectionSpan(id="T1:S1", traj="T1", op_ids=["T1:R1"], step_first=None,
+                         step_last=None, seq_first=5, seq_last=5, n_injections=1,
+                         fingerprint="x", memories=[{"key": "k", "value": "v"}])
+    verdict = auto_verdict_no_subsequent_turn(span)
+    op = operation_record(span, verdict)
+    artifact = build_artifact({}, [{"id": "T1", "run_id": "r"}], [op], [], {"T1": 1}, [])
+    rub = artifact["aggregates"]["overall"]["rubric"]
+    assert rub["deliveries"] == 0  # placeholder rubric is not a judged delivery
+    assert all(v is None for v in rub["rates"].values())
+    assert print_summary(artifact) == 0
+    assert "rubric:" not in capsys.readouterr().out
+    assert "rubric over" not in render_markdown(artifact)
+
+    # an LLM-judged span whose signals came back all null still counts as a
+    # delivery, and must render without crashing too
+    op2 = {**_op("T1:S1", "neutral", 0.9, rubric={"k": _signals(rel=None, acc=None,
+                                                                nov=None, inf=None)}),
+           "payload_summary": "1 injection"}
+    artifact2 = build_artifact({}, [{"id": "T1", "run_id": "r"}], [op2], [], {"T1": 1}, [])
+    assert artifact2["aggregates"]["overall"]["rubric"]["deliveries"] == 1
+    assert print_summary(artifact2) == 0
+    assert "rubric:" not in capsys.readouterr().out
+    assert "rubric over" not in render_markdown(artifact2)
 
 
 def test_aggregate_headline_metrics():
@@ -784,6 +890,12 @@ def test_thinking_params_per_format(monkeypatch):
     chat_completion(resp_off_eff, msgs)
     assert calls[-1]["reasoning"] == {"effort": "none"}
 
+    ant_off_eff = JudgeConfig(base_url="http://x", api_key="k", model="m", api="anthropic",
+                              thinking="disabled", thinking_effort="high")
+    chat_completion(ant_off_eff, msgs)
+    assert calls[-1]["thinking"] == {"type": "disabled"}
+    assert "output_config" not in calls[-1]  # same suppression as openai-chat
+
 
 def test_resolve_config_thinking_validation():
     base = {"BASE_URL": "http://b", "API_KEY": "k", "MODEL": "m"}
@@ -964,7 +1076,7 @@ def test_cli_end_to_end_mocked_judge(monkeypatch, tmp_path):
                             "--json", str(out), "-o", str(md), "--env", str(_env(tmp_path))])
     assert rc == 0
     artifact = json.loads(out.read_text())
-    assert artifact["tool"]["schema"] == "injudge.report/v3"
+    assert artifact["tool"]["schema"] == "injudge.report/v4"
     assert artifact["tool"]["judge_model"] == "judge-m"
     assert len(artifact["operations"]) == 1
     op = artifact["operations"][0]
@@ -974,7 +1086,7 @@ def test_cli_end_to_end_mocked_judge(monkeypatch, tmp_path):
                   "rubric", "analysis", "delivery_cost"):
         assert field in op
     assert op["rubric"]["key_a"]["influence"]["value"] == "acted_on"
-    assert op["rubric"]["key_a"]["novelty"]["value"] is True
+    assert op["rubric"]["key_a"]["novelty"]["value"] == "novel"
     assert op["analysis"].startswith("key_a guided")
     chars = 3 * len(RECALL_CONTENT)
     assert op["delivery_cost"] == {"deliveries": 3, "content_chars_total": chars,

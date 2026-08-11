@@ -45,7 +45,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", dest="json_out", type=Path, default=None,
                     help="optional path for the graph JSON artifact")
     ap.add_argument("--verdicts", type=Path, default=None, metavar="PATH",
-                    help="optional injudge.report/v1 JSON (from eval.injudge): color "
+                    help="optional injudge.report JSON (from eval.injudge): color "
                     "recall nodes by verdict and show rationale/usage in popovers")
     args = ap.parse_args(argv)
 

@@ -12,9 +12,11 @@ The counting rules (eval/TARGET.md + user decisions):
   buckets, and a low-confidence list for triage.
 - per-memory usage tallies merge by key; first_value/last_value surface
   value drift across spans.
-- rubric signal rates are over judged memory-deliveries (span × key) of
-  judged spans only; null signals never dilute a rate. positive_effect is
+- rubric signal rates are over judge-scored memory-deliveries (span × key)
+  of judged spans only; null signals never dilute a rate. positive_effect is
   rated over the influential only (it is null by contract otherwise).
+  Rule-judged auto-neutral spans carry placeholder null rubrics, so they are
+  excluded: `deliveries` counts LLM-judged deliveries only.
 - delivery cost is deterministic: each span's full injection cost (all
   deliveries, including restated ones — they really cost tokens) is charged
   to its verdict class; the neutral+negative total is budget spent on
@@ -45,6 +47,7 @@ def _rubric_rollup(operations: list[dict]) -> dict:
     value distribution per signal and `rates` is the v2-compat projection
     (accuracy true = corroborated+uncontradicted; influence true = any
     footprint; positive_effect true = improved over judged effects).
+    v4: novelty is an enum too (true = novel+confirming; false = redundant).
     """
     counts: dict[str, dict[str, int]] = {s: {} for s in RUBRIC_SIGNALS}
     contradicted: dict[str, list[str]] = {}
@@ -52,8 +55,8 @@ def _rubric_rollup(operations: list[dict]) -> dict:
     reasons: dict[str, int] = {}
     deliveries = 0
     for op in operations:
-        if op.get("verdict") not in _VERDICTS:
-            continue  # error/unjudged spans: rubric untrusted or absent
+        if op.get("verdict") not in _VERDICTS or op.get("auto"):
+            continue  # error/unjudged/rule-judged spans: rubric untrusted or placeholder
         for key, signals in (op.get("rubric") or {}).items():
             deliveries += 1
             for s in RUBRIC_SIGNALS:
@@ -78,7 +81,7 @@ def _rubric_rollup(operations: list[dict]) -> dict:
         "counts": counts,
         "rates": {
             "relevance": rate("relevance", ("true",), ("false",)),
-            "novelty": rate("novelty", ("true",), ("false",)),
+            "novelty": rate("novelty", ("novel", "confirming"), ("redundant",)),
             "accuracy": rate(
                 "accuracy", ("corroborated", "uncontradicted"), ("contradicted",)
             ),
@@ -144,7 +147,6 @@ def aggregate(operations: list[dict], n_injections: int, n_trajectories: int | N
             conf_sums[v].append(conf)
             if conf < 0.5:
                 out["low_confidence"].append(op["operation_id"])
-            if conf < 0.5:
                 out["confidence_buckets"][_BUCKETS[0]] += 1
             elif conf < 0.8:
                 out["confidence_buckets"][_BUCKETS[1]] += 1
@@ -208,6 +210,6 @@ def policy_rollup(trajectories: list[dict]) -> dict:
         "est_injected_tokens": est,
         "prompt_tokens_total": prompt or None,
         "injected_token_share": round(est / prompt, 4) if prompt else None,
-        # annotation-mode total (0 when no trajectory recorded searches)
+        # annotation-mode total (None when no trajectory recorded searches)
         "n_searches": n_searches or None,
     }

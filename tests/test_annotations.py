@@ -11,7 +11,7 @@ import hashlib
 
 from eval.injudge.spans import content_fingerprint, group_spans
 from eval.injudge.steps import build_step_stream
-from eval.memgraph.annotations import ref_to_memory
+from eval.memgraph.annotations import build_annotation_index, ref_to_memory
 from eval.memgraph.graph import load_and_build
 from eval.tests.annotated_fixtures import (
     MEM,
@@ -46,7 +46,7 @@ def test_annotated_run_parses_from_annotations_alone(tmp_path):
     traj, ops, warnings = parse(b, tmp_path)
 
     assert warnings == []
-    assert (traj.main_lane, traj.memory_lane, traj.step_lane) == (MAIN, MEM, MEM)
+    assert (traj.main_lane, traj.memory_lane, traj.memory_lanes) == (MAIN, MEM, {MEM})
     assert traj.adapter == "cure@0.1.0"
     assert traj.instance_id == "pydata__xarray-2905"
     assert traj.sessions == [SID]
@@ -87,7 +87,7 @@ def test_annotated_extract_turn_classification_matches_step_stream(tmp_path):
         b.agent_turn()
     traj, ops, _ = parse(b, tmp_path)
     warnings = []
-    steps = build_step_stream(b.events, traj.step_lane, warnings)
+    steps = build_step_stream(b.events, traj.memory_lanes, warnings)
     assert warnings == []
     assert len(steps) == 20 == traj.n_steps
     assert steps[9].turn == 10 and steps[10].turn == 12  # memory turn 11 skipped
@@ -262,6 +262,79 @@ def test_annotation_structural_problems_surface_as_warnings(tmp_path):
     assert any("references unknown search operation" in w for w in warnings)
     (recall,) = [o for o in ops if o.kind == "recall"]
     assert recall.matched is None and recall.query is None
+
+
+def _reader_events(*payloads):
+    """Session + binds, then one memory_delivery per payload."""
+    evs = [
+        {"seq": 1, "type": "memory_session", "payload": {"trace_session_id": "S"}},
+        {"seq": 2, "type": "memory_role_bind", "proxy_source": MAIN,
+         "payload": {"trace_session_id": "S", "logical_role": "main"}},
+        {"seq": 3, "type": "memory_role_bind", "proxy_source": MEM,
+         "payload": {"trace_session_id": "S", "logical_role": "memory"}},
+    ]
+    for i, payload in enumerate(payloads, 4):
+        evs.append({"seq": i, "type": "memory_delivery",
+                    "payload": {"trace_session_id": "S", **payload}})
+    return evs
+
+
+def test_delivery_missing_or_duplicate_id_is_a_problem_not_confusion():
+    # id-less deliveries violate schema v6: each is dropped with its own
+    # problem — never silently deduped against each other
+    idx = build_annotation_index(_reader_events({"status": "placed"}, {"status": "placed"}))
+    assert idx.deliveries == []
+    assert sum("missing or non-string delivery_id" in p for p in idx.problems) == 2
+    assert not any("duplicate" in p for p in idx.problems)
+    idx = build_annotation_index(
+        _reader_events({"delivery_id": "d1"}, {"delivery_id": "d1"}, {"delivery_id": "d2"})
+    )
+    assert len(idx.deliveries) == 2
+    assert any("duplicate delivery_id d1" in p for p in idx.problems)
+
+
+def test_annotation_reader_never_raises_on_unhashable_ids():
+    # corrupted non-scalar ids surface as problems (the module never raises)
+    idx = build_annotation_index(_reader_events({"delivery_id": ["not", "a", "string"]}))
+    assert idx.deliveries == []
+    assert any("missing or non-string delivery_id" in p for p in idx.problems)
+    idx = build_annotation_index(
+        [{"seq": 1, "type": "memory_session", "annotation_id": ["x"],
+          "payload": {"trace_session_id": "S"}}]
+    )
+    assert any("unhashable annotation_id" in p for p in idx.problems)
+    idx = build_annotation_index(
+        [{"seq": 1, "type": "memory_session", "payload": {"trace_session_id": "S"}},
+         {"seq": 2, "type": "memory_role_bind",
+          "payload": {"trace_session_id": "S", "logical_role": ["main"]}}]
+    )
+    assert any("non-string logical_role" in p for p in idx.problems)
+
+
+def test_duplicate_operation_start_is_a_problem_not_the_end():
+    evs = [
+        {"seq": 1, "type": "memory_session", "payload": {"trace_session_id": "S"}},
+        {"seq": 2, "type": "memory_role_bind", "proxy_source": MAIN,
+         "payload": {"trace_session_id": "S", "logical_role": "main"}},
+        {"seq": 3, "type": "memory_role_bind", "proxy_source": MEM,
+         "payload": {"trace_session_id": "S", "logical_role": "memory"}},
+        {"seq": 4, "type": "memory_generate_start",
+         "payload": {"trace_session_id": "S", "operation_id": "op-1", "trigger": "step"}},
+        {"seq": 5, "type": "memory_generate_start",  # corrupted duplicate
+         "payload": {"trace_session_id": "S", "operation_id": "op-1", "trigger": "step"}},
+        {"seq": 6, "type": "memory_generate_end",
+         "payload": {"trace_session_id": "S", "operation_id": "op-1",
+                     "status": "completed", "produced": [{"version_id": "v1"}]}},
+        {"seq": 7, "type": "memory_generate_start",  # ... in either order
+         "payload": {"trace_session_id": "S", "operation_id": "op-1", "trigger": "step"}},
+    ]
+    idx = build_annotation_index(evs)
+    op = idx.operations["op-1"]
+    assert op.start["seq"] == 4  # first start wins
+    assert op.end["type"] == "memory_generate_end"
+    assert op.end["payload"]["produced"] == [{"version_id": "v1"}]  # real end kept
+    assert sum("starts twice" in p for p in idx.problems) == 2
+    assert not any("ends twice" in p for p in idx.problems)
 
 
 # ---------------------------------------------------------------- injudge integration

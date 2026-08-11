@@ -262,7 +262,7 @@ def load_and_build(paths: list[Path]) -> dict:
     parsed.sort(key=lambda item: (_traj_sort_key(item[0], item[1].started_at), str(item[0])))
     trajectories: list[Trajectory] = []
     ops_by_traj: dict[str, list[MemoryOp]] = {}
-    for i, (_, traj, ops) in enumerate(parsed, 1):
+    for i, (_, traj, ops, _events) in enumerate(parsed, 1):
         old_id = traj.id
         traj.id = f"T{i}"
         for op in ops:

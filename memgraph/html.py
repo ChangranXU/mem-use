@@ -125,7 +125,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
       <div class="item"><svg width="14" height="14"><path d="M7,12 L2,2 L12,2 Z" fill="#e2a93b"/></svg><span><b>error</b> — judge failed (excluded from rates)</span></div>
       <div class="item"><svg width="14" height="14"><path d="M7,12 L2,2 L12,2 Z" fill="#3567d6"/></svg><span>blue = not judged (no verdicts merged)</span></div>
       <div class="note">click a recall node for the judge's rationale, cited evidence, and per-memory usage</div>
-      <div class="note">rubric marks: <b>R</b> relevance, <b>A</b> accuracy (✓ corroborated · ≈ uncontradicted · ✗ contradicted), <b>N</b> novelty, <b>I</b> influence (— none · ◔ referenced · ◑ acted-on · ● decisive), <b>P</b> effect (+ improved · 0 no effect · ✗ harmed); plain ✓/✗ on older (v1/v2) reports</div>
+      <div class="note">rubric marks: <b>R</b> relevance, <b>A</b> accuracy (✓ corroborated · ≈ uncontradicted · ✗ contradicted), <b>N</b> novelty (✓ novel · ≈ confirming · ✗ redundant), <b>I</b> influence (— none · ◔ referenced · ◑ acted-on · ● decisive), <b>P</b> effect (+ improved · 0 no effect · ✗ harmed); plain ✓/✗ for bool signals (R in all versions; A/N/I/P in v1/v2; N in v3)</div>
     </div>
     <div class="group">
       <h4>edges &amp; markers</h4>
@@ -625,9 +625,11 @@ function showOp(opId){
     if(vops.length){
       h+=`<h4>injection verdicts (injudge)</h4>`;
       const seen=new Set();
-      // v3 enum glyphs per signal, with bool fallback for v1/v2 artifacts
+      // enum glyphs per signal (v3 accuracy/influence/effect, v4 novelty);
+      // bool signals (v1/v2 artifacts, v3 novelty) render plain ✓/✗ below
       const SIG_ENUM={
         accuracy:{corroborated:["✓","#2e9e5b"],uncontradicted:["≈","#5b8dd9"],contradicted:["✗","#d64545"]},
+        novelty:{novel:["✓","#2e9e5b"],confirming:["≈","#5b8dd9"],redundant:["✗","#d64545"]},
         influence:{none:["—","var(--muted)"],referenced:["◔","#5b8dd9"],acted_on:["◑","#2e9e5b"],decisive:["●","#2e9e5b"]},
         positive_effect:{improved:["+","#2e9e5b"],no_effect:["0","#b8860b"],harmed:["✗","#d64545"]},
       };
@@ -653,7 +655,8 @@ function showOp(opId){
         if(d.error) h+=`<div class="flagbox">judge error: ${esc(d.error)}</div>`;
         if(d.rationale) h+=`<div class="vline" style="white-space:normal">${esc(d.rationale)}</div>`;
         if(d.rubric&&Object.keys(d.rubric).length){
-          // v2/v3: per-memory rubric R(elevance) A(ccuracy) N(ovelty, v3) I(nfluence) P(ositive effect)
+          // per-memory rubric marks: R(elevance) A(ccuracy) N(ovelty, v4+)
+          // I(nfluence) P(ositive effect); v1/v2 artifacts have no novelty
           for(const [mk,sig] of Object.entries(d.rubric))
             h+=`<div class="vline">${memChip(mk)} ${sigCell(sig,"relevance","R")} ${sigCell(sig,"accuracy","A")}${sig.novelty?" "+sigCell(sig,"novelty","N"):""} ${sigCell(sig,"influence","I")} ${sigCell(sig,"positive_effect","P")}</div>`;
         }

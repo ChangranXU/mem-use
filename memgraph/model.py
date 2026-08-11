@@ -24,7 +24,8 @@ class Trajectory:
     n_steps: int = 0  # agent steps (non-memory-lane turns)
     memory_lane: str | None = None  # proxy_source of the bound memory lane
     main_lane: str | None = None  # proxy_source of the bound main lane (None = unprefixed)
-    step_lane: str | None = None  # lane injudge's step stream classifies against (internal)
+    # all bound memory-lane proxy_sources (internal; None = the unprefixed lane)
+    memory_lanes: set = field(default_factory=set)
     adapter: str | None = None  # memory adapter name@version
     instance_id: str | None = None  # from memory_session
     n_searches: int = 0  # completed memory searches

@@ -36,7 +36,7 @@ from eval.injudge.report import (
 from eval.injudge.spans import group_spans
 from eval.injudge.steps import build_step_stream
 from eval.memgraph.graph import load_and_build
-from eval.memgraph.parse_trajectory import load_events, parse_trajectory
+from eval.memgraph.parse_trajectory import parse_trajectory
 
 
 def _atomic_write(path: Path, text: str) -> None:
@@ -128,11 +128,10 @@ def main(argv: list[str] | None = None) -> int:
         traj_dir = Path(t["path"])
         run_id = t["run_id"]
         warnings: list[str] = []  # re-parse warnings discarded: graph's are already seeded
-        traj, ops = parse_trajectory(traj_dir, warnings, t["id"])
-        lane = traj.step_lane
-        events = load_events(traj_dir / "trajectory.jsonl", warnings)
+        traj, ops, events = parse_trajectory(traj_dir, warnings, t["id"])
+        lanes = traj.memory_lanes
         step_warnings: list[str] = []
-        steps = build_step_stream(events, lane, step_warnings)
+        steps = build_step_stream(events, lanes, step_warnings)
         for w in step_warnings:
             validation.append({"level": "warn", "msg": f"{run_id}: {w}"})
         if len(steps) != t["n_steps"]:
@@ -147,12 +146,17 @@ def main(argv: list[str] | None = None) -> int:
         ops_by_id = {op.id: op for op in recall_ops}
         spans = group_spans(recall_ops, t["id"])
         n_injections_by_traj[t["id"]] = len(recall_ops)
-        # delivery cost: the exact placement content size recorded on the op
-        content_chars = {
-            op.seq: op.content_chars or 0
-            for op in recall_ops
-            if op.seq is not None
-        }
+        # delivery cost per span: the exact placement content size recorded
+        # on each op, summed over the span (chars/4: documented estimate)
+        content_chars = {op.seq: op.content_chars or 0 for op in recall_ops}
+        span_costs = {}
+        for span in spans:
+            chars = sum(content_chars[ops_by_id[op_id].seq] for op_id in span.op_ids)
+            span_costs[span.id] = {
+                "deliveries": span.n_injections,
+                "content_chars_total": chars,
+                "approx_tokens_total": chars // 4,
+            }
         if not recall_ops:
             validation.append(
                 {"level": "info", "msg": f"{run_id}: zero recall injections (valid input, empty verdict set)"}
@@ -166,9 +170,10 @@ def main(argv: list[str] | None = None) -> int:
             if e.get("type") == "message_end"
             and e.get("turn") is not None
             and e.get("role") == "assistant"
-            and e.get("proxy_source") != lane
+            and e.get("proxy_source") not in lanes
         )
-        est_injected_tokens = sum(content_chars.values()) // 4
+        # same per-span rounding the cost rollup uses: one artifact, one total
+        est_injected_tokens = sum(c["approx_tokens_total"] for c in span_costs.values())
         policy = {
             "n_steps": t["n_steps"],
             "n_injections": len(recall_ops),
@@ -243,16 +248,7 @@ def main(argv: list[str] | None = None) -> int:
                         {"level": "error", "msg": f"{span.id}: judge request failed: {e}"}
                     )
             verdict_by_span[span.id] = verdict
-            span_chars = sum(
-                content_chars.get(getattr(ops_by_id.get(op_id), "seq", None), 0)
-                for op_id in span.op_ids
-            )
-            delivery_cost = {
-                "deliveries": span.n_injections,
-                "content_chars_total": span_chars,
-                "approx_tokens_total": span_chars // 4,  # chars/4: documented estimate
-            }
-            operations.append(operation_record(span, verdict, delivery_cost))
+            operations.append(operation_record(span, verdict, span_costs[span.id]))
         injections.extend(injection_rollup(spans, ops_by_id, verdict_by_span, content_chars))
         flush()  # incremental: completed trajectories survive a crash
 

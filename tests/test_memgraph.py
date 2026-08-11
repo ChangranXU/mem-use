@@ -77,7 +77,7 @@ def test_unannotated_run_yields_zero_ops_with_note(tmp_path):
         json.dumps({"seq": 1, "type": "agent_start"}) + "\n", encoding="utf-8"
     )
     warnings = []
-    traj, ops = parse_trajectory(d, warnings)
+    traj, ops, _events = parse_trajectory(d, warnings)
     assert ops == []
     assert any("no memory annotations" in w for w in warnings)
 
@@ -89,7 +89,7 @@ def test_malformed_jsonl_line_skipped(tmp_path):
     lines = [json.dumps(e) for e in good.events] + ["{not json"]
     (d / "trajectory.jsonl").write_text("\n".join(lines), encoding="utf-8")
     warnings = []
-    traj, ops = parse_trajectory(d, warnings)
+    traj, ops, _events = parse_trajectory(d, warnings)
     assert traj.n_steps == 1 and len(warnings) == 1
 
 
@@ -385,7 +385,8 @@ def test_load_verdict_report_requires_injudge_schema(tmp_path):
     bad.write_text("{not json", encoding="utf-8")
     with pytest.raises(SystemExit):
         load_verdict_report(bad)
-    for schema in ("injudge.report/v1", "injudge.report/v2", "injudge.report/v3"):
+    for schema in ("injudge.report/v1", "injudge.report/v2", "injudge.report/v3",
+                   "injudge.report/v4"):
         good = tmp_path / "good.json"
         good.write_text(json.dumps({"tool": {"schema": schema}}), encoding="utf-8")
         assert load_verdict_report(good)["tool"]["schema"] == schema

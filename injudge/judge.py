@@ -270,8 +270,10 @@ def _apply_thinking(cfg: JudgeConfig, body: dict) -> None:
     (on OpenAI use THINKING_EFFORT=minimal instead); the disabled switch maps
     to `none` and likewise suppresses an inherited/explicit effort.
     anthropic: `thinking.type` (enabled carries THINKING_BUDGET as
-    budget_tokens) + `output_config.effort`; sampling overrides are
-    incompatible with enabled thinking, so temperature is dropped there.
+    budget_tokens) + `output_config.effort`; the disabled switch suppresses
+    `output_config.effort` (same rule as openai-chat), and sampling
+    overrides are incompatible with enabled thinking, so temperature is
+    dropped there.
     """
     if cfg.api == "openai-chat":
         if cfg.thinking:
@@ -289,7 +291,7 @@ def _apply_thinking(cfg: JudgeConfig, body: dict) -> None:
             body.pop("temperature", None)
         elif cfg.thinking == "disabled":
             body["thinking"] = {"type": "disabled"}
-        if cfg.thinking_effort:
+        if cfg.thinking_effort and cfg.thinking != "disabled":
             body["output_config"] = {"effort": cfg.thinking_effort}
 
 
@@ -433,29 +435,47 @@ from the step stream:
    corroborated = directly confirmed by observable evidence; contradicted =
    observable evidence refutes it; uncontradicted = neither (plausible,
    nothing refutes it). Do not guess beyond what is observable.
-3. novelty (true|false) — did the agent NOT already have this fact or plan
-   when the injection arrived? Check the steps before the span's first
-   step: if the agent had already discovered, decided, or applied what the
-   memory says, it is not novel (false) — the delivery was redundant/late.
+3. novelty ("novel"|"confirming"|"redundant") — what did the agent already
+   have when the injection arrived? Judge the memory's substance in the
+   steps before the span's first step, by how the agent had articulated it:
+   - confirming: the agent had articulated the substance as OPEN — a
+     suspicion, hypothesis, hesitation, or an unverified assumption — and
+     the memory settles it. Expressed doubt wins over ambient evidence:
+     still-unsure means confirming even if the answer was technically
+     observable earlier;
+   - redundant: the substance was already ESTABLISHED with no open doubt —
+     the agent stated it as fact, had decided or applied it, or tool
+     results had already shown it. The delivery was redundant/late;
+   - novel: the substance never appeared in the pre-injection steps.
+   The note must cite the pre-injection step the tier rests on. Judge from
+   the agent's steps only.
 4. influence ("none"|"referenced"|"acted_on"|"decisive") — the memory's
    footprint in the agent's SUBSEQUENT behavior (steps from the span's
    first step onward):
    - referenced: the agent mentioned or quoted it, but its actions did not
      change because of it;
    - acted_on: a later command, edit, or test was shaped by the memory
-     (the action would likely have differed without it);
+     (the action would likely have differed without it). A SKIPPED step
+     also qualifies, but only with an observable anchor: the agent had
+     announced the intent before the injection and then dropped it, or it
+     explicitly credited the memory with making the step unnecessary;
    - decisive: the agent explicitly credited the memory with changing its
      course, or the course change is unmistakable from the step stream;
-   - none: no observable footprint at all.
+   - none: no observable footprint at all. A skip merely inferred from an
+     action's absence is none — absence alone is never evidence.
    A mention is not proof of influence: the agent may have known or found
    the fact on its own (check novelty and the pre-injection steps).
 5. positive_effect ("improved"|"no_effect"|"harmed"|null) — only when
    influence is acted_on or decisive: did the memory improve the work
-   (correct choice sooner, saved effort, avoided error)? no_effect = it
-   shaped behavior without improving it — that counts AGAINST the memory
-   system (context and attention spent for nothing). harmed = it led the
-   agent astray (wrong location, false lead, reverted correct work).
-   null when influence is none or referenced.
+   (correct choice sooner, saved effort, avoided error)? Saved effort
+   needs the observable anchor from influence (announced intent or
+   explicit credit, cited in the note) plus the step's absence afterward —
+   and a skip that saves nothing (the fact was already established before
+   the injection, novelty redundant) is no_effect, not improved.
+   no_effect = it shaped behavior without improving it — that counts
+   AGAINST the memory system (context and attention spent for nothing).
+   harmed = it led the agent astray (wrong location, false lead, reverted
+   correct work). null when influence is none or referenced.
 
 Rules (binding):
 - Judge each memory independently. Each note is one sentence, citing step
@@ -475,7 +495,8 @@ Answer with ONE JSON object and nothing else:
       "relevance":       {"value": true|false, "note": "<one sentence>"},
       "accuracy":        {"value": "corroborated"|"uncontradicted"|"contradicted",
                           "note": "<one sentence>"},
-      "novelty":         {"value": true|false, "note": "<one sentence>"},
+      "novelty":         {"value": "novel"|"confirming"|"redundant",
+                          "note": "<one sentence citing the pre-injection step>"},
       "influence":       {"value": "none"|"referenced"|"acted_on"|"decisive",
                           "note": "<one sentence>"},
       "positive_effect": {"value": "improved"|"no_effect"|"harmed"|null,
@@ -492,10 +513,9 @@ memories must contain exactly one entry per delivered memory key."""
 
 
 def _memory_line(m: dict) -> str:
-    nv = " needs_verification" if m.get("needs_verification") else ""
-    conf = m.get("confidence")
-    conf_txt = f"{conf:.2f}" if isinstance(conf, (int, float)) else str(conf)
-    return f"- [{m.get('memory_type')} confidence={conf_txt}{nv}] {m.get('key')}: {m.get('value')}"
+    # The memory system's self-assessment (confidence, needs_verification)
+    # is withheld: every signal is judged from the step stream only.
+    return f"- [{m.get('memory_type')}] {m.get('key')}: {m.get('value')}"
 
 
 def _cmd_of(args: dict) -> str:
@@ -556,6 +576,7 @@ _MISSING = object()  # sentinel for "present but unparseable" vs None (null)
 _NAMED_CONFIDENCE = {"high": 0.9, "medium": 0.6, "low": 0.3}
 
 _ACCURACY = ("corroborated", "uncontradicted", "contradicted")
+_NOVELTY = ("novel", "confirming", "redundant")
 _INFLUENCE = ("none", "referenced", "acted_on", "decisive")
 _POS_EFFECT = ("improved", "no_effect", "harmed")
 _ACTED = ("acted_on", "decisive")  # influence levels where positive_effect applies
@@ -607,7 +628,14 @@ def _enum_coercer(allowed: tuple, bool_map: dict, synonyms: dict):
 
 _COERCE = {
     "relevance": _coerce_bool,
-    "novelty": _coerce_bool,
+    "novelty": _enum_coercer(
+        _NOVELTY,
+        {True: "novel", False: "redundant"},
+        {"new": "novel",
+         "confirmatory": "confirming", "corroborating": "confirming",
+         "confirmed": "confirming",
+         "known": "redundant", "duplicate": "redundant"},
+    ),
     "accuracy": _enum_coercer(
         _ACCURACY,
         {True: "uncontradicted", False: "contradicted"},
@@ -650,7 +678,7 @@ def _ints(v: object) -> list[int]:
 def _coerce_confidence(raw: object, span_id: str, warnings: list[str]) -> float:
     """Numbers and common spellings coerced, clamped to [0, 1]."""
     if isinstance(raw, bool):
-        pass  # bool is int — reject below via the str path
+        pass  # bool is int — excluded from the numeric branch, defaults below
     elif isinstance(raw, (int, float)):
         v = float(raw)
         if 0.0 <= v <= 1.0:
@@ -700,11 +728,17 @@ def _derive_usage(signals: dict) -> str:
 
 
 def _footprint_reason(signals: dict) -> str | None:
-    """Why an ignored memory left no footprint (the neutral taxonomy)."""
+    """Why an ignored memory left no footprint (the neutral taxonomy);
+    None when the signals the taxonomy reads are unknown."""
     if signals["relevance"]["value"] is False:
         return "irrelevant"
-    if signals["novelty"]["value"] is False:
+    nov = signals["novelty"]["value"]
+    if nov == "redundant":
         return "redundant"
+    if nov == "confirming":
+        return "confirming_ignored"  # settled an open suspicion, never credited
+    if nov is None:
+        return None  # novelty unknown — no taxonomy claim
     return "ignored_novel"
 
 

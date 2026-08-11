@@ -1,6 +1,6 @@
 """Merge injudge verdicts into the graph for rendering.
 
-`apply_verdicts` joins an `injudge.report/v1`, `v2`, or `v3` artifact onto a
+`apply_verdicts` joins an `injudge.report/v1`–`v4` artifact onto a
 loaded graph by (run_id, op seq) — robust to the two tools assigning different
 T-numbers when run on different path sets — and annotates each recall op in
 place:
@@ -9,7 +9,7 @@ place:
   (positive/negative/neutral/error/unjudged), `restated` for re-deliveries;
 - `verdict_span`: the injudge span id;
 - `verdict_detail` (first injections only): confidence, rationale (v2+: the
-  analysis), evidence, memory_usage, rubric (v2 bools / v3 enums),
+  analysis), evidence, memory_usage, rubric (v2 bools / v3+ enums),
   delivery_cost (v2+), out_of_window_influence (v3), auto, error — rendered in
   the op popover.
 
@@ -22,11 +22,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-_SCHEMAS = ("injudge.report/v1", "injudge.report/v2", "injudge.report/v3")
+_SCHEMAS = (
+    "injudge.report/v1", "injudge.report/v2", "injudge.report/v3", "injudge.report/v4"
+)
 
 
 def load_verdict_report(path: Path) -> dict:
-    """Read and sanity-check an injudge.report artifact (v1, v2, or v3)."""
+    """Read and sanity-check an injudge.report artifact (v1–v4)."""
     try:
         report = json.loads(Path(path).read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as e:
@@ -85,7 +87,7 @@ def apply_verdicts(graph: dict, report: dict, source: str = "") -> None:
                     "rationale": span.get("rationale") or span.get("analysis"),
                     "evidence": span.get("evidence") or [],
                     "memory_usage": span.get("memory_usage") or {},
-                    "rubric": span.get("rubric"),  # v2+ (v2 bools, v3 enums)
+                    "rubric": span.get("rubric"),  # v2+ (v2 bools, v3+ enums)
                     "delivery_cost": span.get("delivery_cost"),  # v2+
                     "out_of_window_influence": span.get("out_of_window_influence"),  # v3
                     "auto": span.get("auto"),

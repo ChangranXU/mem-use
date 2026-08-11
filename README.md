@@ -91,14 +91,15 @@ caps):
 |---|---|---|
 | `relevance` | bool | Is the memory topically related to the task and the agent's current subgoal at the injection point? |
 | `accuracy` | enum | `corroborated` (evidence it is right) / `uncontradicted` (no evidence either way) / `contradicted` (evidence it is wrong) |
-| `novelty` | bool | Did the agent NOT already have this fact/plan in its pre-injection context? false ⇒ the delivery was redundant/late |
-| `influence` | enum | `none` / `referenced` (mentioned only) / `acted_on` (shaped a command, edit, or test) / `decisive` (explicitly credited with a pivot) |
-| `positive_effect` | enum / null | `improved` / `no_effect` / `harmed`; null unless influence is `acted_on`/`decisive` |
+| `novelty` | enum | `novel` (substance never appeared pre-injection) / `confirming` (agent had articulated it as open — suspicion, hypothesis, hesitation — and the memory settles it) / `redundant` (already established, no open doubt ⇒ the delivery was redundant/late) |
+| `influence` | enum | `none` / `referenced` (mentioned only) / `acted_on` (shaped a command, edit, or test — or an observably anchored skip: announced intent dropped, or explicit credit) / `decisive` (explicitly credited with a pivot) |
+| `positive_effect` | enum / null | `improved` / `no_effect` / `harmed`; null unless influence is `acted_on`/`decisive`. Saved effort needs an observable anchor (announced intent or explicit credit) — an absent action alone is never evidence |
 
 Everything downstream is **derived in code, never asked of the LLM**. Per
 memory: `used` = acted-on ∧ improved; `misused` = acted-on ∧ (no_effect ∨
 harmed); `noted` = referenced; `ignored` = no footprint (with a reason:
-`irrelevant` / `redundant` / `ignored_novel`); `unclear` = gaps. The span
+`irrelevant` / `redundant` / `confirming_ignored` / `ignored_novel`);
+`unclear` = gaps. The span
 verdict: any `misused` ⇒ **negative**, else any `used` ⇒ **positive**, else
 **neutral**. Mere reference never yields negative.
 
@@ -107,13 +108,13 @@ flowchart LR
     subgraph LLM["LLM judge output — per delivered memory"]
         relevance["relevance: bool"]
         accuracy["accuracy: enum"]
-        novelty["novelty: bool"]
+        novelty["novelty: enum"]
         influence["influence: enum"]
         positive_effect["positive_effect: enum"]
     end
     influence --> usage["_derive_usage:<br/>used / misused / noted /<br/>ignored / unclear"]
     positive_effect --> usage
-    relevance -. "ignored only" .-> reason["_footprint_reason:<br/>irrelevant / redundant /<br/>ignored_novel"]
+    relevance -. "ignored only" .-> reason["_footprint_reason:<br/>irrelevant / redundant /<br/>confirming_ignored / ignored_novel"]
     novelty -.-> reason
     accuracy -.-> keys["not in the verdict path —<br/>reported as inaccurate_keys"]
     usage --> verdict["derive_verdict:<br/>any misused ⇒ negative,<br/>else any used ⇒ positive,<br/>else neutral"]
@@ -167,7 +168,7 @@ validation.
 
 ### Output
 
-The `injudge.report/v3` JSON artifact (default `injudge-report.json`,
+The `injudge.report/v4` JSON artifact (default `injudge-report.json`,
 rewritten after every trajectory so a crash keeps completed work) carries
 per-span verdicts with rubric, analysis, evidence, and delivery cost, plus
 trajectory policy blocks and the aggregates. `-o` renders a markdown report.
@@ -200,7 +201,7 @@ eval/.venv/bin/python -m pytest eval/tests -q
 - `injudge/spans.py` — recall ops → injection spans (identical content)
 - `injudge/judge.py` — .env config, urllib chat client, prompt, verdict parsing
 - `injudge/aggregate.py` — verdict counts/rates, per-memory usage roll-ups
-- `injudge/report.py` — injudge.report/v3 artifact, markdown, stdout
+- `injudge/report.py` — injudge.report/v4 artifact, markdown, stdout
 - `injudge/__main__.py` — CLI
 - `tests/annotated_fixtures.py` — shared schema-v6 synthetic-trajectory builder
 - `tests/test_memgraph.py` — synthetic-fixture tests (graph, linking, verdicts)

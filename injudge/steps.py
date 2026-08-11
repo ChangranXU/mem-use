@@ -6,13 +6,14 @@ assistant response (reasoning + content + tool calls) and the tool
 executions with their results.
 
 Classification and replay rules mirror eval/memgraph/parse_trajectory.py
-exactly, so step numbering stays consistent with op attribution (the lane
-to classify against comes from the trajectory's memory role binding):
+exactly, so step numbering stays consistent with op attribution (the memory
+lanes to classify against come from the trajectory's memory role bindings —
+the same set memgraph's _TurnTable uses):
 
 - a turn is classified by the proxy_source of its FIRST turn-bearing
   assistant message_end; memory-label turns consume no agent step;
 - turn-less events between a non-memory-lane history_rewritten and the next
-  turn-bearing or structural (turn_start/turn_end/agent_*) event are
+  turn-bearing or structural (turn_start/turn_end/agent_end) event are
   replays — skipped (the memory lane is exempt);
 - tool_execution events join steps by `turn` (deduped by tool_call_id, first
   end wins): the gate re-emits them turn-less after MAIN-lane rewrites, a
@@ -29,13 +30,15 @@ from __future__ import annotations
 
 from eval.injudge.model import AgentStep, ToolExec
 
-_STRUCTURAL = ("turn_start", "turn_end", "agent_start", "agent_end")
-
 
 def build_step_stream(
-    events: list[dict], memory_lane: str, warnings: list[str]
+    events: list[dict], memory_lanes: set, warnings: list[str]
 ) -> list[AgentStep]:
-    """One AgentStep per completed agent turn, in turn order."""
+    """One AgentStep per completed agent turn, in turn order.
+
+    `memory_lanes` is the set of bound memory-lane proxy_sources (an empty
+    set classifies every turn as an agent turn; None inside the set is the
+    unprefixed lane)."""
     turn_seq_start: dict[int, int] = {}
     turn_seq_end: dict[int, int] = {}
     classified: dict[int, dict] = {}  # turn -> first turn-bearing assistant message_end
@@ -54,11 +57,11 @@ def build_step_stream(
                 turn_seq_start.setdefault(t, e.get("seq", 0))
             continue
         if etype == "history_rewritten":
-            in_replay = src != memory_lane
+            in_replay = src not in memory_lanes
             continue
         if e.get("turn") is not None or etype in ("turn_end", "agent_end"):
             in_replay = False
-        if in_replay and src != memory_lane:
+        if in_replay and src not in memory_lanes:
             continue  # replayed kept state — never step content
         if etype == "turn_end":
             t = e.get("turn")
@@ -107,7 +110,7 @@ def build_step_stream(
         msg = classified.get(turn)
         if msg is None:
             continue  # never classified — parse_trajectory's validation covers it
-        if msg.get("proxy_source") == memory_lane:
+        if msg.get("proxy_source") in memory_lanes:
             continue  # memory-LLM turn consumes no agent step
         agent_turns.append(turn)
 

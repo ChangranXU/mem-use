@@ -1,4 +1,4 @@
-"""Report assembly: the `injudge.report/v3` JSON artifact, markdown, stdout.
+"""Report assembly: the `injudge.report/v4` JSON artifact, markdown, stdout.
 
 The artifact satisfies eval/TARGET.md's output contract: per operation
 {operation_id, kind, seq, payload_summary, verdict, confidence, evidence[]}
@@ -12,6 +12,10 @@ configuration is better than another.
 v3: enum rubric signals (accuracy 3-state, influence 4-level,
 positive_effect 3-state) + novelty/timing signal; verdicts derived in code
 (see judge.derive_verdict); mere reference never yields negative.
+v4: novelty is a three-tier enum (novel / confirming / redundant) judged
+from the pre-injection steps' articulation state; the ignored-memory
+taxonomy gains confirming_ignored; the judge prompt no longer shows the
+memory system's self-assessment flags.
 """
 
 from __future__ import annotations
@@ -34,7 +38,7 @@ _SIGNAL_ABBR = {
 }
 _SIGNAL_MARK = {
     "relevance": {True: "✓", False: "✗", None: "—"},
-    "novelty": {True: "✓", False: "✗", None: "—"},
+    "novelty": {"novel": "✓", "confirming": "≈", "redundant": "✗", None: "—"},
     "accuracy": {"corroborated": "✓", "uncontradicted": "≈", "contradicted": "✗", None: "—"},
     "influence": {"none": "—", "referenced": "◔", "acted_on": "◑", "decisive": "●", None: "—"},
     "positive_effect": {"improved": "+", "no_effect": "0", "harmed": "✗", None: "—"},
@@ -136,7 +140,7 @@ def build_artifact(
     overall = aggregate(operations, sum(n_injections_by_traj.values()), len(trajectories))
     overall["policy"] = policy_rollup(trajectories)
     return {
-        "tool": {"name": "eval.injudge", "schema": "injudge.report/v3", **tool_cfg},
+        "tool": {"name": "eval.injudge", "schema": "injudge.report/v4", **tool_cfg},
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "trajectories": trajectories,
         "operations": operations,
@@ -196,17 +200,20 @@ def render_markdown(artifact: dict) -> str:
             + f"), injected ≈{pol['est_injected_tokens']:,} tok{share}"
         )
     rub = agg.get("rubric") or {}
-    if rub.get("deliveries"):
-        lines.append(
-            f"- rubric over {rub['deliveries']} judged memory-deliveries: "
-            f"relevant {rub['rates']['relevance']:.0%}, accurate {rub['rates']['accuracy']:.0%}, "
-            f"influential {rub['rates']['influence']:.0%}"
-            + (
-                f"; of the influential, improved {rub['rates']['positive_effect']:.0%}"
-                if rub["rates"].get("positive_effect") is not None
-                else ""
+    rates = rub.get("rates") or {}
+    if rub.get("deliveries") and any(r is not None for r in rates.values()):
+        txt = ", ".join(
+            f"{label} {rates[s]:.0%}"
+            for label, s in (
+                ("relevant", "relevance"),
+                ("accurate", "accuracy"),
+                ("influential", "influence"),
             )
+            if rates.get(s) is not None
         )
+        if rates.get("positive_effect") is not None:
+            txt += f"; of the influential, improved {rates['positive_effect']:.0%}"
+        lines.append(f"- rubric over {rub['deliveries']} judged memory-deliveries: {txt}")
     lines.append("")
     for t in artifact["trajectories"]:
         ta = artifact["aggregates"]["per_trajectory"][t["id"]]
@@ -334,14 +341,21 @@ def print_summary(artifact: dict) -> int:
             f"injected ≈{pol['est_injected_tokens']:,} tok{share}"
         )
     rub = agg.get("rubric") or {}
-    if rub.get("deliveries"):
-        pe = rub["rates"].get("positive_effect")
-        print(
-            f"  rubric: {rub['deliveries']} memory-deliveries — relevant "
-            f"{rub['rates']['relevance']:.0%}, accurate {rub['rates']['accuracy']:.0%}, "
-            f"influential {rub['rates']['influence']:.0%}"
-            + (f", improved {pe:.0%} of influential" if pe is not None else "")
+    rates = rub.get("rates") or {}
+    if rub.get("deliveries") and any(r is not None for r in rates.values()):
+        txt = ", ".join(
+            f"{label} {rates[s]:.0%}"
+            for label, s in (
+                ("relevant", "relevance"),
+                ("accurate", "accuracy"),
+                ("influential", "influence"),
+            )
+            if rates.get(s) is not None
         )
+        pe = rates.get("positive_effect")
+        if pe is not None:
+            txt += f", improved {pe:.0%} of influential"
+        print(f"  rubric: {rub['deliveries']} memory-deliveries — {txt}")
     for t in artifact["trajectories"]:
         ta = artifact["aggregates"]["per_trajectory"][t["id"]]
         name = t.get("instance_id") or t.get("run_id")

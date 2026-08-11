@@ -240,8 +240,11 @@ def parse_trajectory(
     traj_dir: Path,
     warnings: list[str],
     traj_id: str = "T?",
-) -> tuple[Trajectory, list[MemoryOp]]:
-    """Parse one trajectory directory into (Trajectory, [MemoryOp])."""
+) -> tuple[Trajectory, list[MemoryOp], list[dict]]:
+    """Parse one trajectory directory into (Trajectory, [MemoryOp], events).
+
+    The loaded trajectory events are returned alongside so callers needing
+    the raw stream (eval.injudge's step stream) do not re-read the file."""
     traj_dir = Path(traj_dir)
     jsonl = traj_dir / "trajectory.jsonl"
     if not jsonl.is_file():
@@ -305,9 +308,9 @@ def parse_trajectory(
 
     traj.memory_lane = memory_lane
     traj.main_lane = main_lane
-    # The lane injudge's step stream classifies against: the single bound
-    # memory lane (None = unprefixed lane is valid).
-    traj.step_lane = next(iter(memory_lanes)) if len(memory_lanes) == 1 else memory_lane
+    # The memory lanes injudge's step stream classifies against — the same
+    # set the turn table below uses, so attribution stays consistent.
+    traj.memory_lanes = memory_lanes
     traj.sessions = sorted(index.sessions)
     first_session = next(iter(index.sessions.values()), None)
     if first_session is not None:
@@ -375,4 +378,4 @@ def parse_trajectory(
             f"{run_id}: {table.n_turns} turn_starts but {table.n_agent_turns} agent + "
             f"{table.n_mem_turns} memory turns classified (truncated or missing responses?)"
         )
-    return traj, ops
+    return traj, ops, events
