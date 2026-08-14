@@ -195,8 +195,6 @@ def test_discover_trajectories_names_unmatched_paths(tmp_path):
     """A CLI path that yields no trajectory dir is a usage error named
     explicitly — silently dropping it (a typo next to a valid root, a
     wrong-named file) would misread the run as covering inputs it never saw."""
-    from memgraph.graph import discover_trajectories
-
     TrajBuilder().agent_turn(with_task=True).write(tmp_path / "runs" / "t1")
     assert discover_trajectories([tmp_path / "runs"]) == [tmp_path / "runs" / "t1"]
     assert discover_trajectories([tmp_path / "runs" / "t1" / "trajectory.jsonl"]) == [
@@ -523,6 +521,55 @@ def test_recall_before_observed_creation_is_flagged(tmp_path):
     assert mem["recalled_before_creation"], "expected chronology flag on key_a"
     assert mem["recalled_before_creation"][0]["traj"] == "T1"
     assert any("precede its first observed creation" in v["msg"] for v in graph["validation"])
+
+
+def test_chronology_one_corrupt_timestamp_cross_traj_yields_no_warning(tmp_path):
+    """With exactly one op's timestamp parseable, load order across
+    trajectories is run-START order, not op time — the chronology check has
+    no time evidence and must not fabricate a 'recall precedes creation'
+    warning. (With neither parseable, load order is the designed fallback —
+    see test_recall_before_observed_creation_is_flagged.)"""
+    r = TrajBuilder().agent_turn(with_task=True).recall(ref=cure_ref("key_a", "v"))
+    for e in r.events:
+        e["at"] = "corrupt-timestamp"  # the recall op's at never parses
+    r.write(tmp_path / "20260101-000000.000Z-early", run_id="early")
+    c = TrajBuilder()
+    for _ in range(3):
+        c.agent_turn(with_task=_ == 0)
+    c.memory_turn()
+    c.generate(produced=[cure_ref("key_a", "v")], extraction_step="3")
+    for e in c.events:
+        e["at"] = "2026-01-01T01:00:00Z"
+    c.write(tmp_path / "20260101-010000.000Z-late", run_id="late")
+    graph = load_and_build([tmp_path])
+    mem = next(m for m in graph["memories"] if m["key"] == "key_a")
+    assert not mem["recalled_before_creation"]
+    assert not any(
+        "precede its first observed creation" in v["msg"] for v in graph["validation"]
+    )
+
+
+def test_chronology_one_corrupt_timestamp_same_traj_uses_seq_order(tmp_path):
+    """Within one trajectory, event seq IS recording order: a recall recorded
+    before its memory's creation is flagged even when one op's timestamp is
+    corrupt — only the cross-trajectory comparison lacks evidence."""
+    b = TrajBuilder().agent_turn(with_task=True)
+    ref = cure_ref("key_a", "v")
+    sid = b.search(returned=[ref])
+    b.agent_turn()
+    b.delivery(sid, memories=[ref], bind=b.last_call)  # recall at step 2
+    b.memory_turn()
+    b.generate(produced=[ref], extraction_step="2")  # creation recorded later
+    for e in b.events:
+        e["at"] = (
+            "corrupt-timestamp"
+            if e["type"] == "memory_delivery"
+            else "2026-01-01T00:00:00Z"
+        )
+    b.write(tmp_path / "t1", run_id="t1")
+    graph = load_and_build([tmp_path])
+    mem = next(m for m in graph["memories"] if m["key"] == "key_a")
+    assert mem["recalled_before_creation"]
 
 
 def test_null_step_recall_still_renders(tmp_path):
@@ -901,8 +948,6 @@ def test_dot_path_run_id_stays_joinable(tmp_path, monkeypatch):
     is "" but run_id must stay non-empty (the verdict join and the HTML's
     run-id parsing assume one) — the parse falls back to the resolved
     directory name, and the verdict join then matches."""
-    from pathlib import Path
-
     from memgraph.verdicts import apply_verdicts
 
     b = TrajBuilder().agent_turn(with_task=True).recall()
@@ -915,6 +960,21 @@ def test_dot_path_run_id_stays_joinable(tmp_path, monkeypatch):
     apply_verdicts(graph, verdict_report("cwd-traj", "T99:S1",
                                          [(recall["seq"], recall["step"], "first")]))
     assert recall["verdict"] == "neutral"  # the (run_id, seq) join landed
+
+
+def test_symlink_spelling_names_the_same_run(tmp_path):
+    """The verdict join keys on run_id, so one directory must name one run
+    under every spelling: a symlink alias must not fork the run_id, and the
+    lane sort must order by the real directory name, not the alias."""
+    from memgraph.graph import _traj_sort_key
+
+    b = TrajBuilder().agent_turn(with_task=True).recall()
+    d = b.write(tmp_path / "20260101-000000.000Z-real")
+    (d / "run.json").unlink()  # the directory name is all there is
+    link = tmp_path / "current"
+    link.symlink_to(d)
+    assert load_and_build([link])["trajectories"][0]["run_id"] == d.name
+    assert _traj_sort_key(link, None) == _traj_sort_key(d, None)
 
 
 def test_apply_verdicts_unmatched_seq_warns_and_annotates_nothing(tmp_path):
@@ -1329,6 +1389,32 @@ def test_render_html_escapes_artifact_controlled_numbers():
     assert 'typeof dc.approx_tokens_total==="number"' in html
     assert "delivered ${esc(dc.deliveries)}" in html
     assert 'steps ${esc(evSteps.join(",")||"?")}' in html
+
+
+def test_render_html_zero_token_delivery_cost_is_shown():
+    """A span whose placements recorded no content size (redacted/unsized —
+    injudge warns about that understatement) costs 0 tokens: the popover's
+    delivery line must still render (a falsy-zero check would hide exactly
+    the spans the warning is about)."""
+    from memgraph.html import render_html
+
+    html = render_html({"trajectories": [], "ops": [], "memories": [],
+                        "edges": [], "validation": []})
+    assert 'typeof dc.approx_tokens_total==="number"?' in html
+    assert "&&dc.approx_tokens_total" not in html
+
+
+def test_render_html_null_prototype_maps_for_artifact_keys():
+    """Verdict span ids (from the hand-editable --verdicts artifact) and
+    memory keys (trajectory-controlled) index lookup maps: null-prototype
+    maps make a "__proto__"/"constructor" value degrade to plain data instead
+    of reparenting the map or resolving an inherited member."""
+    from memgraph.html import render_html
+
+    html = render_html({"trajectories": [], "ops": [], "memories": [],
+                        "edges": [], "validation": []})
+    assert "const detailBySpan=Object.create(null);" in html
+    assert "const idByKey=Object.create(null);" in html
 
 
 def test_render_html_restated_op_resolves_the_span_detail():

@@ -45,11 +45,16 @@ def _traj_sort_key(traj_dir: Path, started_at: str | None) -> tuple[int, datetim
     must order by time, not text — "T10:04:54+01:00" IS "T09:04:54Z"), else
     the timestamped directory-name prefix, else the plain name. A
     non-string/unparseable started_at (hand-edited run.json) falls through
-    to the name forms rather than crash the sort. The leading tag keeps the
-    datetimes and the plain-name fallback from ever comparing across kinds."""
+    to the name forms rather than crash the sort. The name forms use the
+    RESOLVED directory name: a symlink alias or "." must sort like the real
+    directory, never by its spelling (parse_trajectory derives run_id the
+    same way). The leading tag keeps the datetimes and the plain-name
+    fallback from ever comparing across kinds."""
     dt = _parse_at(started_at)
+    name = ""
     if dt is None:
-        m = _TS_PREFIX.match(traj_dir.name)
+        name = traj_dir.resolve().name
+        m = _TS_PREFIX.match(name)
         if m:
             try:
                 dt = datetime(int(m[1]), int(m[2]), int(m[3]), int(m[4]), int(m[5]), int(m[6]))
@@ -59,7 +64,7 @@ def _traj_sort_key(traj_dir: Path, started_at: str | None) -> tuple[int, datetim
                 pass
     if dt is not None:
         return (0, dt, "")
-    return (1, datetime.max, traj_dir.name)
+    return (1, datetime.max, name)
 
 
 def discover_trajectories(paths: list[Path]) -> list[Path]:
@@ -294,7 +299,12 @@ def build_graph(
     # creation is causally impossible within the loaded set — the store entry
     # predates it (or lanes are misordered). Flag, never silently link. Lanes
     # may overlap in wall-clock time (concurrent runs sharing one store), so
-    # prefer each op's `at` timestamp; fall back to load order.
+    # prefer each op's `at` timestamp; when NEITHER op carries a parseable
+    # one, fall back to load order (trajectory time, then seq). With exactly
+    # one timestamp missing, load order is evidence only within one
+    # trajectory (seq order = recording order there); across trajectories it
+    # is run-START order, not op time, and a corrupt timestamp must not
+    # fabricate a causal warning.
     order = {op.id: i for i, op in enumerate(all_ops)}
     at_by_id = {op.id: _parse_at(op.at) for op in all_ops}
     for mem in registry.values():
@@ -308,7 +318,10 @@ def build_graph(
             if cat is not None and rat is not None:
                 if rat < cat:
                     early.append(r)
-            elif order[r["op"]] < cpos:
+            elif cat is None and rat is None:
+                if order[r["op"]] < cpos:
+                    early.append(r)
+            elif r["traj"] == mem.created_traj and order[r["op"]] < cpos:
                 early.append(r)
         if early:
             mem.recalled_before_creation = early

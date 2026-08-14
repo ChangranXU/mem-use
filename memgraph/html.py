@@ -171,9 +171,11 @@ const keyOf=id=>JSON.parse(id)[1];
 const memById=Object.fromEntries(G.memories.map(m=>[memId(m),m]));
 // Bare-key contexts (injudge rubric keys, namespace-less deletion targets)
 // link only when exactly one loaded memory carries the key — never guess.
-const idByKey={};
+// Null-prototype maps: memory keys are trajectory-controlled, so a key like
+// "__proto__" must count and link as data, never touch the prototype.
+const idByKey=Object.create(null);
 {
-  const n={};
+  const n=Object.create(null);
   for(const m of G.memories) n[m.key]=(n[m.key]||0)+1;
   for(const m of G.memories) if(n[m.key]===1) idByKey[m.key]=memId(m);
 }
@@ -199,8 +201,11 @@ const opsById=Object.fromEntries(G.ops.map(o=>[o.id,o]));
 const opOrder=Object.fromEntries(G.ops.map((o,i)=>[o.id,i]));
 // a restated injection carries no verdict_detail of its own (the span's first
 // injection holds it) — resolve it through the shared span id, so a memgraph
-// span split off from its injudge span (a delivery gap) still shows the detail
-const detailBySpan={};
+// span split off from its injudge span (a delivery gap) still shows the detail.
+// Null-prototype map: span ids come from the (hand-editable) verdicts artifact
+// — a "__proto__"/"constructor" id must degrade to a bare chip, never reparent
+// the map or resolve an inherited member.
+const detailBySpan=Object.create(null);
 for(const o of G.ops) if(o.verdict_span&&o.verdict_detail) detailBySpan[o.verdict_span]=o.verdict_detail;
 
 // collapse consecutive recalls (per traj) with identical key sets into spans;
@@ -688,8 +693,11 @@ function showOp(opId){
         const d=x.verdict_detail||detailBySpan[x.verdict_span]||{}, v=d.verdict||x.span_verdict||"unjudged";
         const dc=d.delivery_cost||{};
         // artifact-controlled numbers render escaped like any other datum;
-        // the thousands-formatted token count only when it really is a number
-        const dcTxt=typeof dc.approx_tokens_total==="number"&&dc.approx_tokens_total?`<span class="meta">delivered ${esc(dc.deliveries)}× ≈${dc.approx_tokens_total.toLocaleString()} tokens</span>`:"";
+        // the thousands-formatted token count only when it really is a number —
+        // 0 included: a redacted/unsized placement counts 0 tokens, and hiding
+        // the line would misread as "no deliveries" (injudge warns about the
+        // understatement separately)
+        const dcTxt=typeof dc.approx_tokens_total==="number"?`<span class="meta">delivered ${esc(dc.deliveries)}× ≈${dc.approx_tokens_total.toLocaleString()} tokens</span>`:"";
         h+=`<div class="mrow"><div><span class="chip" style="color:${VD_COLOR[v]||"var(--muted)"}">${esc(v)}</span>${d.confidence!=null?`<span class="meta">conf ${esc(d.confidence)}</span>`:""}<span class="meta">${esc(x.verdict_span)}</span>${d.auto?`<span class="meta">auto: ${esc(d.auto)}</span>`:""}${dcTxt}</div>`;
         if(d.error) h+=`<div class="flagbox">judge error: ${esc(d.error)}</div>`;
         if(d.analysis) h+=`<div class="vline" style="white-space:normal">${esc(d.analysis)}</div>`;

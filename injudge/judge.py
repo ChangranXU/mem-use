@@ -1208,7 +1208,7 @@ def judge_span(
     tries = 0
     last_text = ""  # latest out-of-contract answer; transport failures never erase it
     last_text_error = ""  # that answer's own contract violation (assigned with last_text)
-    rejection: str | None = None  # detail of the 400/422 the last degrade answered
+    rejection: str | None = None  # full body of the 400/422 the last degrade answered
     while True:
         req = _build_request(cfg, messages, tier)
         pause: float | None = None
@@ -1216,11 +1216,12 @@ def judge_span(
             with urlopen(req, timeout=cfg.timeout) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
         except HTTPError as e:
-            detail = ""
+            body = ""
             try:
-                detail = e.read().decode("utf-8", "replace")[:300]
+                body = e.read().decode("utf-8", "replace")
             except Exception:
                 pass
+            detail = body[:300]  # messages/artifacts stay capped; comparisons do not
             if e.code == 429 or e.code >= 500:
                 last_error = f"HTTP {e.code}: {detail}"
                 pause = _retry_after(e)
@@ -1246,24 +1247,27 @@ def judge_span(
                 nxt = _next_tier(cfg.api, tier)
                 if nxt is None:
                     raise JudgeError(f"HTTP {e.code}: {detail}") from e
-                if rejection is not None and detail and detail == rejection:
+                if rejection is not None and body and body == rejection:
                     # A non-empty rejection repeating after the format field
                     # changed is tier-independent — a config fault (an
                     # over-limit max_tokens, an unsupported thinking field) or
                     # the span's own content — not a format refusal a degrade
                     # could fix: fail the span on the endpoint's message
                     # instead of walking the rest of the chain on every span.
-                    # An EMPTY body is silence, not an unchanged rejection:
-                    # a gateway that drops per-tier error text still gets the
-                    # full walk (a tier-independent fault then fails at chain
-                    # end with the same HTTP code).
+                    # The comparison runs on the FULL body: two distinct
+                    # rejections sharing a long envelope prefix (only a
+                    # trailing field differs) are not "the identical
+                    # rejection". An EMPTY body is silence, not an unchanged
+                    # rejection: a gateway that drops per-tier error text
+                    # still gets the full walk (a tier-independent fault then
+                    # fails at chain end with the same HTTP code).
                     raise JudgeError(
                         f"HTTP {e.code} unchanged across conformance tiers "
                         f"(tier-independent, not a format refusal): {detail}"
                     ) from e
                 warnings.append(
                     f"{span.id}: tier {tier} rejected (HTTP {e.code}); degrading to {nxt}")
-                rejection = detail
+                rejection = body
                 tier = nxt
                 continue
             else:

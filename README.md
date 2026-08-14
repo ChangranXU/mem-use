@@ -218,7 +218,7 @@ Configured via `.env` (copy `.env.example`; see it for the full comments):
 | `API` | `openai-chat` | Wire format: `openai-chat` · `responses` · `anthropic` |
 | `TEMPERATURE` | `0.0` | Sampling temperature |
 | `MAX_ATTEMPTS` | `5` | Generation tries per span at the working tier; transport failures and out-of-contract answers share it — discovering the working tier (a 400/422 or an ignored format field) is free |
-| `OUTPUT_FORMAT` | unset (auto) | Pin the conformance tier: `structured` · `json` · `prompt`. Unset = auto chain from `structured`, degrading on rejection or proven-ignored format fields (the first tier producing a conforming answer is memoized per run). Pinned + a format-field rejection (400/422) = config error, the run stops |
+| `OUTPUT_FORMAT` | unset (auto) | Pin the conformance tier: `structured` · `json` · `prompt`. Unset = auto chain from `structured`, degrading on rejection or proven-ignored format fields (the first tier producing a conforming answer is memoized per run). Pinned + a request rejection (400/422) = the span fails with an `error` verdict naming the pin — recorded, the run continues |
 | `THINKING` | provider default | `enabled` / `disabled`; disabled is a true off (suppresses the effort field) |
 | `THINKING_EFFORT` | unset | `none` … `max`, provider-native |
 | `THINKING_BUDGET` | — | Anthropic only; required with `API=anthropic` + `THINKING=enabled`, must be < `--judge-max-tokens` |
@@ -266,7 +266,7 @@ python3 -m memgraph <trajectory paths> --verdicts injudge.json -o memgraph-verdi
 
 ## Project layout
 
-- `util.py` — atomic_write (crash-safe artifact writes)
+- `util.py` — shared helpers: atomic_write (crash-safe artifact writes), tmp_sibling, utf8_safe, print_validation
 - `memgraph/annotations.py` — schema-v6 memory-annotation index + MemoryRef mapping
 - `memgraph/model.py` — Trajectory / MemoryOp / MemoryUnit / Edge dataclasses
 - `memgraph/parse_trajectory.py` — trajectory.jsonl → ops (annotation-driven)

@@ -18,7 +18,7 @@ import argparse
 import json
 from pathlib import Path
 
-from util import atomic_write
+from util import atomic_write, tmp_sibling
 from injudge.judge import (
     JudgeError,
     auto_verdict_no_subsequent_turn,
@@ -91,7 +91,10 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="print the judge input per span; no .env read, no judge calls, no files written",
     )
-    ap.add_argument("--limit", type=int, default=None, help="judge at most N spans (rest: unjudged)")
+    ap.add_argument("--limit", type=int, default=None,
+                    help="judge at most N spans with the LLM (rest: unjudged; "
+                    "rule-judged auto-neutral spans always verdict — they cost "
+                    "no judge call)")
     ap.add_argument("--json", dest="json_out", type=Path, default=Path("injudge-report.json"),
                     help="JSON artifact path (default: injudge-report.json)")
     ap.add_argument("-o", "--output", type=Path, default=None, help="optional markdown report path")
@@ -106,15 +109,15 @@ def main(argv: list[str] | None = None) -> int:
         # fail fast on unwritable report paths, before any paid judge call:
         # flush() rewrites the artifact after every trajectory, so an output
         # that cannot be written would abort the run mid-way and lose the
-        # completed judging. The probe writes the same tmp sibling
-        # atomic_write later targets (a read-only or missing parent fails
-        # here, not after the judging is paid for).
+        # completed judging. The probe writes the staging sibling atomic_write
+        # later targets (a read-only or missing parent fails here, not after
+        # the judging is paid for).
         for out_path in (args.json_out, args.output):
             if out_path is None:
                 continue
             if out_path.is_dir():
                 raise SystemExit(f"error: output path {out_path} is a directory")
-            probe = out_path.with_name(out_path.name + ".tmp")
+            probe = tmp_sibling(out_path)
             try:
                 probe.write_text("", encoding="utf-8")
                 probe.unlink()

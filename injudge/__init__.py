@@ -11,3 +11,6 @@ Reuses memgraph for trajectory discovery, op extraction, and step
 attribution; this package adds the step stream, span grouping, judge input
 rendering, judging, aggregation, and reporting on top.
 """
+
+from __future__ import annotations
+

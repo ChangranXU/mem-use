@@ -85,7 +85,8 @@ class MemoryOp:
     memories: list[dict] = field(default_factory=list)
     search_operation_id: str | None = None  # linked search operation
     query: str | None = None  # exact search query text (capped preview)
-    matched: int | None = None  # memories the search returned
+    matched: int | None = None  # memories the search matched (the protocol's
+    # matched_count — may exceed the returned top-k subset it falls back to)
     content_chars: int | None = None  # placement content size
     binding_status: str | None = None  # delivery cursor-binding status
 

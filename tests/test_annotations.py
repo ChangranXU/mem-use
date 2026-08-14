@@ -908,6 +908,75 @@ def test_proxy_stamped_field_violations_are_problems():
     )
 
 
+def test_missing_annotation_id_is_a_problem():
+    """The proxy stamps every recorded memory event's annotation_id, so an
+    absent one is corruption (the recorder's retrieval index flags it) —
+    reported per event; the dedup rule never confuses two absences with a
+    duplicate None (they are simply not claimed)."""
+    idx = build_annotation_index(_structural_events())
+    assert sum("missing annotation_id" in p for p in idx.problems) == 3
+
+
+def test_corrupt_call_refs_are_problems_never_silent():
+    """A non-list call_refs (or an entry without an integer role_call_index)
+    is coerced away for the terminal-ref check — the coercion must be
+    reported like the recorder's retrieval index does, never silently
+    normalized."""
+    idx = build_annotation_index([
+        *_structural_events(),
+        {"seq": 4, "type": "memory_delivery", "annotation_id": "a-1",
+         "binding_status": "bound", "call_refs": "not-a-list",
+         "payload": {"trace_session_id": "S", "delivery_id": "d1"}},
+        {"seq": 5, "type": "memory_delivery", "annotation_id": "a-2",
+         "binding_status": "bound", "call_refs": [{"role_call_index": "x"}],
+         "payload": {"trace_session_id": "S", "delivery_id": "d2"}},
+    ])
+    assert any("call_refs is not a list" in p for p in idx.problems)
+    assert any("corrupted call_refs entry" in p for p in idx.problems)
+
+
+def test_lane_placement_violations_are_problems():
+    """The checked set covers lane placement (the same checks the recorder's
+    retrieval index runs): a session's operation events belong on its bound
+    memory lane, its deliveries on the bound main lane — a delivery landing
+    on the EXTRACT lane must not silently become a recall op."""
+    idx = build_annotation_index([
+        *_structural_events(),
+        {"seq": 4, "type": "memory_search_start", "proxy_source": MAIN,  # wrong lane
+         "annotation_id": "a-1", "binding_status": "not_requested",
+         "payload": {"trace_session_id": "S", "operation_id": "op-s", "query": {}}},
+        {"seq": 5, "type": "memory_search_end", "proxy_source": MEM,
+         "annotation_id": "a-2", "binding_status": "no_call",
+         "payload": {"trace_session_id": "S", "operation_id": "op-s",
+                     "status": "completed", "returned": []}},
+        {"seq": 6, "type": "memory_delivery", "proxy_source": MEM,  # wrong lane
+         "annotation_id": "a-3", "binding_status": "no_call",
+         "payload": {"trace_session_id": "S", "delivery_id": "d-wrong-lane",
+                     "search_operation_id": "op-s", "status": "placed", "memories": []}},
+    ])
+    assert any("op-s" in p and "outside the bound memory lane" in p for p in idx.problems)
+    assert any(
+        "d-wrong-lane" in p and "not recorded on the bound main lane" in p
+        for p in idx.problems
+    )
+
+
+def test_index_never_raises_on_a_delivery_without_seq():
+    """The tool path fabricates trailing seqs (load_events), but a direct
+    caller can hand the index a seq-less delivery: the delivery sort must
+    degrade (corrupt seqs sort last, stably), never raise — the module's
+    never-raises docstring covers direct callers too."""
+    idx = build_annotation_index([
+        {"seq": 1, "type": "memory_session", "annotation_id": "a-0",
+         "payload": {"trace_session_id": "S"}},
+        {"type": "memory_delivery", "annotation_id": "a-1",
+         "payload": {"trace_session_id": "S", "delivery_id": "d1"}},
+        {"seq": 2, "type": "memory_delivery", "annotation_id": "a-2",
+         "payload": {"trace_session_id": "S", "delivery_id": "d2"}},
+    ])
+    assert [d["payload"]["delivery_id"] for d in idx.deliveries] == ["d2", "d1"]
+
+
 def test_session_not_on_the_main_lane_is_a_problem():
     """The session event must be recorded on the lane its main binding names
     (the recorder's retrieval check): a mismatch is lane-record corruption."""
@@ -1101,7 +1170,7 @@ def test_search_query_locator_uses_the_delivery_session_binds(tmp_path):
     assert recall.query == "the second session's query"
 
 
-# ---------------------------------------------------------------- injudge integration
+# ------------------------------------------------- span grouping (injudge)
 
 
 def test_annotation_recall_ops_group_into_spans(tmp_path):

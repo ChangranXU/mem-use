@@ -10,3 +10,6 @@ generation operations, recalls from `memory_delivery` — explicit signals,
 never label conventions, prompt prefixes, or payload guessing (see
 `memgraph/annotations.py`).
 """
+
+from __future__ import annotations
+

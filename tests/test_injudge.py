@@ -1860,6 +1860,31 @@ def test_distinct_400s_per_tier_still_walk_the_chain(monkeypatch):
     assert cfg.learned_tier == "prompt"
 
 
+def test_rejections_differing_past_the_message_cap_still_walk(monkeypatch):
+    """Two DISTINCT 400 rejections whose bodies share their first 300
+    characters (a verbose envelope differing only in a trailing field) are
+    not "the identical rejection": the tier walk continues. The fail-fast
+    compares full bodies; only the recorded message is capped."""
+    record = []
+    prefix = b'{"error": {"message": "' + b"x" * 400  # > 300 chars of shared prefix
+    details = iter([prefix + b'", "param": "response_format"}',
+                    prefix + b'", "param": "json_schema"}'])
+
+    def _open(req, timeout=None):
+        body = json.loads(req.data.decode())
+        record.append(body)
+        if "response_format" in body:
+            raise http_error(400, next(details))
+        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
+
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
+    span, steps = _judge_input_fixture()
+    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
+    assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
+    assert [b.get("response_format", {}).get("type") for b in record] == [
+        "json_schema", "json_object", None]  # walked the chain to the prompt tier
+
+
 def test_tier_degrades_on_out_of_contract_output(monkeypatch):
     """A proxy silently ignoring the format field answers out of contract:
     output-driven degrade, memoized."""
@@ -2706,6 +2731,38 @@ def test_cli_report_path_into_a_missing_parent_fails_fast(monkeypatch, tmp_path)
     assert not out.exists() and not out.with_name(out.name + ".tmp").exists()
 
 
+def test_cli_surrogate_content_still_writes_the_artifact(monkeypatch, tmp_path):
+    """A delivered memory value carrying a lone surrogate (a legal recorder
+    payload — json.loads round-trips the \\ud800 escape) must not crash the
+    per-trajectory flush: the artifact is written with the surrogate escaped,
+    and reads back identical. Before the surrogate fallback this raised
+    UnicodeEncodeError mid-run, losing the already-paid judging."""
+    import hashlib
+
+    text = "value with a surrogate " + chr(0xD800) + " inside"
+    digest = hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
+    ref = {
+        "version_id": f"1:{digest[:16]}",
+        "identity_strength": "native_stable",
+        "identity_scheme": "test-scheme",
+        "namespace": "ns",
+        "content": {"availability": "inline", "text": text, "sha256": digest},
+        "extensions": {"cure": {"key": "key_a", "memory_type": "insight",
+                                "confidence": 0.9, "review_status": "approved",
+                                "needs_verification": False}},
+    }
+    b = TrajBuilder().agent_turn(with_task=True).recall(ref=ref)
+    _write_run(tmp_path / "runs", "t1", b)
+    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory([]))
+    out, md = tmp_path / "report.json", tmp_path / "report.md"
+    rc = injudge_main.main([str(tmp_path / "runs"),
+                            "--json", str(out), "-o", str(md), "--env", str(_env(tmp_path))])
+    assert rc == 0
+    artifact = json.loads(out.read_text(encoding="utf-8"))
+    assert artifact["operations"][0]["memories"][0]["value"] == text
+    assert md.exists()
+
+
 def test_cli_end_to_end_mocked_judge(monkeypatch, tmp_path):
     a = TrajBuilder().agent_turn(with_task=True)
     for _ in range(3):
@@ -2942,6 +2999,40 @@ def test_prompt_tokens_total_unmatched_retraction_warns():
         warnings,
     )
     assert total == 0 and warnings == []
+
+
+def test_prompt_tokens_corrupt_retraction_warns_as_overcount():
+    """A retraction whose key shape is corrupt is no usage record: excluding
+    it leaves the record it was annulling billed — its warning must name the
+    retraction population and the overcount direction, never conflate it with
+    dropped usage records (which undercount)."""
+    events = [
+        {"type": "message_end", "role": "assistant", "proxy_source": "MAIN",
+         "msg": 9, "turn": 1, "usage": {"prompt_tokens": 40}},
+        {"type": "message_retracted", "proxy_source": "MAIN", "msg": True},
+    ]
+    warnings = []
+    assert prompt_tokens_total(events, warnings) == 40  # the record stays billed
+    assert any(
+        "1 message_retracted event(s) carry a corrupt key" in w and "overcount" in w
+        for w in warnings
+    )
+    assert not any("usage record(s)" in w for w in warnings)
+
+
+def test_span_fingerprint_tolerates_a_lone_surrogate_value():
+    """A delivered value can legally carry a lone surrogate (json.loads
+    round-trips the recorder's \\ud800 escapes): the fingerprint hashes it
+    (surrogatepass, like the gate's canonical digests), never crashes."""
+    from memgraph.model import MemoryOp
+
+    op = MemoryOp(
+        id="T1:R1", kind="recall", traj="T1", step=1, seq=1,
+        memories=[{"key": "k", "value": chr(0xD800), "namespace": "ns",
+                   "identity_scheme": None, "identity_strength": None,
+                   "version_id": None, "content_sha256": None}],
+    )
+    assert content_fingerprint(op)
 
 
 def test_cli_tolerates_corrupt_list_fields(tmp_path):

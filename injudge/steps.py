@@ -332,7 +332,8 @@ def prompt_tokens_total(events: list[dict], warnings: list[str]) -> float:
     warned about too, since an out-of-order one leaves its record billed.
     """
     live: dict[tuple, list[dict]] = {}  # (proxy_source, msg) -> unannulled records
-    dropped = 0
+    dropped_records = 0
+    dropped_retractions = 0
     unmatched_retractions = 0
     for e in events:
         usage_record = e.get("type") == "message_end" and e.get("role") == "assistant"
@@ -340,7 +341,12 @@ def prompt_tokens_total(events: list[dict], warnings: list[str]) -> float:
             continue
         key = _usage_key(e)
         if key is None:
-            dropped += 1
+            # records and retractions are different populations with opposite
+            # accounting effects — tally them apart, never under one label
+            if usage_record:
+                dropped_records += 1
+            else:
+                dropped_retractions += 1
             continue
         if usage_record:
             live.setdefault(key, []).append(e)
@@ -355,13 +361,19 @@ def prompt_tokens_total(events: list[dict], warnings: list[str]) -> float:
         for e in stack:
             t = e.get("turn")
             if t is not None and not is_int(t):
-                dropped += 1
+                dropped_records += 1
                 continue
             total += _prompt_tokens(e)
-    if dropped:
+    if dropped_records:
         warnings.append(
-            f"{dropped} usage record(s) carry a corrupt key/turn shape; "
+            f"{dropped_records} usage record(s) carry a corrupt key/turn shape; "
             "excluded, so the prompt-token total undercounts"
+        )
+    if dropped_retractions:
+        warnings.append(
+            f"{dropped_retractions} message_retracted event(s) carry a corrupt key "
+            "shape; excluded, so the record they annul stays billed and the "
+            "prompt-token total may overcount"
         )
     if unmatched_retractions:
         warnings.append(

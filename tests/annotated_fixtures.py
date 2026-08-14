@@ -7,6 +7,8 @@ search operations, and bound deliveries — plus the ordinary turn/message/
 tool events the step stream consumes.
 """
 
+from __future__ import annotations
+
 import hashlib
 import json
 

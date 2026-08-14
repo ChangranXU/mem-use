@@ -443,10 +443,12 @@ def parse_trajectory(
         raise FileNotFoundError(f"no trajectory.jsonl in {traj_dir}")
     events = load_events(jsonl, warnings)
 
-    # the directory name is empty when the input path is "." or "/" — the
-    # verdict join and the HTML's run-id parsing both assume a non-empty
-    # run_id, so fall back to the resolved directory name, then the path text
-    run_id = traj_dir.name or traj_dir.absolute().name or str(traj_dir)
+    # The RESOLVED directory name: the verdict join keys on run_id, so one
+    # directory must name one run under every spelling — "." (empty .name)
+    # and symlink aliases included. resolve() makes the path absolute and
+    # follows symlinks; its name is "" only for a filesystem root, which
+    # falls back to the path text (the join assumes a non-empty run_id).
+    run_id = traj_dir.resolve().name or str(traj_dir)
     model = started_at = status = None
     run_json = traj_dir / "run.json"
     if run_json.is_file():

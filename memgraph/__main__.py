@@ -8,10 +8,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
 
-from util import atomic_write
+from util import atomic_write, print_validation
 from memgraph.graph import load_and_build
 from memgraph.html import render_html
 from memgraph.verdicts import apply_verdicts, load_verdict_report
@@ -66,7 +65,7 @@ def main(argv: list[str] | None = None) -> int:
         f"({n_cand} candidates), {n_rec} recall ops, "
         f"{len(graph['memories'])} memories, {len(graph['edges'])} edges"
     )
-    ops_by_traj: dict[str, list] = {}
+    ops_by_traj: dict[str, list[dict]] = {}
     for o in graph["ops"]:
         ops_by_traj.setdefault(o["traj"], []).append(o)
     for t in graph["trajectories"]:
@@ -79,9 +78,7 @@ def main(argv: list[str] | None = None) -> int:
             f"{t_ext} extractions ({rej} rejections), {t_rec} recalls, "
             f"{t['n_searches']} searches"
         )
-    for v in graph["validation"]:
-        stream = sys.stderr if v["level"] in ("warn", "error") else sys.stdout
-        print(f"  [{v['level']}] {v['msg']}", file=stream)
+    print_validation(graph["validation"])
     print(f"wrote {args.output}")
     if args.json_out:
         print(f"wrote {args.json_out}")

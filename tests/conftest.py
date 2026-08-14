@@ -6,6 +6,8 @@ explicitly for the tests' `memgraph.*` / `injudge.*` imports to resolve —
 under any checkout directory name, from the root or from its parent.
 """
 
+from __future__ import annotations
+
 import sys
 from pathlib import Path
 

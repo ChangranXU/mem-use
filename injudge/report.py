@@ -17,8 +17,9 @@ negative.
 
 from __future__ import annotations
 
-import sys
 from datetime import datetime, timezone
+
+from util import print_validation
 
 from injudge.aggregate import aggregate, policy_rollup
 from injudge.judge import RUBRIC_SIGNALS
@@ -375,7 +376,5 @@ def print_summary(artifact: dict) -> int:
             f"  {t['id']} {name}: {search_txt}{ta['n_injections']} inj, {ta['n_spans']} spans — "
             f"{_verdict_tally(ta)}"
         )
-    for v in artifact.get("validation") or []:
-        stream = sys.stderr if v["level"] in ("warn", "error") else sys.stdout
-        print(f"  [{v['level']}] {v['msg']}", file=stream)
+    print_validation(artifact.get("validation") or [])
     return agg["error"]

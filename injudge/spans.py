@@ -65,7 +65,10 @@ def content_fingerprint(op: MemoryOp) -> str:
             ident = [m.get("namespace"), m.get("key"), m.get("value")]
         canon.append(json.dumps(ident, ensure_ascii=False))
     blob = json.dumps(sorted(canon), ensure_ascii=False)
-    return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:16]
+    # surrogatepass, like the gate's canonical digests: a lone surrogate (a
+    # legal \ud800 JSON escape in a delivered value) stays digestible instead
+    # of crashing the span pass on a valid recorded payload
+    return hashlib.sha1(blob.encode("utf-8", "surrogatepass")).hexdigest()[:16]
 
 
 def group_spans(recall_ops: list[MemoryOp], traj_id: str) -> list[InjectionSpan]:

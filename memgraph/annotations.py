@@ -23,8 +23,9 @@ corrupted events: structural violations are collected in `problems` (the
 recorder's own retrieval/verify tooling remains the strict checker; these
 tools report and carry on). The checked set covers what the consumers trust:
 event pairing, session/binding completeness and lane placement, per-session
-operation-id keying, the proxy-stamped binding vocabulary,
-terminal-call-ref consistency, and the delivery↔search integrity (session
+operation-id keying, the proxy-stamped per-event fields (annotation-id
+presence/uniqueness, the binding vocabulary, call_refs shape, and
+terminal-call-ref consistency), and the delivery↔search integrity (session
 scoping, recording order, delivered identities an ordered subsequence of
 the search's returned set).
 
@@ -66,9 +67,9 @@ class AnnotatedOperation:
 
     operation_id: str
     kind: str  # "generation" | "search"
-    start: dict | None = None
-    changes: list[dict] = field(default_factory=list)
-    end: dict | None = None
+    start: dict[str, Any] | None = None
+    changes: list[dict[str, Any]] = field(default_factory=list)
+    end: dict[str, Any] | None = None
 
     @property
     def lane(self) -> str | None:
@@ -89,10 +90,10 @@ class AnnotatedOperation:
 class AnnotationIndex:
     """The annotation layer of one trajectory, grouped for consumption."""
 
-    sessions: dict[str, dict] = field(default_factory=dict)  # trace_session_id -> memory_session event
+    sessions: dict[str, dict[str, Any]] = field(default_factory=dict)  # trace_session_id -> memory_session event
     binds: dict[str, dict[str, str | None]] = field(default_factory=dict)  # session -> {logical_role: lane}
     operations: dict[str, AnnotatedOperation] = field(default_factory=dict)
-    deliveries: list[dict] = field(default_factory=list)  # memory_delivery events, seq order
+    deliveries: list[dict[str, Any]] = field(default_factory=list)  # memory_delivery events, seq order
     problems: list[str] = field(default_factory=list)
 
     @property
@@ -130,7 +131,11 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
             continue
         seq = event.get("seq")
         annotation_id = event.get("annotation_id")
-        if annotation_id is not None:
+        if annotation_id is None:
+            # the proxy stamps every recorded memory event's id: an absent
+            # one is corruption (the recorder's retrieval index flags it too)
+            index.problems.append(f"seq {seq}: missing annotation_id")
+        else:
             try:
                 if annotation_id in seen_annotation_ids:
                     # the recorder's at-least-once commit can re-record an
@@ -161,13 +166,20 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
 
         # Proxy-stamped event-level fields, checked for every memory event
         # (the same checks the recorder's retrieval index runs): the binding
-        # vocabulary, and the terminal_call_ref naming the last call ref.
+        # vocabulary, the call_refs shape, and the terminal_call_ref naming
+        # the last call ref.
         status = event.get("binding_status")
         if not isinstance(status, str) or status not in BINDING_STATUSES:
             index.problems.append(f"seq {seq}: unknown binding_status {status!r}")
         refs = event.get("call_refs")
         if not isinstance(refs, list):
+            if refs is not None:
+                # coerced to [] below for the terminal-ref check — but the
+                # corruption itself is reported, never silently normalized
+                index.problems.append(f"seq {seq}: call_refs is not a list")
             refs = []
+        elif any(not isinstance(ref, dict) or not is_int(ref.get("role_call_index")) for ref in refs):
+            index.problems.append(f"seq {seq}: corrupted call_refs entry")
         if refs and event.get("terminal_call_ref") != refs[-1]:
             index.problems.append(f"seq {seq}: terminal_call_ref is not the last call ref")
         elif not refs and "terminal_call_ref" in event:
@@ -271,7 +283,14 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
                 continue  # first end wins (same duplicate policy as the start)
             operation.end = event
 
-    index.deliveries.sort(key=lambda e: e["seq"])
+    def _delivery_order(event: dict) -> tuple[bool, int]:
+        # the tool path guarantees an int seq (load_events fabricates one),
+        # but a direct caller can hand in a corrupt/missing one — sort it
+        # last in stable file order, never raise (the never-raises rule)
+        seq = event.get("seq")
+        return (not is_int(seq), seq if is_int(seq) else 0)
+
+    index.deliveries.sort(key=_delivery_order)
     for operation in index.operations.values():
         if operation.end is None:
             index.problems.append(f"operation {operation.operation_id}: missing end event")
@@ -281,6 +300,26 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
             index.problems.append(f"session {sid}: needs exactly one main and one memory binding")
         if "main" in binds and index.sessions[sid].get("proxy_source") != binds["main"]:
             index.problems.append(f"session {sid}: memory_session was not recorded on the main lane")
+        # Lane placement (the same checks the recorder's retrieval index
+        # runs): a session's operation events belong on its bound memory
+        # lane, its deliveries on the bound main lane — an event recorded
+        # anywhere else names a lane drift the consumers cannot see.
+        if "memory" in binds:
+            for op in index.operations.values():
+                if op.start["payload"].get("trace_session_id") == sid and op.lane != binds["memory"]:
+                    index.problems.append(
+                        f"operation {op.operation_id}: events outside the bound memory lane"
+                    )
+        if "main" in binds:
+            for event in index.deliveries:
+                if (
+                    event["payload"].get("trace_session_id") == sid
+                    and event.get("proxy_source") != binds["main"]
+                ):
+                    index.problems.append(
+                        f"delivery {event['payload'].get('delivery_id')}: "
+                        "not recorded on the bound main lane"
+                    )
     for event in index.deliveries:
         # Delivery↔search integrity, the property the recall ops and span
         # fingerprints trust: the delivery follows its search's end, and the
