@@ -4,16 +4,26 @@ A span is a maximal run of recall ops (in agent-step order) delivering
 identical content: the same memory set under the recorder's portable
 identity (namespace, identity_scheme, version_id, content digest — what the
 gate's own `memory_identity` compares on), never adapter-native fields, so
-spanning works for any memory system recorded through the gate. Identical
-re-deliveries carry no new information, so they are judged once via their
-span; the non-first injections roll up as "restated".
+spanning works for any memory system recorded through the gate. One escape
+hatch: a memory no portable identity distinguishes (an operation-local
+version id over undigested content — legal for redacted/unavailable
+ContentRefs) fingerprints on its delivered (namespace, key, value) instead —
+the namespace keeps two stores' same-keyed deliveries apart (memory identity
+is the (namespace, key) pair). The triple degenerates to (namespace, key)
+when no value was recorded (redacted content records none), so distinct
+redacted contents under one (namespace, key) share a span —
+indistinguishable by construction: nothing was recorded that could tell
+them apart. Identical re-deliveries
+carry no new information, so they are judged once via their span; the
+non-first injections roll up as "restated".
 
 A gap in delivery steps does not break a span (the missing steps are
 recorded in `step_gaps` and surfaced to the judge); a content change does.
-Ops with no attributed step (an injection never followed by an agent turn —
-a truncated tail) sort last and merge only into a matching-content span; a
-span whose ops are ALL unattributed gets step_first/step_last = None and is
-auto-judged neutral without an LLM call (no downstream can exist).
+A delivery carries no step only when no agent turn ever classified in the
+run (a memory-only or pre-first-response recording); such ops sort last and
+merge only into a matching-content span, and a span whose ops are ALL
+unattributed gets step_first/step_last = None and is auto-judged neutral
+without an LLM call (no downstream can exist).
 """
 
 from __future__ import annotations
@@ -22,6 +32,7 @@ import hashlib
 import json
 
 from eval.injudge.model import InjectionSpan
+from eval.memgraph.annotations import namespace_of
 from eval.memgraph.model import MemoryOp
 
 
@@ -29,25 +40,31 @@ def content_fingerprint(op: MemoryOp) -> str:
     """sha1 over the portable delivered-set identity, robust to ordering.
 
     Per memory: namespace / identity_scheme / version_id / content sha256 —
-    the same tuple the gate's delivery-subsequence checks compare (PLAN
-    §4.6). An `operation_local` version_id names nothing outside its own
+    the same tuple the gate's delivery-subsequence checks compare on. An
+    `operation_local` version_id names nothing outside its own
     operation (the gate's identity-strength join rule), so it is withheld
     and the content digest alone carries the comparison; for the stable
-    strengths the version_id already names one content digest.
+    strengths the version_id already names one content digest. Scheme alone
+    distinguishes NOTHING (it is constant across one store's memories), so a
+    memory with neither a (withheld-adjusted) version_id nor a content digest
+    falls back to its delivered (namespace, key, value) — the namespace still
+    separates two stores' same-keyed deliveries (the registry's identity
+    pair), while the triple degenerates to (namespace, key) for redacted
+    content (no value is ever recorded), leaving distinct redacted contents
+    under one (namespace, key) indistinguishable and sharing one span.
     """
-    canon = sorted(
-        json.dumps(
-            [
-                m.get("namespace"),
-                m.get("identity_scheme"),
-                m.get("version_id") if m.get("identity_strength") != "operation_local" else None,
-                m.get("content_sha256"),
-            ],
-            ensure_ascii=False,
+    canon = []
+    for m in op.memories:
+        version_id = (
+            m.get("version_id") if m.get("identity_strength") != "operation_local" else None
         )
-        for m in op.memories
-    )
-    blob = json.dumps(canon, sort_keys=True, ensure_ascii=False)
+        digest = m.get("content_sha256")
+        if version_id is not None or digest is not None:
+            ident = [m.get("namespace"), m.get("identity_scheme"), version_id, digest]
+        else:
+            ident = [m.get("namespace"), m.get("key"), m.get("value")]
+        canon.append(json.dumps(ident, ensure_ascii=False))
+    blob = json.dumps(sorted(canon), ensure_ascii=False)
     return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:16]
 
 
@@ -56,17 +73,33 @@ def group_spans(recall_ops: list[MemoryOp], traj_id: str) -> list[InjectionSpan]
     ops = sorted(recall_ops, key=lambda o: (o.step is None, o.step or 0, o.seq))
     spans: list[InjectionSpan] = []
     steps_seen: list[list[int]] = []  # attributed steps per span, parallel to spans
+    latest: dict[str, int] = {}  # fingerprint -> index of the newest span with it
 
     for op in ops:
         fp = content_fingerprint(op)
+        target = None
         if spans and fp == spans[-1].fingerprint:
-            span = spans[-1]
+            target = len(spans) - 1
+        elif op.step is None and fp in latest:
+            # a truncated-tail re-delivery carries no step, so it cannot
+            # break consecutiveness: it is a restated injection of the newest
+            # matching span, wherever that span sits — never a spurious
+            # null-step span judged auto-neutral on its own
+            target = latest[fp]
+        if target is not None:
+            span = spans[target]
             span.op_ids.append(op.id)
             span.n_injections += 1
-            span.seq_last = op.seq
+            # min/max, never a plain assignment: ops arrive in step order,
+            # but a declared/bound step can invert seqs, and a truncated-tail
+            # op merges across newer spans — the range must still bracket
+            # every op of the span
+            span.seq_first = min(span.seq_first, op.seq)
+            span.seq_last = max(span.seq_last, op.seq)
             if op.step is not None:
-                steps_seen[-1].append(op.step)
+                steps_seen[target].append(op.step)
             continue
+        latest[fp] = len(spans)
         spans.append(
             InjectionSpan(
                 id=f"{traj_id}:S{len(spans) + 1}",
@@ -83,7 +116,7 @@ def group_spans(recall_ops: list[MemoryOp], traj_id: str) -> list[InjectionSpan]
         )
         steps_seen.append([op.step] if op.step is not None else [])
 
-    prev_keys: list[str] = []
+    prev: list[tuple] = []  # (namespace, key) identities of the previous span
     for span, steps in zip(spans, steps_seen):
         if steps:
             span.step_first = min(steps)
@@ -92,8 +125,18 @@ def group_spans(recall_ops: list[MemoryOp], traj_id: str) -> list[InjectionSpan]
             span.step_gaps = [
                 s for s in range(span.step_first, span.step_last + 1) if s not in delivered
             ]
-        cur_keys = [m.get("key") or "" for m in span.memories]
-        span.new_keys = [k for k in cur_keys if k not in prev_keys]
-        span.removed_keys = [k for k in prev_keys if k not in cur_keys]
-        prev_keys = cur_keys
+        # The diff compares (namespace, key) pairs — memory identity is the
+        # pair, so a delivery switching stores IS a change — then speaks in
+        # distinct bare keys (the judge contract's vocabulary; one delivery
+        # may carry several versions of a key — graph.py notes the legal
+        # collapse). A key whose store changed lands in BOTH lists: the old
+        # (namespace, key) identity left, the new one arrived.
+        cur = list(
+            dict.fromkeys(
+                (namespace_of(m), m.get("key")) for m in span.memories if m.get("key")
+            )
+        )
+        span.new_keys = list(dict.fromkeys(k for ns, k in cur if (ns, k) not in prev))
+        span.removed_keys = list(dict.fromkeys(k for ns, k in prev if (ns, k) not in cur))
+        prev = cur
     return spans

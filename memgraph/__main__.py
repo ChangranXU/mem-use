@@ -11,6 +11,7 @@ import json
 import sys
 from pathlib import Path
 
+from eval import atomic_write
 from eval.memgraph.graph import load_and_build
 from eval.memgraph.html import render_html
 from eval.memgraph.verdicts import apply_verdicts, load_verdict_report
@@ -46,18 +47,16 @@ def main(argv: list[str] | None = None) -> int:
                     help="optional path for the graph JSON artifact")
     ap.add_argument("--verdicts", type=Path, default=None, metavar="PATH",
                     help="optional injudge.report JSON (from eval.injudge): color "
-                    "recall nodes by verdict and show rationale/usage in popovers")
+                    "recall nodes by verdict and show analysis/usage in popovers")
     args = ap.parse_args(argv)
 
     graph = load_and_build(args.paths)
     if args.verdicts:
         apply_verdicts(graph, load_verdict_report(args.verdicts), str(args.verdicts))
 
-    args.output.write_text(render_html(graph), encoding="utf-8")
+    atomic_write(args.output, render_html(graph))
     if args.json_out:
-        args.json_out.write_text(
-            json.dumps(graph, indent=1, ensure_ascii=False) + "\n", encoding="utf-8"
-        )
+        atomic_write(args.json_out, json.dumps(graph, indent=1, ensure_ascii=False) + "\n")
 
     n_ext = sum(1 for o in graph["ops"] if o["kind"] == "extract")
     n_rec = sum(1 for o in graph["ops"] if o["kind"] == "recall")
@@ -67,8 +66,11 @@ def main(argv: list[str] | None = None) -> int:
         f"({n_cand} candidates), {n_rec} recall ops, "
         f"{len(graph['memories'])} memories, {len(graph['edges'])} edges"
     )
+    ops_by_traj: dict[str, list] = {}
+    for o in graph["ops"]:
+        ops_by_traj.setdefault(o["traj"], []).append(o)
     for t in graph["trajectories"]:
-        ops = [o for o in graph["ops"] if o["traj"] == t["id"]]
+        ops = ops_by_traj.get(t["id"], [])
         t_ext = sum(1 for o in ops if o["kind"] == "extract")
         t_rec = sum(1 for o in ops if o["kind"] == "recall")
         rej = sum(o["rejections"]["count"] for o in ops if o["kind"] == "extract")

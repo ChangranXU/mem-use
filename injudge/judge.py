@@ -3,12 +3,13 @@
 The judge endpoint is configured from `eval/.env` (stdlib only — urllib,
 no SDK). The API format is declared, not detected: `API` is one of
 `openai-chat` (the default), `responses`, or `anthropic`. The judge input
-is the COMPLETE agent step stream of one trajectory plus the injection
+is the trajectory's recorded task statement (when the run carries one),
+the COMPLETE agent step stream of one trajectory, plus the injection
 span to evaluate; the judge scores EVERY delivered memory on a
 five-signal rubric (relevance / accuracy / novelty / influence /
 positive_effect), followed by a short analysis. The span verdict is NOT
-asked of the LLM — it is derived in code from the rubric (eval/TARGET.md:
-the verdict rests on subsequent influence, never on the final task result):
+asked of the LLM — it is derived in code from the rubric (the verdict
+rests on subsequent influence, never on the final task result):
 
 - any memory `misused` (acted-on influence with positive_effect no_effect
   or harmed) ⇒ span **negative** ("used but didn't improve" — context and
@@ -17,39 +18,43 @@ the verdict rests on subsequent influence, never on the final task result):
   span **positive**;
 - else ⇒ **neutral** (no demonstrated footprint).
 
-Parsing is defensive: an unparseable response, or one whose rubric covers
-none of the span's memories, becomes verdict "error" with the raw text
-kept — it is NEVER silently coerced to neutral, because that would pollute
-the neutral rate with judge failures.
+Judge output follows one canonical contract (VERDICT_SCHEMA, array form)
+at every conformance tier; the tiers differ only in how conformance is
+enforced — constrained decoding (structured) → JSON mode (json) → the
+prompt alone (prompt). The attempt loop walks the chain on a format-field
+rejection (400/422) or on out-of-contract output that proves the field was
+ignored — both are free tier discoveries — memoizing the first tier that
+produces a conforming answer; a 400/422 repeating unchanged after the
+format field changed is tier-independent (a config fault or the span's own
+content, never a format refusal) and fails the span, as does any other
+non-429 4xx (auth, unknown URL, payload too large). A valid but
+schema-violating answer at the json tier is a model error (JSON mode never
+promised schema conformance) and takes the same-tier corrective retry: a
+same-tier retry never repeats a failed request blindly — it appends a
+corrective note — with one deliberate exception: an empty-content answer
+(a server-side quirk) gets a fresh draw of the identical request after a
+backoff, and on openai-chat a complete verdict drafted into
+`reasoning_content` is recovered instead. Parsing is strict: anything out
+of contract, or a rubric covering none of the span's memories, becomes
+verdict "error" with the raw text kept — it is NEVER silently coerced to
+neutral, because that would pollute the neutral rate with judge failures.
 """
 
 from __future__ import annotations
 
+import http.client
 import json
-import re
+import math
 import time
+from collections import Counter
 from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
 from pathlib import Path
-from urllib.error import HTTPError, URLError
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen  # module-level: tests monkeypatch urlopen
 
-from eval.injudge.model import AgentStep, InjectionSpan
-
-
-def _parse_json_tolerant(text: str) -> tuple[object | None, str | None]:
-    """json.loads, then a embedded-object fallback; (None, reason) on failure."""
-    try:
-        return json.loads(text), None
-    except (json.JSONDecodeError, TypeError):
-        pass
-    if isinstance(text, str):
-        m = re.search(r"\{.*\}", text, re.DOTALL)
-        if m:
-            try:
-                return json.loads(m.group(0)), "parsed from embedded JSON object"
-            except json.JSONDecodeError:
-                pass
-    return None, "unparseable decision payload"
+from eval.injudge.model import AgentStep, InjectionSpan, step_range
+from eval.memgraph.annotations import is_int
 
 
 class JudgeError(Exception):
@@ -57,7 +62,12 @@ class JudgeError(Exception):
 
 
 def load_env(path: Path) -> dict[str, str]:
-    """KEY=VALUE lines; quotes stripped; blanks and `#` comments skipped."""
+    """KEY=VALUE lines; quotes stripped; blanks and `#` comments skipped.
+
+    A quoted value ends at its closing quote — a trailing `# ...` comment
+    goes with it. An unquoted value ends at the first ` #` (whitespace-led,
+    so a `#` inside the value, e.g. a URL fragment, stays).
+    """
     env: dict[str, str] = {}
     for line in Path(path).read_text(encoding="utf-8").splitlines():
         line = line.strip()
@@ -65,8 +75,12 @@ def load_env(path: Path) -> dict[str, str]:
             continue
         key, _, value = line.partition("=")
         value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
-            value = value[1:-1]
+        if value[:1] in ("'", '"'):
+            end = value.find(value[0], 1)
+            if end >= 1:  # an unterminated quote keeps the raw value
+                value = value[1:end]
+        elif " #" in value:
+            value = value.split(" #", 1)[0].rstrip()
         env[key.strip()] = value
     return env
 
@@ -77,6 +91,81 @@ API_FORMATS = ("openai-chat", "responses", "anthropic")
 # union is validated, the provider owns the semantics.
 EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 
+OUTPUT_FORMATS = ("structured", "json", "prompt")  # OUTPUT_FORMAT pin values
+# Conformance tiers per declared API, all enforcing the same canonical
+# contract (VERDICT_SCHEMA): constrained decoding first, then plain JSON
+# mode (the anthropic Messages API has none), then the prompt alone.
+_TIER_CHAIN = {
+    "openai-chat": ("structured", "json", "prompt"),
+    "responses": ("structured", "json", "prompt"),
+    "anthropic": ("structured", "prompt"),
+}
+
+
+def _next_tier(api: str, tier: str) -> str | None:
+    """The next-weaker conformance tier for the declared API; None at the end."""
+    chain = _TIER_CHAIN[api]
+    nxt = chain.index(tier) + 1
+    return chain[nxt] if nxt < len(chain) else None
+
+
+# ------------------------------------------------------------- the contract
+
+_SIGNALS = ("relevance", "accuracy", "novelty", "influence", "positive_effect")
+RUBRIC_SIGNALS = _SIGNALS  # public alias for report/aggregate rendering
+
+_ACCURACY = ("corroborated", "uncontradicted", "contradicted")
+_NOVELTY = ("novel", "confirming", "redundant")
+_INFLUENCE = ("none", "referenced", "acted_on", "decisive")
+_POS_EFFECT = ("improved", "no_effect", "harmed")
+_ACTED = ("acted_on", "decisive")  # influence levels where positive_effect applies
+
+
+def _signal_schema(value: dict) -> dict:
+    return {
+        "type": "object", "additionalProperties": False,
+        "required": ["value", "note"],
+        "properties": {"value": value, "note": {"type": "string"}},
+    }
+
+
+# The one canonical judge-output contract, array form, required by OpenAI
+# strict mode and anthropic constrained decoding alike (additionalProperties
+# false plus every field required makes dynamic keys impossible, so the
+# memories map is an array of keyed entries). Declared once; consumed by the
+# structured-tier request builders and restated in SYSTEM_PROMPT (whose enum
+# lists are built from these constants, never repeated literally).
+VERDICT_SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "required": ["memories", "analysis", "evidence", "confidence"],
+    "properties": {
+        "memories": {"type": "array", "items": {
+            "type": "object", "additionalProperties": False,
+            "required": ["key", *_SIGNALS],
+            "properties": {
+                "key": {"type": "string"},
+                "relevance": _signal_schema({"type": "boolean"}),
+                "accuracy": _signal_schema({"type": "string", "enum": list(_ACCURACY)}),
+                "novelty": _signal_schema({"type": "string", "enum": list(_NOVELTY)}),
+                "influence": _signal_schema({"type": "string", "enum": list(_INFLUENCE)}),
+                "positive_effect": _signal_schema(
+                    {"type": ["string", "null"], "enum": [*_POS_EFFECT, None]}),
+            },
+        }},
+        "analysis": {"type": "string"},
+        "evidence": {"type": "array", "items": {
+            "type": "object", "additionalProperties": False,
+            "required": ["claim", "steps", "seqs"],
+            "properties": {
+                "claim": {"type": "string"},
+                "steps": {"type": "array", "items": {"type": "integer"}},
+                "seqs": {"type": "array", "items": {"type": "integer"}},
+            },
+        }},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    },
+}
+
 
 @dataclass
 class JudgeConfig:
@@ -85,43 +174,40 @@ class JudgeConfig:
     model: str
     api: str = "openai-chat"  # one of API_FORMATS
     timeout: float = 120.0
-    retries: int = 2  # retries after the first attempt
+    max_attempts: int = 5  # generation tries per span at the working tier; tier discovery is free
     temperature: float = 0.0
     max_tokens: int = 24000  # reasoning models burn most of it on reasoning_content
     thinking: str | None = None  # enabled | disabled | None (provider default)
     thinking_effort: str | None = None  # one of EFFORTS
     thinking_budget: int | None = None  # anthropic extended-thinking budget_tokens
-    # fast lane from the FAST_* keys (future use); each FAST_* key defaults
-    # to its primary counterpart
-    fast: JudgeConfig | None = None
+    output_format: str | None = None  # pinned tier: one of OUTPUT_FORMATS; None = auto
+    learned_tier: str = "structured"  # per-run memo: the first tier that produced a verdict
 
 
-def _thinking_config(env: dict[str, str], prefix: str = "") -> dict:
-    """THINKING / THINKING_EFFORT / THINKING_BUDGET from the .env, validated.
-
-    With prefix="FAST_" reads the fast-lane overrides instead; unset keys
-    return None so the caller falls back to the primary lane's values.
-    """
-    thinking = (env.get(f"{prefix}THINKING") or "").strip().lower() or None
+def _thinking_config(env: dict[str, str]) -> dict:
+    """THINKING / THINKING_EFFORT / THINKING_BUDGET from the .env, validated."""
+    thinking = (env.get("THINKING") or "").strip().lower() or None
     if thinking is not None and thinking not in ("enabled", "disabled"):
         raise SystemExit(
-            f"error: {prefix}THINKING must be enabled or disabled (got {thinking!r})"
+            f"error: THINKING must be enabled or disabled (got {thinking!r})"
         )
-    effort = (env.get(f"{prefix}THINKING_EFFORT") or "").strip().lower() or None
+    effort = (env.get("THINKING_EFFORT") or "").strip().lower() or None
     if effort is not None and effort not in EFFORTS:
         raise SystemExit(
-            f"error: {prefix}THINKING_EFFORT must be one of "
+            f"error: THINKING_EFFORT must be one of "
             f"{', '.join(EFFORTS)} (got {effort!r})"
         )
     budget: int | None = None
-    raw_budget = (env.get(f"{prefix}THINKING_BUDGET") or "").strip()
+    raw_budget = (env.get("THINKING_BUDGET") or "").strip()
     if raw_budget:
         try:
             budget = int(raw_budget)
+            if budget < 1:
+                raise ValueError
         except ValueError:
             raise SystemExit(
-                f"error: {prefix}THINKING_BUDGET must be an integer number of tokens "
-                f"(got {raw_budget!r})"
+                "error: THINKING_BUDGET must be a positive integer number "
+                f"of tokens (got {raw_budget!r})"
             ) from None
     return {"thinking": thinking, "thinking_effort": effort, "thinking_budget": budget}
 
@@ -132,19 +218,35 @@ def _float_config(env: dict[str, str], key: str) -> float | None:
     if not raw:
         return None
     try:
-        return float(raw)
+        value = float(raw)
     except ValueError:
         raise SystemExit(f"error: {key} must be a number (got {raw!r})") from None
+    if not math.isfinite(value):
+        raise SystemExit(f"error: {key} must be a finite number (got {raw!r})")
+    return value
 
 
-def _check_thinking_budget(cfg: JudgeConfig, api_key: str = "API") -> None:
-    """Anthropic extended thinking needs THINKING_BUDGET below the max-tokens
-    cap; applies per lane, to API and FAST_API alike."""
+def _int_config(env: dict[str, str], key: str) -> int | None:
+    """An optional positive int from the .env (e.g. MAX_ATTEMPTS); None when unset."""
+    raw = (env.get(key) or "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        raise SystemExit(f"error: {key} must be a positive integer (got {raw!r})") from None
+    if value < 1:
+        raise SystemExit(f"error: {key} must be a positive integer (got {raw!r})")
+    return value
+
+
+def _check_thinking_budget(cfg: JudgeConfig) -> None:
+    """Anthropic extended thinking needs THINKING_BUDGET below the max-tokens cap."""
     if cfg.api != "anthropic" or cfg.thinking != "enabled":
         return
     if cfg.thinking_budget is None:
         raise SystemExit(
-            f"error: {api_key}=anthropic with THINKING=enabled needs THINKING_BUDGET "
+            "error: API=anthropic with THINKING=enabled needs THINKING_BUDGET "
             "(the messages API requires thinking.budget_tokens)"
         )
     if cfg.thinking_budget >= cfg.max_tokens:
@@ -154,12 +256,27 @@ def _check_thinking_budget(cfg: JudgeConfig, api_key: str = "API") -> None:
         )
 
 
+def _check_output_format(api: str, output_format: str | None) -> None:
+    """A pinned OUTPUT_FORMAT must be a tier the declared API actually has
+    (anthropic has no plain JSON mode)."""
+    if output_format is not None and output_format not in _TIER_CHAIN[api]:
+        raise SystemExit(
+            f"error: OUTPUT_FORMAT={output_format!r} is not available for "
+            f"API={api} (tier chain: {' -> '.join(_TIER_CHAIN[api])})"
+        )
+
+
 def resolve_config(
-    env: dict[str, str], judge_model: str | None = None, **overrides
+    env: dict[str, str],
+    judge_model: str | None = None,
+    timeout: float | None = None,
+    max_attempts: int | None = None,
+    max_tokens: int | None = None,
 ) -> JudgeConfig:
     """Map .env keys to a JudgeConfig. OPENAI_* shadows the bare aliases;
     --judge-model shadows MODEL; API declares the wire format (default
-    openai-chat). Error messages name keys, never values."""
+    openai-chat). The CLI flags (timeout/max_attempts/max_tokens) shadow the
+    .env values. Error messages name keys, never values."""
     base_url = env.get("OPENAI_BASE_URL") or env.get("BASE_URL") or ""
     api_key = env.get("OPENAI_API_KEY") or env.get("API_KEY") or ""
     model = judge_model or env.get("MODEL") or ""
@@ -187,36 +304,78 @@ def resolve_config(
         setattr(cfg, k, v)
     if (temperature := _float_config(env, "TEMPERATURE")) is not None:
         cfg.temperature = temperature
-    for k, v in overrides.items():
-        if v is not None and hasattr(cfg, k):
-            setattr(cfg, k, v)
-    _check_thinking_budget(cfg)
-    fast_api = (env.get("FAST_API") or cfg.api).strip().lower()
-    if fast_api not in API_FORMATS:
+    if (env_max_attempts := _int_config(env, "MAX_ATTEMPTS")) is not None:
+        cfg.max_attempts = env_max_attempts
+    output_format = (env.get("OUTPUT_FORMAT") or "").strip().lower() or None
+    if output_format is not None and output_format not in OUTPUT_FORMATS:
         raise SystemExit(
-            f"error: FAST_API in the .env file must be one of "
-            f"{', '.join(API_FORMATS)} (got {fast_api!r})"
+            f"error: OUTPUT_FORMAT in the .env file must be one of "
+            f"{', '.join(OUTPUT_FORMATS)} (got {output_format!r})"
         )
-    fast_thinking = _thinking_config(env, "FAST_")
-    fast_temperature = _float_config(env, "FAST_TEMPERATURE")
-    cfg.fast = JudgeConfig(
-        base_url=(env.get("FAST_BASE_URL") or cfg.base_url).rstrip("/"),
-        api_key=env.get("FAST_API_KEY") or cfg.api_key,
-        # the fast lane defaults to the .env MODEL, not a --judge-model override
-        model=env.get("FAST_MODEL") or env.get("MODEL") or cfg.model,
-        api=fast_api,
-        timeout=cfg.timeout,
-        retries=cfg.retries,
-        # FAST_TEMPERATURE overrides; unset inherits the primary lane
-        temperature=fast_temperature if fast_temperature is not None else cfg.temperature,
-        max_tokens=cfg.max_tokens,
-        # FAST_THINKING* override per key; unset keys inherit the primary lane
-        thinking=fast_thinking["thinking"] or cfg.thinking,
-        thinking_effort=fast_thinking["thinking_effort"] or cfg.thinking_effort,
-        thinking_budget=fast_thinking["thinking_budget"] or cfg.thinking_budget,
-    )
-    _check_thinking_budget(cfg.fast, "FAST_API")
+    cfg.output_format = output_format
+    if timeout is not None:
+        cfg.timeout = timeout
+    if max_attempts is not None:
+        cfg.max_attempts = max_attempts
+    if max_tokens is not None:
+        cfg.max_tokens = max_tokens
+    # CLI-flag overrides bypass the .env parsers, so validate them here;
+    # the inverted comparisons reject NaN as well as out-of-range values
+    if not cfg.timeout > 0:
+        raise SystemExit(
+            f"error: timeout must be a positive number of seconds (got {cfg.timeout})"
+        )
+    if not cfg.max_attempts >= 1:
+        raise SystemExit(
+            f"error: max_attempts must be a positive integer (got {cfg.max_attempts})"
+        )
+    if not cfg.max_tokens >= 1:
+        raise SystemExit(
+            f"error: max_tokens must be a positive integer (got {cfg.max_tokens})"
+        )
+    _check_thinking_budget(cfg)
+    _check_output_format(cfg.api, cfg.output_format)
     return cfg
+
+
+def _chat_message(payload: dict) -> dict:
+    """choices[0].message of a chat-completions body; {} on any shape drift
+    (a proxy answering 200 with off-shape JSON must read as "no answer",
+    never crash the run)."""
+    if not isinstance(payload, dict):
+        return {}
+    choices = payload.get("choices")
+    choice = choices[0] if isinstance(choices, list) and choices else {}
+    msg = choice.get("message") if isinstance(choice, dict) else {}
+    return msg if isinstance(msg, dict) else {}
+
+
+def _top_level_braces(text: str) -> list[int]:
+    """Positions of "{" opening a top-level JSON object — not nested inside
+    another JSON value, not inside a string. Stray braces in prose degrade
+    the depth count harmlessly (a missed rescue, never a wrong one)."""
+    positions = []
+    depth = 0
+    in_string = False
+    escaped = False
+    for i, ch in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch in "{[":
+            if ch == "{" and depth == 0:
+                positions.append(i)
+            depth += 1
+        elif ch in "}]":
+            depth = max(0, depth - 1)
+    return positions
 
 
 def _reasoning_fallback_text(payload: dict) -> str | None:
@@ -225,26 +384,44 @@ def _reasoning_fallback_text(payload: dict) -> str | None:
     Some reasoning models sporadically route the *entire answer* into the
     reasoning channel and return empty `content` with finish_reason `stop` —
     retrying the identical request cannot recover that, but the answer is
-    right there. Only a fully parseable JSON object qualifies (a truncated
-    draft from genuine budget exhaustion does not); downstream `parse_verdict`
-    still validates the rubric strictly, so a bad draft becomes an error
-    verdict, never a silent pass.
+    right there. Only a fully parseable JSON object qualifies: a truncated
+    draft from genuine budget exhaustion holds no complete object (nested
+    fragments are never the answer); downstream strict parsing still
+    validates the contract, so a bad draft becomes an error verdict, never a
+    silent pass. openai-chat only: the other APIs carry no
+    `reasoning_content` channel in the response shape read here.
     """
-    msg = (payload.get("choices") or [{}])[0].get("message", {})
+    msg = _chat_message(payload)
     rc = msg.get("reasoning_content")
     if not isinstance(rc, str) or not rc.strip():
         return None
     text = rc.strip()
-    candidates = [text]
-    m = re.search(r"\{.*\}", text, re.DOTALL)
-    if m and m.group(0) != text:
-        candidates.append(m.group(0))
-    for cand in candidates:
+    # last top-level object first: the drafted verdict closes the reasoning
+    # (a greedy first-to-last span could straddle several objects and never
+    # parse). raw_decode ignores trailing prose after the object.
+    decoder = json.JSONDecoder()
+    for pos in reversed(_top_level_braces(text)):
         try:
-            if isinstance(json.loads(cand), dict):
-                return cand
-        except json.JSONDecodeError:
+            obj, end = decoder.raw_decode(text, pos)
+        except (ValueError, RecursionError):
+            # JSONDecodeError, the int digit limit, pathological nesting —
+            # an unparseable draft just isn't a rescue
             continue
+        if isinstance(obj, dict):
+            return text[pos:end]
+    # No top-level object parsed: the model may have wrapped the verdict in
+    # an array — "[{...}]" nests the object one level down, so the scan above
+    # records no position for it. The greedy first-"{"-to-last-"}" span is
+    # exactly the object inside a single wrap; a span straddling several
+    # top-level objects never parses, so a successful rescue here is one the
+    # precise scan provably could not produce.
+    start, stop = text.find("{"), text.rfind("}")
+    if 0 <= start < stop:
+        try:
+            if isinstance(json.loads(text[start:stop + 1]), dict):
+                return text[start:stop + 1]
+        except (ValueError, RecursionError):
+            pass
     return None
 
 
@@ -295,13 +472,51 @@ def _apply_thinking(cfg: JudgeConfig, body: dict) -> None:
             body["output_config"] = {"effort": cfg.thinking_effort}
 
 
-def _build_request(cfg: JudgeConfig, messages: list[dict]) -> Request:
-    """One judge request in the declared API format. `messages` is the
-    system+user pair; non-chat formats split the system part out."""
+def _apply_output_format(cfg: JudgeConfig, body: dict, tier: str) -> None:
+    """The tier's provider-native format field (the prompt tier sends none).
+
+    openai-chat: `response_format` json_schema strict (DeepSeek 400s this —
+    the attempt loop degrades) or json_object (DeepSeek JSON mode).
+    responses: `text.format` json_schema or json_object.
+    anthropic: `output_config.format` json_schema, merged into the
+    output_config a thinking effort may already have set.
+    """
+    if tier == "structured":
+        if cfg.api == "openai-chat":
+            body["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "injudge_verdict", "strict": True, "schema": VERDICT_SCHEMA},
+            }
+        elif cfg.api == "responses":
+            body["text"] = {"format": {
+                "type": "json_schema", "name": "injudge_verdict",
+                "strict": True, "schema": VERDICT_SCHEMA}}
+        else:  # anthropic
+            body.setdefault("output_config", {})["format"] = {
+                "type": "json_schema", "schema": VERDICT_SCHEMA}
+    elif tier == "json":
+        if cfg.api == "openai-chat":
+            body["response_format"] = {"type": "json_object"}
+        elif cfg.api == "responses":
+            body["text"] = {"format": {"type": "json_object"}}
+        # anthropic has no json tier (see _TIER_CHAIN)
+    # prompt tier: no format field — the prompt alone carries the contract
+
+
+def _build_request(cfg: JudgeConfig, messages: list[dict], tier: str) -> Request:
+    """One judge request in the declared API format at the given conformance
+    tier. `messages` is the system+user pair, plus the invalid answer and
+    corrective note on retries; non-chat formats split the system part out
+    and forward the rest with roles preserved, so a corrective retry reads
+    as the judge's own bad turn on every API (a lone responses input keeps
+    the plain-string form)."""
     system = next((m.get("content") for m in messages if m.get("role") == "system"), None)
-    user = "\n\n".join(
-        str(m.get("content") or "") for m in messages if m.get("role") != "system"
-    )
+    convo = [
+        {"role": m.get("role"), "content": str(m.get("content") or "")}
+        for m in messages
+        if m.get("role") != "system"
+    ]
     auth = {"Authorization": f"Bearer {cfg.api_key}", "Content-Type": "application/json"}
     if cfg.api == "anthropic":
         body = {
@@ -309,7 +524,7 @@ def _build_request(cfg: JudgeConfig, messages: list[dict]) -> Request:
             "max_tokens": cfg.max_tokens,  # required by the messages API
             "temperature": cfg.temperature,
             "system": system or "",
-            "messages": [{"role": "user", "content": user}],
+            "messages": convo,
         }
         headers = {
             "x-api-key": cfg.api_key,
@@ -322,7 +537,9 @@ def _build_request(cfg: JudgeConfig, messages: list[dict]) -> Request:
         body = {
             "model": cfg.model,
             "instructions": system or "",
-            "input": user,
+            # a single user message stays the plain-string input form; the
+            # message-list form only appears once corrective rounds exist
+            "input": convo[0]["content"] if len(convo) == 1 else convo,
             "temperature": cfg.temperature,
             "max_output_tokens": cfg.max_tokens,
         }
@@ -336,78 +553,42 @@ def _build_request(cfg: JudgeConfig, messages: list[dict]) -> Request:
         }
         headers = auth
     _apply_thinking(cfg, body)
+    _apply_output_format(cfg, body, tier)
     return Request(
         _endpoint(cfg), data=json.dumps(body).encode("utf-8"), headers=headers, method="POST"
     )
 
 
 def _extract_text(cfg: JudgeConfig, payload: dict) -> str | None:
-    """The judge's answer text in the declared format; None when absent."""
+    """The judge's answer text in the declared format; None when absent
+    (including a body that parses but drifts from the declared shape)."""
+    if not isinstance(payload, dict):
+        return None
     if cfg.api == "anthropic":
+        blocks = payload.get("content")
         text = "".join(
             b["text"]
-            for b in payload.get("content") or []
+            for b in (blocks if isinstance(blocks, list) else ())
             if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str)
         )
         return text if text.strip() else None
     if cfg.api == "responses":
+        output = payload.get("output")
         parts = []
-        for item in payload.get("output") or []:
+        for item in (output if isinstance(output, list) else ()):
             if not isinstance(item, dict) or item.get("type") != "message":
                 continue
+            content = item.get("content")
             parts.extend(
                 c["text"]
-                for c in item.get("content") or []
+                for c in (content if isinstance(content, list) else ())
                 if isinstance(c, dict) and c.get("type") == "output_text"
                 and isinstance(c.get("text"), str)
             )
         text = "".join(parts)
         return text if text.strip() else None
-    content = (payload.get("choices") or [{}])[0].get("message", {}).get("content")
+    content = _chat_message(payload).get("content")
     return content if isinstance(content, str) and content.strip() else None
-
-
-def chat_completion(cfg: JudgeConfig, messages: list[dict], notes: list[str] | None = None) -> str:
-    """One judge call via urllib; retries on transient failures only."""
-    req = _build_request(cfg, messages)
-    last: Exception | None = None
-    for attempt in range(1 + cfg.retries):
-        try:
-            with urlopen(req, timeout=cfg.timeout) as resp:
-                payload = json.loads(resp.read().decode("utf-8"))
-            content = _extract_text(cfg, payload)
-            if content is None and cfg.api == "openai-chat":
-                fallback = _reasoning_fallback_text(payload)
-                if fallback is not None:
-                    if notes is not None:
-                        notes.append(
-                            "judge answer read from reasoning_content (content was empty)"
-                        )
-                    return fallback
-            if content is None:
-                # Reasoning models sporadically burn the whole budget on
-                # reasoning and return empty content; like a transient
-                # failure, this is worth another attempt (same prompt, new draw).
-                last = JudgeError(f"response carries no message content: {str(payload)[:300]}")
-            else:
-                return content
-        except HTTPError as e:
-            detail = ""
-            try:
-                detail = e.read().decode("utf-8", "replace")[:300]
-            except Exception:
-                pass
-            if e.code == 429 or e.code >= 500:
-                last = JudgeError(f"HTTP {e.code}: {detail}")
-            else:
-                raise JudgeError(f"HTTP {e.code}: {detail}") from e
-        except (URLError, TimeoutError, OSError) as e:
-            last = JudgeError(f"{type(e).__name__}: {e}")
-        except json.JSONDecodeError as e:
-            last = JudgeError(f"unparseable response body: {e}")
-        if attempt < cfg.retries:
-            time.sleep(1 if attempt == 0 else 4)
-    raise last or JudgeError("request failed")
 
 
 SYSTEM_PROMPT = """You are an audit judge for a memory system integrated into a coding agent.
@@ -416,7 +597,9 @@ spliced into the agent's context, each delivering "approved memories"
 (key/value facts). Injections are grouped into SPANS: maximal runs of
 consecutive injections with identical delivered content. You judge one span.
 
-Your input is the COMPLETE agent step stream of the trajectory — every
+Your input is the exact TASK STATEMENT the agent worked on (present only
+when the run recorded one), the COMPLETE agent step stream of the
+trajectory — every
 completed agent turn with its assistant reasoning/content and tool
 executions — plus the span to evaluate. Steps before the span's first
 step are the pre-injection context (what the agent had done and planned
@@ -424,18 +607,19 @@ when the injection arrived); steps from the span's first step onward are
 where the span's footprint, if any, appears.
 
 Score EVERY delivered memory on this rubric — five signals, judged only
-from the step stream:
+from the task statement and the step stream:
 
 1. relevance (true|false) — is the memory topically related to the task
-   and to the agent's current subgoal at the injection point? Use the
-   steps before the span's first step.
-2. accuracy ("corroborated"|"uncontradicted"|"contradicted") — is the
+   (the recorded statement above; when absent, reconstruct the task from
+   the pre-injection steps) and to the agent's current subgoal at the
+   injection point? Use the steps before the span's first step.
+2. accuracy (@accuracy@) — is the
    memory content factually correct given the codebase state observable in
    the step stream (tool results, file contents, test outcomes)?
    corroborated = directly confirmed by observable evidence; contradicted =
    observable evidence refutes it; uncontradicted = neither (plausible,
    nothing refutes it). Do not guess beyond what is observable.
-3. novelty ("novel"|"confirming"|"redundant") — what did the agent already
+3. novelty (@novelty@) — what did the agent already
    have when the injection arrived? Judge the memory's substance in the
    steps before the span's first step, by how the agent had articulated it:
    - confirming: the agent had articulated the substance as OPEN — a
@@ -449,7 +633,7 @@ from the step stream:
    - novel: the substance never appeared in the pre-injection steps.
    The note must cite the pre-injection step the tier rests on. Judge from
    the agent's steps only.
-4. influence ("none"|"referenced"|"acted_on"|"decisive") — the memory's
+4. influence (@influence@) — the memory's
    footprint in the agent's SUBSEQUENT behavior (steps from the span's
    first step onward):
    - referenced: the agent mentioned or quoted it, but its actions did not
@@ -465,7 +649,7 @@ from the step stream:
      action's absence is none — absence alone is never evidence.
    A mention is not proof of influence: the agent may have known or found
    the fact on its own (check novelty and the pre-injection steps).
-5. positive_effect ("improved"|"no_effect"|"harmed"|null) — only when
+5. positive_effect (@positive_effect@) — only when
    influence is acted_on or decisive: did the memory improve the work
    (correct choice sooner, saved effort, avoided error)? Saved effort
    needs the observable anchor from influence (announced intent or
@@ -490,37 +674,60 @@ Rules (binding):
 
 Answer with ONE JSON object and nothing else:
 {
-  "memories": {
-    "<memory key>": {
+  "memories": [
+    {
+      "key": "<memory key>",
       "relevance":       {"value": true|false, "note": "<one sentence>"},
-      "accuracy":        {"value": "corroborated"|"uncontradicted"|"contradicted",
+      "accuracy":        {"value": @accuracy@,
                           "note": "<one sentence>"},
-      "novelty":         {"value": "novel"|"confirming"|"redundant",
+      "novelty":         {"value": @novelty@,
                           "note": "<one sentence citing the pre-injection step>"},
-      "influence":       {"value": "none"|"referenced"|"acted_on"|"decisive",
+      "influence":       {"value": @influence@,
                           "note": "<one sentence>"},
-      "positive_effect": {"value": "improved"|"no_effect"|"harmed"|null,
+      "positive_effect": {"value": @positive_effect@,
                           "note": "<one sentence>"}
     }
-  },
+  ],
   "analysis": "<2-4 sentences synthesizing the span's footprint>",
   "evidence": [{"claim": "<what happened>", "steps": [<int>...],
                 "seqs": [<int>...]}...],
-  "confidence": <number 0.0-1.0>,
-  "crossed_rewrite": "<sentence or empty string>"
+  "confidence": <number 0.0-1.0>
 }
 memories must contain exactly one entry per delivered memory key."""
+
+
+def _quoted_or(values: tuple[str, ...]) -> str:
+    """One prompt enum list: "a"|"b"|"c"."""
+    return "|".join(f'"{v}"' for v in values)
+
+
+# The prompt's enum lists derive from the same constants as VERDICT_SCHEMA
+# and _valid_value: a renamed/added value moves schema, validation, and
+# prompt together — a stale literal would fail verdicts with an invisible
+# cause (the model is instructed to emit values the contract rejects).
+for _token, _literals in (
+    ("@accuracy@", _quoted_or(_ACCURACY)),
+    ("@novelty@", _quoted_or(_NOVELTY)),
+    ("@influence@", _quoted_or(_INFLUENCE)),
+    ("@positive_effect@", _quoted_or(_POS_EFFECT) + "|null"),
+):
+    SYSTEM_PROMPT = SYSTEM_PROMPT.replace(_token, _literals)
+del _token, _literals
 
 
 def _memory_line(m: dict) -> str:
     # The memory system's self-assessment (confidence, needs_verification)
     # is withheld: every signal is judged from the step stream only.
-    return f"- [{m.get('memory_type')}] {m.get('key')}: {m.get('value')}"
+    return f"- [{m.get('memory_type')}] {m.get('key') or '(unkeyed)'}: {m.get('value')}"
 
 
-def _cmd_of(args: dict) -> str:
+def _cmd_of(args: dict | str) -> str:
     if isinstance(args, dict) and isinstance(args.get("command"), str):
         return args["command"]
+    if isinstance(args, str):
+        # the gate records the raw arguments string when it is not JSON —
+        # show it as-is instead of double-encoding it
+        return args
     return json.dumps(args or {}, ensure_ascii=False)
 
 
@@ -528,7 +735,8 @@ def _render_steps(steps: list[AgentStep]) -> str:
     """The complete step stream, verbatim — no windows, no caps."""
     out = []
     for st in steps:
-        out.append(f"[step {st.step}, turn {st.turn}, seqs {st.seq_start}–{st.seq_end}]")
+        seq_end = st.seq_end if st.seq_end is not None else "?"  # truncated mid-turn
+        out.append(f"[step {st.step}, turn {st.turn}, seqs {st.seq_start}–{seq_end}]")
         if st.reasoning:
             out.append(f"reasoning: {st.reasoning}")
         if st.content:
@@ -537,18 +745,27 @@ def _render_steps(steps: list[AgentStep]) -> str:
             out.append(f"command: {t.name} — {_cmd_of(t.args)}")
             if t.result is not None:
                 out.append(f"result ({t.status or '?'}): {t.result}")
+            elif t.status is not None:
+                # the execution closed without a result (no_result/interrupted)
+                # — the recorded close says why; "never observed" would claim
+                # the run lost the outcome, which it did not
+                out.append(f"result ({t.status}): (none recorded)")
             else:
                 out.append("result: (never observed)")
     return "\n".join(out) or "(none)"
 
 
-def render_user(span: InjectionSpan, steps: list[AgentStep]) -> str:
-    """The judge input: the span to evaluate plus the whole step stream."""
-    parts = [
+def render_user(span: InjectionSpan, steps: list[AgentStep], task: str | None = None) -> str:
+    """The judge input: the recorded task (when present), the span to
+    evaluate, plus the whole step stream."""
+    consumed = step_range(span.step_first, span.step_last)
+    parts = []
+    if task:
+        parts.append(f"TASK STATEMENT (the exact task the run recorded):\n{task}\n")
+    parts.append(
         f"SPAN TO EVALUATE {span.id} — {span.n_injections} identical injection(s), "
-        f"consumed at agent steps {span.step_first}–{span.step_last} "
-        f"(seqs {span.seq_first}–{span.seq_last})."
-    ]
+        f"consumed at agent {consumed} (seqs {span.seq_first}–{span.seq_last})."
+    )
     if span.step_gaps:
         parts.append(f"NOTE: the memory was NOT delivered at steps {span.step_gaps}.")
     if span.new_keys:
@@ -570,144 +787,86 @@ def render_user(span: InjectionSpan, steps: list[AgentStep]) -> str:
 
 # ---------------------------------------------------------------- parsing
 
-_SIGNALS = ("relevance", "accuracy", "novelty", "influence", "positive_effect")
-RUBRIC_SIGNALS = _SIGNALS  # public alias for report/aggregate rendering
-_MISSING = object()  # sentinel for "present but unparseable" vs None (null)
-_NAMED_CONFIDENCE = {"high": 0.9, "medium": 0.6, "low": 0.3}
 
-_ACCURACY = ("corroborated", "uncontradicted", "contradicted")
-_NOVELTY = ("novel", "confirming", "redundant")
-_INFLUENCE = ("none", "referenced", "acted_on", "decisive")
-_POS_EFFECT = ("improved", "no_effect", "harmed")
-_ACTED = ("acted_on", "decisive")  # influence levels where positive_effect applies
-
-
-def _coerce_bool(raw: object) -> bool | None | object:
-    """True/False/None from bools, null, 0/1, and common spellings."""
-    if raw is None:
-        return None
-    if isinstance(raw, bool):
-        return raw
-    if isinstance(raw, (int, float)) and raw in (0, 1):
-        return bool(raw)
-    if isinstance(raw, str):
-        s = raw.strip().lower()
-        if s in ("true", "yes"):
-            return True
-        if s in ("false", "no"):
-            return False
-        if s in ("null", "none", "n/a", "na", ""):
-            return None
-    return _MISSING
+def _valid_value(signal: str, value: object) -> bool:
+    """A signal value against its contract type/enum — no coercion."""
+    if signal == "relevance":
+        return isinstance(value, bool)
+    if signal == "positive_effect":
+        return value is None or value in _POS_EFFECT
+    allowed = {"accuracy": _ACCURACY, "novelty": _NOVELTY, "influence": _INFLUENCE}[signal]
+    return isinstance(value, str) and value in allowed
 
 
-def _enum_coercer(allowed: tuple, bool_map: dict, synonyms: dict):
-    """Coerce to an enum value (or None): exact/synonym strings first (an
-    enum's own "none" spelling must win over the null spelling), bools via
-    bool_map, null stays null; _MISSING when unparseable."""
-
-    def coerce(raw: object):
-        if isinstance(raw, str):
-            s = raw.strip().lower().replace("-", "_").replace(" ", "_")
-            if s in allowed:
-                return s
-            if s in synonyms:
-                return synonyms[s]
-        b = _coerce_bool(raw)
-        if b is not _MISSING:
-            return bool_map.get(b) if b is not None else None
-        if isinstance(raw, str):
-            return _MISSING  # a string that matched nothing is not coercible
-        s = str(raw).strip().lower().replace("-", "_").replace(" ", "_")
-        if s in allowed:
-            return s
-        return synonyms.get(s, _MISSING)
-
-    return coerce
+def _reject_constant(value: str) -> None:
+    """json.loads parse_constant hook: NaN/Infinity are not valid JSON
+    (RFC 8259) — rejecting them at parse time classifies the answer as "is
+    not valid JSON", which at the json tier is the output-side proof of a
+    format-ignoring endpoint (JSON mode guarantees valid JSON) and earns the
+    free degrade; a lenient parse would misread it as the model's own
+    schema error and burn the attempt budget on corrective retries."""
+    raise ValueError(f"non-JSON constant {value!r}")
 
 
-_COERCE = {
-    "relevance": _coerce_bool,
-    "novelty": _enum_coercer(
-        _NOVELTY,
-        {True: "novel", False: "redundant"},
-        {"new": "novel",
-         "confirmatory": "confirming", "corroborating": "confirming",
-         "confirmed": "confirming",
-         "known": "redundant", "duplicate": "redundant"},
-    ),
-    "accuracy": _enum_coercer(
-        _ACCURACY,
-        {True: "uncontradicted", False: "contradicted"},
-        {"verified": "corroborated", "confirmed": "corroborated", "correct": "corroborated",
-         "wrong": "contradicted", "incorrect": "contradicted",
-         "unknown": "uncontradicted", "unverifiable": "uncontradicted"},
-    ),
-    "influence": _enum_coercer(
-        _INFLUENCE,
-        {True: "acted_on", False: "none"},
-        {"mentioned": "referenced", "noted": "referenced", "quoted": "referenced",
-         "used": "acted_on", "acted": "acted_on",
-         "critical": "decisive", "pivotal": "decisive", "deciding": "decisive"},
-    ),
-    "positive_effect": _enum_coercer(
-        _POS_EFFECT,
-        {True: "improved", False: "no_effect"},
-        {"helped": "improved", "positive": "improved",
-         "neutral": "no_effect", "nothing": "no_effect",
-         "negative": "harmed", "harmful": "harmed", "hurt": "harmed"},
-    ),
-}
+def _strict_parse(text: str) -> tuple[dict | None, str | None]:
+    """json.loads plus the VERDICT_SCHEMA shape, checked in code — the
+    prompt tier's share of conformance enforcement (the constrained tiers
+    get it from the API). (obj, None) on conformance; (None, error) with a
+    retryable out-of-contract reason otherwise.
 
-
-def _ints(v: object) -> list[int]:
-    out = []
-    for x in v if isinstance(v, list) else [v]:
-        if isinstance(x, bool):
-            continue
-        if isinstance(x, (int, float)):
-            out.append(int(x))
-        elif isinstance(x, str):
-            try:
-                out.append(int(x))
-            except ValueError:
-                pass
-    return out
-
-
-def _coerce_confidence(raw: object, span_id: str, warnings: list[str]) -> float:
-    """Numbers and common spellings coerced, clamped to [0, 1]."""
-    if isinstance(raw, bool):
-        pass  # bool is int — excluded from the numeric branch, defaults below
-    elif isinstance(raw, (int, float)):
-        v = float(raw)
-        if 0.0 <= v <= 1.0:
-            return v
-        warnings.append(f"{span_id}: confidence {v} out of range, clamped")
-        return min(1.0, max(0.0, v))
-    if isinstance(raw, str):
-        try:
-            return min(1.0, max(0.0, float(raw)))
-        except ValueError:
-            pass
-        if raw.strip().lower() in _NAMED_CONFIDENCE:
-            return _NAMED_CONFIDENCE[raw.strip().lower()]
-    warnings.append(f"{span_id}: confidence missing/unparseable, defaulted to 0.5")
-    return 0.5
-
-
-def _parse_signal(raw: object, ctx: str, warnings: list[str], signal: str) -> dict:
-    """One rubric signal: `{"value": <bool|enum|null>, "note": str}` or bare."""
-    note = ""
-    value_raw = raw
-    if isinstance(raw, dict):
-        value_raw = raw.get("value")
-        note = str(raw.get("note") or "")
-    v = _COERCE[signal](value_raw)
-    if v is _MISSING:
-        warnings.append(f"{ctx}: value {value_raw!r} unparseable; treated as null")
-        v = None
-    return {"value": v, "note": note}
+    Strict means no recovery: no fence/embedded extraction, no
+    synonym/bool/string coercions. The enforced shape is the required
+    subset — the memories array structure, the rubric values, and
+    confidence; extra properties pass (only the constrained tiers reject
+    them). Display-only fields (notes, analysis, evidence) are not
+    shape-checked here.
+    """
+    try:
+        # parse_constant rejects NaN/Infinity, which json.loads would
+        # otherwise accept though neither is valid JSON — an answer carrying
+        # one classifies as "is not valid JSON" (see _reject_constant)
+        obj = json.loads(text, parse_constant=_reject_constant)
+    except RecursionError:
+        # pathologically nested but VALID JSON — at the json tier this is
+        # the model's own error (JSON mode guarantees valid JSON), never a
+        # free "ignored the format field" degrade
+        return None, "nests too deeply to parse"
+    except ValueError:
+        # JSONDecodeError, a NaN/Infinity constant, and the int digit-limit
+        # refusal: the judge's answer never became a parsed object
+        return None, "is not valid JSON"
+    if not isinstance(obj, dict):
+        return None, "is not a JSON object"
+    memories = obj.get("memories")
+    if not isinstance(memories, list):
+        return None, "has no 'memories' array"
+    seen: set[str] = set()
+    for entry in memories:
+        if not isinstance(entry, dict):
+            return None, "has a memories entry that is not an object"
+        key = entry.get("key")
+        if not isinstance(key, str) or not key:
+            return None, "has a memories entry without a non-empty string 'key'"
+        if key in seen:
+            return None, f"has a duplicate memories entry for key {key!r}"
+        seen.add(key)
+        for signal in _SIGNALS:
+            sig = entry.get(signal)
+            if not isinstance(sig, dict) or "value" not in sig:
+                return None, f"has {key}.{signal} not as a value/note object"
+            if not _valid_value(signal, sig["value"]):
+                return None, f"has {key}.{signal} value {sig['value']!r} outside the contract"
+    confidence = obj.get("confidence")
+    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+        return None, "has no numeric confidence"
+    if isinstance(confidence, float) and not math.isfinite(confidence):
+        # A 1e999-style overflow literal IS valid JSON, so parse_constant never
+        # fires for it, but json.loads reads it as a non-finite float: out of
+        # the contract's 0–1 range, and clamping to 0/1 would fabricate a bound
+        # the judge never expressed — reject as out of contract. Ints are
+        # arbitrary-precision, always finite (a huge int still clamps later).
+        return None, "has a non-finite confidence"
+    return obj, None
 
 
 def _derive_usage(signals: dict) -> str:
@@ -727,9 +886,11 @@ def _derive_usage(signals: dict) -> str:
     return "unclear"  # influence itself unknown
 
 
-def _footprint_reason(signals: dict) -> str | None:
-    """Why an ignored memory left no footprint (the neutral taxonomy);
-    None when the signals the taxonomy reads are unknown."""
+def _footprint_reason(signals: dict) -> str:
+    """Why an ignored memory left no footprint (the neutral taxonomy). Only
+    an ignored usage reaches here, and strict parsing guarantees its novelty
+    is an enum value (nulled coverage-gap entries derive unclear, never
+    ignored) — so every case is decided."""
     if signals["relevance"]["value"] is False:
         return "irrelevant"
     nov = signals["novelty"]["value"]
@@ -737,8 +898,6 @@ def _footprint_reason(signals: dict) -> str | None:
         return "redundant"
     if nov == "confirming":
         return "confirming_ignored"  # settled an open suspicion, never credited
-    if nov is None:
-        return None  # novelty unknown — no taxonomy claim
     return "ignored_novel"
 
 
@@ -761,57 +920,111 @@ def _usage_evidence(signals: dict) -> str:
     return ""
 
 
-def parse_verdict(text: str, span: InjectionSpan, warnings: list[str]) -> dict:
-    """Validate the judge's rubric JSON into the internal verdict record;
-    derive memory_usage and the span verdict in code.
+def _int_list(v: object, span_id: str, field: str, warnings: list[str]) -> list[int]:
+    """True ints only, in order — no float/string/bool coercion. A drop is
+    warned about like every other semantic correction here: the cited
+    support is display-only, but losing it silently is not allowed."""
+    if not isinstance(v, list):
+        if v is not None:
+            warnings.append(f"{span_id}: dropped non-array evidence {field}")
+        return []
+    out = [x for x in v if is_int(x)]
+    if len(out) != len(v):
+        warnings.append(f"{span_id}: dropped non-integer evidence {field} entries")
+    return out
 
-    Anything unparseable or out-of-contract → verdict "error" (raw kept),
-    never a silent neutral.
-    """
-    verdict: dict = {
+
+def _clamp_confidence(value: float | int, span_id: str, warnings: list[str]) -> float:
+    """The prompt tier's share of the 0–1 range rule (the schema carries it
+    on the constrained tiers): clamp, with a warning. Comparisons stay in the
+    numeric domain — a huge int is in range-checkable but float() overflows
+    on it."""
+    if 0.0 <= value <= 1.0:
+        return float(value)
+    # the raw value is capped like every other interpolated datum here — a
+    # 10**4000 confidence must not write thousands of digits into validation
+    warnings.append(f"{span_id}: confidence {str(value)[:60]} out of range, clamped")
+    return 0.0 if value < 0.0 else 1.0
+
+
+def blank_verdict() -> dict:
+    """The canonical all-fields verdict shape; callers override what applies."""
+    return {
         "verdict": "error",
         "confidence": None,
-        "rationale": "",
         "analysis": "",
         "rubric": {},
         "memory_usage": {},
         "evidence": [],
-        "crossed_rewrite": "",
         "auto": None,
         "error": None,
     }
-    obj, note = _parse_json_tolerant(text or "")
-    if not isinstance(obj, dict):
-        verdict["error"] = f"judge output {note or 'is not a JSON object'}"
-        verdict["judge_raw"] = (text or "")[:2000]
-        warnings.append(f"{span.id}: {verdict['error']}")
-        return verdict
-    memories = obj.get("memories")
-    if not isinstance(memories, dict):
-        verdict["error"] = "judge output has no 'memories' rubric object"
-        verdict["judge_raw"] = (text or "")[:2000]
-        warnings.append(f"{span.id}: {verdict['error']}")
-        return verdict
 
-    span_keys = [m.get("key") or "" for m in span.memories]
-    for key in memories:
+
+def _error_verdict(error: str, text: str, span: InjectionSpan, warnings: list[str]) -> dict:
+    """The honest failure record: verdict "error" with the raw text kept —
+    never a silent neutral."""
+    verdict = blank_verdict()
+    verdict["error"] = error
+    verdict["judge_raw"] = (text or "")[:2000]
+    warnings.append(f"{span.id}: {error}")
+    return verdict
+
+
+def _assemble_verdict(
+    obj: dict, text: str, span: InjectionSpan, warnings: list[str]
+) -> dict:
+    """Contract validation and assembly of a shape-valid judge object into
+    the internal verdict record; memory_usage and the span verdict derive
+    in code.
+
+    These are the semantic checks a JSON schema cannot express, not format
+    tolerance: coverage (a span key absent from the array gets nulled
+    signals + a warning; zero coverage is an immediate error verdict — a
+    model-quality signal, never retried), the positive_effect↔influence
+    pairing correction, unknown-key drop, and the confidence range clamp.
+    """
+    verdict = blank_verdict()
+    entries = {e["key"]: e for e in obj["memories"]}
+    raw_keys = [m.get("key") or "" for m in span.memories]
+    # the judge contract is one rubric entry per key, so a delivery carrying
+    # several versions of one key (distinct portable identities) collapses
+    # into a single entry — coverage counts distinct keys, and the collapse
+    # is warned about like every other semantic correction here
+    span_keys = list(dict.fromkeys(raw_keys))
+    delivered_counts = Counter(raw_keys)
+    for key in span_keys:
+        if key and delivered_counts[key] > 1:
+            warnings.append(
+                f"{span.id}: key {key!r} delivered in {delivered_counts[key]} "
+                "versions; judged once per key"
+            )
+    n_unkeyed = delivered_counts[""]
+    if n_unkeyed and any(span_keys):
+        # the judge contract keys rubric entries by memory key, so an
+        # unkeyed delivered memory can never be covered — surfaced like every
+        # other drop here, never silently absent from the verdict record
+        # (its delivery cost still counts in the span's deterministic cost)
+        warnings.append(
+            f"{span.id}: {n_unkeyed} delivered "
+            f"{'memory' if n_unkeyed == 1 else 'memories'} with no key; "
+            "excluded from the rubric and usage records"
+        )
+    for key in entries:
         if key not in span_keys:
             warnings.append(f"{span.id}: rubric entry for unknown key {key!r} dropped")
     covered = 0
     for key in span_keys:
         if not key:
             continue
-        raw = memories.get(key)
-        if raw is None:
+        entry = entries.get(key)
+        if entry is None:
             warnings.append(f"{span.id}: rubric missing memory {key!r}; signals nulled")
             signals = {s: {"value": None, "note": ""} for s in _SIGNALS}
         else:
             covered += 1
-            if not isinstance(raw, dict):
-                raw = {}
-                warnings.append(f"{span.id}: rubric for {key!r} is not an object; signals nulled")
             signals = {
-                s: _parse_signal(raw.get(s), f"{span.id}: {key}.{s}", warnings, s)
+                s: {"value": entry[s]["value"], "note": str(entry[s].get("note") or "")}
                 for s in _SIGNALS
             }
         # positive_effect pairs with acted-on influence
@@ -829,78 +1042,289 @@ def parse_verdict(text: str, span: InjectionSpan, warnings: list[str]) -> dict:
             pe["value"] = None
         verdict["rubric"][key] = signals
         usage = _derive_usage(signals)
-        entry = {"usage": usage, "evidence": _usage_evidence(signals)}
+        usage_entry = {"usage": usage, "evidence": _usage_evidence(signals)}
         if usage == "ignored":
-            entry["reason"] = _footprint_reason(signals)
-        verdict["memory_usage"][key] = entry
-    if span_keys and covered == 0:
-        verdict["error"] = "judge rubric covers none of the span's memories"
-        verdict["judge_raw"] = (text or "")[:2000]
-        warnings.append(f"{span.id}: {verdict['error']}")
-        return verdict
-    if not span_keys:
+            usage_entry["reason"] = _footprint_reason(signals)
+        verdict["memory_usage"][key] = usage_entry
+    if any(span_keys) and covered == 0:
+        return _error_verdict(
+            "judge rubric covers none of the span's memories", text, span, warnings)
+    if not any(span_keys):
         warnings.append(f"{span.id}: span delivers no parseable memories; rubric empty")
 
     verdict["verdict"] = derive_verdict(verdict["memory_usage"])
-    verdict["confidence"] = _coerce_confidence(obj.get("confidence"), span.id, warnings)
+    verdict["confidence"] = _clamp_confidence(obj["confidence"], span.id, warnings)
     verdict["analysis"] = str(obj.get("analysis") or "")
-    verdict["rationale"] = verdict["analysis"]  # v1 field name, kept for consumers
-    for entry in obj.get("evidence") or []:
-        if not isinstance(entry, dict):
-            warnings.append(f"{span.id}: dropped malformed evidence entry {entry!r}")
+    evidence = obj.get("evidence")
+    if not isinstance(evidence, list):
+        # display-only field: out-of-contract but not retried — one note,
+        # never a crash (a scalar is not iterable) or a per-key/char warning
+        if evidence is not None:
+            warnings.append(f"{span.id}: dropped non-array evidence")
+        evidence = []
+    for ev in evidence:
+        if not isinstance(ev, dict):
+            warnings.append(f"{span.id}: dropped malformed evidence entry {ev!r}")
             continue
-        claim = str(entry.get("claim") or "")
+        claim = str(ev.get("claim") or "")
         if not claim:
             warnings.append(f"{span.id}: dropped evidence entry without a claim")
             continue
         verdict["evidence"].append(
-            {"claim": claim, "steps": _ints(entry.get("steps")), "seqs": _ints(entry.get("seqs"))}
+            {"claim": claim,
+             "steps": _int_list(ev.get("steps"), span.id, "steps", warnings),
+             "seqs": _int_list(ev.get("seqs"), span.id, "seqs", warnings)}
         )
-    verdict["crossed_rewrite"] = str(obj.get("crossed_rewrite") or "")
     return verdict
 
 
+def _corrective_note(error: str) -> str:
+    """What a retry at the final (or pinned) tier adds to the request: the
+    contract violation, so the retry differs from the failed attempt even
+    at temperature 0."""
+    return (
+        f"That answer is not valid per the output contract: judge output {error}. "
+        "Answer again with ONE JSON object and nothing else, exactly in the "
+        "declared shape — one memories array entry per delivered memory key, "
+        "every signal as a value/note object whose value comes from its "
+        "declared boolean or enum, and a numeric confidence."
+    )
+
+
+def _retry_after(e: HTTPError) -> float | None:
+    """Server-declared retry delay (Retry-After delta-seconds or HTTP-date,
+    the two RFC 7231 forms), capped so a stray header cannot stall a run;
+    None when the header is absent or unparseable."""
+    raw = (e.headers or {}).get("Retry-After")
+    try:
+        delay = float(raw)
+    except (TypeError, ValueError):
+        try:
+            date = parsedate_to_datetime(raw)
+        except (TypeError, ValueError):
+            return None
+        if date.tzinfo is None:
+            return None  # a date without a zone is not an RFC 7231 HTTP-date
+        delay = date.timestamp() - time.time()
+    return min(max(delay, 0.0), 120.0) if math.isfinite(delay) else None
+
+
 def judge_span(
-    span: InjectionSpan, steps: list[AgentStep], cfg: JudgeConfig, warnings: list[str]
+    span: InjectionSpan,
+    steps: list[AgentStep],
+    cfg: JudgeConfig,
+    warnings: list[str],
+    task: str | None = None,
 ) -> dict:
-    """One judge call for one span. JudgeError propagates to the caller."""
+    """Judge one span through the conformance tier chain.
+
+    Auto mode walks structured → json → prompt (anthropic: structured →
+    prompt). A 400/422 rejects the REQUEST as a format-tier refusal (free —
+    no generation was produced), so the tier degrades without consuming the
+    attempt budget — unless the identical NON-EMPTY rejection repeats at the
+    weaker tier: unchanged after the format field changed, it is
+    tier-independent (a config fault like an over-limit max_tokens, or the
+    span's own content), never a format refusal, and fails the span on the
+    endpoint's message. An empty rejection body is silence, not an unchanged
+    rejection — it never triggers the fail-fast (a gateway dropping per-tier
+    error text still gets the full walk). Any other non-429 4xx (auth, unknown
+    URL, payload too large) is an endpoint/config fault, not a format problem,
+    and fails the span immediately. Out-of-contract OUTPUT that proves the endpoint
+    ignored the format field — any violation _strict_parse checks at the
+    structured tier (an out-of-range confidence is not among them: the
+    schema's 0–1 bound is a semantic correction clamped in code, not a
+    parsed violation), invalid JSON at the json tier (JSON mode guarantees
+    valid JSON, never schema conformance) — is the same endpoint property
+    discovered from the output side, so the tier degrades free too; a
+    valid-but-wrong-shape answer at the json tier is a model error and
+    takes the corrective retry instead.
+    The learned-tier memo records only a tier that produced a conforming
+    answer, so later spans start at a tier proven to work. At the final
+    tier (or with OUTPUT_FORMAT pinned) a retry must change the request —
+    the invalid answer plus a corrective note is appended. Transport
+    failures, empty-content draws, and budget-consuming out-of-contract
+    answers consume max_attempts; discovering the working tier (a
+    request-level format rejection or an ignored format field) is free.
+    Budget exhausted after invalid output → error verdict with judge_raw,
+    its error naming that answer's own contract violation (a later transport
+    failure never misattributes the cause); pure transport exhaustion raises
+    JudgeError for the caller to record.
+    """
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": render_user(span, steps)},
+        {"role": "user", "content": render_user(span, steps, task)},
     ]
-    notes: list[str] = []
-    text = chat_completion(cfg, messages, notes)
-    for note in notes:
-        warnings.append(f"{span.id}: {note}")
-    return parse_verdict(text, span, warnings)
+    tier = cfg.output_format or cfg.learned_tier
+    tries = 0
+    last_text = ""  # latest out-of-contract answer; transport failures never erase it
+    last_text_error = ""  # that answer's own contract violation (assigned with last_text)
+    rejection: str | None = None  # detail of the 400/422 the last degrade answered
+    while True:
+        req = _build_request(cfg, messages, tier)
+        pause: float | None = None
+        try:
+            with urlopen(req, timeout=cfg.timeout) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except HTTPError as e:
+            detail = ""
+            try:
+                detail = e.read().decode("utf-8", "replace")[:300]
+            except Exception:
+                pass
+            if e.code == 429 or e.code >= 500:
+                last_error = f"HTTP {e.code}: {detail}"
+                pause = _retry_after(e)
+            elif e.code in (400, 422):
+                # request-level rejection: the endpoint refuses this tier's
+                # format field — degrade for free, no attempt consumed
+                if cfg.output_format is not None:
+                    # A pinned tier cannot degrade. The rejection is not
+                    # necessarily the format field, though: the prompt tier
+                    # sends none at all, and on the format tiers the first
+                    # 400/422 may be an unrelated config fault (unknown model,
+                    # over-limit max_tokens) — name the pin, not the cause.
+                    raise SystemExit(
+                        f"error: the judge endpoint rejected the request with "
+                        f"OUTPUT_FORMAT={cfg.output_format!r} pinned "
+                        f"(HTTP {e.code}: {detail}) — fix the .env"
+                    ) from e
+                nxt = _next_tier(cfg.api, tier)
+                if nxt is None:
+                    raise JudgeError(f"HTTP {e.code}: {detail}") from e
+                if rejection is not None and detail and detail == rejection:
+                    # A non-empty rejection repeating after the format field
+                    # changed is tier-independent — a config fault (an
+                    # over-limit max_tokens, an unsupported thinking field) or
+                    # the span's own content — not a format refusal a degrade
+                    # could fix: fail the span on the endpoint's message
+                    # instead of walking the rest of the chain on every span.
+                    # An EMPTY body is silence, not an unchanged rejection:
+                    # a gateway that drops per-tier error text still gets the
+                    # full walk (a tier-independent fault then fails at chain
+                    # end with the same HTTP code).
+                    raise JudgeError(
+                        f"HTTP {e.code} unchanged across conformance tiers "
+                        f"(tier-independent, not a format refusal): {detail}"
+                    ) from e
+                warnings.append(
+                    f"{span.id}: tier {tier} rejected (HTTP {e.code}); degrading to {nxt}")
+                rejection = detail
+                tier = nxt
+                continue
+            else:
+                # 401/403/404/413 & co. are config faults, not format-tier
+                # rejections — fail fast instead of walking the chain
+                raise JudgeError(f"HTTP {e.code}: {detail}") from e
+        except (OSError, http.client.HTTPException) as e:
+            # URLError/TimeoutError are OSError subclasses; HTTPException
+            # (IncompleteRead, BadStatusLine, ...) is not — a truncated or
+            # garbled 200 body is the same transport class as a refused
+            # connection and must never escape to abort the run
+            last_error = f"{type(e).__name__}: {e}"
+        except (ValueError, RecursionError) as e:
+            # invalid UTF-8, unparseable JSON, an int past the digit limit,
+            # pathological nesting — the body never became a payload
+            # (ValueError covers both UnicodeDecodeError and JSONDecodeError)
+            last_error = f"unparseable response body: {e}"
+        else:
+            text = _extract_text(cfg, payload)
+            rescued = False  # answer recovered from reasoning_content
+            if text is None and cfg.api == "openai-chat":
+                text = _reasoning_fallback_text(payload)
+                if text is not None:
+                    rescued = True
+                    warnings.append(
+                        f"{span.id}: judge answer read from reasoning_content "
+                        "(content was empty)"
+                    )
+            if text is not None:
+                obj, error = _strict_parse(text)
+                if obj is not None:
+                    # the tier produced a conforming answer — only now is it
+                    # proven to work, so only now is the run memo updated (a
+                    # degrade alone proves nothing about the weaker tier). A
+                    # rescued reasoning_content draft never passed through the
+                    # format channel, so its conformance proves nothing either
+                    # — the same rule the degrade path below applies.
+                    if not rescued:
+                        cfg.learned_tier = tier
+                    return _assemble_verdict(obj, text, span, warnings)
+                last_error = f"judge output {error}"
+                nxt = None if cfg.output_format else _next_tier(cfg.api, tier)
+                # Free tier discovery from the output side — the endpoint
+                # provably ignored this tier's format field. At the structured
+                # tier any contract violation proves it (strict json_schema
+                # guarantees the whole contract). At the json tier only
+                # invalid JSON proves it: JSON mode guarantees valid JSON,
+                # never schema conformance, so a valid-but-wrong-shape answer
+                # is a model error, not an endpoint property — degrading
+                # would only weaken enforcement for no reason. A rescued
+                # reasoning_content draft never passed through the format
+                # channel at all, so its violation proves nothing either.
+                if (
+                    nxt is not None
+                    and not rescued
+                    and (tier == "structured" or error == "is not valid JSON")
+                ):
+                    warnings.append(
+                        f"{span.id}: tier {tier} output out of contract ({error}); a proxy "
+                        f"likely ignored the format field — degrading to {nxt}"
+                    )
+                    tier = nxt
+                    continue
+                # pinned/final tier, or a violation that is the model's own:
+                # the retry must change the request — the invalid answer plus
+                # a corrective note is appended. Only these budget-consuming
+                # violations seed the error record: a free tier discovery is
+                # not this span's failure, and attributing it later would
+                # misreport a working tier's transport exhaustion.
+                last_text = text
+                last_text_error = last_error
+                messages = messages + [
+                    {"role": "assistant", "content": text},
+                    {"role": "user", "content": _corrective_note(error)},
+                ]
+                # an out-of-contract generation consumed the budget; the
+                # corrective retry needs no backoff
+                tries += 1
+                if tries >= cfg.max_attempts:
+                    break
+                continue
+            # Reasoning models sporadically burn the whole budget on
+            # reasoning and return empty content — a server-side quirk,
+            # worth a fresh draw of the identical request at the same tier.
+            last_error = f"response carries no message content: {str(payload)[:300]}"
+        # shared backoff tail: transport failures and empty-content draws
+        tries += 1
+        if tries >= cfg.max_attempts:
+            break
+        time.sleep(pause if pause is not None else (1 if tries == 1 else 4))
+    if last_text:
+        return _error_verdict(last_text_error, last_text, span, warnings)
+    raise JudgeError(last_error)
 
 
 def auto_verdict_no_subsequent_turn(span: InjectionSpan) -> dict:
-    """Rule-judged neutral: the injection was never followed by an agent
-    turn, so no downstream footprint can exist (TARGET.md evidence rules)."""
-    rationale = (
-        "injection was never followed by an agent turn (trajectory ends "
-        "here); no downstream footprint can exist"
+    """Rule-judged neutral: no agent turn ever classified in the run, so no
+    downstream footprint can exist. No judge ran, so there is
+    no confidence and the rubric is a null placeholder — the aggregates
+    exclude both from the judged stats."""
+    verdict = blank_verdict()
+    verdict["verdict"] = "neutral"
+    verdict["analysis"] = (
+        "no agent turn classified in the run; no downstream footprint can exist"
     )
-    return {
-        "verdict": "neutral",
-        "confidence": 1.0,
-        "rationale": rationale,
-        "analysis": rationale,
-        "rubric": {
-            (m.get("key") or ""): {
-                s: {"value": None, "note": "no subsequent turn"} for s in _SIGNALS
-            }
-            for m in span.memories
-            if m.get("key")
-        },
-        "memory_usage": {
-            (m.get("key") or ""): {"usage": "unclear", "evidence": "no subsequent turn"}
-            for m in span.memories
-            if m.get("key")
-        },
-        "evidence": [],
-        "crossed_rewrite": "",
-        "auto": "no_subsequent_turn",
-        "error": None,
+    verdict["rubric"] = {
+        m["key"]: {
+            s: {"value": None, "note": "no subsequent turn"} for s in _SIGNALS
+        }
+        for m in span.memories
+        if m.get("key")
     }
+    verdict["memory_usage"] = {
+        m["key"]: {"usage": "unclear", "evidence": "no subsequent turn"}
+        for m in span.memories
+        if m.get("key")
+    }
+    verdict["auto"] = "no_subsequent_turn"
+    return verdict

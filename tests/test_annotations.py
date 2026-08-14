@@ -14,14 +14,14 @@ from eval.injudge.steps import build_step_stream
 from eval.memgraph.annotations import build_annotation_index, ref_to_memory
 from eval.memgraph.graph import load_and_build
 from eval.tests.annotated_fixtures import (
+    MAIN,
     MEM,
     SID,
+    TASK,
     AnnotatedBuilder,
     cure_ref,
     parse,
 )
-
-MAIN = "MAIN"
 
 
 # ---------------------------------------------------------------- parsing
@@ -46,10 +46,10 @@ def test_annotated_run_parses_from_annotations_alone(tmp_path):
     traj, ops, warnings = parse(b, tmp_path)
 
     assert warnings == []
-    assert (traj.main_lane, traj.memory_lane, traj.memory_lanes) == (MAIN, MEM, {MEM})
+    assert (traj.memory_lane, traj.memory_lanes) == (MEM, {MEM})
     assert traj.adapter == "cure@0.1.0"
     assert traj.instance_id == "pydata__xarray-2905"
-    assert traj.sessions == [SID]
+    assert traj.task == TASK  # the session's exact task, for the judge input
     assert traj.n_steps == 13
     assert traj.n_searches == 1
 
@@ -77,6 +77,122 @@ def test_annotated_run_parses_from_annotations_alone(tmp_path):
     assert [m["key"] for m in recall.memories] == ["k1"]
 
 
+def test_rejection_counts_drop_non_int_counts(tmp_path):
+    """A corrupt rejection count (bool/float/str) is not a count: dropped
+    from the rollup rather than carried into the artifact."""
+    b = AnnotatedBuilder().agent_turn(with_task=True)
+    b.memory_turn()
+    b.generate(rejections={"transient_task_state": 2, "corrupt_bool": True,
+                           "corrupt_float": 1.5, "zero": 0},
+               extraction_step="1")
+    _, ops, _ = parse(b, tmp_path)
+    extract = next(o for o in ops if o.kind == "extract")
+    assert extract.rejection_counts == {"transient_task_state": 2}
+
+
+def test_search_matched_count_wins_over_len_returned(tmp_path):
+    """The protocol's matched_count is the declared match total; `returned`
+    is the top-k subset handed back, so len(returned) understates a
+    truncated search. Without the field, len(returned) is the fallback."""
+    b = AnnotatedBuilder().agent_turn(with_task=True)
+    returned = [cure_ref("k1", "v1")]
+    sid = b.search(returned=returned, matched_count={"value": 7,
+                                                     "precision": "lower_bound"})
+    b.agent_turn()
+    b.delivery(sid, memories=returned, bind=b.last_call)
+    _, ops, _ = parse(b, tmp_path)
+    recall = next(o for o in ops if o.kind == "recall")
+    assert recall.matched == 7
+
+
+def test_search_matched_count_absent_falls_back_to_returned(tmp_path):
+    b = AnnotatedBuilder().agent_turn(with_task=True)
+    returned = [cure_ref("k1", "v1"), cure_ref("k2", "v2")]
+    sid = b.search(returned=returned)
+    b.agent_turn()
+    b.delivery(sid, memories=returned, bind=b.last_call)
+    _, ops, _ = parse(b, tmp_path)
+    recall = next(o for o in ops if o.kind == "recall")
+    assert recall.matched == 2
+
+
+def test_task_trajectory_message_locator_resolves_from_events(tmp_path):
+    """A locator-recorded task is carried too (schema v6 allows any
+    ContentRef): a trajectory_message locator resolves against the same
+    event stream through the role bindings — the judge keeps its ground
+    truth. msg_index 1 is the main lane's first user message."""
+    locator_task = {
+        "availability": "trajectory_message",
+        "sha256": "0" * 64,
+        "locator": {"logical_role": "main", "msg_index": 1},
+    }
+    b = AnnotatedBuilder(task_ref=locator_task)
+    b.agent_turn(with_task=True)
+    traj, _, warnings = parse(b, tmp_path)
+    assert traj.task == TASK  # resolved from the main lane's user message
+    assert not any("not resolvable" in w for w in warnings)
+
+
+def test_search_query_locator_resolves_like_the_task(tmp_path):
+    """The recall op's linked-search query resolves by the same rule as the
+    session task: a trajectory_message locator resolves against the event
+    stream through the role bindings — never silently None."""
+    b = AnnotatedBuilder()
+    b.agent_turn(with_task=True)
+    locator_query = {
+        "availability": "trajectory_message",
+        "sha256": "0" * 64,
+        "locator": {"logical_role": "main", "msg_index": 1},
+    }
+    b.annotation(
+        "memory_search_start",
+        {"trace_session_id": SID, "operation_id": "op-q",
+         "requested_by": "main", "handled_by": "memory",
+         "query": locator_query},
+        lane=b.mem,
+    )
+    # emit the search end by hand (the builder's search() helper only builds
+    # inline-text queries)
+    b.annotation(
+        "memory_search_end",
+        {"trace_session_id": SID, "operation_id": "op-q", "status": "completed",
+         "returned": [], "error_codes": []},
+        lane=b.mem,
+    )
+    b.agent_turn()
+    b.delivery("op-q", memories=[cure_ref("k1", "v")], bind=b.last_call)
+    traj, ops, _ = parse(b, tmp_path)
+    (recall,) = [o for o in ops if o.kind == "recall"]
+    assert recall.query == TASK
+
+
+def test_task_locator_to_unresolvable_content_warns(tmp_path):
+    """Locator kinds pointing outside trajectory.jsonl (call bodies, sidecar
+    artifacts) resolve to None — with a note, never a silent drop."""
+    call_task = {
+        "availability": "call_request",
+        "sha256": "0" * 64,
+        "locator": {"operation_id": "00000000-0000-4000-8000-000000000001",
+                    "call_selection": "terminal",
+                    "json_pointer": ""},
+    }
+    b = AnnotatedBuilder(task_ref=call_task)
+    b.agent_turn()
+    traj, _, warnings = parse(b, tmp_path)
+    assert traj.task is None
+    assert any("not resolvable from trajectory.jsonl" in w for w in warnings)
+
+
+def test_task_redacted_stays_none_without_a_warning(tmp_path):
+    """Redacted/unavailable task content is a privacy posture, not a loss —
+    None by design, no note."""
+    b = AnnotatedBuilder(task_ref={"availability": "redacted", "reason": "policy"})
+    b.agent_turn()
+    traj, _, warnings = parse(b, tmp_path)
+    assert traj.task is None
+    assert not any("task" in w for w in warnings)
+
+
 def test_annotated_extract_turn_classification_matches_step_stream(tmp_path):
     b = AnnotatedBuilder()
     for _ in range(10):
@@ -94,19 +210,21 @@ def test_annotated_extract_turn_classification_matches_step_stream(tmp_path):
 
 
 def test_delivery_step_fallbacks(tmp_path):
-    """No binding → declared main_step; neither → next agent turn; tail → None."""
+    """No binding → declared main_step; neither → the most recently classified
+    agent turn (the bridge commits a delivery after the carrying call's
+    response recorded, so the consuming turn has already classified)."""
     b = AnnotatedBuilder()
     b.agent_turn(with_task=True)
     sid1 = b.search(returned=[cure_ref("k1")])
     b.agent_turn()
     b.delivery(sid1, memories=[cure_ref("k1")], main_step=2)  # declared only
     sid2 = b.search(returned=[cure_ref("k1")])
-    b.delivery(sid2, memories=[cure_ref("k1")])  # neither → next turn
+    b.delivery(sid2, memories=[cure_ref("k1")])  # neither → its consuming turn (2)
     b.agent_turn()
     sid3 = b.search(returned=[cure_ref("k1")])
-    b.delivery(sid3, memories=[cure_ref("k1")])  # truncated tail → None
+    b.delivery(sid3, memories=[cure_ref("k1")])  # after the last turn → step 3
     _, ops, warnings = parse(b, tmp_path)
-    assert [o.step for o in ops if o.kind == "recall"] == [2, 3, None]
+    assert [o.step for o in ops if o.kind == "recall"] == [2, 2, 3]
     assert warnings == []
 
 
@@ -121,6 +239,117 @@ def test_delivery_declared_step_disagreement_warns_and_bound_wins(tmp_path):
     (recall,) = [o for o in ops if o.kind == "recall"]
     assert recall.step == 2
     assert any("disagrees with the bound call" in w for w in warnings)
+
+
+def test_delivery_declared_step_out_of_bounds_falls_back(tmp_path):
+    """A declared main_step beyond the observed agent turns is recorder
+    corruption: warn and use the observed-turn rule, never render off-axis."""
+    b = AnnotatedBuilder()
+    b.agent_turn(with_task=True)
+    sid = b.search(returned=[cure_ref("k1")])
+    b.delivery(sid, memories=[cure_ref("k1")], main_step=999)  # no such step
+    b.agent_turn()
+    _, ops, warnings = parse(b, tmp_path)
+    (recall,) = [o for o in ops if o.kind == "recall"]
+    assert recall.step == 1  # the most recently classified turn before the commit
+    assert any("outside the observed agent steps" in w for w in warnings)
+
+
+def test_delivery_bound_to_a_memory_lane_call_warns(tmp_path):
+    """A delivery whose terminal_call_ref resolves to a MEMORY-lane turn has
+    no agent step to attribute through: the binding is unusable — warn, then
+    fall back to the declared step, never silently."""
+    b = AnnotatedBuilder()
+    b.agent_turn(with_task=True)
+    b.memory_turn()
+    mem_call = b.last_call  # the memory lane's call
+    sid = b.search(returned=[cure_ref("k1")])
+    b.delivery(sid, memories=[cure_ref("k1")], bind=mem_call, main_step=1)
+    _, ops, warnings = parse(b, tmp_path)
+    (recall,) = [o for o in ops if o.kind == "recall"]
+    assert recall.step == 1  # the declared step, via the fallback
+    assert any("not a classified agent turn" in w for w in warnings)
+
+
+def test_declared_extraction_step_unparseable_warns(tmp_path):
+    """An adapter-declared extraction step that is neither a step number nor
+    "final" cannot be cross-checked against the computed step — warn instead
+    of skipping the check silently."""
+    b = AnnotatedBuilder()
+    b.agent_turn(with_task=True)
+    b.memory_turn()
+    b.generate(produced=[cure_ref("k1")], extraction_step="-3")
+    _, ops, warnings = parse(b, tmp_path)
+    (extract,) = [o for o in ops if o.kind == "extract"]
+    assert extract.step == 1  # computed from the stream regardless
+    assert any("no cross-check possible" in w for w in warnings)
+
+
+def test_declared_extraction_step_unicode_digit_never_crashes(tmp_path):
+    """str.isdigit admits non-decimal Unicode digits ("²".isdigit() is True)
+    that int() rejects: a corrupt declared step must degrade to the
+    no-cross-check warning, never abort the parse."""
+    b = AnnotatedBuilder()
+    b.agent_turn(with_task=True)
+    b.memory_turn()
+    b.generate(produced=[cure_ref("k1")], extraction_step="²")
+    _, ops, warnings = parse(b, tmp_path)
+    (extract,) = [o for o in ops if o.kind == "extract"]
+    assert extract.step == 1  # computed from the stream regardless
+    assert any("no cross-check possible" in w for w in warnings)
+
+
+def test_extraction_step_protocol_main_step_fallback(tmp_path):
+    """A non-CURE adapter declares the extraction step with the protocol's
+    own integer main_step (no extensions.cure): the declared step is read
+    and the cross-check still runs."""
+    b = AnnotatedBuilder()
+    b.agent_turn(with_task=True)
+    b.memory_turn()
+    header = {
+        "trace_session_id": SID,
+        "operation_id": "op-proto",
+        "requested_by": "main",
+        "handled_by": "memory",
+        "main_step": 2,
+    }
+    b.annotation("memory_generate_start", {**header, "trigger": "step", "inputs": []},
+                 lane=b.mem)
+    b.annotation("memory_generate_end",
+                 {**header, "status": "completed", "produced": [], "change_count": 0},
+                 lane=b.mem)
+    _, ops, warnings = parse(b, tmp_path)
+    (extract,) = [o for o in ops if o.kind == "extract"]
+    assert extract.step == 1 and extract.declared_step == "2"
+    assert any("disagrees with the computed agent step" in w for w in warnings)
+
+
+def test_declared_extraction_step_reads_the_end_event_first(tmp_path):
+    """Start and end may carry divergent main_step values (an extraction
+    spanning a turn boundary): the declared value must come from the END
+    event first — the computed step it is cross-checked against anchors
+    there (_op_anchor) — else the check warns over nothing."""
+    b = AnnotatedBuilder()
+    b.agent_turn(with_task=True)
+    b.agent_turn()
+    b.memory_turn()
+    header = {
+        "trace_session_id": SID,
+        "operation_id": "op-divergent",
+        "requested_by": "main",
+        "handled_by": "memory",
+    }
+    b.annotation("memory_generate_start",
+                 {**header, "trigger": "step", "inputs": [], "main_step": 1},
+                 lane=b.mem)
+    b.annotation("memory_generate_end",
+                 {**header, "status": "completed", "produced": [], "change_count": 0,
+                  "main_step": 2},
+                 lane=b.mem)
+    _, ops, warnings = parse(b, tmp_path)
+    (extract,) = [o for o in ops if o.kind == "extract"]
+    assert extract.step == 2 and extract.declared_step == "2"  # end-anchored, agrees
+    assert not any("disagrees" in w for w in warnings)
 
 
 def test_failed_delivery_is_not_an_op(tmp_path):
@@ -150,6 +379,34 @@ def test_generation_missing_end_flagged(tmp_path):
     assert any("missing end event" in w for w in warnings)
 
 
+def test_generation_missing_end_keeps_recorded_deletions(tmp_path):
+    """A missing memory_generate_end is already flagged — it must not also
+    discard the operation's recorded delete changes: recorded data survives
+    a structural violation, it is never silently dropped."""
+    b = AnnotatedBuilder()
+    b.agent_turn(with_task=True)
+    ref = cure_ref("k1", "doomed value")
+    b.annotation(
+        "memory_generate_start",
+        {"trace_session_id": SID, "operation_id": "op-open", "trigger": "step",
+         "inputs": [], "requested_by": "main", "handled_by": "memory"},
+        lane=b.mem,
+    )
+    b.annotation(
+        "memory_change",
+        {"trace_session_id": SID, "operation_id": "op-open", "change_id": "c0",
+         "action": "delete", "before": [ref], "after": [], "relationships": [],
+         "change_index": 0, "change_count": 1},
+        lane=b.mem,
+    )
+    _, ops, warnings = parse(b, tmp_path)
+    (extract,) = [o for o in ops if o.kind == "extract"]
+    assert extract.flagged == "missing memory_generate_end event"
+    assert len(extract.deletions) == 1
+    assert extract.deletions[0]["ref"]["key"] == "k1"
+    assert any("missing end event" in w for w in warnings)
+
+
 def test_delete_change_of_unobserved_memory_links_exact(tmp_path):
     """The before-ref makes the deleted memory known — no fuzzy target matching."""
     b = AnnotatedBuilder()
@@ -165,6 +422,33 @@ def test_delete_change_of_unobserved_memory_links_exact(tmp_path):
     (edge,) = [e for e in graph["edges"] if e["kind"] == "deletes"]
     assert edge["uncertain"] is False
     assert not any("matched no known memory" in v["msg"] for v in graph["validation"])
+
+
+def test_removal_change_actions_and_unmodeled_ones(tmp_path):
+    """delete/archive/expire all remove the before-refs from the active
+    store, so all three graph as deletions; the state effects the graph does
+    not model (merge/split/restore/unknown) are noted, never silently
+    dropped."""
+    b = AnnotatedBuilder()
+    b.agent_turn(with_task=True)
+    b.memory_turn()
+    archived = cure_ref("k_arch", "archived value", store_id=7)
+    expired = cure_ref("k_expr", "expired value", store_id=8)
+    b.generate(extraction_step="1", changes=[
+        ("archive", [archived], []),
+        ("expire", [expired], []),
+        ("restore", [], [archived]),
+        ("merge", [archived, expired], []),
+    ])
+    b.write(tmp_path / "t1")
+    graph = load_and_build([tmp_path])
+    (extract,) = [o for o in graph["ops"] if o["kind"] == "extract"]
+    assert [d["target"] for d in extract["deletions"]] == ["k_arch", "k_expr"]
+    assert {m["key"] for m in graph["memories"] if m["deleted_by"]} == {"k_arch", "k_expr"}
+    assert any(
+        "unmodeled change action(s) merge, restore" in v["msg"]
+        for v in graph["validation"]
+    )
 
 
 def test_update_change_supersedes_via_produced_key(tmp_path):
@@ -215,7 +499,7 @@ def test_non_cure_adapter_generic_ref_mapping(tmp_path):
     sid = b.search(returned=[ref])
     b.delivery(sid, memories=[ref], bind=call)
     traj, ops, _ = parse(b, tmp_path)
-    assert (traj.main_lane, traj.memory_lane) == ("solver-x", "aux-y")
+    assert traj.memory_lane == "aux-y"
     assert traj.adapter == "opaquevec@0.3.1"
     (recall,) = [o for o in ops if o.kind == "recall"]
     assert recall.step == 2 and [m["key"] for m in recall.memories] == ["item_0004"]
@@ -253,6 +537,54 @@ def test_missing_role_binding_falls_back_to_operation_lanes(tmp_path):
     assert any("without a memory role binding" in w for w in warnings)
 
 
+def test_shared_unprefixed_lane_counts_all_turns_as_agent_steps(tmp_path):
+    """Bindings missing AND the operation events on the unprefixed lane: None
+    as a memory lane would swallow every (equally unprefixed) agent turn and
+    collapse the step count to zero. One shared lane cannot separate the
+    roles — count every turn as an agent step, with a warning."""
+    b = AnnotatedBuilder(main=None, mem=None)
+    b.events = [e for e in b.events if e.get("type") != "memory_role_bind"]
+    for i, e in enumerate(b.events, 1):
+        e["seq"] = i
+    for _ in range(3):
+        b.agent_turn(with_task=_ == 0)
+    b.memory_turn()  # unprefixed as well: indistinguishable from an agent turn
+    b.generate(extraction_step="4")
+    traj, ops, warnings = parse(b, tmp_path)
+    assert traj.n_steps == 4  # no collapse to zero
+    assert any("share the unprefixed lane" in w for w in warnings)
+    steps = build_step_stream(b.events, traj.memory_lanes, [])
+    assert len(steps) == traj.n_steps  # injudge/memgraph attribution parity
+
+
+def test_delivery_recent_turn_fallback_is_chronological_under_pipelining(tmp_path):
+    """Same-lane pipelining can record an older turn's classifying response
+    after a younger one's (deferred recording): the most-recent-turn fallback
+    picks the turn classified LAST before the delivery commit by classifying
+    seq (turn 2), never the lowest turn number (turn 1)."""
+    b = AnnotatedBuilder()
+    b.turn = 1
+    b._emit("turn_start", turn=1, call_id="000001-x", proxy_source=MAIN)
+    b.turn = 2
+    b._emit("turn_start", turn=2, call_id="000002-x", proxy_source=MAIN)
+    b._emit("message_end", proxy_source=MAIN, role="assistant", msg=2, turn=2,
+            content="the younger turn responds first")
+    b._emit("turn_end", turn=2, status="completed", proxy_source=MAIN)
+    b.turn = 3
+    b._emit("turn_start", turn=3, call_id="000003-x", proxy_source=MAIN)
+    sid = b.search(returned=[cure_ref("k1")])
+    b.delivery(sid, memories=[cure_ref("k1")])  # unbound, undeclared → the fallback
+    b._emit("message_end", proxy_source=MAIN, role="assistant", msg=2, turn=3,
+            content="turn 3 classifies next")
+    b._emit("turn_end", turn=3, status="completed", proxy_source=MAIN)
+    b._emit("message_end", proxy_source=MAIN, role="assistant", msg=2, turn=1,
+            content="turn 1's deferred response records last")
+    b._emit("turn_end", turn=1, status="completed", proxy_source=MAIN)
+    _, ops, warnings = parse(b, tmp_path)
+    (recall,) = [o for o in ops if o.kind == "recall"]
+    assert recall.step == 2  # turn 2 — classified last before the delivery
+
+
 def test_annotation_structural_problems_surface_as_warnings(tmp_path):
     b = AnnotatedBuilder()
     b.agent_turn(with_task=True)
@@ -262,6 +594,19 @@ def test_annotation_structural_problems_surface_as_warnings(tmp_path):
     assert any("references unknown search operation" in w for w in warnings)
     (recall,) = [o for o in ops if o.kind == "recall"]
     assert recall.matched is None and recall.query is None
+
+
+def test_delivery_missing_search_link_is_not_reported_as_unknown(tmp_path):
+    """Schema v6 requires the delivery→search link, so an absent one is a
+    problem — but missing is not unknown: the warning must say which."""
+    b = AnnotatedBuilder()
+    b.agent_turn(with_task=True)
+    b.delivery(None, memories=[cure_ref("k1")], main_step=1)
+    _, ops, warnings = parse(b, tmp_path)
+    assert any("missing its search operation link" in w for w in warnings)
+    assert not any("unknown search operation" in w for w in warnings)
+    (recall,) = [o for o in ops if o.kind == "recall"]
+    assert recall.search_operation_id is None
 
 
 def _reader_events(*payloads):
@@ -311,6 +656,26 @@ def test_annotation_reader_never_raises_on_unhashable_ids():
     assert any("non-string logical_role" in p for p in idx.problems)
 
 
+def test_annotation_reader_never_raises_on_a_corrupt_lane():
+    """A corrupt (non-string) proxy_source on a role bind or operation event
+    names no lane: the bind is skipped with a problem and the operation lane
+    falls back to None — an unhashable source must never crash the lane sets
+    built from either."""
+    from eval.memgraph.annotations import AnnotatedOperation
+
+    idx = build_annotation_index(
+        [{"seq": 1, "type": "memory_session", "payload": {"trace_session_id": "S"}},
+         {"seq": 2, "type": "memory_role_bind", "proxy_source": ["MAIN"],
+          "payload": {"trace_session_id": "S", "logical_role": "main"}}]
+    )
+    assert idx.binds.get("S", {}) == {}  # the corrupt bind did not land
+    assert any("non-string proxy_source" in p for p in idx.problems)
+
+    op = AnnotatedOperation(operation_id="o", kind="generation")
+    op.start = {"seq": 1, "type": "memory_generate_start", "proxy_source": ["MEM"]}
+    assert op.lane is None  # a corrupt lane names nothing
+
+
 def test_duplicate_operation_start_is_a_problem_not_the_end():
     evs = [
         {"seq": 1, "type": "memory_session", "payload": {"trace_session_id": "S"}},
@@ -335,6 +700,389 @@ def test_duplicate_operation_start_is_a_problem_not_the_end():
     assert op.end["payload"]["produced"] == [{"version_id": "v1"}]  # real end kept
     assert sum("starts twice" in p for p in idx.problems) == 2
     assert not any("ends twice" in p for p in idx.problems)
+
+
+def test_operation_lane_uses_the_first_recorded_proxy_source():
+    """The fallback lane comes from the first event that CARRIES a
+    proxy_source — an event without one must not mask a later event's lane
+    (nor may a genuinely unprefixed operation report a lane)."""
+    from eval.memgraph.annotations import AnnotatedOperation
+
+    op = AnnotatedOperation(operation_id="o", kind="generation")
+    op.start = {"seq": 1, "type": "memory_generate_start"}  # no proxy_source
+    op.end = {"seq": 2, "type": "memory_generate_end", "proxy_source": MEM}
+    assert op.lane == MEM
+    bare = AnnotatedOperation(operation_id="o2", kind="generation")
+    bare.start = {"seq": 1, "type": "memory_generate_start"}
+    assert bare.lane is None  # genuinely unprefixed
+
+
+def test_mismatched_operation_events_are_problems_not_silent_swaps():
+    """A search end cannot close a generation op, and a change cannot extend
+    a search op — kind mismatches are collected as problems, never applied."""
+    evs = [
+        {"seq": 1, "type": "memory_session", "payload": {"trace_session_id": "S"}},
+        {"seq": 2, "type": "memory_generate_start",
+         "payload": {"trace_session_id": "S", "operation_id": "op-g", "trigger": "step"}},
+        {"seq": 3, "type": "memory_search_end",  # wrong kind for a generation op
+         "payload": {"trace_session_id": "S", "operation_id": "op-g",
+                     "status": "completed", "returned": []}},
+        {"seq": 4, "type": "memory_search_start",
+         "payload": {"trace_session_id": "S", "operation_id": "op-s", "query": {}}},
+        {"seq": 5, "type": "memory_change",  # wrong kind for a search op
+         "payload": {"trace_session_id": "S", "operation_id": "op-s",
+                     "action": "create", "before": [], "after": []}},
+    ]
+    idx = build_annotation_index(evs)
+    assert idx.operations["op-g"].end is None  # not closed by the wrong event
+    assert idx.operations["op-s"].changes == []
+    assert any("cannot close" in p for p in idx.problems)
+    assert any("memory_change on search operation" in p for p in idx.problems)
+
+
+def test_memory_change_after_the_operation_end_is_dropped():
+    """A change outside the operation's extent is the same corruption class
+    as a change on a search op: a problem, never attributed to the closed op."""
+    idx = build_annotation_index([
+        {"seq": 1, "type": "memory_session", "payload": {"trace_session_id": "S"}},
+        {"seq": 2, "type": "memory_generate_start",
+         "payload": {"trace_session_id": "S", "operation_id": "op-1", "trigger": "step"}},
+        {"seq": 3, "type": "memory_generate_end",
+         "payload": {"trace_session_id": "S", "operation_id": "op-1",
+                     "status": "completed", "produced": []}},
+        {"seq": 4, "type": "memory_change",
+         "payload": {"trace_session_id": "S", "operation_id": "op-1",
+                     "action": "delete", "before": [{"version_id": "v1"}], "after": []}},
+    ])
+    assert idx.operations["op-1"].changes == []
+    assert any("after the operation end" in p for p in idx.problems)
+
+
+def test_duplicate_events_keep_the_first_record():
+    """Duplicate ends and role re-binds (write retries or corruption): the
+    first well-formed record wins — the same first-wins policy as duplicate
+    sessions, starts, and deliveries — always flagged as a problem."""
+    idx = build_annotation_index([
+        {"seq": 1, "type": "memory_session", "payload": {"trace_session_id": "S"}},
+        {"seq": 2, "type": "memory_generate_start",
+         "payload": {"trace_session_id": "S", "operation_id": "op-1", "trigger": "step"}},
+        {"seq": 3, "type": "memory_generate_end",
+         "payload": {"trace_session_id": "S", "operation_id": "op-1",
+                     "status": "completed", "produced": [{"version_id": "v1"}]}},
+        {"seq": 4, "type": "memory_generate_end",
+         "payload": {"trace_session_id": "S", "operation_id": "op-1",
+                     "status": "failed", "produced": []}},
+    ])
+    assert idx.operations["op-1"].end["seq"] == 3
+    assert any("ends twice" in p for p in idx.problems)
+    idx = build_annotation_index([
+        {"seq": 1, "type": "memory_session", "payload": {"trace_session_id": "S"}},
+        {"seq": 2, "type": "memory_role_bind", "proxy_source": "LANE_A",
+         "payload": {"trace_session_id": "S", "logical_role": "memory"}},
+        {"seq": 3, "type": "memory_role_bind", "proxy_source": "LANE_B",
+         "payload": {"trace_session_id": "S", "logical_role": "memory"}},
+    ])
+    assert idx.binds["S"]["memory"] == "LANE_A"
+    assert any("binds memory twice" in p for p in idx.problems)
+
+
+def test_duplicate_annotation_id_is_applied_once():
+    """The recorder's at-least-once commit can re-record an identical event
+    after a mid-write failure (same annotation_id): flag it and apply it
+    once — a duplicated delete change must not double the op's deletions."""
+    change = {
+        "type": "memory_change",
+        "annotation_id": "dup-1",
+        "payload": {"trace_session_id": "S", "operation_id": "op-1",
+                    "action": "delete", "before": [{"version_id": "v1"}], "after": []},
+    }
+    idx = build_annotation_index([
+        {"seq": 1, "type": "memory_session", "payload": {"trace_session_id": "S"}},
+        {"seq": 2, "type": "memory_generate_start",
+         "payload": {"trace_session_id": "S", "operation_id": "op-1", "trigger": "step"}},
+        {"seq": 3, **change},
+        {"seq": 4, **change},  # the at-least-once re-record, identical
+    ])
+    assert len(idx.operations["op-1"].changes) == 1
+    assert any("duplicate recorded annotation_id" in p for p in idx.problems)
+
+
+def test_dedup_claims_an_id_only_for_an_applied_event():
+    """Dedup must claim the annotation_id only when the event is applicable:
+    a first copy dropped for a corrupt payload (or missing session) applied
+    nothing, so an at-least-once re-record of the same id is not a
+    duplicate — it is the one copy that gets applied."""
+    event = {
+        "type": "memory_change",
+        "annotation_id": "recov-1",
+        "payload": {"trace_session_id": "S", "operation_id": "op-1",
+                    "action": "delete", "before": [{"version_id": "v1"}], "after": []},
+    }
+    torn = {"seq": 3, **event, "payload": "torn write"}
+    idx = build_annotation_index([
+        {"seq": 1, "type": "memory_session", "payload": {"trace_session_id": "S"}},
+        {"seq": 2, "type": "memory_generate_start",
+         "payload": {"trace_session_id": "S", "operation_id": "op-1", "trigger": "step"}},
+        torn,  # the first copy, lost mid-write
+        {"seq": 4, **event},  # the identical re-record
+    ])
+    assert len(idx.operations["op-1"].changes) == 1
+    assert any("non-object payload" in p for p in idx.problems)
+    assert not any("duplicate recorded annotation_id" in p for p in idx.problems)
+
+
+def test_lanes_use_the_first_binding_per_role_across_sessions():
+    """A multi-session index summarizes each display lane from the first
+    session that binds it (the turn classification merges all sessions'
+    memory lanes — the display must not contradict it)."""
+    idx = build_annotation_index([
+        {"seq": 1, "type": "memory_session", "payload": {"trace_session_id": "S1"}},
+        {"seq": 2, "type": "memory_role_bind", "proxy_source": "M1",
+         "payload": {"trace_session_id": "S1", "logical_role": "main"}},
+        {"seq": 3, "type": "memory_session", "payload": {"trace_session_id": "S2"}},
+        {"seq": 4, "type": "memory_role_bind", "proxy_source": "A2",
+         "payload": {"trace_session_id": "S2", "logical_role": "main"}},
+        {"seq": 5, "type": "memory_role_bind", "proxy_source": "M2",
+         "payload": {"trace_session_id": "S2", "logical_role": "memory"}},
+    ])
+    # S1 binds no memory lane; the display falls to S2's instead of None
+    assert idx.lanes() == ("M1", "M2")
+
+
+# ---------------------------------------------------------------- injudge integration
+
+
+def _structural_events():
+    """Session + both role binds, all proxy-stamped fields clean."""
+    return [
+        {"seq": 1, "type": "memory_session", "proxy_source": MAIN,
+         "binding_status": "not_requested", "payload": {"trace_session_id": "S"}},
+        {"seq": 2, "type": "memory_role_bind", "proxy_source": MAIN,
+         "binding_status": "not_requested",
+         "payload": {"trace_session_id": "S", "logical_role": "main"}},
+        {"seq": 3, "type": "memory_role_bind", "proxy_source": MEM,
+         "binding_status": "not_requested",
+         "payload": {"trace_session_id": "S", "logical_role": "memory"}},
+    ]
+
+
+def test_proxy_stamped_field_violations_are_problems():
+    """The proxy stamps every memory event's binding_status from a fixed
+    vocabulary and the terminal_call_ref as the last call ref (its retrieval
+    index checks both): off-vocabulary or inconsistent records are corruption
+    — reported, never consumed silently."""
+    idx = build_annotation_index([
+        *_structural_events(),
+        {"seq": 4, "type": "memory_delivery", "binding_status": "bogus",
+         "payload": {"trace_session_id": "S", "delivery_id": "d1"}},
+        {"seq": 5, "type": "memory_delivery", "binding_status": "bound",
+         "call_refs": [{"role_call_index": 1}, {"role_call_index": 2}],
+         "terminal_call_ref": {"role_call_index": 1},
+         "payload": {"trace_session_id": "S", "delivery_id": "d2"}},
+        {"seq": 6, "type": "memory_delivery", "binding_status": "bound",
+         "terminal_call_ref": {"role_call_index": 1},
+         "payload": {"trace_session_id": "S", "delivery_id": "d3"}},
+    ])
+    assert any("unknown binding_status 'bogus'" in p for p in idx.problems)
+    assert any("terminal_call_ref is not the last call ref" in p for p in idx.problems)
+    assert any("terminal_call_ref without call refs" in p for p in idx.problems)
+    # the clean structural events carry a vocabulary status: nothing spurious
+    assert not any(
+        "unknown binding_status" in p and "bogus" not in p for p in idx.problems
+    )
+
+
+def test_session_not_on_the_main_lane_is_a_problem():
+    """The session event must be recorded on the lane its main binding names
+    (the recorder's retrieval check): a mismatch is lane-record corruption."""
+    idx = build_annotation_index([
+        {"seq": 1, "type": "memory_session", "proxy_source": "AUX",
+         "binding_status": "not_requested", "payload": {"trace_session_id": "S"}},
+        *_structural_events()[1:],
+    ])
+    assert any("memory_session was not recorded on the main lane" in p
+               for p in idx.problems)
+
+
+def test_delivery_search_integrity_problems():
+    """The recall ops and span fingerprints trust the delivery↔search link:
+    a delivery recorded at/before its search's end, or delivering memories
+    the search never returned (or returned in another order), is corruption —
+    the same checks the recorder's retrieval index runs."""
+    def search_events(op, seq, returned):
+        return [
+            {"seq": seq - 1, "type": "memory_search_start", "proxy_source": MEM,
+             "binding_status": "not_requested",
+             "payload": {"trace_session_id": "S", "operation_id": op, "query": {}}},
+            {"seq": seq, "type": "memory_search_end", "proxy_source": MEM,
+             "binding_status": "no_call",
+             "payload": {"trace_session_id": "S", "operation_id": op,
+                         "status": "completed",
+                         "returned": [{"ordinal": i, "memory": m}
+                                      for i, m in enumerate(returned)]}},
+        ]
+
+    def delivery(seq, delivery_id, op, memories):
+        return {"seq": seq, "type": "memory_delivery", "proxy_source": MAIN,
+                "binding_status": "no_call",
+                "payload": {"trace_session_id": "S", "delivery_id": delivery_id,
+                            "search_operation_id": op, "status": "placed",
+                            "memories": memories}}
+
+    v1 = {"version_id": "v1", "namespace": "ns"}
+    v2 = {"version_id": "v2", "namespace": "ns"}
+    idx = build_annotation_index([
+        *_structural_events(),
+        *search_events("op-1", 5, [v1, v2]),
+        delivery(5, "d-early", "op-1", []),  # at its search's end seq
+        delivery(6, "d-alien", "op-1", [{"version_id": "v9", "namespace": "ns"}]),
+        delivery(7, "d-reordered", "op-1", [v2, v1]),  # right set, wrong order
+        delivery(8, "d-ok", "op-1", [v2]),  # an in-order subset
+    ])
+    assert any("d-early" in p and "recorded before its search end" in p
+               for p in idx.problems)
+    assert any("d-alien" in p and "not an ordered search subsequence" in p
+               for p in idx.problems)
+    assert any("d-reordered" in p and "not an ordered search subsequence" in p
+               for p in idx.problems)
+    assert not any("d-ok" in p for p in idx.problems)
+
+
+def _other_session_events():
+    """A second session S2 with its own role binds."""
+    return [
+        {"seq": 40, "type": "memory_session", "proxy_source": MAIN,
+         "binding_status": "not_requested", "payload": {"trace_session_id": "S2"}},
+        {"seq": 41, "type": "memory_role_bind", "proxy_source": MAIN,
+         "binding_status": "not_requested",
+         "payload": {"trace_session_id": "S2", "logical_role": "main"}},
+        {"seq": 42, "type": "memory_role_bind", "proxy_source": MEM,
+         "binding_status": "not_requested",
+         "payload": {"trace_session_id": "S2", "logical_role": "memory"}},
+    ]
+
+
+def test_delivery_linking_another_sessions_search_is_a_problem():
+    """The recorder's retrieval index refuses a delivery referencing a search
+    outside its session; the same corruption must be flagged here rather than
+    subsequence-checked against the other session's results."""
+    v1 = {"version_id": "v1", "namespace": "ns"}
+    idx = build_annotation_index([
+        *_structural_events(),
+        {"seq": 10, "type": "memory_search_start", "proxy_source": MEM,
+         "binding_status": "not_requested",
+         "payload": {"trace_session_id": "S", "operation_id": "op-s",
+                     "query": {}}},
+        {"seq": 11, "type": "memory_search_end", "proxy_source": MEM,
+         "binding_status": "no_call",
+         "payload": {"trace_session_id": "S", "operation_id": "op-s",
+                     "status": "completed",
+                     "returned": [{"ordinal": 0, "memory": v1}]}},
+        *_other_session_events(),
+        # S2's delivery links S's search — and would PASS the subsequence
+        # check against it, so only the session scope surfaces the corruption
+        {"seq": 50, "type": "memory_delivery", "proxy_source": MAIN,
+         "binding_status": "no_call",
+         "payload": {"trace_session_id": "S2", "delivery_id": "d-cross",
+                     "search_operation_id": "op-s", "status": "placed",
+                     "memories": [v1]}},
+    ])
+    assert any("d-cross" in p and "outside its session" in p for p in idx.problems)
+    assert not any("d-cross" in p and "subsequence" in p for p in idx.problems)
+
+
+def test_operation_id_reused_across_sessions_is_a_problem():
+    """Operations are keyed by bare operation_id: a second session reusing one
+    is reported, and its events never merge into the first session's
+    operation (the recorder's retrieval refusal)."""
+    v1 = {"version_id": "v1", "namespace": "ns"}
+    idx = build_annotation_index([
+        *_structural_events(),
+        {"seq": 10, "type": "memory_search_start", "proxy_source": MEM,
+         "binding_status": "not_requested",
+         "payload": {"trace_session_id": "S", "operation_id": "op-1",
+                     "query": {}}},
+        {"seq": 11, "type": "memory_search_end", "proxy_source": MEM,
+         "binding_status": "no_call",
+         "payload": {"trace_session_id": "S", "operation_id": "op-1",
+                     "status": "completed",
+                     "returned": [{"ordinal": 0, "memory": v1}]}},
+        *_other_session_events(),
+        {"seq": 50, "type": "memory_search_start", "proxy_source": MEM,
+         "binding_status": "not_requested",
+         "payload": {"trace_session_id": "S2", "operation_id": "op-1",
+                     "query": {}}},
+    ])
+    assert any("op-1" in p and "reused across sessions" in p for p in idx.problems)
+    # the first session's operation stays intact — no double-start confusion
+    assert not any("starts twice" in p for p in idx.problems)
+
+
+def test_delivery_malformed_memory_entry_surfaces_not_vacuous_pass():
+    """A malformed delivered memory degrades to a null identity that fails
+    the subsequence match (the recorder's memory_identity is total) —
+    filtering it out would let the check pass vacuously with no problem."""
+    v1 = {"version_id": "v1", "namespace": "ns"}
+    idx = build_annotation_index([
+        *_structural_events(),
+        {"seq": 10, "type": "memory_search_start", "proxy_source": MEM,
+         "binding_status": "not_requested",
+         "payload": {"trace_session_id": "S", "operation_id": "op-1",
+                     "query": {}}},
+        {"seq": 11, "type": "memory_search_end", "proxy_source": MEM,
+         "binding_status": "no_call",
+         "payload": {"trace_session_id": "S", "operation_id": "op-1",
+                     "status": "completed",
+                     "returned": [{"ordinal": 0, "memory": v1}]}},
+        {"seq": 12, "type": "memory_delivery", "proxy_source": MAIN,
+         "binding_status": "no_call",
+         "payload": {"trace_session_id": "S", "delivery_id": "d-bad",
+                     "search_operation_id": "op-1", "status": "placed",
+                     "memories": [{"content": {"availability": "redacted"}}]}},
+    ])
+    assert any("d-bad" in p and "no usable identity fields" in p for p in idx.problems)
+    assert any("d-bad" in p and "not an ordered search subsequence" in p
+               for p in idx.problems)
+
+
+def test_search_query_locator_uses_the_delivery_session_binds(tmp_path):
+    """A trajectory_message search-query locator resolves through the
+    delivery's OWN session bindings — in a multi-session run the first
+    session's lanes would point at the wrong messages (or none)."""
+    import json
+
+    from eval.memgraph.parse_trajectory import parse_trajectory
+
+    def ann(seq, type, payload, lane):
+        return {"seq": seq, "type": type, "proxy_source": lane,
+                "binding_status": "not_requested", "payload": payload}
+
+    locator = {"availability": "trajectory_message",
+               "locator": {"logical_role": "main", "msg_index": 1}}
+    events = [
+        ann(1, "memory_session", {"trace_session_id": "S1"}, "A1"),
+        ann(2, "memory_role_bind", {"trace_session_id": "S1", "logical_role": "main"}, "A1"),
+        ann(3, "memory_role_bind", {"trace_session_id": "S1", "logical_role": "memory"}, "M1"),
+        ann(4, "memory_session", {"trace_session_id": "S2"}, "A2"),
+        ann(5, "memory_role_bind", {"trace_session_id": "S2", "logical_role": "main"}, "A2"),
+        ann(6, "memory_role_bind", {"trace_session_id": "S2", "logical_role": "memory"}, "M2"),
+        {"seq": 7, "type": "message_end", "proxy_source": "A2", "role": "user",
+         "msg": 1, "content": "the second session's query"},
+        ann(8, "memory_search_start", {"trace_session_id": "S2", "operation_id": "op-q",
+                                       "query": locator}, "M2"),
+        ann(9, "memory_search_end", {"trace_session_id": "S2", "operation_id": "op-q",
+                                     "status": "completed", "returned": []}, "M2"),
+        ann(10, "memory_delivery", {"trace_session_id": "S2", "delivery_id": "d1",
+                                    "search_operation_id": "op-q", "status": "placed",
+                                    "memories": []}, "A2"),
+    ]
+    d = tmp_path / "t1"
+    d.mkdir()
+    (d / "trajectory.jsonl").write_text(
+        "\n".join(json.dumps(e) for e in events) + "\n", encoding="utf-8")
+    _, ops, _ = parse_trajectory(d, [])
+    (recall,) = [o for o in ops if o.kind == "recall"]
+    assert recall.query == "the second session's query"
 
 
 # ---------------------------------------------------------------- injudge integration

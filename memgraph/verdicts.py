@@ -1,6 +1,6 @@
 """Merge injudge verdicts into the graph for rendering.
 
-`apply_verdicts` joins an `injudge.report/v1`–`v4` artifact onto a
+`apply_verdicts` joins an `injudge.report/v4` artifact onto a
 loaded graph by (run_id, op seq) — robust to the two tools assigning different
 T-numbers when run on different path sets — and annotates each recall op in
 place:
@@ -8,10 +8,11 @@ place:
 - `verdict`: the span verdict for the span's first injection
   (positive/negative/neutral/error/unjudged), `restated` for re-deliveries;
 - `verdict_span`: the injudge span id;
-- `verdict_detail` (first injections only): confidence, rationale (v2+: the
-  analysis), evidence, memory_usage, rubric (v2 bools / v3+ enums),
-  delivery_cost (v2+), out_of_window_influence (v3), auto, error — rendered in
-  the op popover.
+- `span_verdict`: the span's verdict on every one of its injections, first
+  or restated (the role-independent outcome, for coloring);
+- `verdict_detail` (first injections only): confidence, analysis, evidence,
+  memory_usage, rubric, delivery_cost, auto, error — rendered in the op
+  popover.
 
 Unmatched lanes/ops are validation notes, never errors: the graph renders
 identically whether or not verdicts are present.
@@ -20,24 +21,24 @@ identically whether or not verdicts are present.
 from __future__ import annotations
 
 import json
+from collections import Counter
 from pathlib import Path
 
-_SCHEMAS = (
-    "injudge.report/v1", "injudge.report/v2", "injudge.report/v3", "injudge.report/v4"
-)
+from eval.memgraph.annotations import is_int
+
+_SCHEMA = "injudge.report/v4"
 
 
 def load_verdict_report(path: Path) -> dict:
-    """Read and sanity-check an injudge.report artifact (v1–v4)."""
+    """Read and sanity-check an injudge.report/v4 artifact."""
     try:
         report = json.loads(Path(path).read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as e:
         raise SystemExit(f"error: cannot read verdicts report {path}: {e}")
     tool = report.get("tool") if isinstance(report, dict) else None
-    if not isinstance(tool, dict) or tool.get("schema") not in _SCHEMAS:
+    if not isinstance(tool, dict) or tool.get("schema") != _SCHEMA:
         raise SystemExit(
-            f"error: {path} is not an injudge.report artifact "
-            f"(expected schema {' or '.join(_SCHEMAS)})"
+            f"error: {path} is not an injudge.report artifact (expected schema {_SCHEMA})"
         )
     return report
 
@@ -49,26 +50,134 @@ def apply_verdicts(graph: dict, report: dict, source: str = "") -> None:
     def note(level: str, msg: str) -> None:
         validation.append({"level": level, "msg": msg})
 
-    spans_by_id = {o.get("operation_id"): o for o in report.get("operations") or []}
-    traj_run = {t.get("id"): t.get("run_id") for t in report.get("trajectories") or []}
+    def entries(key: str) -> list[dict]:
+        """The object entries of one report list. A corrupt (e.g. hand-edited)
+        artifact can carry anything there; like every other mismatch here the
+        bad entries are a validation note, never a crash."""
+        raw = report.get(key)
+        if not isinstance(raw, list):
+            return []
+        good = [x for x in raw if isinstance(x, dict)]
+        if len(good) != len(raw):
+            n = len(raw) - len(good)
+            note("warn", f"verdict report: {n} non-object {key} "
+                         f"entr{'y' if n == 1 else 'ies'} skipped")
+        return good
+
+    def span_of(entry: dict) -> dict | None:
+        """The entry's span record; join keys are strings in the schema, and
+        the isinstance check also keeps unhashable corrupt values out of the
+        dict lookups."""
+        span_id = entry.get("span_id")
+        return spans_by_id.get(span_id) if isinstance(span_id, str) else None
+
+    spans_by_id: dict[str, dict] = {}
+    for o in entries("operations"):
+        op_id = o.get("operation_id")
+        if not isinstance(op_id, str):
+            # the same no-silent-drop rule as the injection entries below
+            note(
+                "warn",
+                "verdict report: operation entry without a string operation_id skipped",
+            )
+            continue
+        if op_id in spans_by_id:
+            note(
+                "warn",
+                f"verdict report: duplicate operation_id {op_id!r}; the later entry wins",
+            )
+        spans_by_id[op_id] = o
+    traj_run: dict[str, str] = {}
+    for t in entries("trajectories"):
+        traj_id = t.get("id")
+        run_id = t.get("run_id")
+        if not isinstance(traj_id, str) or not isinstance(run_id, str) or not run_id:
+            note(
+                "warn",
+                "verdict report: trajectory entry without a string id/run_id skipped",
+            )
+            continue
+        if traj_id in traj_run:
+            note(
+                "warn",
+                f"verdict report: duplicate trajectory id {traj_id!r}; the later entry wins",
+            )
+        traj_run[traj_id] = run_id
+    # a run_id covering several report trajectories merges their seq maps;
+    # on a seq collision the later report entry wins
+    for r in sorted(r for r, n in Counter(traj_run.values()).items() if n > 1):
+        note(
+            "warn",
+            f"verdict report covers run_id {r!r} more than once; their seq maps "
+            "merge — later entries overwrite earlier ones on collision",
+        )
     # per run_id: seq -> injection roll-up entry
     inj_by_traj: dict[str, dict[int, dict]] = {}
-    for entry in report.get("injections") or []:
+    for entry in entries("injections"):
         seq = entry.get("seq")
-        span = spans_by_id.get(entry.get("span_id")) or {}
-        run_id = traj_run.get(span.get("traj"))
-        if isinstance(seq, int) and run_id:
+        span = span_of(entry)
+        if span is None:
+            # a stale/hand-edited report can dangle: the injection names a
+            # span no operation record defines. It can never join, and the
+            # seq-join notes below cannot see it (it never enters the seq
+            # map) — so say so here, never silently drop it.
+            note(
+                "warn",
+                f"verdict report: injection names unknown span "
+                f"{entry.get('span_id')!r}; skipped",
+            )
+            continue
+        traj = span.get("traj")
+        run_id = traj_run.get(traj) if isinstance(traj, str) else None
+        if is_int(seq) and run_id:
             inj_by_traj.setdefault(run_id, {})[seq] = entry
+        else:
+            # same no-silent-drop rule as the dangling span above: a corrupt
+            # seq (a JSON true is not seq 1) or a span whose trajectory maps
+            # to no run_id can never join — say so
+            note(
+                "warn",
+                f"verdict report: injection (span {entry.get('span_id')!r}, "
+                f"seq {seq!r}) has no joinable (run_id, seq) key; skipped",
+            )
+
+    # a run_id shared by several loaded trajectories makes the join ambiguous:
+    # annotate neither rather than cross-contaminating both (runless
+    # trajectories never join — inj_by_traj keys truthy run_ids only — so a
+    # missing run_id is not "shared", just unjoinable). Join keys are strings
+    # in the schema; the isinstance check also keeps corrupt run.json values
+    # (mixed types crash sorted(), unhashable ones crash the set) out.
+    graph_runs = Counter(
+        t.get("run_id")
+        for t in graph.get("trajectories") or []
+        if isinstance(t.get("run_id"), str) and t.get("run_id")
+    )
+    ambiguous = {r for r, n in graph_runs.items() if n > 1}
+    for r in sorted(ambiguous):
+        note(
+            "warn",
+            f"{r}: run_id shared by multiple loaded trajectories; the verdict join "
+            "is ambiguous — no verdicts annotated for it",
+        )
 
     n_annotated = 0
     for traj in graph.get("trajectories") or []:
         run_id = traj.get("run_id")
-        seq_map = inj_by_traj.get(run_id)
-        if seq_map is None:
-            if any(o.get("kind") == "recall" and o.get("traj") == traj.get("id")
-                   for o in graph.get("ops") or []):
-                note("info", f"{run_id}: no verdicts in the report for this trajectory")
+        # only a string run_id can join (the report side's keys are strings);
+        # a corrupt run.json value is unjoinable — and possibly unhashable
+        seq_map = inj_by_traj.get(run_id) if isinstance(run_id, str) else None
+        if seq_map is None or run_id in ambiguous:
+            if seq_map is None and any(
+                o.get("kind") == "recall" and o.get("traj") == traj.get("id")
+                for o in graph.get("ops") or []
+            ):
+                note(
+                    "info",
+                    f"{run_id or traj.get('id')}: no verdicts in the report "
+                    "for this trajectory",
+                )
             continue
+        matched: set[int] = set()
         for op in graph.get("ops") or []:
             if op.get("traj") != traj.get("id") or op.get("kind") != "recall":
                 continue
@@ -76,7 +185,8 @@ def apply_verdicts(graph: dict, report: dict, source: str = "") -> None:
             if entry is None:
                 note("warn", f"{op.get('id')}: no injection verdict matches seq {op.get('seq')}")
                 continue
-            span = spans_by_id.get(entry.get("span_id")) or {}
+            matched.add(op["seq"])
+            span = span_of(entry)  # guaranteed by the ingest filter above
             op["verdict"] = entry.get("verdict")
             op["verdict_span"] = entry.get("span_id")
             op["span_verdict"] = span.get("verdict")  # span outcome regardless of role
@@ -84,16 +194,25 @@ def apply_verdicts(graph: dict, report: dict, source: str = "") -> None:
                 op["verdict_detail"] = {
                     "verdict": span.get("verdict"),
                     "confidence": span.get("confidence"),
-                    "rationale": span.get("rationale") or span.get("analysis"),
+                    "analysis": span.get("analysis"),
                     "evidence": span.get("evidence") or [],
                     "memory_usage": span.get("memory_usage") or {},
-                    "rubric": span.get("rubric"),  # v2+ (v2 bools, v3+ enums)
-                    "delivery_cost": span.get("delivery_cost"),  # v2+
-                    "out_of_window_influence": span.get("out_of_window_influence"),  # v3
+                    "rubric": span.get("rubric"),
+                    "delivery_cost": span.get("delivery_cost"),
                     "auto": span.get("auto"),
                     "error": span.get("error"),
                 }
             n_annotated += 1
+        unmatched = sorted(set(seq_map) - matched)
+        if unmatched:
+            # the join is by (run_id, op seq): report injections matching no
+            # loaded recall op mean the report and the graph disagree (a
+            # stale report, a regenerated trajectory) — noted, never silent
+            note(
+                "warn",
+                f"{run_id}: {len(unmatched)} report injection(s) matched no recall op "
+                f"(seqs {unmatched[:8]}{', …' if len(unmatched) > 8 else ''})",
+            )
     if n_annotated:
         graph.setdefault("tool", {})["verdicts"] = source or True
         note("info", f"verdicts merged for {n_annotated} recall injection(s)")

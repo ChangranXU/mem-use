@@ -2,7 +2,8 @@
 
 All containers are plain dataclasses with `to_dict()` for the JSON artifact
 (`--json` output and the payload embedded in the HTML report). Steps are
-agent steps: the count of completed main-lane (non-memory) turns, 1-based.
+agent steps: the count of completed main-lane (non-memory) turns, 1-based —
+an extraction observed before the first turn completes is step 0.
 """
 
 from __future__ import annotations
@@ -16,41 +17,36 @@ class Trajectory:
 
     id: str  # short graph-local id, e.g. "T1"
     run_id: str  # from run.json, else directory name
-    label: str  # display label
     path: str
     model: str | None = None
     started_at: str | None = None
     status: str | None = None
     n_steps: int = 0  # agent steps (non-memory-lane turns)
     memory_lane: str | None = None  # proxy_source of the bound memory lane
-    main_lane: str | None = None  # proxy_source of the bound main lane (None = unprefixed)
     # all bound memory-lane proxy_sources (internal; None = the unprefixed lane)
     memory_lanes: set = field(default_factory=set)
     adapter: str | None = None  # memory adapter name@version
     instance_id: str | None = None  # from memory_session
-    n_searches: int = 0  # completed memory searches
+    # exact task statement from memory_session (internal: the judge input —
+    # like memory_lanes, never serialized into the artifacts)
+    task: str | None = None
+    n_searches: int = 0  # memory searches with a recorded end (any status: completed/failed/partial)
     rewrites: list[dict] = field(default_factory=list)  # history_rewritten markers
-    proxy_sources: list[str] = field(default_factory=list)  # distinct sources seen
-    sessions: list[str] = field(default_factory=list)  # trace session ids
 
     def to_dict(self) -> dict:
         return {
             "id": self.id,
             "run_id": self.run_id,
-            "label": self.label,
             "path": self.path,
             "model": self.model,
             "started_at": self.started_at,
             "status": self.status,
             "n_steps": self.n_steps,
             "memory_lane": self.memory_lane,
-            "main_lane": self.main_lane,
             "adapter": self.adapter,
             "instance_id": self.instance_id,
             "n_searches": self.n_searches,
             "rewrites": self.rewrites,
-            "proxy_sources": self.proxy_sources,
-            "sessions": self.sessions,
         }
 
 
@@ -115,9 +111,10 @@ class MemoryOp:
                         "count": sum(counts.values()),
                         "by_reason": dict(counts),
                     },
-                    "flagged": self.flagged,
                 }
             )
+            if self.flagged is not None:
+                d["flagged"] = self.flagged
             if self.trigger is not None:
                 d["trigger"] = self.trigger
             if self.declared_step is not None:
@@ -139,21 +136,22 @@ class MemoryOp:
 
 @dataclass
 class MemoryUnit:
-    """One memory, identified by its key, linked across trajectories."""
+    """One memory, identified by its (namespace, key), linked across trajectories."""
 
     key: str
+    namespace: str | None = None  # store namespace scoping the key (None = none recorded)
     memory_type: str | None = None
     confidence: float | None = None
     value: str | None = None
     status: str = "unknown"  # latest review_status seen (updated by later candidates)
     created_status: str | None = None  # review_status of the CREATING candidate (never overwritten)
-    origin: str = "observed"  # "observed" | "not_observed" (recalled but never created here)
+    origin: str = "observed"  # "observed" | "not_observed" (no creation in the loaded set)
     created_op: str | None = None
     created_traj: str | None = None
     created_step: int | None = None
     recalls: list[dict] = field(default_factory=list)  # [{op, traj, step}]
     updates: list[dict] = field(default_factory=list)  # later candidates reusing the key
-    deleted_by: dict | None = None  # {op, traj, step, target, uncertain}
+    deleted_by: dict | None = None  # {op, traj, step, target}
     # recalls that precede the first observed creation (store entry predates
     # the loaded trajectories, or lanes are misordered)
     recalled_before_creation: list[dict] = field(default_factory=list)
@@ -161,6 +159,7 @@ class MemoryUnit:
     def to_dict(self) -> dict:
         return {
             "key": self.key,
+            "namespace": self.namespace,
             "memory_type": self.memory_type,
             "confidence": self.confidence,
             "value": self.value,
@@ -186,7 +185,14 @@ class Edge:
     kind: str  # "creates" | "recalls" | "deletes" | "supersedes"
     op: str  # MemoryOp.id
     memory: str  # MemoryUnit.key
+    namespace: str | None = None  # MemoryUnit.namespace — the key's half of the identity
     uncertain: bool = False
 
     def to_dict(self) -> dict:
-        return {"kind": self.kind, "op": self.op, "memory": self.memory, "uncertain": self.uncertain}
+        return {
+            "kind": self.kind,
+            "op": self.op,
+            "memory": self.memory,
+            "namespace": self.namespace,
+            "uncertain": self.uncertain,
+        }

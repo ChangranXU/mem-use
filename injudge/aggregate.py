@@ -1,6 +1,6 @@
 """Aggregate span verdicts into per-trajectory and overall quality stats.
 
-The counting rules (eval/TARGET.md + user decisions):
+The counting rules:
 
 - rates are over judged spans only: denominator = positive + negative +
   neutral. `error` (judge failures) and `unjudged` (--limit truncation)
@@ -9,9 +9,17 @@ The counting rules (eval/TARGET.md + user decisions):
 - auto-neutral spans (no subsequent turn) count as neutral — they are
   rule-judged "no footprint", consistent with "no footprint ⇒ neutral".
 - confidence never weights counts; it is reported as per-class means,
-  buckets, and a low-confidence list for triage.
-- per-memory usage tallies merge by key; first_value/last_value surface
-  value drift across spans.
+  buckets, and a low-confidence list for triage — LLM-judged spans only:
+  rule-judged auto-neutral spans carry no confidence (no judge ran), the
+  same placeholder exclusion the rubric rollup applies.
+- per-memory usage tallies merge by (namespace, key) — the system's memory
+  identity pair, so two stores' same-keyed memories never conflate — over
+  LLM-judged spans only (a rule-judged auto-neutral span carries a
+  placeholder "unclear" per memory, the same exclusion the rubric rollup and
+  confidence apply); first_value/last_value surface value drift across those
+  spans. A key delivered under several namespaces in one op is judged once
+  (the contract is one entry per key) but tallies under EACH of its
+  (namespace, key) identities.
 - rubric signal rates are over judge-scored memory-deliveries (span × key)
   of judged spans only; null signals never dilute a rate. positive_effect is
   rated over the influential only (it is null by contract otherwise).
@@ -20,16 +28,41 @@ The counting rules (eval/TARGET.md + user decisions):
 - delivery cost is deterministic: each span's full injection cost (all
   deliveries, including restated ones — they really cost tokens) is charged
   to its verdict class; the neutral+negative total is budget spent on
-  injections that did not help.
+  injections that did not help. The wasted-token share divides that total
+  by the judged classes' tokens only — the same judged-only rule as rates.
 """
 
 from __future__ import annotations
 
 from eval.injudge.judge import RUBRIC_SIGNALS
+from eval.memgraph.annotations import namespace_of
 
 _VERDICTS = ("positive", "negative", "neutral")
 _USAGES = ("used", "noted", "ignored", "misused", "unclear")
 _BUCKETS = ("[0,0.5)", "[0.5,0.8)", "[0.8,1.0]")
+# the verdict classes every count/cost rollup tallies (error and unjudged are
+# counts, never rate denominators)
+_COUNTED = (*_VERDICTS, "error", "unjudged")
+
+
+def _key_namespaces(op: dict) -> dict[str, list[str | None]]:
+    """key -> the namespaces it is delivered under within one op, in delivery
+    order. The rubric and usage records speak in bare keys (the judge contract
+    is one entry per key); this resolves each back to its (namespace, key)
+    identity. A key delivered under several namespaces in one op (a
+    multi-store delivery the judge scored jointly) maps to them all, so the
+    joint judgment tallies under EACH of its (namespace, key) identities —
+    never a phantom namespace-less one."""
+    by_key: dict[str, list[str | None]] = {}
+    for m in op.get("memories") or []:
+        key = m.get("key")
+        if not key:
+            continue
+        ns = namespace_of(m)
+        nss = by_key.setdefault(key, [])
+        if ns not in nss:
+            nss.append(ns)
+    return by_key
 
 
 def _bucket_value(v: object) -> str:
@@ -43,29 +76,41 @@ def _bucket_value(v: object) -> str:
 def _rubric_rollup(operations: list[dict]) -> dict:
     """Per-signal value distributions + rates over judged spans' deliveries.
 
-    v3: accuracy/influence/positive_effect are enums, so `counts` is a raw
-    value distribution per signal and `rates` is the v2-compat projection
-    (accuracy true = corroborated+uncontradicted; influence true = any
-    footprint; positive_effect true = improved over judged effects).
-    v4: novelty is an enum too (true = novel+confirming; false = redundant).
+    `counts` is the raw value distribution per signal (relevance is a bool,
+    the rest are enums); `rates` projects each onto a boolean-style summary
+    rate for the one-line report (accuracy true = corroborated+uncontradicted;
+    novelty true = novel+confirming; influence true = any footprint;
+    positive_effect true = improved over judged effects). `deliveries` counts
+    judge-answered entries only — a coverage gap's all-null entry is skipped —
+    while aggregate()'s memory_usage tallies every delivered key (a gap lands
+    as `unclear`): two populations over the same spans, by design.
     """
     counts: dict[str, dict[str, int]] = {s: {} for s in RUBRIC_SIGNALS}
-    contradicted: dict[str, list[str]] = {}
-    irrelevant: dict[str, list[str]] = {}
+    contradicted: dict[tuple[str | None, str], list[str]] = {}
+    irrelevant: dict[tuple[str | None, str], list[str]] = {}
     reasons: dict[str, int] = {}
     deliveries = 0
     for op in operations:
         if op.get("verdict") not in _VERDICTS or op.get("auto"):
             continue  # error/unjudged/rule-judged spans: rubric untrusted or placeholder
+        namespaces = _key_namespaces(op)
         for key, signals in (op.get("rubric") or {}).items():
+            if all((signals.get(s) or {}).get("value") is None for s in RUBRIC_SIGNALS):
+                # all-null entry: the judge never returned this key (a
+                # coverage gap, warned about at assembly) — not a judged
+                # delivery, and its nulls must not enter the distributions
+                continue
             deliveries += 1
             for s in RUBRIC_SIGNALS:
                 b = _bucket_value((signals.get(s) or {}).get("value"))
                 counts[s][b] = counts[s].get(b, 0) + 1
+            idents = [(ns, key) for ns in namespaces.get(key) or [None]]
             if (signals.get("accuracy") or {}).get("value") == "contradicted":
-                contradicted.setdefault(key, []).append(op["operation_id"])
+                for ident in idents:
+                    contradicted.setdefault(ident, []).append(op["operation_id"])
             if (signals.get("relevance") or {}).get("value") is False:
-                irrelevant.setdefault(key, []).append(op["operation_id"])
+                for ident in idents:
+                    irrelevant.setdefault(ident, []).append(op["operation_id"])
         for entry in (op.get("memory_usage") or {}).values():
             r = entry.get("reason")
             if r:
@@ -94,17 +139,23 @@ def _rubric_rollup(operations: list[dict]) -> dict:
         },
         "no_footprint_reasons": reasons,
         "inaccurate_keys": [
-            {"key": k, "spans": spans} for k, spans in sorted(contradicted.items())
+            {"namespace": ns, "key": k, "spans": spans}
+            for (ns, k), spans in sorted(
+                contradicted.items(), key=lambda item: (item[0][0] or "", item[0][1])
+            )
         ],
         "irrelevant_keys": [
-            {"key": k, "spans": spans} for k, spans in sorted(irrelevant.items())
+            {"namespace": ns, "key": k, "spans": spans}
+            for (ns, k), spans in sorted(
+                irrelevant.items(), key=lambda item: (item[0][0] or "", item[0][1])
+            )
         ],
     }
 
 
 def _cost_rollup(operations: list[dict]) -> dict:
     """Deterministic delivery-cost totals, charged per span verdict."""
-    by_verdict = dict.fromkeys((*_VERDICTS, "error", "unjudged"), 0)
+    by_verdict = dict.fromkeys(_COUNTED, 0)
     chars = 0
     for op in operations:
         dcost = op.get("delivery_cost") or {}
@@ -126,19 +177,17 @@ def aggregate(operations: list[dict], n_injections: int, n_trajectories: int | N
         "n_injections": n_injections,
         "n_spans": len(operations),
         "restated_injections": n_injections - len(operations),
-        "unjudged": 0,
         "mean_confidence_by_verdict": {},
         "confidence_buckets": dict.fromkeys(_BUCKETS, 0),
         "low_confidence": [],
-        "memory_usage": {},
         "rubric": _rubric_rollup(operations),
         "cost": _cost_rollup(operations),
     }
     if n_trajectories is not None:
         out["n_trajectories"] = n_trajectories
-    counts = dict.fromkeys((*_VERDICTS, "error", "unjudged"), 0)
+    counts = dict.fromkeys(_COUNTED, 0)
     conf_sums: dict[str, list[float]] = {v: [] for v in _VERDICTS}
-    usage_roll: dict[str, dict] = {}
+    usage_roll: dict[tuple[str | None, str], dict] = {}
     for op in operations:
         v = op.get("verdict")
         counts[v if v in counts else "error"] += 1
@@ -152,22 +201,30 @@ def aggregate(operations: list[dict], n_injections: int, n_trajectories: int | N
                 out["confidence_buckets"][_BUCKETS[1]] += 1
             else:
                 out["confidence_buckets"][_BUCKETS[2]] += 1
-        values = {m.get("key"): m.get("value") for m in op.get("memories") or []}
+        if op.get("verdict") not in _VERDICTS or op.get("auto"):
+            continue  # error/unjudged/rule-judged spans: usage untrusted or placeholder
+        namespaces = _key_namespaces(op)
+        values = {
+            (namespace_of(m), m.get("key")): m.get("value")
+            for m in op.get("memories") or []
+            if m.get("key")
+        }
         for key, entry in (op.get("memory_usage") or {}).items():
-            roll = usage_roll.setdefault(
-                key,
-                {
-                    "tallies": dict.fromkeys(_USAGES, 0),
-                    "spans": [],
-                    "first_value": values.get(key),
-                    "last_value": values.get(key),
-                },
-            )
-            u = entry.get("usage")
-            roll["tallies"][u if u in roll["tallies"] else "unclear"] += 1
-            roll["spans"].append(op["operation_id"])
-            if values.get(key) is not None:
-                roll["last_value"] = values[key]
+            for ns in namespaces.get(key) or [None]:
+                ident = (ns, key)
+                roll = usage_roll.setdefault(
+                    ident,
+                    {
+                        "tallies": dict.fromkeys(_USAGES, 0),
+                        "spans": [],
+                        "first_value": values.get(ident),
+                        "last_value": values.get(ident),
+                    },
+                )
+                u = entry.get("usage")
+                roll["tallies"][u if u in roll["tallies"] else "unclear"] += 1
+                roll["spans"].append(op["operation_id"])
+                roll["last_value"] = values.get(ident)
     for v in _VERDICTS:
         out[v] = counts[v]
         out["mean_confidence_by_verdict"][v] = (
@@ -177,18 +234,20 @@ def aggregate(operations: list[dict], n_injections: int, n_trajectories: int | N
     out["unjudged"] = counts["unjudged"]
     denom = sum(counts[v] for v in _VERDICTS)
     out["rates"] = {v: (round(counts[v] / denom, 4) if denom else None) for v in _VERDICTS}
-    out["memory_usage"] = usage_roll
-    # headline: the pre-registered numbers for cross-system claims
-    total_tok = out["cost"]["approx_tokens_total"]
-    wasted = (
-        out["cost"]["approx_tokens_by_verdict"]["negative"]
-        + out["cost"]["approx_tokens_by_verdict"]["neutral"]
-    )
+    out["memory_usage"] = [
+        {"namespace": ns, "key": key, **roll} for (ns, key), roll in usage_roll.items()
+    ]
+    # headline: the pre-registered numbers for cross-system claims; the
+    # wasted-token share follows the same judged-only rule as the rates —
+    # error/unjudged cost is a count, never a denominator
+    byv = out["cost"]["approx_tokens_by_verdict"]
+    judged_tok = sum(byv[v] for v in _VERDICTS)
+    wasted = byv["negative"] + byv["neutral"]
     out["headline"] = {
         "judged_spans": denom,
         "positive_span_rate": out["rates"]["positive"],
         "negative_span_rate": out["rates"]["negative"],
-        "wasted_token_share": round(wasted / total_tok, 4) if total_tok else None,
+        "wasted_token_share": round(wasted / judged_tok, 4) if judged_tok else None,
     }
     return out
 
@@ -200,7 +259,9 @@ def policy_rollup(trajectories: list[dict]) -> dict:
     n_steps = sum(b.get("n_steps") or 0 for b in blocks)
     n_spans = sum(t.get("n_spans") or 0 for t in trajectories)
     est = sum(b.get("est_injected_tokens") or 0 for b in blocks)
-    prompt = sum(b.get("prompt_tokens_total") or 0 for b in blocks)
+    billed = [b for b in blocks if b.get("prompt_tokens_total")]
+    est_billed = sum(b.get("est_injected_tokens") or 0 for b in billed)
+    prompt = sum(b["prompt_tokens_total"] for b in billed)
     n_searches = sum(b.get("n_searches") or 0 for b in blocks)
     return {
         "n_injections": n_inj,
@@ -208,8 +269,13 @@ def policy_rollup(trajectories: list[dict]) -> dict:
         "injection_density": round(n_inj / n_steps, 4) if n_steps else None,
         "restated_ratio": round((n_inj - n_spans) / n_inj, 4) if n_inj else None,
         "est_injected_tokens": est,
+        # the injected share's numerator and denominator cover exactly the
+        # trajectories with usage records — est_injected_tokens stays the
+        # all-scope deterministic total, so the two are named separately
+        # instead of implying est == share x prompt
+        "est_injected_tokens_billed": est_billed if billed else None,
         "prompt_tokens_total": prompt or None,
-        "injected_token_share": round(est / prompt, 4) if prompt else None,
+        "injected_token_share": round(est_billed / prompt, 4) if prompt else None,
         # annotation-mode total (None when no trajectory recorded searches)
         "n_searches": n_searches or None,
     }

@@ -21,12 +21,13 @@ def ev(seq, type, **kw):
 
 
 def cure_ref(key, value="v", memory_type="insight", confidence=0.9,
-             review_status="approved", store_id=1, version_id=None):
+             review_status="approved", store_id=1, version_id=None, namespace="ns"):
     """One CURE-row MemoryRef as emitted by the bridge's annotations.
 
     Like the real bridge, the version_id digests the row's semantic content
     (a value change is a new version) and the inline content carries its
-    sha256; confidence/review metadata stay outside the identity.
+    sha256; confidence/review metadata stay outside the identity. The
+    namespace names the store (the bridge hashes its DB path into it).
     """
     digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
     return {
@@ -34,7 +35,7 @@ def cure_ref(key, value="v", memory_type="insight", confidence=0.9,
         "identity_strength": "native_stable",
         "identity_scheme": "cure-sqlite-row-version-v1",
         "item_id": f"item-{key}",
-        "namespace": "ns",
+        "namespace": namespace,
         "content": {"availability": "inline", "text": value, "sha256": digest},
         "extensions": {
             "cure": {
@@ -52,7 +53,7 @@ def cure_ref(key, value="v", memory_type="insight", confidence=0.9,
 class AnnotatedBuilder:
     """Assembles a synthetic annotated (schema v6) trajectory.jsonl."""
 
-    def __init__(self, main=MAIN, mem=MEM, adapter=None):
+    def __init__(self, main=MAIN, mem=MEM, adapter=None, task_ref=None):
         self.events = []
         self.seq = 0
         self.turn = 0
@@ -69,7 +70,7 @@ class AnnotatedBuilder:
                 "session_kind": "episode",
                 "adapter": self.adapter,
                 "instance_id": "pydata__xarray-2905",
-                "task": {"availability": "inline", "text": TASK},
+                "task": task_ref or {"availability": "inline", "text": TASK},
             },
             lane=self.main,
         )
@@ -140,8 +141,10 @@ class AnnotatedBuilder:
         return self
 
     def rewrite(self, src=MAIN, kept=5, dropped=1, replay_tool_ends=True):
-        """A history_rewritten plus the turn-less replays the gate emits after
-        it on the agent lane: an assistant copy and a prior tool end copy."""
+        """A history_rewritten plus what may follow it turn-less on the agent
+        lane: the gate's origin-history re-record of the response-side
+        assistant message, and (at-least-once retry) a duplicate close of an
+        earlier tool execution — deduped downstream like any re-closing."""
         self._emit("history_rewritten", proxy_source=src, kept=kept, dropped=dropped)
         self._emit("message_end", proxy_source=self.main, role="assistant", msg=2,
                    content="", reasoning_content="replayed", origin="history")
@@ -212,8 +215,11 @@ class AnnotatedBuilder:
         )
         return self
 
-    def search(self, returned=(), query="the task query", with_end=True):
-        """One search operation; returns its operation_id for deliveries."""
+    def search(self, returned=(), query="the task query", with_end=True,
+               matched_count=None):
+        """One search operation; returns its operation_id for deliveries.
+        `matched_count` is the protocol's {value, precision} field (None =
+        not recorded)."""
         header = self._op_header()
         self.annotation(
             "memory_search_start",
@@ -221,23 +227,25 @@ class AnnotatedBuilder:
             lane=self.mem,
         )
         if with_end:
-            self.annotation(
-                "memory_search_end",
-                {
-                    **header,
-                    "status": "completed",
-                    "returned": [
-                        {"ordinal": i, "memory": ref} for i, ref in enumerate(returned)
-                    ],
-                    "error_codes": [],
-                },
-                lane=self.mem,
-            )
+            payload = {
+                **header,
+                "status": "completed",
+                "returned": [
+                    {"ordinal": i, "memory": ref} for i, ref in enumerate(returned)
+                ],
+                "error_codes": [],
+            }
+            if matched_count is not None:
+                payload["matched_count"] = matched_count
+            self.annotation("memory_search_end", payload, lane=self.mem)
         return header["operation_id"]
 
     def delivery(self, search_operation_id, memories=(), bind=None, main_step=None,
                  status="placed", content="## CURE Memory Policy\n…"):
-        """One memory_delivery on the main lane (bound when `bind` is given)."""
+        """One memory_delivery on the main lane (bound when `bind` is given);
+        content=None records a redacted placement (no text, no chars)."""
+        ref = ({"availability": "redacted", "reason": "policy"} if content is None
+               else {"availability": "inline", "text": content, "chars": len(content)})
         payload = {
             "trace_session_id": SID,
             "delivery_id": f"d-{self.seq:04d}",
@@ -247,8 +255,7 @@ class AnnotatedBuilder:
             "status": status,
             "placement": {
                 "kind": "prompt_message",
-                "content": {"availability": "inline", "text": content,
-                            "chars": len(content)},
+                "content": ref,
                 "proof_kind": "canonical_message",
             },
             "memories": list(memories),

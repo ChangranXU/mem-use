@@ -19,7 +19,9 @@ spans that delivered it.
 
 from __future__ import annotations
 
+import html
 import json
+import re
 
 _TEMPLATE = r"""<!DOCTYPE html>
 <html lang="en">
@@ -124,8 +126,8 @@ _TEMPLATE = r"""<!DOCTYPE html>
       <div class="item"><svg width="14" height="14"><path d="M7,12 L2,2 L12,2 Z" fill="#98a2b3"/></svg><span><b>neutral</b> — no observable footprint</span></div>
       <div class="item"><svg width="14" height="14"><path d="M7,12 L2,2 L12,2 Z" fill="#e2a93b"/></svg><span><b>error</b> — judge failed (excluded from rates)</span></div>
       <div class="item"><svg width="14" height="14"><path d="M7,12 L2,2 L12,2 Z" fill="#3567d6"/></svg><span>blue = not judged (no verdicts merged)</span></div>
-      <div class="note">click a recall node for the judge's rationale, cited evidence, and per-memory usage</div>
-      <div class="note">rubric marks: <b>R</b> relevance, <b>A</b> accuracy (✓ corroborated · ≈ uncontradicted · ✗ contradicted), <b>N</b> novelty (✓ novel · ≈ confirming · ✗ redundant), <b>I</b> influence (— none · ◔ referenced · ◑ acted-on · ● decisive), <b>P</b> effect (+ improved · 0 no effect · ✗ harmed); plain ✓/✗ for bool signals (R in all versions; A/N/I/P in v1/v2; N in v3)</div>
+      <div class="note">click a recall node for the judge's analysis, cited evidence, and per-memory usage</div>
+      <div class="note">rubric marks: <b>R</b> relevance (bool ✓/✗), <b>A</b> accuracy (✓ corroborated · ≈ uncontradicted · ✗ contradicted), <b>N</b> novelty (✓ novel · ≈ confirming · ✗ redundant), <b>I</b> influence (— none · ◔ referenced · ◑ acted-on · ● decisive), <b>P</b> effect (+ improved · 0 no effect · ✗ harmed)</div>
     </div>
     <div class="group">
       <h4>edges &amp; markers</h4>
@@ -156,26 +158,35 @@ const G = __GRAPH_JSON__;
 // ---------- helpers ----------
 function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 function hue(key){ let h=0; for(const c of key) h=(h*31+c.charCodeAt(0))>>>0; return h%360; }
-function memColor(key){ return `hsl(${hue(key)},65%,42%)`; }
+function memColor(id){ return `hsl(${hue(id)},65%,42%)`; }
+// Memory identity is the (namespace, key) pair — the same identity the graph
+// registry keys on; a bare key would collapse two stores' memories into one.
+// The id string is JSON: no separator to collide with key/namespace content,
+// null and "" stay distinct. A non-string namespace names no store (the same
+// rule as the registry's _namespace_of). Display text stays the bare key
+// everywhere; the namespace only disambiguates on demand (detail panel, list
+// tooltip).
+const memId=m=>JSON.stringify([typeof m.namespace==="string"?m.namespace:null,m.key]);
+const keyOf=id=>JSON.parse(id)[1];
+const memById=Object.fromEntries(G.memories.map(m=>[memId(m),m]));
+// Bare-key contexts (injudge rubric keys, namespace-less deletion targets)
+// link only when exactly one loaded memory carries the key — never guess.
+const idByKey={};
+{
+  const n={};
+  for(const m of G.memories) n[m.key]=(n[m.key]||0)+1;
+  for(const m of G.memories) if(n[m.key]===1) idByKey[m.key]=memId(m);
+}
 // injudge verdict colors (ops carry verdicts only when merged via --verdicts)
 const VD_COLOR={positive:"#2e9e5b",negative:"#d64545",neutral:"#98a2b3",error:"#e2a93b"};
-function vdColor(o){ return o&&o.span_verdict? (VD_COLOR[o.span_verdict]||null) : null; }
 function shorten(s,n){ s=String(s||""); return s.length>n? s.slice(0,n-1)+"…" : s; }
 // "20260727-065319.391Z-cure-v2-9eb25cc9" → {main:"cure-v2 · #9eb25cc9", sub:"2026-07-27 06:53Z"}
+// run_id is stringified first: a hand-edited run.json can carry a non-string,
+// and String.prototype.match on it would throw and kill the whole page.
 function prettyLabel(t){
-  const m=(t.label||"").match(/^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})\.\d+Z-(.+)-([0-9a-f]{6,})$/);
-  if(!m) return {main:shorten(t.label,34), sub:""};
+  const m=String(t.run_id||"").match(/^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})\.\d+Z-(.+)-([0-9a-f]{6,})$/);
+  if(!m) return {main:shorten(t.run_id,34), sub:""};
   return {main:`${m[7]} · #${m[8]}`, sub:`${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}Z`};
-}
-// SWE-bench-style instance id ("pydata__xarray-2905") from extraction session
-// ids — used when the run name itself doesn't carry one. The trailing lookahead
-// rejects the run's hex session suffix ("-2905-3d87…" must not match "-3").
-function instanceHint(t){
-  for(const s of (t.sessions||[])){
-    const m=String(s).match(/([a-z0-9_.-]+__[a-z0-9_.-]+?-\d{1,6})(?![0-9a-f])/i);
-    if(m) return m[1];
-  }
-  return null;
 }
 
 // ---------- zoom-independent derived data ----------
@@ -189,19 +200,22 @@ const opOrder=Object.fromEntries(G.ops.map((o,i)=>[o.id,i]));
 
 // collapse consecutive recalls (per traj) with identical key sets into spans;
 // step-less recalls (truncated trajectories) become singleton spans, never merged
-const recallSpans={}; // firstOpId -> {ids:[], keys:[], rawkeys:[], steps:[a,b]}
+const recallSpans={}; // firstOpId -> {ids:[], memIds:[], keySig, steps:[a,b]}
 const spansByTraj={}; // traj id -> span groups in step order
 {
   for(const t of trajs){
     const rs=G.ops.filter(o=>o.traj===t.id&&o.kind==="recall")
                   .sort((a,b)=>(a.step==null?1e15:a.step)-(b.step==null?1e15:b.step));
     let grp=null;
-    const keyset=o=>o.memories.map(m=>m.key).sort().join("|");
+    // memIds are JSON strings (no literal control chars) — the joined
+    // signature stays unambiguous
+    const keySig=ids=>ids.slice().sort().join("\u001f");
     const close=()=>{ if(!grp) return; recallSpans[grp.ids[0]]=grp; (spansByTraj[t.id]=spansByTraj[t.id]||[]).push(grp); };
     for(const o of rs){
-      if(grp && o.step!=null && grp.steps[1]!=null && o.step===grp.steps[1]+1 && keyset(o)===grp.keys) { grp.ids.push(o.id); grp.steps[1]=o.step; continue; }
+      const ids=o.memories.map(memId);
+      if(grp && o.step!=null && grp.steps[1]!=null && o.step===grp.steps[1]+1 && keySig(ids)===grp.keySig) { grp.ids.push(o.id); grp.steps[1]=o.step; continue; }
       close();
-      grp={ids:[o.id], keys:keyset(o), rawkeys:o.memories.map(m=>m.key), steps:[o.step,o.step]};
+      grp={ids:[o.id], memIds:ids, keySig:keySig(ids), steps:[o.step,o.step]};
     }
     close();
   }
@@ -214,7 +228,7 @@ const spanDiff={}; // leadId -> {added:[], removed:[]}
 for(const t of trajs){
   let prev=null;
   for(const g of (spansByTraj[t.id]||[])){
-    const cur=new Set(g.rawkeys);
+    const cur=new Set(g.memIds);
     if(prev){
       const added=[...cur].filter(k=>!prev.has(k)), removed=[...prev].filter(k=>!cur.has(k));
       if(added.length||removed.length) spanDiff[g.ids[0]]={added,removed};
@@ -223,24 +237,25 @@ for(const t of trajs){
   }
 }
 
-// memory keys with an edge into each recall span → stagger converging arrowheads
-const edgeTargets={}; // leadId -> [memory key]
+// memory ids with an edge into each recall span → stagger converging arrowheads
+// (each op appears at most once in a memory's recalls, so a span leader is
+// pushed exactly once; non-leader ops share their leader's key set by
+// construction, so the leader carries the memory whenever any member does)
+const edgeTargets={}; // leadId -> [memory id]
 for(const m of G.memories){
   if(!(m.created&&m.created.op)) continue;
-  const seen=new Set();
   for(const r of (m.recalls||[])){
     const lead=spanLeader[r.op]||r.op;
-    if(lead!==r.op||seen.has(lead)) continue;
-    seen.add(lead);
-    (edgeTargets[lead]=edgeTargets[lead]||[]).push(m.key);
+    if(lead!==r.op) continue; // one entry per span
+    (edgeTargets[lead]=edgeTargets[lead]||[]).push(memId(m));
   }
 }
 
-// memory keys created at each op → fan out parallel curves leaving one ▲
-const edgeSources={}; // creation opId -> [memory key]
+// memory ids created at each op → fan out parallel curves leaving one ▲
+const edgeSources={}; // creation opId -> [memory id]
 for(const m of G.memories){
   const c=m.created&&m.created.op;
-  if(c&&(m.recalls||[]).length) (edgeSources[c]=edgeSources[c]||[]).push(m.key);
+  if(c&&(m.recalls||[]).length) (edgeSources[c]=edgeSources[c]||[]).push(memId(m));
 }
 
 // collapse rewrites at consecutive steps into bands (per traj)
@@ -296,7 +311,7 @@ function buildSVG(){
   // ghost creation markers: memories recalled but never created in the loaded
   // set anchor a dashed ▲ at the left edge of their first recall's lane,
   // staggered so several ghosts don't pile onto the same x
-  const ghostPos={}; // memory key -> {x,y}
+  const ghostPos={}; // memory id -> {x,y}
   {
     const perLane={};
     for(const m of G.memories){
@@ -305,7 +320,7 @@ function buildSVG(){
         (trajIdx[a.traj]-trajIdx[b.traj])||((a.step==null?1e15:a.step)-(b.step==null?1e15:b.step)))[0];
       const gi=trajIdx[first.traj]; if(gi==null) continue;
       const k=perLane[gi]||0; perLane[gi]=k+1;
-      ghostPos[m.key]={x:X(0)+k*15, y:laneY(gi)-13};
+      ghostPos[memId(m)]={x:X(0)+k*15, y:laneY(gi)-13};
     }
   }
   // stagger a/p/r count labels within each lane so neighbors don't collide
@@ -334,7 +349,7 @@ function buildSVG(){
     for(const band of rewriteBands[t.id]){
       const x0=X(band.a)-8, x1=X(band.b)+8;
       const srcs=[...new Set(band.items.map(r=>r.proxy_source||"?"))];
-      const tip=`${band.count} history rewrites at steps ${band.a}–${band.b} (${srcs.join(" + ")})`;
+      const tip=`${band.count} history rewrites at steps ${band.a}–${band.b} (${srcs.map(s=>esc(s)).join(" + ")})`;
       const fill=srcs.length===1&&srcs[0]===t.memory_lane? "#ece4f7" : "#edf0f5";
       if(t.n_steps>0 && band.b-band.a+1>=0.8*t.n_steps){
         // rewrites at nearly every step — same band shape, but translucent with
@@ -354,7 +369,7 @@ function buildSVG(){
     for(const rw of rewriteSingles[t.id]){
       const x=X(rw.step==null?0:rw.step);
       const rwCol=rw.proxy_source===t.memory_lane? "#b06ab3" : "#c3cbd8";
-      svg.push(`<line x1="${x}" y1="${y-LANE_H/2+4}" x2="${x}" y2="${y+LANE_H/2-4}" stroke="${rwCol}" stroke-dasharray="3 3"><title>history rewritten (kept ${rw.kept}, dropped ${rw.dropped}${rw.proxy_source?", "+esc(rw.proxy_source):""})</title></line>`);
+      svg.push(`<line x1="${x}" y1="${y-LANE_H/2+4}" x2="${x}" y2="${y+LANE_H/2-4}" stroke="${rwCol}" stroke-dasharray="3 3"><title>history rewritten (kept ${esc(rw.kept)}, dropped ${esc(rw.dropped)}${rw.proxy_source?", "+esc(rw.proxy_source):""})</title></line>`);
     }
   });
   // edges (before nodes so nodes sit on top): creation op → each recall span;
@@ -363,36 +378,36 @@ function buildSVG(){
   nDrawnEdges=0;
   nLifeEdges=0;
   for(const m of G.memories){
-    const fromId=m.created&&m.created.op;
+    const fromId=m.created&&m.created.op, mid=memId(m);
     for(const r of (m.recalls||[])){
       const toLead=spanLeader[r.op]||r.op;
       if(toLead!==r.op) continue; // one edge per span
-      const a=(fromId&&opPos[fromId])||ghostPos[m.key], b=opPos[toLead];
+      const a=(fromId&&opPos[fromId])||ghostPos[mid], b=opPos[toLead];
       if(!a||!b) continue;
       const g2=recallSpans[toLead];
       // a span pill is drawn at its true start step even when its leader op was
       // dodged sideways (a co-located singleton recall) — arrows land there too
       const bx=(g2&&g2.ids.length>1&&g2.steps[0]!=null)? X(g2.steps[0]) : b.x;
-      const tg=edgeTargets[toLead]||[], ti=tg.indexOf(m.key);
+      const tg=edgeTargets[toLead]||[], ti=tg.indexOf(mid);
       // arrowheads converge on the exact step x; fan them vertically instead of
       // horizontally so every tip stays on the step gridline at any zoom
       const tyOff=(tg.length>1&&ti>=0? (ti-(tg.length-1)/2)*4 : 0);
-      const sg=(fromId&&edgeSources[fromId])||[], si=sg.indexOf(m.key);
+      const sg=(fromId&&edgeSources[fromId])||[], si=sg.indexOf(mid);
       const sx=a.x+(sg.length>1&&si>=0? (si-(sg.length-1)/2)*5 : 0);
       const y0=a.y+9, y1=b.y-9+tyOff; // ▲ bottom → ▼/pill top
       const dy=Math.max(20, Math.min(80, Math.abs(y1-y0)*0.45));
-      const col=memColor(m.key);
+      const col=memColor(mid);
       nDrawnEdges++;
-      edgeEls.push(`<path class="edge" data-mem="${esc(m.key)}" d="M${sx},${y0} C${sx},${y0+dy} ${bx},${y1-dy} ${bx},${y1}" fill="none" stroke="${col}" stroke-opacity="0.2" stroke-width="1.5"><title>${esc(m.key)}</title></path>`);
+      edgeEls.push(`<path class="edge" data-mem="${esc(mid)}" d="M${sx},${y0} C${sx},${y0+dy} ${bx},${y1-dy} ${bx},${y1}" fill="none" stroke="${col}" stroke-opacity="0.2" stroke-width="1.5"><title>${esc(m.key)}</title></path>`);
     }
     // lifecycle: creation → each update → deletion, dashed in the memory color
     const chain=[...new Set([fromId, ...(m.updates||[]).map(u=>u.op), m.deleted_by&&m.deleted_by.op]
       .filter(id=>id&&opPos[id]))].sort((p,q)=>opOrder[p]-opOrder[q]);
     for(let i=0;i+1<chain.length;i++){
-      const a=opPos[chain[i]], b=opPos[chain[i+1]], col=memColor(m.key);
-      const mid=(a.x+b.x)/2, top=Math.min(a.y,b.y)-24;
+      const a=opPos[chain[i]], b=opPos[chain[i+1]], col=memColor(mid);
+      const mid2=(a.x+b.x)/2, top=Math.min(a.y,b.y)-24;
       nLifeEdges++;
-      edgeEls.push(`<path class="edge life" data-mem="${esc(m.key)}" d="M${a.x},${a.y-9} Q${mid},${top} ${b.x},${b.y-9}" fill="none" stroke="${col}" stroke-opacity="0.35" stroke-width="1.5" stroke-dasharray="5 4"><title>${esc(m.key)} lifecycle: ${chain[i]} → ${chain[i+1]}</title></path>`);
+      edgeEls.push(`<path class="edge life" data-mem="${esc(mid)}" d="M${a.x},${a.y-9} Q${mid2},${top} ${b.x},${b.y-9}" fill="none" stroke="${col}" stroke-opacity="0.35" stroke-width="1.5" stroke-dasharray="5 4"><title>${esc(m.key)} lifecycle: ${chain[i]} → ${chain[i+1]}</title></path>`);
     }
   }
   svg.push(`<g id="edges">${edgeEls.join("")}</g>`);
@@ -414,7 +429,7 @@ function buildSVG(){
     } else {
       const lead=spanLeader[o.id], g=recallSpans[lead];
       if(o.id!==lead||!g) continue;
-      const n=g.ids.length, keys=new Set(g.rawkeys).size;
+      const n=g.ids.length, keys=new Set(g.memIds).size;
       // spans always sit at their true start step; only singleton ▼s dodge
       const px=(n>1&&g.steps[0]!=null)? X(g.steps[0]) : p.x;
       let w=n>1? Math.max(14,(X(g.steps[1])-X(g.steps[0]))+10):14;
@@ -423,13 +438,18 @@ function buildSVG(){
       if(n>1&&lt&&lt.n_steps>0&&g.steps[1]!=null) w=Math.max(14,Math.min(w, X(lt.n_steps)+2-px));
       const stepTxt=g.steps[0]==null? "step ?" : `steps ${g.steps[0]}${g.steps[1]>g.steps[0]?"–"+g.steps[1]:""}`;
       const df=spanDiff[lead];
-      const diffTxt=df? ` — set change: ${df.added.map(k=>"+"+k).concat(df.removed.map(k=>"−"+k)).join(", ")}` : "";
-      // verdict coloring: the span leader's injudge span verdict; count the
-      // distinct injudge spans covered (a memgraph span can merge several)
+      const diffTxt=df? ` — set change: ${df.added.map(k=>"+"+esc(keyOf(k))).concat(df.removed.map(k=>"−"+esc(keyOf(k)))).join(", ")}` : "";
+      // verdict coloring: a pill can cover several judged spans — it takes a
+      // verdict color only when every judged span it covers agrees (verdicts
+      // always follow the judged span, never the pill); a mixed pill stays
+      // uncolored and says so, the popover lists each span's verdict
       const spanIds=new Set(g.ids.map(id=>opsById[id]&&opsById[id].verdict_span).filter(Boolean));
-      const vcol=vdColor(o);
+      const svd=[...new Set(g.ids.map(id=>opsById[id]&&opsById[id].span_verdict).filter(Boolean))];
+      const vcol=svd.length===1? (VD_COLOR[svd[0]]||null) : null;
       const fillNow=vcol||"var(--recall)";
-      const vdTxt=o.span_verdict? ` — verdict ${o.span_verdict}${spanIds.size>1?` (covers ${spanIds.size} judged spans; click for each)`:""}` : "";
+      const vdTxt=svd.length===1
+        ? ` — verdict ${esc(svd[0])}${spanIds.size>1?` (covers ${spanIds.size} judged spans; click for each)`:""}`
+        : (svd.length>1? ` — mixed verdicts across ${spanIds.size} judged spans (click for each)` : "");
       svg.push(`<g class="opnode op-recall" data-op="${lead}" transform="translate(${px},${p.y})">
         ${n>1? `<rect x="0" y="-7" width="${w}" height="14" rx="7" fill="${fillNow}" fill-opacity="0.85"/>` : `<path d="${tri(0,0,false,7)}" fill="${fillNow}"/>`}
         <text y="${n>1?3:-10}" x="${n>1?w/2:0}" font-size="8.5" text-anchor="middle" fill="${n>1?"#fff":"#475467"}">${n>1?`×${n}`:keys}</text>
@@ -437,10 +457,10 @@ function buildSVG(){
     }
   }
   // ghost creation markers (origin not observed) — dashed ▲ with "?"
-  for(const [key,p] of Object.entries(ghostPos)){
-    svg.push(`<g class="ghostnode" data-mem="${esc(key)}" transform="translate(${p.x},${p.y})">
-      <path d="${tri(0,0,true,7)}" fill="none" stroke="${memColor(key)}" stroke-width="1.6" stroke-dasharray="3 2.4"><title>${esc(key)} — origin not observed; creation predates the loaded trajectories (first seen recalled)</title></path>
-      <text y="-10" font-size="8.5" text-anchor="middle" fill="${memColor(key)}">?</text></g>`);
+  for(const [mid,p] of Object.entries(ghostPos)){
+    svg.push(`<g class="ghostnode" data-mem="${esc(mid)}" transform="translate(${p.x},${p.y})">
+      <path d="${tri(0,0,true,7)}" fill="none" stroke="${memColor(mid)}" stroke-width="1.6" stroke-dasharray="3 2.4"><title>${esc(keyOf(mid))} — origin not observed; creation predates the loaded trajectories (first seen recalled)</title></path>
+      <text y="-10" font-size="8.5" text-anchor="middle" fill="${memColor(mid)}">?</text></g>`);
   }
   // gutter for step-less ops (unattributed — truncated or unclassifiable)
   if(GUTTER){
@@ -461,9 +481,12 @@ function buildSVG(){
   // lane labels, kept pinned on horizontal scroll via #canvas scroll handler
   const lab=[`<g id="labels"><rect x="0" y="0" width="${LABEL_W-6}" height="${height}" fill="#fff" opacity="0.93"/><line x1="${LABEL_W-6}" y1="0" x2="${LABEL_W-6}" y2="${height}" stroke="#eef1f5"/><text x="8" y="${TOP-18}" font-size="10" fill="#667085">agent step →</text>`];
   trajs.forEach((t,i)=>{
-    const y=laneY(i), pl=prettyLabel(t), hint=instanceHint(t);
-    const sub=[hint?pl.main:null, pl.sub, `${t.n_steps} steps`, t.status, t.model].filter(Boolean).join(" · ");
-    lab.push(`<text x="8" y="${y-6}" font-size="11" font-weight="600"><title>${esc(t.label)}</title>${esc(hint||pl.main)}</text>`);
+    const y=laneY(i), pl=prettyLabel(t);
+    // the recorded instance id (memory_session) leads the label when present
+    // — ignore a corrupt non-string one like any other drifted datum
+    const inst=typeof t.instance_id==="string"&&t.instance_id?t.instance_id:null;
+    const sub=[inst?pl.main:null, pl.sub, `${t.n_steps} steps`, t.status, t.model].filter(Boolean).join(" · ");
+    lab.push(`<text x="8" y="${y-6}" font-size="11" font-weight="600"><title>${esc(t.run_id)}</title>${esc(inst||pl.main)}</text>`);
     lab.push(`<text x="8" y="${y+8}" font-size="9" fill="#667085"><title>${esc(sub)}</title>${esc(shorten(sub,44))}</text>`);
   });
   lab.push(`</g>`);
@@ -476,22 +499,21 @@ function buildSVG(){
 const canvas=document.getElementById("canvas");
 const detail=document.getElementById("detail");
 let selected=null, hoverMem=null, focus=null; // focus={traj,step} — step inspector
-const memByKey=Object.fromEntries(G.memories.map(m=>[m.key,m]));
-// memory actions at (traj, step): key -> Set("created"|"updated"|"deleted"|"recalled")
+// memory actions at (traj, step): memory id -> Set("created"|"updated"|"deleted"|"recalled")
 function actionsAt(trajId, step){
   const acts={};
-  const add=(k,kind)=>{(acts[k]=acts[k]||new Set()).add(kind);};
+  const add=(id,kind)=>{(acts[id]=acts[id]||new Set()).add(kind);};
   for(const o of G.ops){
     if(o.traj!==trajId||o.step!==step) continue;
     if(o.kind==="extract"){
       for(const c of o.candidates){
         if(!c.key) continue;
-        const m=memByKey[c.key];
-        add(c.key, m&&m.created&&m.created.op===o.id ? "created" : "updated");
+        const id=memId(c), m=memById[id];
+        add(id, m&&m.created&&m.created.op===o.id ? "created" : "updated");
       }
-      for(const m of G.memories) if(m.deleted_by&&m.deleted_by.op===o.id) add(m.key,"deleted");
+      for(const m of G.memories) if(m.deleted_by&&m.deleted_by.op===o.id) add(memId(m),"deleted");
     } else {
-      for(const dm of o.memories) if(dm.key) add(dm.key,"recalled");
+      for(const dm of o.memories) if(dm.key) add(memId(dm),"recalled");
     }
   }
   return acts;
@@ -500,7 +522,7 @@ function collapseUses(recalls){
   const byT={};
   for(const r of recalls){ (byT[r.traj]=byT[r.traj]||[]).push(r.step); }
   return Object.entries(byT).map(([t,ss])=>{
-    ss=ss.filter(s=>s!=null).sort((a,b)=>a-b);
+    ss=[...new Set(ss.filter(s=>s!=null))].sort((a,b)=>a-b);
     const ranges=[]; let a=null,b=null;
     for(const s of ss){ if(a==null){a=b=s;continue;} if(s===b+1){b=s;continue;} ranges.push([a,b]); a=b=s; }
     if(a!=null) ranges.push([a,b]);
@@ -520,7 +542,7 @@ function paintEdges(){
   const hotKey=selected||hoverMem;
   document.querySelectorAll(".op-recall").forEach(n=>{
     const g=recallSpans[n.dataset.op];
-    n.classList.toggle("hot", !!(hotKey&&g&&g.rawkeys.includes(hotKey)));
+    n.classList.toggle("hot", !!(hotKey&&g&&g.memIds.includes(hotKey)));
   });
 }
 function clearSel(){
@@ -536,15 +558,15 @@ function locateOp(opId){
   el.classList.add("located");
   setTimeout(()=>el.classList.remove("located"), 1700);
 }
-function selectMemory(key){
-  clearSel(); selected=key; paintEdges();
-  const li=document.querySelector(`#memlist li[data-mem="${CSS.escape(key)}"]`);
+function selectMemory(id){
+  clearSel(); selected=id; paintEdges();
+  const li=document.querySelector(`#memlist li[data-mem="${CSS.escape(id)}"]`);
   if(li) li.classList.add("sel");
-  const m=G.memories.find(x=>x.key===key); if(!m) return;
+  const m=memById[id]; if(!m) return;
   const c=m.created||{};
   if(c.op) locateOp(c.op);
   else {
-    const gh=document.querySelector(`.ghostnode[data-mem="${CSS.escape(key)}"]`);
+    const gh=document.querySelector(`.ghostnode[data-mem="${CSS.escape(id)}"]`);
     if(gh){ gh.scrollIntoView({behavior:"smooth", block:"nearest", inline:"center"});
       gh.classList.add("located"); setTimeout(()=>gh.classList.remove("located"), 1700); }
   }
@@ -557,8 +579,8 @@ function selectMemory(key){
   const trailHtml=trail.length>1
     ? `<div class="kv">lifecycle: ${trail.map(x=>`<span class="chip" style="color:${x.st==="deleted"?"var(--flag)":(STATUS_COLOR[x.st]||"var(--muted)")}" title="${esc(x.op||"")}">${esc(x.st)}</span>`).join(" → ")}</div>`
     : "";
-  detail.innerHTML=`<h3 style="color:${memColor(key)}">${esc(key)}</h3>
-    <div class="kv"><span class="chip">${esc(m.memory_type||"?")}</span><span class="chip">${esc(m.status)}</span>${m.deleted_by?`<span class="chip" style="color:var(--flag)">deleted</span>`:""}${m.confidence!=null?`<span class="chip">conf ${m.confidence}</span>`:""}${m.origin==="not_observed"?`<span class="chip">origin not observed</span>`:""}</div>
+  detail.innerHTML=`<h3 style="color:${memColor(id)}">${esc(m.key)}</h3>
+    <div class="kv"><span class="chip">${esc(m.memory_type||"?")}</span><span class="chip">${esc(m.status)}</span>${m.deleted_by?`<span class="chip" style="color:var(--flag)">deleted</span>`:""}${m.confidence!=null?`<span class="chip">conf ${esc(m.confidence)}</span>`:""}${m.origin==="not_observed"?`<span class="chip">origin not observed</span>`:""}${m.namespace?`<span class="chip" title="store namespace ${esc(m.namespace)}">store ${esc(shorten(m.namespace,16))}</span>`:""}</div>
     <div class="kv">created: ${c.op?`${esc(c.op)} @ ${esc(c.traj)} step ${c.step}`:"— (origin not observed)"}</div>
     ${trailHtml}
     ${m.recalled_before_creation&&m.recalled_before_creation.length?`<div class="kv" style="color:var(--flag)">⚠ ${m.recalled_before_creation.length} recall(s) precede this creation — the store entry likely predates the loaded trajectories</div>`:""}
@@ -567,8 +589,14 @@ function selectMemory(key){
     ${m.deleted_by?`<div class="kv">deleted by ${esc(m.deleted_by.op)} @ step ${m.deleted_by.step}</div>`:""}
     <pre>${esc(m.value||"")}</pre>`;
 }
-function memChip(key,sign){
-  return `<span class="chip memlink" data-mem="${esc(key)}" title="select memory">${sign||""}${esc(key)}</span>`;
+function memChip(id,sign,label){
+  return `<span class="chip memlink" data-mem="${esc(id)}" title="select memory">${sign||""}${esc(label||keyOf(id))}</span>`;
+}
+// a bare key links only when it names exactly one loaded memory (an ambiguous
+// or unknown key renders as plain text, never a wrong link)
+function chipForKey(key,sign){
+  const id=idByKey[key];
+  return id? memChip(id,sign,key) : `<span class="chip">${sign||""}${esc(key)}</span>`;
 }
 function bindMemLinks(){
   detail.querySelectorAll(".memlink").forEach(el=>el.addEventListener("click",ev=>{
@@ -589,14 +617,17 @@ function showOp(opId){
       h+=`<h4>candidates (${o.candidates.length})</h4>`;
       for(const c of o.candidates){
         const stCol=STATUS_COLOR[c.review_status]||"var(--muted)";
-        h+=`<div class="mrow"><div>${c.key?memChip(c.key):"—"}<span class="chip" style="color:${stCol}">${esc(c.review_status||"?")}</span>${c.confidence!=null?`<span class="meta">conf ${c.confidence}</span>`:""}</div><div class="vline" title="${esc(c.value||"")}">${esc(shorten(c.value,150))}</div></div>`;
+        h+=`<div class="mrow"><div>${c.key?memChip(memId(c)):"—"}<span class="chip" style="color:${stCol}">${esc(c.review_status||"?")}</span>${c.confidence!=null?`<span class="meta">conf ${esc(c.confidence)}</span>`:""}</div><div class="vline" title="${esc(c.value||"")}">${esc(shorten(c.value,150))}</div></div>`;
       }
     }
     if(o.deletions&&o.deletions.length){
       h+=`<h4>deletions (${o.deletions.length})</h4>`;
       for(const d of o.deletions){
         const tgt=d.target||"";
-        h+=`<div class="mrow"><div>${memByKey[tgt]?memChip(tgt):esc(tgt)}</div></div>`;
+        // the before-ref pins the exact (namespace, key); a ref-less target
+        // resolves by bare key only when unambiguous, else plain text
+        const id=d.ref? memId(d.ref) : idByKey[tgt];
+        h+=`<div class="mrow"><div>${id&&memById[id]?memChip(id,"",tgt):esc(tgt)}</div></div>`;
       }
     }
     if(o.rejections&&o.rejections.count){
@@ -606,18 +637,18 @@ function showOp(opId){
   } else {
     const g=recallSpans[opId];
     const n=g?g.ids.length:1, steps=g?g.steps:[o.step];
-    const keys=new Set(o.memories.map(m=>m.key)).size;
+    const keys=new Set(o.memories.map(memId)).size;
     body={steps,injections:g?g.ids:[o.id],memories:o.memories,
           search_operation_id:o.search_operation_id,query:o.query,matched:o.matched,binding_status:o.binding_status};
     h+=`<div class="kv">${n} injection${n>1?"s":""} · steps ${steps[0]==null?"?":steps[0]}${steps[1]>steps[0]?"–"+steps[1]:""} · ${keys} distinct memor${keys>1?"ies":"y"}</div>`;
     if(o.matched!=null||o.binding_status||o.query!=null)
       h+=`<div class="kv">${o.matched!=null?`search returned ${o.matched}`:""}${o.binding_status?` · binding ${esc(o.binding_status)}`:""}${o.query!=null?` · query “${esc(shorten(o.query,120))}”`:""}</div>`;
     const df=spanDiff[opId];
-    if(df) h+=`<div class="kv">set change: ${df.added.map(k=>memChip(k,"+")).join(" ")}${df.added.length&&df.removed.length?" ":""}${df.removed.map(k=>memChip(k,"−")).join(" ")}</div>`;
+    if(df) h+=`<div class="kv">set change: ${df.added.map(id=>memChip(id,"+",keyOf(id))).join(" ")}${df.added.length&&df.removed.length?" ":""}${df.removed.map(id=>memChip(id,"−",keyOf(id))).join(" ")}</div>`;
     if(o.memories.length){
       h+=`<h4>delivered (${o.memories.length})</h4>`;
       for(const dm of o.memories){
-        h+=`<div class="mrow"><div>${memChip(dm.key)}<span class="chip">${esc(dm.memory_type||"")}${dm.needs_verification?" ⚠":""}</span>${dm.confidence!=null?`<span class="meta">conf ${dm.confidence}</span>`:""}</div><div class="vline" title="${esc(dm.value||"")}">${esc(shorten(dm.value,150))}</div></div>`;
+        h+=`<div class="mrow"><div>${memChip(memId(dm))}<span class="chip">${esc(dm.memory_type||"")}${dm.needs_verification?" ⚠":""}</span>${dm.confidence!=null?`<span class="meta">conf ${esc(dm.confidence)}</span>`:""}</div><div class="vline" title="${esc(dm.value||"")}">${esc(shorten(dm.value,150))}</div></div>`;
       }
     }
     // injudge verdicts for every judged span this memgraph span covers
@@ -625,8 +656,7 @@ function showOp(opId){
     if(vops.length){
       h+=`<h4>injection verdicts (injudge)</h4>`;
       const seen=new Set();
-      // enum glyphs per signal (v3 accuracy/influence/effect, v4 novelty);
-      // bool signals (v1/v2 artifacts, v3 novelty) render plain ✓/✗ below
+      // enum glyphs per signal; relevance is the only bool signal
       const SIG_ENUM={
         accuracy:{corroborated:["✓","#2e9e5b"],uncontradicted:["≈","#5b8dd9"],contradicted:["✗","#d64545"]},
         novelty:{novel:["✓","#2e9e5b"],confirming:["≈","#5b8dd9"],redundant:["✗","#d64545"]},
@@ -640,7 +670,9 @@ function showOp(opId){
           mark=v?"✓":"✗"; col=v?"#2e9e5b":"#d64545";
         } else if(v!=null){
           const cell=(SIG_ENUM[s]||{})[v];
-          if(cell){ mark=cell[0]; col=cell[1]; } else { mark=String(v); }
+          // a foreign/hand-edited verdicts artifact can carry an off-enum
+          // value — escape it like every other interpolated datum
+          if(cell){ mark=cell[0]; col=cell[1]; } else { mark=esc(String(v)); }
         }
         return `<span title="${esc(s)}: ${esc(v==null?"null":String(v))}${e.note?" — "+esc(e.note):""}" style="color:${col}">${abbr}${mark}</span>`;
       };
@@ -649,21 +681,22 @@ function showOp(opId){
         seen.add(x.verdict_span);
         const d=x.verdict_detail||{}, v=d.verdict||x.span_verdict||"unjudged";
         const dc=d.delivery_cost||{};
-        const dcTxt=dc.approx_tokens_total?`<span class="meta">delivered ${dc.deliveries}× ≈${dc.approx_tokens_total.toLocaleString()} tokens</span>`:"";
-        const oow=d.out_of_window_influence?`<span class="chip" style="color:#b8860b" title="influence judgment rests on evidence outside the evidence window">⚠ out-of-window</span>`:"";
-        h+=`<div class="mrow"><div><span class="chip" style="color:${VD_COLOR[v]||"var(--muted)"}">${esc(v)}</span>${d.confidence!=null?`<span class="meta">conf ${d.confidence}</span>`:""}<span class="meta">${esc(x.verdict_span)}</span>${d.auto?`<span class="meta">auto: ${esc(d.auto)}</span>`:""}${oow}${dcTxt}</div>`;
+        // artifact-controlled numbers render escaped like any other datum;
+        // the thousands-formatted token count only when it really is a number
+        const dcTxt=typeof dc.approx_tokens_total==="number"&&dc.approx_tokens_total?`<span class="meta">delivered ${esc(dc.deliveries)}× ≈${dc.approx_tokens_total.toLocaleString()} tokens</span>`:"";
+        h+=`<div class="mrow"><div><span class="chip" style="color:${VD_COLOR[v]||"var(--muted)"}">${esc(v)}</span>${d.confidence!=null?`<span class="meta">conf ${esc(d.confidence)}</span>`:""}<span class="meta">${esc(x.verdict_span)}</span>${d.auto?`<span class="meta">auto: ${esc(d.auto)}</span>`:""}${dcTxt}</div>`;
         if(d.error) h+=`<div class="flagbox">judge error: ${esc(d.error)}</div>`;
-        if(d.rationale) h+=`<div class="vline" style="white-space:normal">${esc(d.rationale)}</div>`;
+        if(d.analysis) h+=`<div class="vline" style="white-space:normal">${esc(d.analysis)}</div>`;
         if(d.rubric&&Object.keys(d.rubric).length){
-          // per-memory rubric marks: R(elevance) A(ccuracy) N(ovelty, v4+)
-          // I(nfluence) P(ositive effect); v1/v2 artifacts have no novelty
+          // per-memory rubric marks: R(elevance) A(ccuracy) N(ovelty)
+          // I(nfluence) P(ositive effect)
           for(const [mk,sig] of Object.entries(d.rubric))
-            h+=`<div class="vline">${memChip(mk)} ${sigCell(sig,"relevance","R")} ${sigCell(sig,"accuracy","A")}${sig.novelty?" "+sigCell(sig,"novelty","N"):""} ${sigCell(sig,"influence","I")} ${sigCell(sig,"positive_effect","P")}</div>`;
+            h+=`<div class="vline">${chipForKey(mk)} ${sigCell(sig,"relevance","R")} ${sigCell(sig,"accuracy","A")} ${sigCell(sig,"novelty","N")} ${sigCell(sig,"influence","I")} ${sigCell(sig,"positive_effect","P")}</div>`;
         }
         for(const [k,u] of Object.entries(d.memory_usage||{}))
           h+=`<div class="vline" title="${esc(u.evidence||"")}">${esc(k)} → ${esc(u.usage)}${u.reason?` <span class="meta">(${esc(u.reason)})</span>`:""}</div>`;
         for(const evv of (d.evidence||[]))
-          h+=`<div class="vline" style="white-space:normal">• ${esc(evv.claim||"")} (steps ${(evv.steps||[]).join(",")||"?"}; seqs ${(evv.seqs||[]).join(",")||"?"})</div>`;
+          h+=`<div class="vline" style="white-space:normal">• ${esc(evv.claim||"")} (steps ${esc((evv.steps||[]).join(",")||"?")}; seqs ${esc((evv.seqs||[]).join(",")||"?")})</div>`;
         h+=`</div>`;
       }
     }
@@ -709,7 +742,7 @@ function mount(keepScroll){
   const nE=G.ops.filter(o=>o.kind==="extract").length, nR=G.ops.filter(o=>o.kind==="recall").length;
   const nDeliv=G.memories.reduce((s,m)=>s+(m.recalls||[]).length,0);
   let vdStats="";
-  if(G.tool.verdicts){
+  if(G.tool&&G.tool.verdicts){
     document.getElementById("legend-verdicts").style.display="";
     const seenS=new Set(), vc={};
     for(const o of G.ops){
@@ -791,23 +824,24 @@ function renderMemList(filter){
   let shown=0;
   for(const m of G.memories){
     if(filter && !m.key.toLowerCase().includes(filter)) continue;
-    const kinds=acts? acts[m.key]:null;
+    const mid=memId(m);
+    const kinds=acts? acts[mid]:null;
     if(acts && !kinds) continue; // step inspector: only memories acting at this step
     shown++;
     const li=document.createElement("li");
-    li.dataset.mem=m.key;
+    li.dataset.mem=mid;
     const used=m.recalls.length;
     const created=(m.created&&m.created.op)?1:0;
     // terminal state wins: a deleted memory shows "deleted", not its last review status
     const effStatus=m.deleted_by? "deleted" : m.status;
     const stCol=m.deleted_by? "var(--flag)" : (STATUS_COLOR[m.status]||"var(--muted)");
-    li.title=`${m.key} — status: ${effStatus}${m.deleted_by?` (was ${m.status}; deleted by ${m.deleted_by.op} @ step ${m.deleted_by.step})`:""}; created ${created?"at "+m.created.traj+" step "+m.created.step:"not observed"}; recalled ${used}×. Dot color matches its edges.`;
+    li.title=`${m.key}${m.namespace?` (store ${m.namespace})`:""} — status: ${effStatus}${m.deleted_by?` (was ${m.status}; deleted by ${m.deleted_by.op} @ step ${m.deleted_by.step})`:""}; created ${created?"at "+m.created.traj+" step "+m.created.step:"not observed"}; recalled ${used}×. Dot color matches its edges.`;
     const stHtml=kinds
       ? [...kinds].map(k=>`<span class="act" style="color:${ACTION_COLOR[k]}">${ACTION_LABEL[k]}</span>`).join(" ")
       : `<span style="color:${stCol}">${esc(effStatus)}</span>${m.origin==="not_observed"?" · origin?":""} · ▲${created} ▼${used}`;
-    li.innerHTML=`<span class="badge" style="background:${memColor(m.key)}"></span><span class="mkey">${esc(m.key)}</span><span class="st">${stHtml}</span>`;
-    li.onclick=()=>selectMemory(m.key);
-    li.onmouseenter=()=>{hoverMem=m.key;paintEdges();};
+    li.innerHTML=`<span class="badge" style="background:${memColor(mid)}"></span><span class="mkey">${esc(m.key)}</span><span class="st">${stHtml}</span>`;
+    li.onclick=()=>selectMemory(mid);
+    li.onmouseenter=()=>{hoverMem=mid;paintEdges();};
     li.onmouseleave=()=>{hoverMem=null;paintEdges();};
     memlist.appendChild(li);
   }
@@ -853,5 +887,26 @@ if(canvas.scrollWidth>canvas.clientWidth+2) zoomFit();
 
 def render_html(graph: dict, title: str = "memgraph — memory operation relationships") -> str:
     """Render the graph dict as one self-contained HTML document."""
-    payload = json.dumps(graph, ensure_ascii=False).replace("</", "<\\/")
-    return _TEMPLATE.replace("__GRAPH_JSON__", payload).replace("__TITLE__", title)
+    # every "<" in the payload becomes its unicode escape (valid in both
+    # JSON and JS string literals): trajectory-controlled values can neither
+    # close the script element ("</script>") nor open a script-data comment
+    # ("<!--"), which would swallow the rest of the document. U+2028/U+2029
+    # get the same treatment: line terminators a pre-ES2019 JS parser
+    # rejects inside string literals.
+    payload = (
+        json.dumps(graph, ensure_ascii=False)
+        .replace("<", "\\u003c")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+    )
+    # one substitution pass: replacements are never re-scanned, so a graph
+    # datum carrying the literal __TITLE__ survives, a title carrying the
+    # literal __GRAPH_JSON__ survives, and no ordering between the two
+    # placeholders matters. The title lands in <title>/<h1> text — escape it
+    # like any other interpolated string.
+    escaped = html.escape(title)
+    return re.sub(
+        "__TITLE__|__GRAPH_JSON__",
+        lambda m: escaped if m.group(0) == "__TITLE__" else payload,
+        _TEMPLATE,
+    )
