@@ -609,6 +609,22 @@ def test_delivery_missing_search_link_is_not_reported_as_unknown(tmp_path):
     assert recall.search_operation_id is None
 
 
+def test_delivery_naming_a_generation_op_is_not_reported_as_unknown(tmp_path):
+    """A delivery whose search_operation_id names a recorded GENERATION
+    operation is a kind mismatch, not an unknown search — the warning must
+    say which (the id visibly exists in the log)."""
+    b = AnnotatedBuilder()
+    b.agent_turn(with_task=True)
+    gen_id = b.generate(produced=[cure_ref("k1")], extraction_step="1")
+    b.delivery(gen_id, memories=[cure_ref("k1")], main_step=1)
+    _, ops, warnings = parse(b, tmp_path)
+    assert any("names generation operation" in w and "not a search" in w
+               for w in warnings)
+    assert not any("unknown search operation" in w for w in warnings)
+    (recall,) = [o for o in ops if o.kind == "recall"]
+    assert recall.matched is None and recall.query is None
+
+
 def _reader_events(*payloads):
     """Session + binds, then one memory_delivery per payload."""
     evs = [

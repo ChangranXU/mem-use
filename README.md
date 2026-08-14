@@ -19,7 +19,9 @@ label conventions, no prompt prefixes, no payload guessing.
 A run without annotations yields zero memory operations plus a validation
 note — valid input, not an error. Each input path may be a trajectory dir
 (containing `trajectory.jsonl`), a `trajectory.jsonl` file, or a root dir
-scanned recursively.
+scanned recursively. A path that matches nothing (a typo, a wrong-named
+file, an empty tree) is a usage error named explicitly, never silently
+dropped.
 
 ## Setup
 

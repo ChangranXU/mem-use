@@ -165,7 +165,8 @@ class AnnotatedBuilder:
 
     def generate(self, produced=(), rejections=None, status="completed",
                  extraction_step="10", changes=(), error_codes=(), bind=None):
-        """One generation operation (start → changes → end)."""
+        """One generation operation (start → changes → end); returns its
+        operation_id (e.g. for a delivery naming it by mistake)."""
         header = self._op_header()
         self.annotation("memory_generate_start",
                         {**header, "trigger": "step", "inputs": []}, lane=self.mem)
@@ -213,7 +214,7 @@ class AnnotatedBuilder:
             call_refs=[bind] if bind else [],
             terminal_call_ref=bind,
         )
-        return self
+        return header["operation_id"]
 
     def search(self, returned=(), query="the task query", with_end=True,
                matched_count=None):

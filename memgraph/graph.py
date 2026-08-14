@@ -68,19 +68,30 @@ def discover_trajectories(paths: list[Path]) -> list[Path]:
     A path may be a trajectory dir, a trajectory.jsonl file, or a root dir to
     scan recursively. Results are deduplicated and sorted by directory name
     (timestamp-prefixed in practice); run.json started_at order is applied
-    later, once parsed.
+    later, once parsed. A path that yields no trajectory dir (a typo, a
+    wrong-named file, an empty tree) is a usage error: named explicitly rather
+    than silently dropped — a vanished argument would misread the run as
+    covering inputs it never saw.
     """
     found: dict[str, Path] = {}
     for p in paths:
         p = Path(p)
-        if p.is_file() and p.name == "trajectory.jsonl":
-            found[str(p.parent)] = p.parent
-        elif p.is_dir():
+        if p.is_file():
+            if p.name == "trajectory.jsonl":
+                found[str(p.parent)] = p.parent
+                continue
+            raise SystemExit(f"error: {p} is a file but not named trajectory.jsonl")
+        if p.is_dir():
             if (p / "trajectory.jsonl").is_file():
                 found[str(p)] = p
-            else:
-                for jsonl in sorted(p.rglob("trajectory.jsonl")):
+                continue
+            nested = sorted(p.rglob("trajectory.jsonl"))
+            if nested:
+                for jsonl in nested:
                     found[str(jsonl.parent)] = jsonl.parent
+                continue
+            raise SystemExit(f"error: no trajectory.jsonl found under {p}")
+        raise SystemExit(f"error: {p} does not exist")
     return [found[k] for k in sorted(found)]
 
 
@@ -223,9 +234,6 @@ def build_graph(
                         f"{op.id}: deleted memory {key!r} has no observed creation in "
                         "the loaded trajectories (origin not observed)",
                     )
-                if ident not in registry:
-                    note("warn", f"{op.id}: deletion target {target!r} matched no known memory")
-                    continue
                 registry[ident].deleted_by = {
                     "op": op.id,
                     "traj": op.traj,

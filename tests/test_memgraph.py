@@ -190,6 +190,29 @@ def test_corrupt_field_values_degrade_never_crash(tmp_path):
     assert graph["memories"][0]["key"] == "item-k1"
 
 
+def test_discover_trajectories_names_unmatched_paths(tmp_path):
+    """A CLI path that yields no trajectory dir is a usage error named
+    explicitly — silently dropping it (a typo next to a valid root, a
+    wrong-named file) would misread the run as covering inputs it never saw."""
+    from eval.memgraph.graph import discover_trajectories
+
+    TrajBuilder().agent_turn(with_task=True).write(tmp_path / "runs" / "t1")
+    assert discover_trajectories([tmp_path / "runs"]) == [tmp_path / "runs" / "t1"]
+    assert discover_trajectories([tmp_path / "runs" / "t1" / "trajectory.jsonl"]) == [
+        tmp_path / "runs" / "t1"
+    ]
+    stray = tmp_path / "runs" / "notes.txt"
+    stray.write_text("x", encoding="utf-8")
+    with pytest.raises(SystemExit, match="not named trajectory.jsonl"):
+        discover_trajectories([tmp_path / "runs" / "t1", stray])
+    with pytest.raises(SystemExit, match="does not exist"):
+        discover_trajectories([tmp_path / "runs" / "t1", tmp_path / "typo"])
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with pytest.raises(SystemExit, match="no trajectory.jsonl found under"):
+        discover_trajectories([tmp_path / "runs" / "t1", empty])
+
+
 # ---------------------------------------------------------------- linking
 
 

@@ -110,7 +110,7 @@ def _reasoning_of(msg: dict) -> str:
 
 
 def build_step_stream(
-    events: list[dict], memory_lanes: set, warnings: list[str]
+    events: list[dict], memory_lanes: set[str | None], warnings: list[str]
 ) -> list[AgentStep]:
     """One AgentStep per completed agent turn, in turn order.
 

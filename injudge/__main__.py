@@ -104,12 +104,22 @@ def main(argv: list[str] | None = None) -> int:
     cfg = None
     if not args.dry_run:
         # fail fast on unwritable report paths, before any paid judge call:
-        # flush() rewrites the artifact after every trajectory, so an
-        # existing directory there would abort the run mid-way and lose the
-        # completed judging
+        # flush() rewrites the artifact after every trajectory, so an output
+        # that cannot be written would abort the run mid-way and lose the
+        # completed judging. The probe writes the same tmp sibling
+        # atomic_write later targets (a read-only or missing parent fails
+        # here, not after the judging is paid for).
         for out_path in (args.json_out, args.output):
-            if out_path is not None and out_path.is_dir():
+            if out_path is None:
+                continue
+            if out_path.is_dir():
                 raise SystemExit(f"error: output path {out_path} is a directory")
+            probe = out_path.with_name(out_path.name + ".tmp")
+            try:
+                probe.write_text("", encoding="utf-8")
+                probe.unlink()
+            except OSError as e:
+                raise SystemExit(f"error: cannot write report to {out_path}: {e}") from e
         env_path = args.env or _DEFAULT_ENV
         if not env_path.is_file():
             raise SystemExit(f"error: no .env file at {env_path} (or use --dry-run)")

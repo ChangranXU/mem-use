@@ -24,7 +24,7 @@ class Trajectory:
     n_steps: int = 0  # agent steps (non-memory-lane turns)
     memory_lane: str | None = None  # proxy_source of the bound memory lane
     # all bound memory-lane proxy_sources (internal; None = the unprefixed lane)
-    memory_lanes: set = field(default_factory=set)
+    memory_lanes: set[str | None] = field(default_factory=set)
     adapter: str | None = None  # memory adapter name@version
     instance_id: str | None = None  # from memory_session
     # exact task statement from memory_session (internal: the judge input —

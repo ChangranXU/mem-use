@@ -262,7 +262,8 @@ for(const m of G.memories){
 const rewriteBands={}; // traj id -> [{a,b,count,items}] (count>=2)
 const rewriteSingles={}; // traj id -> [rw]
 for(const t of trajs){
-  const rws=(t.rewrites||[]).slice().sort((a,b)=>(a.step==null?0:a.step)-(b.step==null?0:b.step));
+  // rewrites always carry an int step (parse_trajectory computes it), unlike op steps
+  const rws=(t.rewrites||[]).slice().sort((a,b)=>a.step-b.step);
   const bands=[], singles=[];
   let grp=null;
   const close=()=>{ if(!grp) return;
@@ -270,7 +271,7 @@ for(const t of trajs){
     else singles.push(grp.items[0]);
     grp=null; };
   for(const rw of rws){
-    const s=rw.step==null?0:rw.step;
+    const s=rw.step;
     if(grp && s<=grp.b+1){ grp.b=Math.max(grp.b,s); grp.items.push(rw); continue; }
     close();
     grp={a:s,b:s,items:[rw]};
@@ -367,7 +368,7 @@ function buildSVG(){
       svg.push(`<line x1="${xe}" y1="${y-LANE_H/2+2}" x2="${xe}" y2="${y+LANE_H/2-2}" stroke="#c3cbd8" stroke-width="1.2"><title>${esc(t.id)} ends at step ${t.n_steps}</title></line>`);
     }
     for(const rw of rewriteSingles[t.id]){
-      const x=X(rw.step==null?0:rw.step);
+      const x=X(rw.step);
       const rwCol=rw.proxy_source===t.memory_lane? "#b06ab3" : "#c3cbd8";
       svg.push(`<line x1="${x}" y1="${y-LANE_H/2+4}" x2="${x}" y2="${y+LANE_H/2-4}" stroke="${rwCol}" stroke-dasharray="3 3"><title>history rewritten (kept ${esc(rw.kept)}, dropped ${esc(rw.dropped)}${rw.proxy_source?", "+esc(rw.proxy_source):""})</title></line>`);
     }

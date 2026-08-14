@@ -2573,6 +2573,21 @@ def test_cli_report_path_into_a_directory_fails_fast(monkeypatch, tmp_path):
                            "--json", str(outdir), "--env", str(_env(tmp_path))])
 
 
+def test_cli_report_path_into_a_missing_parent_fails_fast(monkeypatch, tmp_path):
+    """A --json path whose parent directory does not exist (or is read-only)
+    aborts before any paid judge call — the incremental flush would otherwise
+    crash mid-run and lose the completed judging."""
+    b = TrajBuilder().agent_turn(with_task=True).recall(REF_A)
+    _write_run(tmp_path / "runs", "t1", b)
+    monkeypatch.setattr("eval.injudge.judge.urlopen",
+                        fake_urlopen_factory([], fail=AssertionError("network!")))
+    out = tmp_path / "missing" / "injudge-report.json"
+    with pytest.raises(SystemExit, match="cannot write report to"):
+        injudge_main.main([str(tmp_path / "runs"),
+                           "--json", str(out), "--env", str(_env(tmp_path))])
+    assert not out.exists() and not out.with_name(out.name + ".tmp").exists()
+
+
 def test_cli_end_to_end_mocked_judge(monkeypatch, tmp_path):
     a = TrajBuilder().agent_turn(with_task=True)
     for _ in range(3):

@@ -383,10 +383,19 @@ def _recall_op_from_delivery(
                 returned = end_payload.get("returned")
                 op.matched = len(returned) if isinstance(returned, list) else None
     elif isinstance(search_id, str):
-        warnings.append(
-            f"{run_id}: delivery {payload.get('delivery_id')} references unknown "
-            f"search operation {search_id}"
-        )
+        if search is not None:
+            # the id names a recorded operation, but a generation one — a kind
+            # mismatch, not an unknown search (the annotations index reports
+            # the structural side; here the recall op just gets no query)
+            warnings.append(
+                f"{run_id}: delivery {payload.get('delivery_id')} names generation "
+                f"operation {search_id}, not a search"
+            )
+        else:
+            warnings.append(
+                f"{run_id}: delivery {payload.get('delivery_id')} references unknown "
+                f"search operation {search_id}"
+            )
     else:
         # schema v6 requires the link (the gate rejects a delivery whose
         # search is missing or incomplete) — absent is not "unknown"
