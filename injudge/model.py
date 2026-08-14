@@ -2,7 +2,7 @@
 
 All containers are plain dataclasses. Steps are agent steps: the count of
 completed non-memory-LLM turns, 1-based — identical to memgraph's step
-attribution (eval/memgraph/parse_trajectory.py).
+attribution (memgraph/parse_trajectory.py).
 """
 
 from __future__ import annotations

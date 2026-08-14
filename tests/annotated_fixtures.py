@@ -298,6 +298,6 @@ class AnnotatedBuilder:
 def parse(b: AnnotatedBuilder, tmp_path, name="t1"):
     d = b.write(tmp_path / name)
     warnings = []
-    from eval.memgraph.parse_trajectory import parse_trajectory
+    from memgraph.parse_trajectory import parse_trajectory
     traj, ops, _events = parse_trajectory(d, warnings)
     return traj, ops, warnings

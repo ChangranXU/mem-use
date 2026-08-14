@@ -20,9 +20,9 @@ from __future__ import annotations
 import sys
 from datetime import datetime, timezone
 
-from eval.injudge.aggregate import aggregate, policy_rollup
-from eval.injudge.judge import RUBRIC_SIGNALS
-from eval.injudge.model import InjectionSpan, step_range
+from injudge.aggregate import aggregate, policy_rollup
+from injudge.judge import RUBRIC_SIGNALS
+from injudge.model import InjectionSpan, step_range
 
 _MARK = {"positive": "+", "negative": "−", "neutral": "○", "error": "!", "unjudged": "?"}
 _SIGNAL_ABBR = {
@@ -133,7 +133,7 @@ def build_artifact(
     overall = aggregate(operations, sum(n_injections_by_traj.values()), len(trajectories))
     overall["policy"] = policy_rollup(trajectories)
     return {
-        "tool": {"name": "eval.injudge", "schema": "injudge.report/v4", **tool_cfg},
+        "tool": {"name": "injudge", "schema": "injudge.report/v4", **tool_cfg},
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "trajectories": trajectories,
         "operations": operations,

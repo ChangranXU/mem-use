@@ -1,4 +1,5 @@
-"""eval/ — trajectory analysis for memory-system quality evaluation."""
+"""Shared cross-tool helpers — the two tools are sibling top-level packages
+(memgraph/, injudge/), so what both need lives here at the checkout root."""
 
 from __future__ import annotations
 

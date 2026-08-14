@@ -34,8 +34,8 @@ The counting rules:
 
 from __future__ import annotations
 
-from eval.injudge.judge import RUBRIC_SIGNALS
-from eval.memgraph.annotations import namespace_of
+from injudge.judge import RUBRIC_SIGNALS
+from memgraph.annotations import namespace_of
 
 _VERDICTS = ("positive", "negative", "neutral")
 _USAGES = ("used", "noted", "ignored", "misused", "unclear")

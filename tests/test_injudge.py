@@ -1,6 +1,6 @@
-"""Fixture tests for eval.injudge: step stream, spans, judge input, verdicts.
+"""Fixture tests for injudge: step stream, spans, judge input, verdicts.
 
-Fixtures are schema-v6 annotated trajectories (eval/tests/annotated_fixtures.py):
+Fixtures are schema-v6 annotated trajectories (tests/annotated_fixtures.py):
 memory actions are memory_* events, and the step stream consumes the ordinary
 turn/message/tool events. The step-stream quirks verified against real runs
 still apply: origin-history re-records after MAIN-lane rewrites, turn-less
@@ -17,9 +17,9 @@ from urllib.error import HTTPError
 
 import pytest
 
-from eval.injudge import __main__ as injudge_main
-from eval.injudge.aggregate import aggregate, policy_rollup
-from eval.injudge.judge import (
+from injudge import __main__ as injudge_main
+from injudge.aggregate import aggregate, policy_rollup
+from injudge.judge import (
     SYSTEM_PROMPT,
     VERDICT_SCHEMA,
     JudgeConfig,
@@ -40,20 +40,20 @@ from eval.injudge.judge import (
     render_user,
     resolve_config,
 )
-from eval.injudge.model import AgentStep, InjectionSpan, ToolExec
-from eval.injudge.report import (
+from injudge.model import AgentStep, InjectionSpan, ToolExec
+from injudge.report import (
     _policy_line,
     build_artifact,
     operation_record,
     print_summary,
     render_markdown,
 )
-from eval.injudge.spans import content_fingerprint, group_spans
-from eval.injudge.steps import build_step_stream, prompt_tokens_total
-from eval.memgraph.parse_trajectory import parse_trajectory
-from eval.tests.annotated_fixtures import MEM, TASK
-from eval.tests.annotated_fixtures import AnnotatedBuilder as TrajBuilder
-from eval.tests.annotated_fixtures import cure_ref
+from injudge.spans import content_fingerprint, group_spans
+from injudge.steps import build_step_stream, prompt_tokens_total
+from memgraph.parse_trajectory import parse_trajectory
+from annotated_fixtures import MEM, TASK
+from annotated_fixtures import AnnotatedBuilder as TrajBuilder
+from annotated_fixtures import cure_ref
 
 REF_A = cure_ref("key_a", "Use xarray/core/variable.py apply_ufunc carefully",
                  confidence=0.95)
@@ -1504,7 +1504,7 @@ def _judge_input_fixture():
 
 def test_judge_span_end_to_end(monkeypatch):
     record = []
-    monkeypatch.setattr("eval.injudge.judge.urlopen", fake_urlopen_factory(record))
+    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory(record))
     span, steps = _judge_input_fixture()
     cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
     verdict = judge_span(span, steps, cfg, [])
@@ -1566,7 +1566,7 @@ def test_empty_content_retries_same_tier(monkeypatch):
     resends the identical request, so it waits out the usual backoff first."""
     attempts = []
     sleeps = []
-    monkeypatch.setattr("eval.injudge.judge.time.sleep", sleeps.append)
+    monkeypatch.setattr("injudge.judge.time.sleep", sleeps.append)
 
     def _open(req, timeout=None):
         attempts.append(json.loads(req.data.decode()))
@@ -1575,7 +1575,7 @@ def test_empty_content_retries_same_tier(monkeypatch):
                 "content": "", "reasoning_content": "thinking about it…"}}]})
         return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
 
-    monkeypatch.setattr("eval.injudge.judge.urlopen", _open)
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
     span, steps = _judge_input_fixture()
     cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", max_attempts=3)
     assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
@@ -1586,7 +1586,7 @@ def test_empty_content_retries_same_tier(monkeypatch):
     def _always_empty(req, timeout=None):
         return FakeResponse({"choices": [{"message": {"content": ""}}]})
 
-    monkeypatch.setattr("eval.injudge.judge.urlopen", _always_empty)
+    monkeypatch.setattr("injudge.judge.urlopen", _always_empty)
     cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", max_attempts=2)
     with pytest.raises(JudgeError, match="no message content"):
         judge_span(span, steps, cfg, [])
@@ -1602,7 +1602,7 @@ def test_reasoning_rescue_recovers_a_drained_answer_at_any_tier(monkeypatch):
     payload = {"choices": [{"message": {"content": "", "reasoning_content": GOOD}}]}
     for fmt in ("structured", "json", "prompt"):
         record = []
-        monkeypatch.setattr("eval.injudge.judge.urlopen", fake_urlopen_factory(record, payload))
+        monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory(record, payload))
         warnings = []
         cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", output_format=fmt)
         verdict = judge_span(span, steps, cfg, warnings)
@@ -1615,8 +1615,8 @@ def test_reasoning_rescue_recovers_a_drained_answer_at_any_tier(monkeypatch):
     partial = {"choices": [{"message": {"content": "",
                                         "reasoning_content": GOOD[:-20]}}]}
     record = []
-    monkeypatch.setattr("eval.injudge.judge.urlopen", fake_urlopen_factory(record, partial))
-    monkeypatch.setattr("eval.injudge.judge.time.sleep", lambda s: None)
+    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory(record, partial))
+    monkeypatch.setattr("injudge.judge.time.sleep", lambda s: None)
     cfg = JudgeConfig(base_url="http://x", api_key="k", model="m",
                       output_format="json", max_attempts=2)
     with pytest.raises(JudgeError, match="no message content"):
@@ -1632,7 +1632,7 @@ def test_reasoning_rescue_does_not_memoize_the_tier(monkeypatch):
     span, steps = _judge_input_fixture()
     payload = {"choices": [{"message": {"content": "", "reasoning_content": GOOD}}]}
     record = []
-    monkeypatch.setattr("eval.injudge.judge.urlopen", fake_urlopen_factory(record, payload))
+    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory(record, payload))
     cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")  # auto chain
     assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
     assert len(record) == 1
@@ -1651,7 +1651,7 @@ def test_reasoning_rescue_picks_the_closing_top_level_object(monkeypatch):
     ):
         payload = {"choices": [{"message": {"content": "", "reasoning_content": rc}}]}
         record = []
-        monkeypatch.setattr("eval.injudge.judge.urlopen",
+        monkeypatch.setattr("injudge.judge.urlopen",
                             fake_urlopen_factory(record, payload))
         cfg = JudgeConfig(base_url="http://x", api_key="k", model="m",
                           output_format="json")
@@ -1669,7 +1669,7 @@ def test_reasoning_rescue_recovers_an_array_wrapped_verdict(monkeypatch):
     rc = "wrapping the answer in an array:\n[" + GOOD + "]"
     payload = {"choices": [{"message": {"content": "", "reasoning_content": rc}}]}
     record = []
-    monkeypatch.setattr("eval.injudge.judge.urlopen",
+    monkeypatch.setattr("injudge.judge.urlopen",
                         fake_urlopen_factory(record, payload))
     cfg = JudgeConfig(base_url="http://x", api_key="k", model="m",
                       output_format="json")
@@ -1719,7 +1719,7 @@ def test_judge_span_responses_format(monkeypatch):
              "content": [{"type": "output_text", "text": GOOD}]},
         ]})
 
-    monkeypatch.setattr("eval.injudge.judge.urlopen", _open)
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
     span, steps = _judge_input_fixture()
     cfg = JudgeConfig(base_url="http://x/v1", api_key="k", model="m", api="responses")
     assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
@@ -1741,7 +1741,7 @@ def test_judge_span_anthropic_format(monkeypatch):
             {"type": "text", "text": GOOD},
         ]})
 
-    monkeypatch.setattr("eval.injudge.judge.urlopen", _open)
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
     span, steps = _judge_input_fixture()
     cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", api="anthropic")
     assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
@@ -1774,7 +1774,7 @@ def test_tier_degrades_on_400_then_memoized(monkeypatch):
             raise http_error(400, b"response_format json_schema unsupported")
         return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
 
-    monkeypatch.setattr("eval.injudge.judge.urlopen", _open)
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
     span, steps = _judge_input_fixture()
     cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", max_attempts=1)
     warnings = []
@@ -1801,7 +1801,7 @@ def test_tier_independent_400_fails_fast(monkeypatch):
         record.append(json.loads(req.data.decode()))
         raise http_error(400, b"Invalid max_tokens value")  # fresh instance per request
 
-    monkeypatch.setattr("eval.injudge.judge.urlopen", _open)
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
     span, steps = _judge_input_fixture()
     cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
     warnings = []
@@ -1826,7 +1826,7 @@ def test_empty_400s_walk_the_whole_chain(monkeypatch):
             raise http_error(400, b"")
         return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
 
-    monkeypatch.setattr("eval.injudge.judge.urlopen", _open)
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
     span, steps = _judge_input_fixture()
     cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
     warnings = []
@@ -1851,7 +1851,7 @@ def test_distinct_400s_per_tier_still_walk_the_chain(monkeypatch):
             raise http_error(400, next(details))
         return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
 
-    monkeypatch.setattr("eval.injudge.judge.urlopen", _open)
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
     span, steps = _judge_input_fixture()
     cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
     assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
@@ -1872,7 +1872,7 @@ def test_tier_degrades_on_out_of_contract_output(monkeypatch):
             return FakeResponse({"choices": [{"message": {"content": "not json at all"}}]})
         return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
 
-    monkeypatch.setattr("eval.injudge.judge.urlopen", _open)
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
     span, steps = _judge_input_fixture()
     cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
     warnings = []
@@ -1896,7 +1896,7 @@ def test_out_of_contract_degrade_consumes_no_attempt(monkeypatch):
             return FakeResponse({"choices": [{"message": {"content": "not json at all"}}]})
         return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
 
-    monkeypatch.setattr("eval.injudge.judge.urlopen", _open)
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
     span, steps = _judge_input_fixture()
     cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", max_attempts=1)
     assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
@@ -1925,7 +1925,7 @@ def test_json_tier_non_finite_confidence_degrades_free(monkeypatch):
             return FakeResponse({"choices": [{"message": {"content": json.dumps(bad)}}]})
         return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
 
-    monkeypatch.setattr("eval.injudge.judge.urlopen", _open)
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
     span, steps = _judge_input_fixture()
     cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", max_attempts=1)
     warnings = []
@@ -1956,7 +1956,7 @@ def test_json_tier_overflow_literal_confidence_is_a_model_error(monkeypatch):
             return FakeResponse({"choices": [{"message": {"content": bad}}]})
         return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
 
-    monkeypatch.setattr("eval.injudge.judge.urlopen", _open)
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
     span, steps = _judge_input_fixture()
     cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
     warnings = []
@@ -1982,7 +1982,7 @@ def test_anthropic_chain_skips_json_tier(monkeypatch):
             raise http_error(400, b"output_config.format unsupported")
         return FakeResponse({"content": [{"type": "text", "text": GOOD}]})
 
-    monkeypatch.setattr("eval.injudge.judge.urlopen", _open)
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
     span, steps = _judge_input_fixture()
     cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", api="anthropic")
     assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
@@ -2002,7 +2002,7 @@ def test_corrective_retry_at_final_tier(monkeypatch):
             return FakeResponse({"choices": [{"message": {"content": "garbage"}}]})
         return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
 
-    monkeypatch.setattr("eval.injudge.judge.urlopen", _open)
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
     span, steps = _judge_input_fixture()
     cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", output_format="prompt")
     assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
@@ -2024,7 +2024,7 @@ def test_corrective_retry_preserves_roles_on_anthropic(monkeypatch):
         text = "garbage" if len(record) == 1 else GOOD
         return FakeResponse({"content": [{"type": "text", "text": text}]})
 
-    monkeypatch.setattr("eval.injudge.judge.urlopen", _open)
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
     span, steps = _judge_input_fixture()
     cfg = JudgeConfig(base_url="http://x", api_key="k", model="m",
                       api="anthropic", output_format="prompt")
@@ -2049,7 +2049,7 @@ def test_corrective_retry_preserves_roles_on_responses(monkeypatch):
         return FakeResponse({"output": [{"type": "message",
                                          "content": [{"type": "output_text", "text": text}]}]})
 
-    monkeypatch.setattr("eval.injudge.judge.urlopen", _open)
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
     span, steps = _judge_input_fixture()
     cfg = JudgeConfig(base_url="http://x", api_key="k", model="m",
                       api="responses", output_format="prompt")
@@ -2067,12 +2067,12 @@ def test_wrong_shaped_response_body_is_retried_not_crashing(monkeypatch):
     JSON error page) reads as 'no message content': retried within the
     budget, then an honest JudgeError — never an uncaught AttributeError."""
     span, steps = _judge_input_fixture()
-    monkeypatch.setattr("eval.injudge.judge.time.sleep", lambda s: None)
+    monkeypatch.setattr("injudge.judge.time.sleep", lambda s: None)
     for payload in (["not", "an", "object"],
                     {"choices": ["not-an-object"]},
                     {"choices": [{"message": "not-an-object"}]}):
         record = []
-        monkeypatch.setattr("eval.injudge.judge.urlopen",
+        monkeypatch.setattr("injudge.judge.urlopen",
                             fake_urlopen_factory(record, payload))
         cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", max_attempts=2)
         with pytest.raises(JudgeError, match="no message content"):
@@ -2088,7 +2088,7 @@ def test_wrong_shaped_response_body_is_retried_not_crashing(monkeypatch):
             return FakeResponse({"choices": ["garbage"]})
         return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
 
-    monkeypatch.setattr("eval.injudge.judge.urlopen", drift_once)
+    monkeypatch.setattr("injudge.judge.urlopen", drift_once)
     cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
     assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
 
@@ -2096,7 +2096,7 @@ def test_wrong_shaped_response_body_is_retried_not_crashing(monkeypatch):
 def test_budget_exhausted_invalid_output_is_error_with_raw(monkeypatch):
     record = []
     payload = {"choices": [{"message": {"content": "garbage"}}]}
-    monkeypatch.setattr("eval.injudge.judge.urlopen", fake_urlopen_factory(record, payload))
+    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory(record, payload))
     span, steps = _judge_input_fixture()
     cfg = JudgeConfig(base_url="http://x", api_key="k", model="m",
                       output_format="prompt", max_attempts=2)
@@ -2115,7 +2115,7 @@ def test_pinned_output_format_rejected_is_config_error(monkeypatch):
     calls (the artifact flushes per trajectory, so an abort would lose the
     current trajectory's completed verdicts)."""
     record = []
-    monkeypatch.setattr("eval.injudge.judge.urlopen",
+    monkeypatch.setattr("injudge.judge.urlopen",
                         fake_urlopen_factory(record, fail=http_error(400)))
     span, steps = _judge_input_fixture()
     cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", output_format="structured")
@@ -2136,7 +2136,7 @@ def test_pinned_tier_retries_within_tier_only(monkeypatch):
             return FakeResponse({"choices": [{"message": {"content": "bad"}}]})
         return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
 
-    monkeypatch.setattr("eval.injudge.judge.urlopen", _open)
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
     span, steps = _judge_input_fixture()
     cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", output_format="json")
     assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
@@ -2153,8 +2153,8 @@ def test_transport_failures_share_the_attempt_budget(monkeypatch):
             raise OSError("boom")
         return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
 
-    monkeypatch.setattr("eval.injudge.judge.urlopen", flaky)
-    monkeypatch.setattr("eval.injudge.judge.time.sleep", lambda s: None)
+    monkeypatch.setattr("injudge.judge.urlopen", flaky)
+    monkeypatch.setattr("injudge.judge.time.sleep", lambda s: None)
     span, steps = _judge_input_fixture()
     cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", max_attempts=3)
     assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
@@ -2170,7 +2170,7 @@ def test_truncated_or_garbled_body_is_retried_never_escapes(monkeypatch):
     budget, then an honest JudgeError — never an uncaught escape that aborts
     the whole run mid-trajectory."""
     span, steps = _judge_input_fixture()
-    monkeypatch.setattr("eval.injudge.judge.time.sleep", lambda s: None)
+    monkeypatch.setattr("injudge.judge.time.sleep", lambda s: None)
 
     class TruncatedResponse:
         def read(self):
@@ -2190,7 +2190,7 @@ def test_truncated_or_garbled_body_is_retried_never_escapes(monkeypatch):
             return TruncatedResponse()
         return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
 
-    monkeypatch.setattr("eval.injudge.judge.urlopen", flaky)
+    monkeypatch.setattr("injudge.judge.urlopen", flaky)
     cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
     assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
 
@@ -2199,7 +2199,7 @@ def test_truncated_or_garbled_body_is_retried_never_escapes(monkeypatch):
             return b"\xff\xfe not utf-8"
 
     monkeypatch.setattr(
-        "eval.injudge.judge.urlopen", lambda req, timeout=None: GarbledResponse({}))
+        "injudge.judge.urlopen", lambda req, timeout=None: GarbledResponse({}))
     cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", max_attempts=2)
     with pytest.raises(JudgeError, match="unparseable response body"):
         judge_span(span, steps, cfg, [])
@@ -2211,7 +2211,7 @@ def test_pathologically_nested_body_is_retried_never_escapes(monkeypatch):
     garbled body — retried within the budget, then an honest JudgeError,
     never an uncaught escape aborting the run mid-trajectory."""
     span, steps = _judge_input_fixture()
-    monkeypatch.setattr("eval.injudge.judge.time.sleep", lambda s: None)
+    monkeypatch.setattr("injudge.judge.time.sleep", lambda s: None)
 
     class NestedResponse(FakeResponse):
         def read(self):
@@ -2225,12 +2225,12 @@ def test_pathologically_nested_body_is_retried_never_escapes(monkeypatch):
             return NestedResponse({})
         return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
 
-    monkeypatch.setattr("eval.injudge.judge.urlopen", flaky)
+    monkeypatch.setattr("injudge.judge.urlopen", flaky)
     cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
     assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
 
     monkeypatch.setattr(
-        "eval.injudge.judge.urlopen", lambda req, timeout=None: NestedResponse({}))
+        "injudge.judge.urlopen", lambda req, timeout=None: NestedResponse({}))
     cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", max_attempts=2)
     with pytest.raises(JudgeError, match="unparseable response body"):
         judge_span(span, steps, cfg, [])
@@ -2241,9 +2241,9 @@ def test_non_format_4xx_fails_fast(monkeypatch):
     fail the span on the first request — no chain walk, no misleading
     degrade warnings, no learned-tier memo pollution."""
     record = []
-    monkeypatch.setattr("eval.injudge.judge.urlopen",
+    monkeypatch.setattr("injudge.judge.urlopen",
                         fake_urlopen_factory(record, fail=http_error(401, b"invalid key")))
-    monkeypatch.setattr("eval.injudge.judge.time.sleep", lambda s: None)
+    monkeypatch.setattr("injudge.judge.time.sleep", lambda s: None)
     span, steps = _judge_input_fixture()
     cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
     warnings = []
@@ -2259,7 +2259,7 @@ def test_429_honors_retry_after(monkeypatch):
     (capped), not the fixed backoff."""
     calls = {"n": 0}
     sleeps = []
-    monkeypatch.setattr("eval.injudge.judge.time.sleep", sleeps.append)
+    monkeypatch.setattr("injudge.judge.time.sleep", sleeps.append)
 
     def throttled(req, timeout=None):
         calls["n"] += 1
@@ -2267,7 +2267,7 @@ def test_429_honors_retry_after(monkeypatch):
             raise HTTPError("http://x", 429, "err", {"Retry-After": "7"}, BytesIO(b"slow down"))
         return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
 
-    monkeypatch.setattr("eval.injudge.judge.urlopen", throttled)
+    monkeypatch.setattr("injudge.judge.urlopen", throttled)
     span, steps = _judge_input_fixture()
     cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
     assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
@@ -2280,7 +2280,7 @@ def test_429_honors_retry_after_http_date(monkeypatch):
     the fixed backoff and burning attempts against a throttled endpoint."""
     calls = {"n": 0}
     sleeps = []
-    monkeypatch.setattr("eval.injudge.judge.time.sleep", sleeps.append)
+    monkeypatch.setattr("injudge.judge.time.sleep", sleeps.append)
     when = datetime.now(timezone.utc) + timedelta(seconds=30)
 
     def throttled(req, timeout=None):
@@ -2291,7 +2291,7 @@ def test_429_honors_retry_after_http_date(monkeypatch):
                             BytesIO(b"slow down"))
         return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
 
-    monkeypatch.setattr("eval.injudge.judge.urlopen", throttled)
+    monkeypatch.setattr("injudge.judge.urlopen", throttled)
     span, steps = _judge_input_fixture()
     cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
     assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
@@ -2311,8 +2311,8 @@ def test_mixed_failure_keeps_the_raw_answer(monkeypatch):
             return FakeResponse({"choices": [{"message": {"content": "garbage"}}]})
         raise OSError("boom")
 
-    monkeypatch.setattr("eval.injudge.judge.urlopen", flaky)
-    monkeypatch.setattr("eval.injudge.judge.time.sleep", lambda s: None)
+    monkeypatch.setattr("injudge.judge.urlopen", flaky)
+    monkeypatch.setattr("injudge.judge.time.sleep", lambda s: None)
     span, steps = _judge_input_fixture()
     cfg = JudgeConfig(base_url="http://x", api_key="k", model="m",
                       output_format="prompt", max_attempts=2)
@@ -2336,8 +2336,8 @@ def test_free_tier_discovery_does_not_seed_the_error_attribution(monkeypatch):
             return FakeResponse({"choices": [{"message": {"content": "not json at all"}}]})
         raise OSError("boom")
 
-    monkeypatch.setattr("eval.injudge.judge.urlopen", flaky)
-    monkeypatch.setattr("eval.injudge.judge.time.sleep", lambda s: None)
+    monkeypatch.setattr("injudge.judge.urlopen", flaky)
+    monkeypatch.setattr("injudge.judge.time.sleep", lambda s: None)
     span, steps = _judge_input_fixture()
     cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", max_attempts=2)
     with pytest.raises(JudgeError, match="OSError"):
@@ -2364,7 +2364,7 @@ def test_json_tier_schema_violation_is_a_model_error_not_a_tier_discovery(monkey
                 {"choices": [{"message": {"content": '{"verdict": "positive"}'}}]})
         return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
 
-    monkeypatch.setattr("eval.injudge.judge.urlopen", _open)
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
     span, steps = _judge_input_fixture()
     cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
     warnings = []
@@ -2388,7 +2388,7 @@ def test_chat_content_parts_array_is_read(monkeypatch):
     record = []
     half = len(GOOD) // 2
     monkeypatch.setattr(
-        "eval.injudge.judge.urlopen",
+        "injudge.judge.urlopen",
         fake_urlopen_factory(
             record,
             payload={"choices": [{"message": {"content": [
@@ -2419,7 +2419,7 @@ def test_truncated_answer_is_a_budget_error_never_a_tier_degrade(monkeypatch):
                 {"finish_reason": "length", "message": {"content": GOOD[:40]}}]})
         return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
 
-    monkeypatch.setattr("eval.injudge.judge.urlopen", _open)
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
     span, steps = _judge_input_fixture()
     cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
     warnings = []
@@ -2448,6 +2448,48 @@ def test_truncated_signal_per_api():
     resp = JudgeConfig(base_url="http://x", api_key="k", model="m", api="responses")
     assert _truncated(resp, {"incomplete_details": {"reason": "max_output_tokens"}})
     assert not _truncated(resp, {"status": "completed"})
+
+
+def test_truncated_empty_content_is_a_budget_error_never_a_blind_retry(monkeypatch):
+    """A reasoning model that burns the whole budget before writing any
+    content returns an empty answer WITH the truncation signal — the same
+    budget rule as a truncated partial: an identical resend re-truncates
+    deterministically, so the span gets the honest error verdict instead of
+    the fresh draws the normal-finish quirk keeps
+    (test_empty_content_retries_same_tier)."""
+    record = []
+
+    def _open(req, timeout=None):
+        record.append(json.loads(req.data.decode()))
+        return FakeResponse({"choices": [
+            {"finish_reason": "length",
+             "message": {"content": "", "reasoning_content": "thinking…"}}]})
+
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
+    span, steps = _judge_input_fixture()
+    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", max_attempts=5)
+    verdict = judge_span(span, steps, cfg, [])
+    assert verdict["verdict"] == "error"
+    assert "truncated" in verdict["error"] and "no message content" in verdict["error"]
+    assert len(record) == 1  # no same-budget retry — it would re-truncate
+
+
+def test_content_parts_array_joins_text_parts_only(monkeypatch):
+    """An OpenAI-compatible endpoint may answer with a content-parts array:
+    only the text parts are the answer. A non-text part carrying a "text"
+    field (a reasoning part on some proxies) must not prepend junk to the
+    verdict — strict parsing would misread the joined text as out of
+    contract and burn the attempt budget on a valid answer."""
+    payload = {"choices": [{"message": {"content": [
+        {"type": "reasoning", "text": "let me think about this span…"},
+        {"type": "text", "text": GOOD},
+    ]}}]}
+    record = []
+    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory(record, payload))
+    span, steps = _judge_input_fixture()
+    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
+    assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
+    assert len(record) == 1
 
 
 def test_thinking_params_per_format():
@@ -2640,7 +2682,7 @@ def test_cli_report_path_into_a_directory_fails_fast(monkeypatch, tmp_path):
     uncaught IsADirectoryError and lose the completed judging."""
     b = TrajBuilder().agent_turn(with_task=True).recall(REF_A)
     _write_run(tmp_path / "runs", "t1", b)
-    monkeypatch.setattr("eval.injudge.judge.urlopen",
+    monkeypatch.setattr("injudge.judge.urlopen",
                         fake_urlopen_factory([], fail=AssertionError("network!")))
     outdir = tmp_path / "injudge-report.json"
     outdir.mkdir()
@@ -2655,7 +2697,7 @@ def test_cli_report_path_into_a_missing_parent_fails_fast(monkeypatch, tmp_path)
     crash mid-run and lose the completed judging."""
     b = TrajBuilder().agent_turn(with_task=True).recall(REF_A)
     _write_run(tmp_path / "runs", "t1", b)
-    monkeypatch.setattr("eval.injudge.judge.urlopen",
+    monkeypatch.setattr("injudge.judge.urlopen",
                         fake_urlopen_factory([], fail=AssertionError("network!")))
     out = tmp_path / "missing" / "injudge-report.json"
     with pytest.raises(SystemExit, match="cannot write report to"):
@@ -2672,7 +2714,7 @@ def test_cli_end_to_end_mocked_judge(monkeypatch, tmp_path):
     b = TrajBuilder().agent_turn(with_task=True).agent_turn()  # zero injections
     _write_run(tmp_path / "runs", "20260101-010000.000Z-run-b", b)
     record = []
-    monkeypatch.setattr("eval.injudge.judge.urlopen", fake_urlopen_factory(record))
+    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory(record))
     out, md = tmp_path / "report.json", tmp_path / "report.md"
     rc = injudge_main.main([str(tmp_path / "runs"),
                             "--json", str(out), "-o", str(md), "--env", str(_env(tmp_path))])
@@ -2725,7 +2767,7 @@ def test_cli_end_to_end_mocked_judge(monkeypatch, tmp_path):
 def test_cli_zero_injection_trajectory(monkeypatch, tmp_path):
     b = TrajBuilder().agent_turn(with_task=True).agent_turn()
     _write_run(tmp_path / "runs", "t1", b)
-    monkeypatch.setattr("eval.injudge.judge.urlopen",
+    monkeypatch.setattr("injudge.judge.urlopen",
                         fake_urlopen_factory([], fail=AssertionError("network!")))
     out = tmp_path / "report.json"
     rc = injudge_main.main([str(tmp_path / "runs"),
@@ -2743,7 +2785,7 @@ def test_cli_notes_unsized_placement_content(monkeypatch, tmp_path):
     0 tokens, and the understatement is a validation note — never silent."""
     b = TrajBuilder().agent_turn(with_task=True).recall(REF_A, content=None)
     _write_run(tmp_path / "runs", "t1", b)
-    monkeypatch.setattr("eval.injudge.judge.urlopen", fake_urlopen_factory([]))
+    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory([]))
     out = tmp_path / "report.json"
     rc = injudge_main.main([str(tmp_path / "runs"),
                             "--json", str(out), "--env", str(_env(tmp_path))])
@@ -2765,7 +2807,7 @@ def test_cli_prompt_tokens_ignore_bool_turn_usage(monkeypatch, tmp_path):
     b._emit("message_end", proxy_source="MAIN", role="assistant", msg=10, turn=True,
             content="", usage={"prompt_tokens": 999})
     _write_run(tmp_path / "runs", "t1", b)
-    monkeypatch.setattr("eval.injudge.judge.urlopen",
+    monkeypatch.setattr("injudge.judge.urlopen",
                         fake_urlopen_factory([], fail=AssertionError("network!")))
     out = tmp_path / "report.json"
     rc = injudge_main.main([str(tmp_path / "runs"),
@@ -2787,7 +2829,7 @@ def test_cli_prompt_tokens_cover_every_lane(monkeypatch, tmp_path):
     b._emit("message_end", proxy_source="EXTRACT", role="assistant", msg=3,
             turn=b.turn, content="", usage={"prompt_tokens": 40})
     _write_run(tmp_path / "runs", "t1", b)
-    monkeypatch.setattr("eval.injudge.judge.urlopen",
+    monkeypatch.setattr("injudge.judge.urlopen",
                         fake_urlopen_factory([], fail=AssertionError("network!")))
     out = tmp_path / "report.json"
     rc = injudge_main.main([str(tmp_path / "runs"),
@@ -2813,7 +2855,7 @@ def test_cli_prompt_tokens_retraction_and_recovery(monkeypatch, tmp_path):
     b._emit("message_end", proxy_source="MAIN", role="assistant", msg=10,
             content="", origin="history", usage={"prompt_tokens": 40})
     _write_run(tmp_path / "runs", "t1", b)
-    monkeypatch.setattr("eval.injudge.judge.urlopen",
+    monkeypatch.setattr("injudge.judge.urlopen",
                         fake_urlopen_factory([], fail=AssertionError("network!")))
     out = tmp_path / "report.json"
     rc = injudge_main.main([str(tmp_path / "runs"),
@@ -2839,7 +2881,7 @@ def test_cli_prompt_tokens_corrupt_msg_or_source_never_crash(monkeypatch, tmp_pa
             content="", origin="history", usage={"prompt_tokens": 999})
     b._emit("message_retracted", proxy_source="MAIN", msg=9.0)  # must not pop msg 9
     _write_run(tmp_path / "runs", "t1", b)
-    monkeypatch.setattr("eval.injudge.judge.urlopen",
+    monkeypatch.setattr("injudge.judge.urlopen",
                         fake_urlopen_factory([], fail=AssertionError("network!")))
     out = tmp_path / "report.json"
     rc = injudge_main.main([str(tmp_path / "runs"),
@@ -2860,7 +2902,7 @@ def test_cli_prompt_tokens_dropped_usage_records_warn(monkeypatch, tmp_path):
     b._emit("message_end", proxy_source="MAIN", role="assistant", msg=11, turn="x",
             content="", usage={"prompt_tokens": 999})  # corrupt turn
     _write_run(tmp_path / "runs", "t1", b)
-    monkeypatch.setattr("eval.injudge.judge.urlopen",
+    monkeypatch.setattr("injudge.judge.urlopen",
                         fake_urlopen_factory([], fail=AssertionError("network!")))
     out = tmp_path / "report.json"
     rc = injudge_main.main([str(tmp_path / "runs"),
@@ -2935,7 +2977,7 @@ def test_cli_judge_error_exit_2_partial_artifact(monkeypatch, tmp_path):
             raise OSError("boom")
         return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
 
-    monkeypatch.setattr("eval.injudge.judge.urlopen", flaky)
+    monkeypatch.setattr("injudge.judge.urlopen", flaky)
     out = tmp_path / "report.json"
     rc = injudge_main.main([str(tmp_path / "runs"),
                             "--json", str(out), "--env", str(_env(tmp_path)),
@@ -2949,7 +2991,7 @@ def test_cli_judge_error_exit_2_partial_artifact(monkeypatch, tmp_path):
 def test_cli_dry_run_no_network(monkeypatch, tmp_path, capsys):
     a = TrajBuilder().agent_turn(with_task=True).recall(REF_A)
     _write_run(tmp_path / "runs", "t1", a)
-    monkeypatch.setattr("eval.injudge.judge.urlopen",
+    monkeypatch.setattr("injudge.judge.urlopen",
                         fake_urlopen_factory([], fail=AssertionError("network!")))
     rc = injudge_main.main([str(tmp_path / "runs"), "--dry-run",
                             "--env", str(tmp_path / "missing.env")])
@@ -2981,7 +3023,7 @@ def test_cli_dry_run_honors_limit(monkeypatch, tmp_path, capsys):
     a.recall(REF_A)
     a.recall(REF_B)
     _write_run(tmp_path / "runs", "t1", a)
-    monkeypatch.setattr("eval.injudge.judge.urlopen",
+    monkeypatch.setattr("injudge.judge.urlopen",
                         fake_urlopen_factory([], fail=AssertionError("network!")))
     rc = injudge_main.main([str(tmp_path / "runs"), "--dry-run", "--limit", "1"])
     assert rc == 0
@@ -2996,7 +3038,7 @@ def test_cli_limit_marks_unjudged(monkeypatch, tmp_path):
     a.recall(REF_B)
     _write_run(tmp_path / "runs", "t1", a)
     record = []
-    monkeypatch.setattr("eval.injudge.judge.urlopen", fake_urlopen_factory(record))
+    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory(record))
     out = tmp_path / "report.json"
     rc = injudge_main.main([str(tmp_path / "runs"),
                             "--json", str(out), "--env", str(_env(tmp_path)), "--limit", "1"])
@@ -3008,15 +3050,15 @@ def test_cli_limit_marks_unjudged(monkeypatch, tmp_path):
     assert len(record) == 1
 
 
-def test_cli_default_env_is_eval_env(monkeypatch, tmp_path):
-    """Without --env the CLI reads the package-level eval/.env."""
+def test_cli_default_env_is_checkout_env(monkeypatch, tmp_path):
+    """Without --env the CLI reads the checkout-root .env."""
     a = TrajBuilder().agent_turn(with_task=True).recall(REF_A)
     _write_run(tmp_path / "runs", "t1", a)
     env = tmp_path / ".env"
     env.write_text("BASE_URL=http://judge.local\nAPI_KEY=k\nMODEL=judge-m\nAPI=openai-chat\n")
     monkeypatch.setattr(injudge_main, "_DEFAULT_ENV", env)
     record = []
-    monkeypatch.setattr("eval.injudge.judge.urlopen", fake_urlopen_factory(record))
+    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory(record))
     out = tmp_path / "report.json"
     rc = injudge_main.main([str(tmp_path / "runs"), "--json", str(out)])
     assert rc == 0

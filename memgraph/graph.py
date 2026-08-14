@@ -15,9 +15,9 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-from eval.memgraph.annotations import namespace_of
-from eval.memgraph.model import Edge, MemoryOp, MemoryUnit, Trajectory
-from eval.memgraph.parse_trajectory import parse_trajectory
+from memgraph.annotations import namespace_of
+from memgraph.model import Edge, MemoryOp, MemoryUnit, Trajectory
+from memgraph.parse_trajectory import parse_trajectory
 
 _TS_PREFIX = re.compile(r"^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})")
 
@@ -66,29 +66,32 @@ def discover_trajectories(paths: list[Path]) -> list[Path]:
     """Resolve CLI paths into trajectory dirs (dirs containing trajectory.jsonl).
 
     A path may be a trajectory dir, a trajectory.jsonl file, or a root dir to
-    scan recursively. Results are deduplicated and sorted by directory name
-    (timestamp-prefixed in practice); run.json started_at order is applied
-    later, once parsed. A path that yields no trajectory dir (a typo, a
-    wrong-named file, an empty tree) is a usage error: named explicitly rather
-    than silently dropped — a vanished argument would misread the run as
-    covering inputs it never saw.
+    scan recursively. Results are deduplicated by resolved path — the same
+    directory under two spellings (".", a relative form, an absolute one) is
+    one trajectory, and loading it twice would share one run_id, tripping the
+    verdict join's ambiguity guard on both copies — and sorted by that
+    resolved path; run.json started_at order is applied later, once parsed.
+    A path that yields no trajectory dir (a typo, a wrong-named file, an
+    empty tree) is a usage error: named explicitly rather than silently
+    dropped — a vanished argument would misread the run as covering inputs
+    it never saw.
     """
     found: dict[str, Path] = {}
     for p in paths:
         p = Path(p)
         if p.is_file():
             if p.name == "trajectory.jsonl":
-                found[str(p.parent)] = p.parent
+                found.setdefault(str(p.parent.resolve()), p.parent)
                 continue
             raise SystemExit(f"error: {p} is a file but not named trajectory.jsonl")
         if p.is_dir():
             if (p / "trajectory.jsonl").is_file():
-                found[str(p)] = p
+                found.setdefault(str(p.resolve()), p)
                 continue
             nested = sorted(p.rglob("trajectory.jsonl"))
             if nested:
                 for jsonl in nested:
-                    found[str(jsonl.parent)] = jsonl.parent
+                    found.setdefault(str(jsonl.parent.resolve()), jsonl.parent)
                 continue
             raise SystemExit(f"error: no trajectory.jsonl found under {p}")
         raise SystemExit(f"error: {p} does not exist")
@@ -326,7 +329,7 @@ def build_graph(
             note("info", f"{traj.run_id}: zero memory operations (valid input, empty lane)")
 
     return {
-        "tool": {"name": "eval.memgraph"},
+        "tool": {"name": "memgraph"},
         "trajectories": [t.to_dict() for t in trajectories],
         "ops": [op.to_dict() for op in all_ops],
         "memories": [m.to_dict() for m in registry.values()],
@@ -341,7 +344,7 @@ def load_trajectories(
     """Discovery + parse: trajectories, ops, and raw events per trajectory.
 
     The parsed events are returned alongside (keyed by the assigned
-    trajectory id) so callers needing the raw stream (eval.injudge's step
+    trajectory id) so callers needing the raw stream (injudge's step
     stream) do not re-read the files.
     """
     traj_dirs = discover_trajectories(paths)

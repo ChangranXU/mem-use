@@ -24,7 +24,7 @@ import json
 from collections import Counter
 from pathlib import Path
 
-from eval.memgraph.annotations import is_int
+from memgraph.annotations import is_int
 
 _SCHEMA = "injudge.report/v4"
 
@@ -33,7 +33,10 @@ def load_verdict_report(path: Path) -> dict:
     """Read and sanity-check an injudge.report/v4 artifact."""
     try:
         report = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
+    except (OSError, ValueError, RecursionError) as e:
+        # ValueError covers UnicodeDecodeError/JSONDecodeError and the int
+        # digit-limit refusal; RecursionError covers pathological nesting —
+        # a corrupt artifact fails fast with a targeted message, never a traceback
         raise SystemExit(f"error: cannot read verdicts report {path}: {e}") from e
     tool = report.get("tool") if isinstance(report, dict) else None
     if not isinstance(tool, dict) or tool.get("schema") != _SCHEMA:

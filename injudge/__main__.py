@@ -1,4 +1,4 @@
-"""CLI: python3 -m eval.injudge <path>... [options]
+"""CLI: python3 -m injudge <path>... [options]
 
 Judge recall injections in gate trajectories: group identical injections
 into spans, then score every delivered memory on a five-signal rubric
@@ -18,8 +18,8 @@ import argparse
 import json
 from pathlib import Path
 
-from eval import atomic_write
-from eval.injudge.judge import (
+from util import atomic_write
+from injudge.judge import (
     JudgeError,
     auto_verdict_no_subsequent_turn,
     blank_verdict,
@@ -28,16 +28,16 @@ from eval.injudge.judge import (
     render_user,
     resolve_config,
 )
-from eval.injudge.report import (
+from injudge.report import (
     build_artifact,
     injection_rollup,
     operation_record,
     print_summary,
     render_markdown,
 )
-from eval.injudge.spans import group_spans
-from eval.injudge.steps import build_step_stream, prompt_tokens_total
-from eval.memgraph.graph import build_graph, load_trajectories
+from injudge.spans import group_spans
+from injudge.steps import build_step_stream, prompt_tokens_total
+from memgraph.graph import build_graph, load_trajectories
 
 
 def _unjudged(reason: str) -> dict:
@@ -55,7 +55,7 @@ _DEFAULT_ENV = Path(__file__).resolve().parents[1] / ".env"
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
-        prog="python3 -m eval.injudge",
+        prog="python3 -m injudge",
         description=(
             "Verdict recall injections in gate trajectories: for each span of "
             "identical injections, judge its footprint in the turns that follow "

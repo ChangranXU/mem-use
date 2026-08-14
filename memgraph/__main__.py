@@ -1,4 +1,4 @@
-"""CLI: python3 -m eval.memgraph <path>... [options]
+"""CLI: python3 -m memgraph <path>... [options]
 
 Builds the memory-operation relationship graph from gate trajectories and
 writes a self-contained HTML visualization (plus optional JSON artifact).
@@ -11,15 +11,15 @@ import json
 import sys
 from pathlib import Path
 
-from eval import atomic_write
-from eval.memgraph.graph import load_and_build
-from eval.memgraph.html import render_html
-from eval.memgraph.verdicts import apply_verdicts, load_verdict_report
+from util import atomic_write
+from memgraph.graph import load_and_build
+from memgraph.html import render_html
+from memgraph.verdicts import apply_verdicts, load_verdict_report
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
-        prog="python3 -m eval.memgraph",
+        prog="python3 -m memgraph",
         description=(
             "Visualize relationships between memory-related actions in gate "
             "trajectories: which (trajectory, step) created each memory and "
@@ -46,7 +46,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", dest="json_out", type=Path, default=None,
                     help="optional path for the graph JSON artifact")
     ap.add_argument("--verdicts", type=Path, default=None, metavar="PATH",
-                    help="optional injudge.report JSON (from eval.injudge): color "
+                    help="optional injudge.report JSON (from injudge): color "
                     "recall nodes by verdict and show analysis/usage in popovers")
     args = ap.parse_args(argv)
 

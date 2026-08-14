@@ -1,4 +1,4 @@
-"""Fixture tests for schema-v6 annotation-driven parsing (eval.memgraph + eval.injudge).
+"""Fixture tests for schema-v6 annotation-driven parsing (memgraph + injudge).
 
 Fixtures mirror the annotation protocol emitted by traj-recorder schema v6
 (see extension/traj-recorder README "Annotating memory actions"): a
@@ -9,11 +9,11 @@ annotation events alone — never from prompt text or label conventions.
 
 import hashlib
 
-from eval.injudge.spans import content_fingerprint, group_spans
-from eval.injudge.steps import build_step_stream
-from eval.memgraph.annotations import build_annotation_index, ref_to_memory
-from eval.memgraph.graph import load_and_build
-from eval.tests.annotated_fixtures import (
+from injudge.spans import content_fingerprint, group_spans
+from injudge.steps import build_step_stream
+from memgraph.annotations import build_annotation_index, ref_to_memory
+from memgraph.graph import load_and_build
+from annotated_fixtures import (
     MAIN,
     MEM,
     SID,
@@ -677,7 +677,7 @@ def test_annotation_reader_never_raises_on_a_corrupt_lane():
     names no lane: the bind is skipped with a problem and the operation lane
     falls back to None — an unhashable source must never crash the lane sets
     built from either."""
-    from eval.memgraph.annotations import AnnotatedOperation
+    from memgraph.annotations import AnnotatedOperation
 
     idx = build_annotation_index(
         [{"seq": 1, "type": "memory_session", "payload": {"trace_session_id": "S"}},
@@ -722,7 +722,7 @@ def test_operation_lane_uses_the_first_recorded_proxy_source():
     """The fallback lane comes from the first event that CARRIES a
     proxy_source — an event without one must not mask a later event's lane
     (nor may a genuinely unprefixed operation report a lane)."""
-    from eval.memgraph.annotations import AnnotatedOperation
+    from memgraph.annotations import AnnotatedOperation
 
     op = AnnotatedOperation(operation_id="o", kind="generation")
     op.start = {"seq": 1, "type": "memory_generate_start"}  # no proxy_source
@@ -1067,7 +1067,7 @@ def test_search_query_locator_uses_the_delivery_session_binds(tmp_path):
     session's lanes would point at the wrong messages (or none)."""
     import json
 
-    from eval.memgraph.parse_trajectory import parse_trajectory
+    from memgraph.parse_trajectory import parse_trajectory
 
     def ann(seq, type, payload, lane):
         return {"seq": seq, "type": type, "proxy_source": lane,

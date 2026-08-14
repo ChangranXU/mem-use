@@ -25,13 +25,12 @@ dropped.
 
 ## Setup
 
-Requires Python 3.11+; the tools themselves are stdlib-only. The package
-imports as `eval`, so clone the repo under that name and run the tools from
-its parent directory:
+Requires Python 3.11+; the tools themselves are stdlib-only. Clone the repo
+and run the tools as modules from the checkout root:
 
 ```bash
-git clone <repo-url> eval
-cd eval && cp .env.example .env   # fill in the judge endpoint (injudge only)
+git clone <repo-url>
+cd <checkout> && cp .env.example .env   # fill in the judge endpoint (injudge only)
 ```
 
 Tests need pytest in a checkout-local uv environment (never the system
@@ -51,7 +50,7 @@ reuse when several runs are loaded together. Memory identity is the
 stores is two memories, never one.
 
 ```bash
-python3 -m eval.memgraph <trajectory paths> -o memgraph.html --json memgraph.json
+python3 -m memgraph <trajectory paths> -o memgraph.html --json memgraph.json
 ```
 
 The graph is annotation-driven: lanes come from `memory_role_bind` (falling
@@ -198,10 +197,10 @@ aggregates pre-register the headline numbers: positive/negative span rates
 and the wasted-token share.
 
 ```bash
-python3 -m eval.injudge <trajectory paths> --json injudge.json -o injudge.md
+python3 -m injudge <trajectory paths> --json injudge.json -o injudge.md
 
 # inspect the judge input (span + whole step stream), no judge calls:
-python3 -m eval.injudge <trajectory paths> --dry-run --limit 3
+python3 -m injudge <trajectory paths> --dry-run --limit 3
 ```
 
 Tuning flags: `--timeout`, `--max-attempts`, `--judge-max-tokens` (default
@@ -254,18 +253,20 @@ Trajectories with zero injections yield an empty verdict set — valid input.
 Feed the artifact back to memgraph to see the verdicts in the visualization:
 
 ```bash
-python3 -m eval.memgraph <trajectory paths> --verdicts injudge.json -o memgraph-verdicts.html
+python3 -m memgraph <trajectory paths> --verdicts injudge.json -o memgraph-verdicts.html
 ```
 
 ## Tests
 
 ```bash
-# from the parent directory (the checkout imports as `eval`)
-eval/.venv/bin/python -m pytest eval/tests -q
+# from the checkout root, under any directory name (tests/conftest.py
+# puts the checkout root on sys.path)
+.venv/bin/python -m pytest tests -q
 ```
 
 ## Project layout
 
+- `util.py` — atomic_write (crash-safe artifact writes)
 - `memgraph/annotations.py` — schema-v6 memory-annotation index + MemoryRef mapping
 - `memgraph/model.py` — Trajectory / MemoryOp / MemoryUnit / Edge dataclasses
 - `memgraph/parse_trajectory.py` — trajectory.jsonl → ops (annotation-driven)

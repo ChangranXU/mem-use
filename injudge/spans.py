@@ -31,9 +31,9 @@ from __future__ import annotations
 import hashlib
 import json
 
-from eval.injudge.model import InjectionSpan
-from eval.memgraph.annotations import namespace_of
-from eval.memgraph.model import MemoryOp
+from injudge.model import InjectionSpan
+from memgraph.annotations import namespace_of
+from memgraph.model import MemoryOp
 
 
 def content_fingerprint(op: MemoryOp) -> str:

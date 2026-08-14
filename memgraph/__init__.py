@@ -8,5 +8,5 @@ Memory actions come from the schema-v6 `memory_*` annotation events recorded
 by the traj-recorder gate: lanes from `memory_role_bind`, extractions from
 generation operations, recalls from `memory_delivery` — explicit signals,
 never label conventions, prompt prefixes, or payload guessing (see
-`eval/memgraph/annotations.py`).
+`memgraph/annotations.py`).
 """

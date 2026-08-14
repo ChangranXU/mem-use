@@ -4,7 +4,7 @@ The step stream is the *influence surface* injection verdicts are computed
 from: one AgentStep per completed agent turn, carrying the assistant response
 (reasoning + content) and the tool executions with their results.
 
-Turn classification is eval/memgraph/parse_trajectory.py's
+Turn classification is memgraph/parse_trajectory.py's
 `classifying_messages` itself, so step numbering stays consistent with op
 attribution (the memory lanes to classify against come from the
 trajectory's memory role bindings — the same set memgraph's _TurnTable
@@ -49,9 +49,9 @@ recovered.
 
 from __future__ import annotations
 
-from eval.injudge.model import AgentStep, ToolExec
-from eval.memgraph.annotations import is_int, message_text
-from eval.memgraph.parse_trajectory import classifying_messages, list_field
+from injudge.model import AgentStep, ToolExec
+from memgraph.annotations import is_int, message_text
+from memgraph.parse_trajectory import classifying_messages, list_field
 
 
 def _turn_of(e: dict) -> int | None:

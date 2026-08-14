@@ -20,15 +20,15 @@ This module indexes those events in one tolerant pass. It never reconstructs
 memory actions from prompt text, role names, or adapter vocabulary — a run
 without `memory_*` events yields an empty index — and never raises on
 corrupted events: structural violations are collected in `problems` (the
-recorder's own retrieval/verify tooling remains the strict checker; eval
-reports and carries on). The checked set covers what the consumers trust:
+recorder's own retrieval/verify tooling remains the strict checker; these
+tools report and carry on). The checked set covers what the consumers trust:
 event pairing, session/binding completeness and lane placement, per-session
 operation-id keying, the proxy-stamped binding vocabulary,
 terminal-call-ref consistency, and the delivery↔search integrity (session
 scoping, recording order, delivered identities an ordered subsequence of
 the search's returned set).
 
-Stdlib only, like the rest of eval/. Every entry carries the recorder's
+Stdlib only, like the rest of the tools. Every entry carries the recorder's
 portable memory identity (namespace / identity_scheme / identity_strength /
 version_id + content sha256 — the same fields the gate's own
 `memory_identity` compares on, never adapter-native vocabulary) so span
@@ -476,7 +476,7 @@ def ref_key(ref: Any) -> str | None:
 
 
 def ref_to_memory(ref: Any) -> dict:
-    """MemoryRef → the eval's delivered/candidate memory entry shape.
+    """MemoryRef → the tools' delivered/candidate memory entry shape.
 
     `{key, value, memory_type, confidence, review_status, needs_verification}`
     plus the recorder's portable identity `{namespace, identity_scheme,

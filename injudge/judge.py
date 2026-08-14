@@ -1,7 +1,7 @@
 """LLM judge: endpoint config, API-format clients, prompt, rubric parsing.
 
-The judge endpoint is configured from `eval/.env` (stdlib only — urllib,
-no SDK). The API format is declared, not detected: `API` is one of
+The judge endpoint is configured from the checkout's `.env` (stdlib only —
+urllib, no SDK). The API format is declared, not detected: `API` is one of
 `openai-chat` (the default), `responses`, or `anthropic`. The judge input
 is the trajectory's recorded task statement (when the run carries one),
 the COMPLETE agent step stream of one trajectory, plus the injection
@@ -39,8 +39,9 @@ schema-violating answer at the json tier is a model error (JSON mode never
 promised schema conformance) and takes the same-tier corrective retry: a
 same-tier retry never repeats a failed request blindly — it appends a
 corrective note — with one deliberate exception: an empty-content answer
-(a server-side quirk) gets a fresh draw of the identical request after a
-backoff, and on openai-chat a complete verdict drafted into
+that finished normally (a server-side quirk) gets a fresh draw of the
+identical request after a backoff (a truncated one takes the budget rule
+above), and on openai-chat a complete verdict drafted into
 `reasoning_content` is recovered instead. Parsing is strict: anything out
 of contract, or a rubric covering none of the span's memories, becomes
 verdict "error" with the raw text kept — it is NEVER silently coerced to
@@ -60,8 +61,8 @@ from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen  # module-level: tests monkeypatch urlopen
 
-from eval.injudge.model import AgentStep, InjectionSpan, step_range
-from eval.memgraph.annotations import is_int
+from injudge.model import AgentStep, InjectionSpan, step_range
+from memgraph.annotations import is_int
 
 
 class JudgeError(Exception):
@@ -603,13 +604,15 @@ def _extract_text(cfg: JudgeConfig, payload: dict) -> str | None:
     content = _chat_message(payload).get("content")
     if isinstance(content, list):
         # an OpenAI-compatible endpoint may answer with a content-parts
-        # array — join its text blocks like the anthropic/responses branches
-        # do; read as "no answer" it would burn the attempt budget on
-        # identical empty draws and lose a valid answer
+        # array — join its text parts like the anthropic/responses branches
+        # join theirs; a non-text part (e.g. reasoning) carrying a "text"
+        # field is not the answer, and reading as "no answer" would burn
+        # the attempt budget on identical empty draws
         content = "".join(
             p["text"]
             for p in content
-            if isinstance(p, dict) and isinstance(p.get("text"), str)
+            if isinstance(p, dict) and p.get("type") == "text"
+            and isinstance(p.get("text"), str)
         )
     return content if isinstance(content, str) and content.strip() else None
 
@@ -1354,9 +1357,20 @@ def judge_span(
                 if tries >= cfg.max_attempts:
                     break
                 continue
-            # Reasoning models sporadically burn the whole budget on
-            # reasoning and return empty content — a server-side quirk,
-            # worth a fresh draw of the identical request at the same tier.
+            if _truncated(cfg, payload):
+                # Truncation with no content at all — a reasoning model burned
+                # the whole budget before writing the answer. The same budget
+                # rule as a truncated partial: a fresh draw of the identical
+                # request re-truncates deterministically, so record the honest
+                # failure instead of retrying.
+                return _error_verdict(
+                    "judge response truncated at the output budget with no "
+                    "message content (the budget went to reasoning); "
+                    "increase max_tokens",
+                    "", span, warnings,
+                )
+            # empty content with a normal finish is a server-side quirk —
+            # worth a fresh draw of the identical request at the same tier
             last_error = f"response carries no message content: {str(payload)[:300]}"
         # shared backoff tail: transport failures and empty-content draws
         tries += 1

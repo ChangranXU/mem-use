@@ -52,21 +52,22 @@
 The project is structured as:
 
 ```bash
-__init__.py                  # atomic_write (crash-safe artifact writes)
+util.py                      # atomic_write (crash-safe artifact writes)
 memgraph/annotations.py      # schema-v6 memory-annotation index + MemoryRef mapping
 memgraph/model.py            # Trajectory / MemoryOp / MemoryUnit / Edge dataclasses
 memgraph/parse_trajectory.py # trajectory.jsonl → ops (annotation-driven, turn table)
 memgraph/graph.py            # path discovery, cross-trajectory linking, validation
 memgraph/html.py             # self-contained HTML renderer (template + embedded graph JSON)
 memgraph/verdicts.py         # merge injudge.report/v4 verdicts onto recall ops
-memgraph/__main__.py         # CLI: python3 -m eval.memgraph
+memgraph/__main__.py         # CLI: python3 -m memgraph
 injudge/model.py             # AgentStep / ToolExec / InjectionSpan dataclasses
 injudge/steps.py             # agent-lane step stream + all-lane billed prompt tokens
 injudge/spans.py             # recall ops → injection spans (identical portable content)
 injudge/judge.py             # .env config, tiered urllib client, prompt, verdict parsing
 injudge/aggregate.py         # verdict counts/rates, per-memory usage roll-ups
 injudge/report.py            # injudge.report/v4 artifact, markdown, stdout summary
-injudge/__main__.py          # CLI: python3 -m eval.injudge
+injudge/__main__.py          # CLI: python3 -m injudge
+tests/conftest.py            # puts the checkout root on sys.path for pytest runs
 tests/annotated_fixtures.py  # shared schema-v6 synthetic-trajectory builder
 tests/test_*.py              # pytest suite (collected)
 ```
@@ -74,20 +75,22 @@ tests/test_*.py              # pytest suite (collected)
 Runtime inputs are trajectory dirs (containing `trajectory.jsonl`),
 `trajectory.jsonl` files, or root dirs scanned recursively; a path that
 matches nothing is a usage error named explicitly, never silently dropped.
-Judge endpoint configuration is `eval/.env` (never commit it; see
+Judge endpoint configuration is the checkout's `.env` (never commit it; see
 `.env.example` — every key is read and validated, there are no dead knobs).
 
 # Build, test, and development commands
 
 - `uv venv .venv && uv pip install pytest` — create the checkout-local test
   environment once (runs are stdlib-only; only the tests need pytest).
-- `eval/.venv/bin/python -m pytest eval/tests -q` — run the full suite, from
-  the parent directory (the checkout imports as `eval`).
-- `python3 -m eval.memgraph <paths> -o memgraph.html --json memgraph.json` —
-  build the graph (`--verdicts injudge-report.json` merges verdicts first).
-- `python3 -m eval.injudge <paths> --json injudge-report.json -o report.md` —
-  judge spans; `--dry-run` prints the judge input with no .env read, no
-  network, no files written.
+- `.venv/bin/python -m pytest tests -q` — run the full suite from the
+  checkout root, under any directory name (tests/conftest.py puts the
+  checkout root on sys.path; memgraph/ and injudge/ are top-level packages).
+- `python3 -m memgraph <paths> -o memgraph.html --json memgraph.json` —
+  build the graph, from the checkout root (`--verdicts injudge-report.json`
+  merges verdicts first).
+- `python3 -m injudge <paths> --json injudge-report.json -o report.md` —
+  judge spans, from the checkout root; `--dry-run` prints the judge input
+  with no .env read, no network, no files written.
 
 # Style guide
 
@@ -115,7 +118,7 @@ Judge endpoint configuration is `eval/.env` (never commit it; see
    `tests/annotated_fixtures.py` (`AnnotatedBuilder`), mirroring the
    annotation protocol the recorder emits.
 2. No network: the judge is stubbed by monkeypatching
-   `eval.injudge.judge.urlopen`; tests assert on the artifacts written to
+   `injudge.judge.urlopen`; tests assert on the artifacts written to
    disk.
 3. Name tests `test_<behavior>`; every test should exercise a real point of
    failure (corrupt input tolerance, step attribution, verdict joins), not
@@ -129,7 +132,8 @@ Judge endpoint configuration is `eval/.env` (never commit it; see
 
 These are load-bearing; never weaken them:
 
-- The judge API key comes from `eval/.env` and is sent only to the judge
+- The judge API key comes from the checkout's `.env` and is sent only to the
+  judge
   endpoint: it must never appear in artifacts, reports, logs, or error
   messages (config errors name keys, never values).
 - The memgraph HTML is an untrusted-content host: every trajectory- or
@@ -179,7 +183,7 @@ Use these component names in parentheses for `fix`, `feat`, `enh`, and `ref` com
 
 - `memgraph` - Changes to the graph pipeline (`memgraph/`): annotation index, parsing, linking, HTML, verdict merge
 - `injudge` - Changes to the judging pipeline (`injudge/`): step stream, spans, judge client, aggregates, report
-- `eval` - Cross-tool changes (shared step rule, `__init__.py`, the fixture builder)
+- `util` - Cross-tool changes (shared step rule, `util.py`, the fixture builder)
 
 # Rules
 

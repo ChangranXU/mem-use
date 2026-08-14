@@ -3,7 +3,7 @@
 Runs recorded through the traj-recorder (schema v6) carry explicit `memory_*`
 annotation events — the memory system's logical actions, recorded at the
 boundary by the system itself (see extension/traj-recorder "Annotating memory
-actions" and `eval/memgraph/annotations.py`). This parser consumes exactly
+actions" and `memgraph/annotations.py`). This parser consumes exactly
 those events; it never reconstructs memory actions from prompt text, role
 names, or label conventions.
 
@@ -35,7 +35,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from eval.memgraph.annotations import (
+from memgraph.annotations import (
     AnnotationIndex,
     build_annotation_index,
     content_chars,
@@ -46,7 +46,7 @@ from eval.memgraph.annotations import (
     ref_to_memory,
     resolved_content_text,
 )
-from eval.memgraph.model import MemoryOp, Trajectory
+from memgraph.model import MemoryOp, Trajectory
 
 _QUERY_CAP = 300  # recall-op query previews are informational; keep artifacts lean
 
@@ -70,17 +70,33 @@ def load_events(path: Path, warnings: list[str]) -> list[dict]:
     """
     events = []
     corrupt = []
-    # errors="replace": a non-UTF-8 byte must not abort the whole read — it
-    # lands in its line as U+FFFD and the line then fails JSON parsing like
-    # any other malformed line (one corrupt line never aborts the run)
-    with open(path, encoding="utf-8", errors="replace") as f:
-        for lineno, line in enumerate(f, 1):
+    # binary read + strict per-line decode: a non-UTF-8 byte must not abort
+    # the whole read, and errors="replace" alone would land it in a string
+    # VALUE silently (the line still parses, so the corruption would flow
+    # into artifacts unnoted). The line is kept — dropping it would lose its
+    # whole event (seq, turn classification, usage) over one bad byte — with
+    # the U+FFFD replacement warned about, never silent. UTF-8 continuation
+    # bytes are all >= 0x80, so a multi-byte character never straddles a
+    # b"\n" split.
+    with open(path, "rb") as f:
+        for lineno, raw in enumerate(f, 1):
+            try:
+                line = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                line = raw.decode("utf-8", "replace")
+                warnings.append(
+                    f"{path.name}:{lineno}: non-UTF-8 byte(s); "
+                    "decoded with U+FFFD replacements"
+                )
             line = line.strip()
             if not line:
                 continue
             try:
                 event = json.loads(line)
-            except json.JSONDecodeError as e:
+            except (ValueError, RecursionError) as e:
+                # ValueError covers JSONDecodeError and the int digit-limit
+                # refusal; RecursionError covers pathologically deep nesting —
+                # a hand-edited line is skipped like any other malformed one
                 warnings.append(f"{path.name}:{lineno}: skipped malformed JSONL line ({e})")
                 continue
             if not isinstance(event, dict):
@@ -420,7 +436,7 @@ def parse_trajectory(
     """Parse one trajectory directory into (Trajectory, [MemoryOp], events).
 
     The loaded trajectory events are returned alongside so callers needing
-    the raw stream (eval.injudge's step stream) do not re-read the file."""
+    the raw stream (injudge's step stream) do not re-read the file."""
     traj_dir = Path(traj_dir)
     jsonl = traj_dir / "trajectory.jsonl"
     if not jsonl.is_file():
@@ -437,9 +453,11 @@ def parse_trajectory(
         meta = None
         try:
             parsed = json.loads(run_json.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
-            # an unreadable, non-UTF-8, or malformed run.json degrades to the
-            # directory name like any other corrupt metadata — never raise
+        except (OSError, ValueError, RecursionError) as e:
+            # an unreadable, non-UTF-8, malformed, or pathologically nested
+            # run.json degrades to the directory name like any other corrupt
+            # metadata — never raise (ValueError covers UnicodeDecodeError,
+            # JSONDecodeError, and the int digit-limit refusal alike)
             warnings.append(f"{run_json}: cannot parse run.json ({e}); using directory name")
         else:
             if isinstance(parsed, dict):

@@ -1,18 +1,19 @@
-"""Fixture tests for eval.memgraph: parsing, step attribution, linking, verdicts.
+"""Fixture tests for memgraph: parsing, step attribution, linking, verdicts.
 
 Fixtures are schema-v6 annotated trajectories (see
-eval/tests/annotated_fixtures.py): memory actions come from memory_* events,
+tests/annotated_fixtures.py): memory actions come from memory_* events,
 never from prompt text or label conventions.
 """
 
 import json
+from pathlib import Path
 
 import pytest
 
-from eval.memgraph.graph import build_graph, load_and_build
-from eval.memgraph.parse_trajectory import parse_trajectory
-from eval.tests.annotated_fixtures import AnnotatedBuilder as TrajBuilder
-from eval.tests.annotated_fixtures import cure_ref, parse
+from memgraph.graph import build_graph, discover_trajectories, load_and_build
+from memgraph.parse_trajectory import parse_trajectory
+from annotated_fixtures import AnnotatedBuilder as TrajBuilder
+from annotated_fixtures import cure_ref, parse
 
 
 # ---------------------------------------------------------------- parsing
@@ -194,7 +195,7 @@ def test_discover_trajectories_names_unmatched_paths(tmp_path):
     """A CLI path that yields no trajectory dir is a usage error named
     explicitly — silently dropping it (a typo next to a valid root, a
     wrong-named file) would misread the run as covering inputs it never saw."""
-    from eval.memgraph.graph import discover_trajectories
+    from memgraph.graph import discover_trajectories
 
     TrajBuilder().agent_turn(with_task=True).write(tmp_path / "runs" / "t1")
     assert discover_trajectories([tmp_path / "runs"]) == [tmp_path / "runs" / "t1"]
@@ -527,7 +528,7 @@ def test_recall_before_observed_creation_is_flagged(tmp_path):
 def test_null_step_recall_still_renders(tmp_path):
     # delivery in a run where no agent turn ever classified (memory-lane-only
     # fixture) → step None; graph + HTML must still build.
-    from eval.memgraph.html import render_html
+    from memgraph.html import render_html
 
     b = TrajBuilder()
     sid = b.search(returned=[cure_ref("key_a")])
@@ -544,7 +545,7 @@ def test_non_string_run_id_never_breaks_parse_or_html(tmp_path):
     object): the parse keeps the directory name with a warning, and the
     HTML's run-id parsing stringifies first — a bare (t.run_id||"").match
     would throw and leave an empty canvas."""
-    from eval.memgraph.html import render_html
+    from memgraph.html import render_html
 
     b = TrajBuilder().agent_turn(with_task=True).recall(cure_ref("k", "v"))
     b.write(tmp_path / "t1", run_id="t1")
@@ -602,6 +603,61 @@ def test_unparseable_run_json_degrades_never_crashes(tmp_path):
     assert any("cannot parse run.json" in v["msg"] for v in graph["validation"])
 
 
+def test_pathologically_nested_json_degrades_never_raises(tmp_path):
+    """json.loads raises RecursionError on pathologically nested input (and a
+    plain ValueError on the int digit limit) — neither may escape the
+    never-raise paths: a nested run.json degrades to the directory name, a
+    nested or digit-bloated JSONL line is skipped like any malformed one."""
+    deep = "[" * 200000 + "]" * 200000
+    b = TrajBuilder().agent_turn(with_task=True).recall()
+    d = b.write(tmp_path / "t1", run_id="t1")
+    (d / "run.json").write_text('{"run_id": ' + deep + "}")
+    p = d / "trajectory.jsonl"
+    p.write_bytes(
+        p.read_bytes()
+        + deep.encode() + b"\n"
+        + ('{"seq": ' + "1" * 5000 + "}").encode() + b"\n"
+    )
+    graph = load_and_build([d])
+    assert graph["trajectories"][0]["run_id"] == "t1"
+    assert any("cannot parse run.json" in v["msg"] for v in graph["validation"])
+    assert sum("skipped malformed JSONL line" in v["msg"]
+               for v in graph["validation"]) == 2
+    assert not any("decoded with U+FFFD" in v["msg"] for v in graph["validation"])
+
+
+def test_non_utf8_line_replacement_is_warned_never_silent(tmp_path):
+    """A corrupt byte inside a string value keeps the line — dropping it
+    would lose the whole event (its seq, turn classification, usage) over
+    one bad byte — but the U+FFFD replacement is always a validation note:
+    the taint never flows into artifacts silently."""
+    b = TrajBuilder().agent_turn(with_task=True)
+    d = b.write(tmp_path / "t1", run_id="t1")
+    p = d / "trajectory.jsonl"
+    p.write_bytes(
+        p.read_bytes() + b'{"seq": 900, "type": "history_rewritten", "kept": "a\xffb"}\n'
+    )
+    graph = load_and_build([d])
+    assert any("decoded with U+FFFD replacements" in v["msg"]
+               for v in graph["validation"])
+    kept = graph["trajectories"][0]["rewrites"][0]["kept"]
+    assert kept == "a\ufffdb"  # the event survives, taint visible
+
+
+def test_discovery_dedupes_one_dir_under_several_spellings(tmp_path, monkeypatch):
+    """The same trajectory directory passed under several path spellings
+    (a relative form, an absolute one, its trajectory.jsonl file) is ONE
+    trajectory: loading it twice would share one run_id and trip the verdict
+    join's ambiguity guard on both copies."""
+    b = TrajBuilder().agent_turn(with_task=True).recall()
+    d = b.write(tmp_path / "t1", run_id="t1")
+    monkeypatch.chdir(tmp_path)
+    assert discover_trajectories([Path("t1"), d, d / "trajectory.jsonl"]) == [Path("t1")]
+    graph = load_and_build([Path("t1"), d])
+    assert len(graph["trajectories"]) == 1
+    assert not any("shared by multiple" in v["msg"] for v in graph["validation"])
+
+
 def test_unhashable_event_type_is_skipped_never_crashes(tmp_path):
     """A hand-edited event whose `type` is unhashable (a list) would raise
     TypeError on the annotation index's set-membership test — a corrupt type
@@ -646,7 +702,7 @@ def test_mixed_tz_timestamps_do_not_crash_chronology(tmp_path):
 def test_parse_at_z_suffix_and_garbage():
     """fromisoformat (3.11+) parses the Z suffix natively; aware stamps are
     normalized to naive UTC; unparseable input degrades to None."""
-    from eval.memgraph.graph import _parse_at
+    from memgraph.graph import _parse_at
 
     z = _parse_at("2026-01-01T00:00:00Z")
     assert z is not None and z.tzinfo is None
@@ -745,7 +801,7 @@ def test_multiple_generations_and_lanes_in_tool_config(tmp_path):
     b.recall()
     b.write(tmp_path / "t1", run_id="t1")
     graph = load_and_build([tmp_path])
-    assert graph["tool"] == {"name": "eval.memgraph"}
+    assert graph["tool"] == {"name": "memgraph"}
     (t,) = graph["trajectories"]
     assert t["memory_lane"] == "EXTRACT"
     assert t["adapter"] == "cure@0.1.0" and t["instance_id"] == "pydata__xarray-2905"
@@ -796,7 +852,7 @@ def verdict_report(run_id, span_id, entries, verdict="neutral"):
         for i, (seq, step, role) in enumerate(entries)
     ]
     return {
-        "tool": {"name": "eval.injudge", "schema": "injudge.report/v4"},
+        "tool": {"name": "injudge", "schema": "injudge.report/v4"},
         "trajectories": [{"id": "T99", "run_id": run_id}],
         "operations": [op_record],
         "injections": injections,
@@ -809,7 +865,7 @@ def graph_payload(html):
 
 
 def test_apply_verdicts_joins_by_run_id_and_seq(tmp_path):
-    from eval.memgraph.verdicts import apply_verdicts
+    from memgraph.verdicts import apply_verdicts
 
     b = (TrajBuilder().agent_turn(with_task=True).agent_turn()
          .recall().recall())
@@ -841,13 +897,13 @@ def test_apply_verdicts_joins_by_run_id_and_seq(tmp_path):
 
 
 def test_dot_path_run_id_stays_joinable(tmp_path, monkeypatch):
-    """`python -m eval.memgraph .` from inside a trajectory dir: Path(".").name
+    """`python -m memgraph .` from inside a trajectory dir: Path(".").name
     is "" but run_id must stay non-empty (the verdict join and the HTML's
     run-id parsing assume one) — the parse falls back to the resolved
     directory name, and the verdict join then matches."""
     from pathlib import Path
 
-    from eval.memgraph.verdicts import apply_verdicts
+    from memgraph.verdicts import apply_verdicts
 
     b = TrajBuilder().agent_turn(with_task=True).recall()
     d = b.write(tmp_path / "cwd-traj", run_id="cwd-traj")
@@ -862,7 +918,7 @@ def test_dot_path_run_id_stays_joinable(tmp_path, monkeypatch):
 
 
 def test_apply_verdicts_unmatched_seq_warns_and_annotates_nothing(tmp_path):
-    from eval.memgraph.verdicts import apply_verdicts
+    from memgraph.verdicts import apply_verdicts
 
     b = TrajBuilder().agent_turn(with_task=True).recall()
     b.write(tmp_path / "t1", run_id="run-1")
@@ -877,7 +933,7 @@ def test_apply_verdicts_unmatched_seq_warns_and_annotates_nothing(tmp_path):
 def test_apply_verdicts_corrupt_entries_warn(tmp_path):
     """A hand-edited report can carry operation/trajectory entries without
     usable ids: they can never join — validation notes, never silent drops."""
-    from eval.memgraph.verdicts import apply_verdicts
+    from memgraph.verdicts import apply_verdicts
 
     b = TrajBuilder().agent_turn(with_task=True).recall()
     b.write(tmp_path / "t1", run_id="run-1")
@@ -899,7 +955,7 @@ def test_apply_verdicts_unmatched_report_injection_warns(tmp_path):
     matches no loaded recall op means the report and the graph disagree (a
     stale report, a regenerated trajectory) — a validation note, never a
     silent drop."""
-    from eval.memgraph.verdicts import apply_verdicts
+    from memgraph.verdicts import apply_verdicts
 
     b = TrajBuilder().agent_turn(with_task=True).recall()
     b.write(tmp_path / "t1", run_id="run-1")
@@ -919,7 +975,7 @@ def test_apply_verdicts_dangling_span_id_is_noted_not_silent(tmp_path):
     """A stale/hand-edited report can name a span no operation record
     defines: the injection can never join (its run is derived through the
     span) — a validation note, never a silent drop."""
-    from eval.memgraph.verdicts import apply_verdicts
+    from memgraph.verdicts import apply_verdicts
 
     b = TrajBuilder().agent_turn(with_task=True).recall()
     b.write(tmp_path / "t1", run_id="run-1")
@@ -936,7 +992,7 @@ def test_apply_verdicts_bool_seq_is_not_seq_1():
     """A JSON `true` seq is not seq 1: True == 1 collides in the seq map, so a
     corrupt injection entry must never join the recall op carrying seq 1 —
     and the drop is a validation note, never silent."""
-    from eval.memgraph.verdicts import apply_verdicts
+    from memgraph.verdicts import apply_verdicts
 
     graph = {
         "trajectories": [{"id": "T1", "run_id": "run-1"}],
@@ -957,7 +1013,7 @@ def test_apply_verdicts_corrupt_report_entries_are_notes_not_crashes():
     """A hand-edited artifact can put a non-object entry in any report list:
     like every other input mismatch here that is a validation note, never an
     AttributeError — and the well-formed entries still join."""
-    from eval.memgraph.verdicts import apply_verdicts
+    from memgraph.verdicts import apply_verdicts
 
     graph = {
         "trajectories": [{"id": "T1", "run_id": "run-1"}],
@@ -977,7 +1033,7 @@ def test_apply_verdicts_duplicate_run_id_is_ambiguous_not_contaminating(tmp_path
     """Two loaded trajectories sharing one run_id make the (run_id, seq) join
     ambiguous: skip both with a warning — never annotate one run's verdicts
     onto the other's recall ops."""
-    from eval.memgraph.verdicts import apply_verdicts
+    from memgraph.verdicts import apply_verdicts
 
     a = TrajBuilder().agent_turn(with_task=True).recall()
     a.write(tmp_path / "d1", run_id="same-run")
@@ -997,7 +1053,7 @@ def test_apply_verdicts_duplicate_report_run_id_merges_with_warning(tmp_path):
     """A report covering one run_id twice (e.g. the same run judged twice)
     merges both trajectories' seq maps — later entries overwrite earlier ones
     on a seq collision — and the merge is warned about, never silent."""
-    from eval.memgraph.verdicts import apply_verdicts
+    from memgraph.verdicts import apply_verdicts
 
     b = TrajBuilder().agent_turn(with_task=True).recall().recall()
     b.write(tmp_path / "t1", run_id="run-1")
@@ -1026,7 +1082,7 @@ def test_apply_verdicts_duplicate_operation_id_warns(tmp_path):
     """One operation_id twice in a (hand-edited) report: the later entry wins
     the span lookup — same collision rule as the seq maps — and the overwrite
     is warned about like every other corruption apply_verdicts reports."""
-    from eval.memgraph.verdicts import apply_verdicts
+    from memgraph.verdicts import apply_verdicts
 
     b = TrajBuilder().agent_turn(with_task=True).recall()
     b.write(tmp_path / "t1", run_id="run-1")
@@ -1047,7 +1103,7 @@ def test_apply_verdicts_duplicate_trajectory_id_warns(tmp_path):
     """One trajectory id twice in a (hand-edited) report: the later run_id
     mapping wins — the same collision rule as duplicate operation_ids and
     seq maps — and the overwrite is warned about, never silent."""
-    from eval.memgraph.verdicts import apply_verdicts
+    from memgraph.verdicts import apply_verdicts
 
     b = TrajBuilder().agent_turn(with_task=True).recall()
     b.write(tmp_path / "t1", run_id="run-1")
@@ -1066,7 +1122,7 @@ def test_apply_verdicts_missing_run_ids_are_not_ambiguous(tmp_path):
     truthy run_ids only) — two runless trajectories are unjoinable, not
     "shared", and must not trip the ambiguity warning (or crash sorted()
     when a genuinely duplicated run_id is also present)."""
-    from eval.memgraph.verdicts import apply_verdicts
+    from memgraph.verdicts import apply_verdicts
 
     graph = {
         "trajectories": [
@@ -1088,7 +1144,7 @@ def test_apply_verdicts_non_string_run_ids_never_crash():
     types crash sorted() and unhashable values crash the dict/set lookups.
     Only string run_ids can ever join (the report side's keys are strings) —
     the rest are simply unjoinable, never a crash."""
-    from eval.memgraph.verdicts import apply_verdicts
+    from memgraph.verdicts import apply_verdicts
 
     graph = {
         "trajectories": [
@@ -1108,7 +1164,7 @@ def test_apply_verdicts_non_string_run_ids_never_crash():
 def test_apply_verdicts_runless_trajectory_note_names_the_trajectory():
     """A runless trajectory never joins the report; when it has recall ops
     the info note still names it — by its graph id, not a literal None."""
-    from eval.memgraph.verdicts import apply_verdicts
+    from memgraph.verdicts import apply_verdicts
 
     graph = {
         "trajectories": [{"id": "T1", "run_id": None}],
@@ -1121,7 +1177,7 @@ def test_apply_verdicts_runless_trajectory_note_names_the_trajectory():
 
 
 def test_apply_verdicts_run_without_report_coverage_notes_info(tmp_path):
-    from eval.memgraph.verdicts import apply_verdicts
+    from memgraph.verdicts import apply_verdicts
 
     b = TrajBuilder().agent_turn(with_task=True).recall()
     b.write(tmp_path / "t1", run_id="run-1")
@@ -1135,7 +1191,7 @@ def test_apply_verdicts_run_without_report_coverage_notes_info(tmp_path):
 
 
 def test_load_verdict_report_requires_injudge_schema(tmp_path):
-    from eval.memgraph.verdicts import load_verdict_report
+    from memgraph.verdicts import load_verdict_report
 
     bad = tmp_path / "bad.json"
     bad.write_text(json.dumps({"tool": {"schema": "other/v9"}}), encoding="utf-8")
@@ -1154,8 +1210,8 @@ def test_load_verdict_report_requires_injudge_schema(tmp_path):
 
 
 def test_render_html_with_verdicts_embeds_them(tmp_path):
-    from eval.memgraph.html import render_html
-    from eval.memgraph.verdicts import apply_verdicts
+    from memgraph.html import render_html
+    from memgraph.verdicts import apply_verdicts
 
     b = TrajBuilder().agent_turn(with_task=True).recall()
     b.write(tmp_path / "t1", run_id="run-1")
@@ -1177,7 +1233,7 @@ def test_render_html_with_verdicts_embeds_them(tmp_path):
 
 
 def test_render_html_without_verdicts_has_no_verdict_payload(tmp_path):
-    from eval.memgraph.html import render_html
+    from memgraph.html import render_html
 
     b = TrajBuilder().agent_turn(with_task=True).recall()
     b.write(tmp_path / "t1", run_id="t1")
@@ -1193,7 +1249,7 @@ def test_render_html_title_literal_in_graph_data_survives(tmp_path):
     """A graph datum carrying the literal __TITLE__ must not be rewritten by
     the template's title substitution (placeholders are replaced in a single
     pass — injected content is never re-scanned)."""
-    from eval.memgraph.html import render_html
+    from memgraph.html import render_html
 
     b = TrajBuilder().agent_turn(with_task=True)
     b.write(tmp_path / "t1", run_id="run with __TITLE__ inside")
@@ -1207,7 +1263,7 @@ def test_render_html_graph_token_in_title_stays_literal():
     """The reverse direction: a title carrying the literal __GRAPH_JSON__
     must arrive as title text, never get the graph payload injected into
     <title>/<h1> (the same single-pass guarantee)."""
-    from eval.memgraph.html import render_html
+    from memgraph.html import render_html
 
     out = render_html({"trajectories": [], "ops": [], "memories": [],
                        "edges": [], "validation": []},
@@ -1219,7 +1275,7 @@ def test_render_html_graph_token_in_title_stays_literal():
 def test_render_html_escapes_the_title():
     """The title is interpolated as <title>/<h1> text: markup characters in
     it must arrive escaped, never as live HTML."""
-    from eval.memgraph.html import render_html
+    from memgraph.html import render_html
 
     out = render_html({"trajectories": [], "ops": [], "memories": [],
                        "edges": [], "validation": []},
@@ -1232,7 +1288,7 @@ def test_render_html_escapes_trajectory_data_in_svg_titles():
     """Memory keys and lane names are trajectory-controlled: every one of
     them interpolated into an SVG <title> goes through esc() — the span
     set-change diff, the rewrite-band sources, the verdict label."""
-    from eval.memgraph.html import render_html
+    from memgraph.html import render_html
 
     html = render_html({"trajectories": [], "ops": [], "memories": [],
                         "edges": [], "validation": []})
@@ -1250,7 +1306,7 @@ def test_render_html_escapes_off_enum_rubric_values():
     """A foreign or hand-edited --verdicts artifact can carry an off-enum
     rubric signal value: the sigCell fallback rendering it into innerHTML goes
     through esc() like every other interpolated datum."""
-    from eval.memgraph.html import render_html
+    from memgraph.html import render_html
 
     html = render_html({"trajectories": [], "ops": [], "memories": [],
                         "edges": [], "validation": []})
@@ -1262,7 +1318,7 @@ def test_render_html_escapes_artifact_controlled_numbers():
     trajectory/verdicts artifacts: a hand-edited string value must render
     escaped, and the thousands-formatted token count is computed only when
     the value really is a number."""
-    from eval.memgraph.html import render_html
+    from memgraph.html import render_html
 
     html = render_html({"trajectories": [], "ops": [], "memories": [],
                         "edges": [], "validation": []})
@@ -1280,7 +1336,7 @@ def test_render_html_restated_op_resolves_the_span_detail():
     spans: the split-off leader is a restated injection carrying no
     verdict_detail of its own — the popover resolves the span's detail
     through the shared span id instead of showing a bare verdict chip."""
-    from eval.memgraph.html import render_html
+    from memgraph.html import render_html
 
     html = render_html({"trajectories": [], "ops": [], "memories": [],
                         "edges": [], "validation": []})
@@ -1291,7 +1347,7 @@ def test_render_html_verdict_popover_guards_corrupt_entries():
     """A hand-edited verdicts artifact can carry null memory_usage/evidence
     entries or non-array step lists: the popover's dereferences are guarded —
     an unguarded one throws and that op's detail panel never renders."""
-    from eval.memgraph.html import render_html
+    from memgraph.html import render_html
 
     html = render_html({"trajectories": [], "ops": [], "memories": [],
                         "edges": [], "validation": []})
@@ -1306,10 +1362,10 @@ def test_render_html_payload_neutralizes_script_breakout():
     browser's script-data parser would leave the script context and could
     swallow the rest of the document). Every "<" is escaped in the payload,
     and the value still round-trips."""
-    from eval.memgraph.html import render_html
+    from memgraph.html import render_html
 
     value = "x <!-- <script>alert(1)</script> -->"
-    graph = {"tool": {"name": "eval.memgraph"}, "trajectories": [], "ops": [],
+    graph = {"tool": {"name": "memgraph"}, "trajectories": [], "ops": [],
              "edges": [], "validation": [],
              "memories": [{"key": "k", "value": value, "recalls": [], "updates": []}]}
     html = render_html(graph)
@@ -1322,10 +1378,10 @@ def test_render_html_payload_escapes_js_line_separators():
     """U+2028/U+2029 in trajectory data are line terminators a pre-ES2019 JS
     parser rejects inside string literals: escaped like "<" (the form is
     valid in both JSON and JS), and the value still round-trips."""
-    from eval.memgraph.html import render_html
+    from memgraph.html import render_html
 
     value = "a\u2028b\u2029c"
-    graph = {"tool": {"name": "eval.memgraph"}, "trajectories": [], "ops": [],
+    graph = {"tool": {"name": "memgraph"}, "trajectories": [], "ops": [],
              "edges": [], "validation": [],
              "memories": [{"key": "k", "value": value, "recalls": [], "updates": []}]}
     html = render_html(graph)
