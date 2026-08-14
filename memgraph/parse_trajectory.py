@@ -70,7 +70,10 @@ def load_events(path: Path, warnings: list[str]) -> list[dict]:
     """
     events = []
     corrupt = []
-    with open(path, encoding="utf-8") as f:
+    # errors="replace": a non-UTF-8 byte must not abort the whole read — it
+    # lands in its line as U+FFFD and the line then fails JSON parsing like
+    # any other malformed line (one corrupt line never aborts the run)
+    with open(path, encoding="utf-8", errors="replace") as f:
         for lineno, line in enumerate(f, 1):
             line = line.strip()
             if not line:
@@ -294,7 +297,10 @@ def _extract_op_from_generation(
     for change in operation.changes:
         cp = change["payload"]
         action = cp.get("action")
-        if action in _REMOVAL_ACTIONS:
+        # the frozenset membership test hashes its operand: an unhashable
+        # hand-edited action (a list) would raise TypeError — a corrupt
+        # action degrades to the unmodeled warning below, never a crash
+        if isinstance(action, str) and action in _REMOVAL_ACTIONS:
             for ref in list_field(cp, "before"):
                 op.deletions.append({"target": ref_key(ref), "ref": ref_to_memory(ref)})
         elif action not in ("create", "update", "noop"):
@@ -421,19 +427,25 @@ def parse_trajectory(
         raise FileNotFoundError(f"no trajectory.jsonl in {traj_dir}")
     events = load_events(jsonl, warnings)
 
-    run_id = traj_dir.name
+    # the directory name is empty when the input path is "." or "/" — the
+    # verdict join and the HTML's run-id parsing both assume a non-empty
+    # run_id, so fall back to the resolved directory name, then the path text
+    run_id = traj_dir.name or traj_dir.absolute().name or str(traj_dir)
     model = started_at = status = None
     run_json = traj_dir / "run.json"
     if run_json.is_file():
         meta = None
         try:
             parsed = json.loads(run_json.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+            # an unreadable, non-UTF-8, or malformed run.json degrades to the
+            # directory name like any other corrupt metadata — never raise
+            warnings.append(f"{run_json}: cannot parse run.json ({e}); using directory name")
+        else:
             if isinstance(parsed, dict):
                 meta = parsed
             else:
                 warnings.append(f"{run_json}: run.json is not a JSON object; using directory name")
-        except json.JSONDecodeError as e:
-            warnings.append(f"{run_json}: unparseable run.json ({e}); using directory name")
         if meta is not None:
             # only a non-empty string names a run (the verdict join and the
             # HTML's run-id parsing both assume one); a corrupt value keeps

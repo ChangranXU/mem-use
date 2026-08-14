@@ -41,8 +41,13 @@
   The judge walks the conformance tier chain structured → json → prompt
   (anthropic: structured → prompt); tier discovery on a 400/422 or a
   proven-ignored format field is free, everything else consumes
-  `MAX_ATTEMPTS`. An unparseable/out-of-contract answer becomes verdict
-  `error` with the raw text kept — never silently neutral.
+  `MAX_ATTEMPTS`. An answer cut at the output-token budget is a budget
+  property, never proof of an ignored format field: it becomes an `error`
+  verdict naming the truncation (no degrade, no same-budget retry). With
+  `OUTPUT_FORMAT` pinned there is no chain, so a 400/422 fails the span
+  (recorded, the run continues), never aborts the run. An
+  unparseable/out-of-contract answer becomes verdict `error` with the raw
+  text kept — never silently neutral.
 
 The project is structured as:
 

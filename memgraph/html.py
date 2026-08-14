@@ -197,6 +197,11 @@ const laneY=i=> TOP+i*(LANE_H+LANE_GAP)+LANE_H/2;
 const trajIdx=Object.fromEntries(trajs.map((t,i)=>[t.id,i]));
 const opsById=Object.fromEntries(G.ops.map(o=>[o.id,o]));
 const opOrder=Object.fromEntries(G.ops.map((o,i)=>[o.id,i]));
+// a restated injection carries no verdict_detail of its own (the span's first
+// injection holds it) — resolve it through the shared span id, so a memgraph
+// span split off from its injudge span (a delivery gap) still shows the detail
+const detailBySpan={};
+for(const o of G.ops) if(o.verdict_span&&o.verdict_detail) detailBySpan[o.verdict_span]=o.verdict_detail;
 
 // collapse consecutive recalls (per traj) with identical key sets into spans;
 // step-less recalls (truncated trajectories) become singleton spans, never merged
@@ -680,7 +685,7 @@ function showOp(opId){
       for(const x of vops){
         if(seen.has(x.verdict_span)) continue;
         seen.add(x.verdict_span);
-        const d=x.verdict_detail||{}, v=d.verdict||x.span_verdict||"unjudged";
+        const d=x.verdict_detail||detailBySpan[x.verdict_span]||{}, v=d.verdict||x.span_verdict||"unjudged";
         const dc=d.delivery_cost||{};
         // artifact-controlled numbers render escaped like any other datum;
         // the thousands-formatted token count only when it really is a number
@@ -694,10 +699,18 @@ function showOp(opId){
           for(const [mk,sig] of Object.entries(d.rubric))
             h+=`<div class="vline">${chipForKey(mk)} ${sigCell(sig,"relevance","R")} ${sigCell(sig,"accuracy","A")} ${sigCell(sig,"novelty","N")} ${sigCell(sig,"influence","I")} ${sigCell(sig,"positive_effect","P")}</div>`;
         }
-        for(const [k,u] of Object.entries(d.memory_usage||{}))
+        // a hand-edited verdicts artifact can carry null/non-object entries
+        // or non-array step lists — skip them like any other drifted datum,
+        // never dead-panel the op on a TypeError
+        for(const [k,u] of Object.entries(d.memory_usage||{})){
+          if(!u||typeof u!=="object") continue;
           h+=`<div class="vline" title="${esc(u.evidence||"")}">${esc(k)} → ${esc(u.usage)}${u.reason?` <span class="meta">(${esc(u.reason)})</span>`:""}</div>`;
-        for(const evv of (d.evidence||[]))
-          h+=`<div class="vline" style="white-space:normal">• ${esc(evv.claim||"")} (steps ${esc((evv.steps||[]).join(",")||"?")}; seqs ${esc((evv.seqs||[]).join(",")||"?")})</div>`;
+        }
+        for(const evv of (Array.isArray(d.evidence)?d.evidence:[])){
+          if(!evv||typeof evv!=="object") continue;
+          const evSteps=Array.isArray(evv.steps)?evv.steps:[], evSeqs=Array.isArray(evv.seqs)?evv.seqs:[];
+          h+=`<div class="vline" style="white-space:normal">• ${esc(evv.claim||"")} (steps ${esc(evSteps.join(",")||"?")}; seqs ${esc(evSeqs.join(",")||"?")})</div>`;
+        }
         h+=`</div>`;
       }
     }

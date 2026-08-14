@@ -122,8 +122,11 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
     seen_delivery_ids: set[str] = set()
 
     for event in events:
+        # the set membership test hashes its operand: an unhashable
+        # hand-edited type (a list) would raise TypeError — a corrupt type
+        # names no memory event, so the event is skipped, never fatal
         event_type = event.get("type")
-        if event_type not in MEMORY_EVENT_TYPES:
+        if not isinstance(event_type, str) or event_type not in MEMORY_EVENT_TYPES:
             continue
         seq = event.get("seq")
         annotation_id = event.get("annotation_id")

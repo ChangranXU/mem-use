@@ -558,6 +558,62 @@ def test_non_string_run_id_never_breaks_parse_or_html(tmp_path):
     assert "recallSpans" in html
 
 
+def test_unhashable_change_action_degrades_never_crashes(tmp_path):
+    """A hand-edited memory_change can carry an unhashable action (a list):
+    the removal-membership test hashes its operand, so the corrupt action
+    must degrade to the unmodeled-action warning, never raise TypeError."""
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.memory_turn()
+    b.generate(changes=[("delete", [cure_ref("k", "v")], [])], extraction_step="1")
+    for e in b.events:
+        if e["type"] == "memory_change":
+            e["payload"]["action"] = ["delete"]  # hand-edit: unhashable
+    _traj, ops, warnings = parse(b, tmp_path)
+    assert ops[0].deletions == []  # the corrupt action claims no removal
+    assert any("unmodeled change action" in w for w in warnings)
+
+
+def test_non_utf8_jsonl_line_is_tolerated(tmp_path):
+    """A trajectory.jsonl carrying non-UTF-8 bytes must not abort the run:
+    the undecodable bytes are replaced — a line corrupted inside a string
+    still parses (the replacement chars stay visible), one corrupted in its
+    structure is skipped like any other malformed line."""
+    b = TrajBuilder().agent_turn(with_task=True).recall()
+    d = b.write(tmp_path / "t1", run_id="t1")
+    p = d / "trajectory.jsonl"
+    p.write_bytes(
+        p.read_bytes()
+        + b'{"seq": 900, "type": "\xff\xfe"}\n'  # corrupt inside a string: kept
+        + b'\xff{"seq": 901}\n'  # corrupt in the structure: skipped
+    )
+    graph = load_and_build([tmp_path])
+    assert len([o for o in graph["ops"] if o["kind"] == "recall"]) == 1
+    assert any("skipped malformed JSONL line" in v["msg"] for v in graph["validation"])
+
+
+def test_unparseable_run_json_degrades_never_crashes(tmp_path):
+    """A run.json that is not UTF-8 (or unreadable) must degrade to the
+    directory name with a warning — never raise."""
+    b = TrajBuilder().agent_turn(with_task=True).recall()
+    d = b.write(tmp_path / "t1", run_id="t1")
+    (d / "run.json").write_bytes('{"run_id": "caf\xe9"}'.encode("latin-1"))
+    graph = load_and_build([tmp_path])
+    assert graph["trajectories"][0]["run_id"] == "t1"
+    assert any("cannot parse run.json" in v["msg"] for v in graph["validation"])
+
+
+def test_unhashable_event_type_is_skipped_never_crashes(tmp_path):
+    """A hand-edited event whose `type` is unhashable (a list) would raise
+    TypeError on the annotation index's set-membership test — a corrupt type
+    names no memory event, so it is skipped like any unknown type, never
+    fatal."""
+    b = TrajBuilder().agent_turn(with_task=True).recall()
+    b.events.append({"seq": 900, "type": ["memory_delivery"], "payload": {}})
+    _traj, ops, warnings = parse(b, tmp_path)
+    assert [o.kind for o in ops] == ["recall"]  # intact despite the corrupt line
+    assert warnings == []
+
+
 def test_created_status_preserved_across_updates(tmp_path):
     v1 = cure_ref("k", "v1", review_status="pending_review", store_id=1)
     v2 = cure_ref("k", "v2", review_status="approved", store_id=2)
@@ -782,6 +838,27 @@ def test_apply_verdicts_joins_by_run_id_and_seq(tmp_path):
     assert second["span_verdict"] == "neutral"
     assert "verdict_detail" not in second
     assert graph["tool"]["verdicts"] == "injudge.json"
+
+
+def test_dot_path_run_id_stays_joinable(tmp_path, monkeypatch):
+    """`python -m eval.memgraph .` from inside a trajectory dir: Path(".").name
+    is "" but run_id must stay non-empty (the verdict join and the HTML's
+    run-id parsing assume one) — the parse falls back to the resolved
+    directory name, and the verdict join then matches."""
+    from pathlib import Path
+
+    from eval.memgraph.verdicts import apply_verdicts
+
+    b = TrajBuilder().agent_turn(with_task=True).recall()
+    d = b.write(tmp_path / "cwd-traj", run_id="cwd-traj")
+    (d / "run.json").unlink()  # the directory name is all there is
+    monkeypatch.chdir(d)
+    graph = load_and_build([Path(".")])
+    assert graph["trajectories"][0]["run_id"] == "cwd-traj"
+    recall = next(o for o in graph["ops"] if o["kind"] == "recall")
+    apply_verdicts(graph, verdict_report("cwd-traj", "T99:S1",
+                                         [(recall["seq"], recall["step"], "first")]))
+    assert recall["verdict"] == "neutral"  # the (run_id, seq) join landed
 
 
 def test_apply_verdicts_unmatched_seq_warns_and_annotates_nothing(tmp_path):
@@ -1195,7 +1272,32 @@ def test_render_html_escapes_artifact_controlled_numbers():
     assert "conf ${esc(d.confidence)}" in html
     assert 'typeof dc.approx_tokens_total==="number"' in html
     assert "delivered ${esc(dc.deliveries)}" in html
-    assert 'steps ${esc((evv.steps||[]).join(",")||"?")}' in html
+    assert 'steps ${esc(evSteps.join(",")||"?")}' in html
+
+
+def test_render_html_restated_op_resolves_the_span_detail():
+    """injudge merges a span across a delivery gap that splits memgraph's
+    spans: the split-off leader is a restated injection carrying no
+    verdict_detail of its own — the popover resolves the span's detail
+    through the shared span id instead of showing a bare verdict chip."""
+    from eval.memgraph.html import render_html
+
+    html = render_html({"trajectories": [], "ops": [], "memories": [],
+                        "edges": [], "validation": []})
+    assert "detailBySpan[x.verdict_span]" in html
+
+
+def test_render_html_verdict_popover_guards_corrupt_entries():
+    """A hand-edited verdicts artifact can carry null memory_usage/evidence
+    entries or non-array step lists: the popover's dereferences are guarded —
+    an unguarded one throws and that op's detail panel never renders."""
+    from eval.memgraph.html import render_html
+
+    html = render_html({"trajectories": [], "ops": [], "memories": [],
+                        "edges": [], "validation": []})
+    assert 'if(!u||typeof u!=="object") continue;' in html
+    assert 'if(!evv||typeof evv!=="object") continue;' in html
+    assert "Array.isArray(evv.steps)?evv.steps:[]" in html
 
 
 def test_render_html_payload_neutralizes_script_breakout():

@@ -27,7 +27,14 @@ ignored — both are free tier discoveries — memoizing the first tier that
 produces a conforming answer; a 400/422 repeating unchanged after the
 format field changed is tier-independent (a config fault or the span's own
 content, never a format refusal) and fails the span, as does any other
-non-429 4xx (auth, unknown URL, payload too large). A valid but
+non-429 4xx (auth, unknown URL, payload too large); with OUTPUT_FORMAT
+pinned there is no chain to walk, so a 400/422 fails the span the same way
+(recorded per span, the run continues) rather than aborting the run. A
+response cut at the output-token budget is a budget property of that
+answer, never proof of an ignored format field: it becomes an error
+verdict naming the truncation with the partial text kept — no free degrade
+(one span's budget must not memoize the weakest tier for the run), and no
+same-budget retry, which would deterministically re-truncate. A valid but
 schema-violating answer at the json tier is a model error (JSON mode never
 promised schema conformance) and takes the same-tier corrective retry: a
 same-tier retry never repeats a failed request blindly — it appends a
@@ -66,10 +73,16 @@ def load_env(path: Path) -> dict[str, str]:
 
     A quoted value ends at its closing quote — a trailing `# ...` comment
     goes with it. An unquoted value ends at the first ` #` (whitespace-led,
-    so a `#` inside the value, e.g. a URL fragment, stays).
+    so a `#` inside the value, e.g. a URL fragment, stays). An unreadable or
+    non-UTF-8 file is CLI misuse: fail fast with a targeted message, never an
+    uncaught traceback (the .env is read before any paid judge call).
     """
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        raise SystemExit(f"error: cannot read the .env file {path}: {e}") from e
     env: dict[str, str] = {}
-    for line in Path(path).read_text(encoding="utf-8").splitlines():
+    for line in text.splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -588,7 +601,41 @@ def _extract_text(cfg: JudgeConfig, payload: dict) -> str | None:
         text = "".join(parts)
         return text if text.strip() else None
     content = _chat_message(payload).get("content")
+    if isinstance(content, list):
+        # an OpenAI-compatible endpoint may answer with a content-parts
+        # array — join its text blocks like the anthropic/responses branches
+        # do; read as "no answer" it would burn the attempt budget on
+        # identical empty draws and lose a valid answer
+        content = "".join(
+            p["text"]
+            for p in content
+            if isinstance(p, dict) and isinstance(p.get("text"), str)
+        )
     return content if isinstance(content, str) and content.strip() else None
+
+
+def _truncated(cfg: JudgeConfig, payload: dict) -> bool:
+    """True when the provider cut the answer at the output-token budget.
+
+    A truncated answer is a budget property of THIS response, never proof
+    the endpoint ignored the tier's format field — misreading it as one
+    would degrade the tier for free over a condition no degrade can fix,
+    and a prompt-tier success would then memoize the weakest tier for the
+    rest of the run.
+    """
+    if not isinstance(payload, dict):
+        return False
+    if cfg.api == "anthropic":
+        return payload.get("stop_reason") == "max_tokens"
+    if cfg.api == "responses":
+        details = payload.get("incomplete_details")
+        return isinstance(details, dict) and details.get("reason") == "max_output_tokens"
+    choices = payload.get("choices")
+    choice = choices[0] if isinstance(choices, list) and choices else {}
+    reason = choice.get("finish_reason") if isinstance(choice, dict) else None
+    # "length" is the OpenAI spelling; some compatible proxies pass through
+    # the anthropic-style "max_tokens" instead
+    return reason in ("length", "max_tokens")
 
 
 SYSTEM_PROMPT = """You are an audit judge for a memory system integrated into a coding agent.
@@ -1178,15 +1225,20 @@ def judge_span(
                 # request-level rejection: the endpoint refuses this tier's
                 # format field — degrade for free, no attempt consumed
                 if cfg.output_format is not None:
-                    # A pinned tier cannot degrade. The rejection is not
-                    # necessarily the format field, though: the prompt tier
-                    # sends none at all, and on the format tiers the first
-                    # 400/422 may be an unrelated config fault (unknown model,
-                    # over-limit max_tokens) — name the pin, not the cause.
-                    raise SystemExit(
-                        f"error: the judge endpoint rejected the request with "
+                    # A pinned tier cannot degrade, so the rejection fails
+                    # the span like any other endpoint fault — recorded per
+                    # span, the run continues. Aborting the run instead would
+                    # lose the current trajectory's already-paid verdicts
+                    # (the artifact flushes per trajectory), and a mid-run
+                    # 400/422 can be span-specific (a payload too large), not
+                    # a config fault. The message names the pin, not the
+                    # cause: the prompt tier sends no format field at all,
+                    # and a format tier's first 400/422 may be an unrelated
+                    # config fault (unknown model, over-limit max_tokens).
+                    raise JudgeError(
+                        f"the judge endpoint rejected the request with "
                         f"OUTPUT_FORMAT={cfg.output_format!r} pinned "
-                        f"(HTTP {e.code}: {detail}) — fix the .env"
+                        f"(HTTP {e.code}: {detail}) — fix the .env or drop the pin"
                     ) from e
                 nxt = _next_tier(cfg.api, tier)
                 if nxt is None:
@@ -1250,6 +1302,18 @@ def judge_span(
                         cfg.learned_tier = tier
                     return _assemble_verdict(obj, text, span, warnings)
                 last_error = f"judge output {error}"
+                if _truncated(cfg, payload):
+                    # budget exhaustion, not a format-tier property: the cut
+                    # answer never became the contract, and a same-budget
+                    # retry re-truncates (deterministically at temperature
+                    # 0). Record the honest failure — never a free degrade
+                    # that misreads truncation as an ignored format field
+                    # (and memoizes the weakest tier off one span's budget).
+                    return _error_verdict(
+                        f"judge response truncated at the output budget "
+                        f"(judge output {error}); increase max_tokens",
+                        text, span, warnings,
+                    )
                 nxt = None if cfg.output_format else _next_tier(cfg.api, tier)
                 # Free tier discovery from the output side — the endpoint
                 # provably ignored this tier's format field. At the structured

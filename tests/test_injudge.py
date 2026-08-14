@@ -33,6 +33,7 @@ from eval.injudge.judge import (
     _error_verdict,
     _render_steps,
     _strict_parse,
+    _truncated,
     auto_verdict_no_subsequent_turn,
     judge_span,
     load_env,
@@ -2108,13 +2109,17 @@ def test_budget_exhausted_invalid_output_is_error_with_raw(monkeypatch):
 
 
 def test_pinned_output_format_rejected_is_config_error(monkeypatch):
-    """Pinned + 400 → fail fast (don't burn every span on a misconfiguration)."""
+    """Pinned + 400 → the span fails fast (a pinned tier cannot degrade), but
+    as a per-span JudgeError — recorded, the run continues — never a
+    SystemExit aborting a multi-trajectory run mid-way after paid judge
+    calls (the artifact flushes per trajectory, so an abort would lose the
+    current trajectory's completed verdicts)."""
     record = []
     monkeypatch.setattr("eval.injudge.judge.urlopen",
                         fake_urlopen_factory(record, fail=http_error(400)))
     span, steps = _judge_input_fixture()
     cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", output_format="structured")
-    with pytest.raises(SystemExit, match="OUTPUT_FORMAT"):
+    with pytest.raises(JudgeError, match="OUTPUT_FORMAT"):
         judge_span(span, steps, cfg, [])
     assert len(record) == 1
 
@@ -2372,6 +2377,77 @@ def test_json_tier_schema_violation_is_a_model_error_not_a_tier_discovery(monkey
     assert "not valid per the output contract" in record[2]["messages"][3]["content"]
     assert not any("degrading to prompt" in w for w in warnings)
     assert cfg.learned_tier == "json"  # memoized only once the tier produced a verdict
+
+
+def test_chat_content_parts_array_is_read(monkeypatch):
+    """An OpenAI-compatible endpoint may answer with a content-parts array
+    instead of a plain string: its text blocks join like the
+    anthropic/responses branches. Read as "no answer", a valid verdict would
+    burn the attempt budget on identical empty draws and end in a JudgeError
+    without judge_raw."""
+    record = []
+    half = len(GOOD) // 2
+    monkeypatch.setattr(
+        "eval.injudge.judge.urlopen",
+        fake_urlopen_factory(
+            record,
+            payload={"choices": [{"message": {"content": [
+                {"type": "text", "text": GOOD[:half]},
+                {"type": "text", "text": GOOD[half:]},
+            ]}}]},
+        ),
+    )
+    span, steps = _judge_input_fixture()
+    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
+    assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
+    assert len(record) == 1
+
+
+def test_truncated_answer_is_a_budget_error_never_a_tier_degrade(monkeypatch):
+    """A max_tokens-truncated answer is invalid JSON, but that is a budget
+    property of THIS response — never proof the endpoint ignored the format
+    field. A free degrade would misdiagnose it, and a prompt-tier success
+    would memoize the weakest tier for the rest of the run off one span's
+    budget. The span gets an honest error verdict naming the truncation, the
+    partial answer kept, no doomed same-budget retry."""
+    record = []
+
+    def _open(req, timeout=None):
+        record.append(json.loads(req.data.decode()))
+        if len(record) == 1:  # the structured-tier answer is cut mid-JSON
+            return FakeResponse({"choices": [
+                {"finish_reason": "length", "message": {"content": GOOD[:40]}}]})
+        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
+
+    monkeypatch.setattr("eval.injudge.judge.urlopen", _open)
+    span, steps = _judge_input_fixture()
+    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
+    warnings = []
+    verdict = judge_span(span, steps, cfg, warnings)
+    assert verdict["verdict"] == "error"
+    assert "truncated at the output budget" in verdict["error"]
+    assert verdict["judge_raw"]  # the partial answer is kept
+    assert len(record) == 1  # no degrade, no same-budget retry
+    assert not any("degrading" in w for w in warnings)
+    assert cfg.learned_tier == "structured"  # the memo is never poisoned
+
+
+def test_truncated_signal_per_api():
+    """Each API family's truncation spelling is recognized (chat finish_reason
+    "length" / the anthropic-style "max_tokens" some proxies pass through;
+    anthropic stop_reason; responses incomplete_details); a completed answer
+    never reads as truncated."""
+    chat = JudgeConfig(base_url="http://x", api_key="k", model="m")
+    assert _truncated(chat, {"choices": [{"finish_reason": "length"}]})
+    assert _truncated(chat, {"choices": [{"finish_reason": "max_tokens"}]})
+    assert not _truncated(chat, {"choices": [{"finish_reason": "stop"}]})
+    assert not _truncated(chat, {"choices": [{"message": {}}]})
+    ant = JudgeConfig(base_url="http://x", api_key="k", model="m", api="anthropic")
+    assert _truncated(ant, {"stop_reason": "max_tokens"})
+    assert not _truncated(ant, {"stop_reason": "end_turn"})
+    resp = JudgeConfig(base_url="http://x", api_key="k", model="m", api="responses")
+    assert _truncated(resp, {"incomplete_details": {"reason": "max_output_tokens"}})
+    assert not _truncated(resp, {"status": "completed"})
 
 
 def test_thinking_params_per_format():

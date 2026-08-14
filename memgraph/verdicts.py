@@ -33,8 +33,8 @@ def load_verdict_report(path: Path) -> dict:
     """Read and sanity-check an injudge.report/v4 artifact."""
     try:
         report = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as e:
-        raise SystemExit(f"error: cannot read verdicts report {path}: {e}")
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
+        raise SystemExit(f"error: cannot read verdicts report {path}: {e}") from e
     tool = report.get("tool") if isinstance(report, dict) else None
     if not isinstance(tool, dict) or tool.get("schema") != _SCHEMA:
         raise SystemExit(
