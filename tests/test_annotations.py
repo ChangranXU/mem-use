@@ -1053,6 +1053,44 @@ def test_non_list_payload_list_fields_are_problems():
         assert any(f"payload.{field} is not a list" in p for p in idx.problems), field
 
 
+def test_corrupt_matched_count_shapes_are_problems():
+    """Ingest validates matched_count as {value: int, precision: enum}, both
+    keys required and non-null — so a non-dict, or a dict with a missing,
+    non-integer, or boolean value, only reaches the log through hand-editing.
+    Reported like every other shape drift (never silently degraded to
+    len(returned), which understates a truncated search). An explicit null
+    stays the None-means-absent convention the neighboring checks share."""
+
+    def search_pair(seq, op_id, matched_count):
+        return [
+            {"seq": seq, "type": "memory_search_start", "proxy_source": MEM,
+             "annotation_id": f"a-{seq}", "binding_status": "not_requested",
+             "payload": {"trace_session_id": "S", "operation_id": op_id,
+                         "query": {}}},
+            {"seq": seq + 1, "type": "memory_search_end", "proxy_source": MEM,
+             "annotation_id": f"a-{seq + 1}", "binding_status": "no_call",
+             "payload": {"trace_session_id": "S", "operation_id": op_id,
+                         "status": "completed", "returned": [],
+                         "matched_count": matched_count}},
+        ]
+
+    events = [
+        *_structural_events(),
+        *search_pair(4, "op-str", "oops"),
+        *search_pair(6, "op-missing", {"precision": "exact"}),
+        *search_pair(8, "op-corrupt", {"value": "oops", "precision": "exact"}),
+        *search_pair(10, "op-bool", {"value": True, "precision": "exact"}),
+        *search_pair(12, "op-null", None),
+        *search_pair(14, "op-clean", {"value": 3, "precision": "lower_bound"}),
+    ]
+    idx = build_annotation_index(events)
+    flagged = [p for p in idx.problems if "payload.matched_count" in p]
+    # exactly the corrupt ends (seqs 5/7/9/11) — the explicit null (13) and
+    # the clean object (15) never fire
+    assert sorted(int(p.split(":", 1)[0].split()[-1]) for p in flagged) == [5, 7, 9, 11]
+    assert all("is not an object with an integer value" in p for p in flagged)
+
+
 def test_delivery_non_list_memories_warns_and_degrades(tmp_path):
     """The end-to-end shape: a hand-edited delivery whose memories are a
     string yields a zero-memory recall op AND a parse-time warning — corrupt

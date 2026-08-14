@@ -25,7 +25,8 @@
   text is forbidden).
 - Corrupt input is tolerated, never fatal: malformed JSONL lines, non-integer
   seqs, unknown binding statuses or logical roles, non-list payload
-  list-fields, broken session/operation links all land in
+  list-fields, corrupt matched_count shapes, broken session/operation links
+  all land in
   `validation`/warnings and the run carries on (the recorder's own
   retrieval/verify tooling remains the strict checker). Hand-edited artifacts
   must degrade, never raise — every field read off a possibly-corrupt event

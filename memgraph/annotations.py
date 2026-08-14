@@ -26,8 +26,10 @@ event pairing, session/binding completeness and lane placement (every event
 of an operation — the recorder's within-operation lane check), per-session
 operation-id keying, the proxy-stamped per-event fields (annotation-id
 presence/uniqueness, the binding-status and logical-role vocabularies,
-call_refs shape, and terminal-call-ref consistency), the payload list-field
-shapes the consumers iterate (a non-list never passed the gate's ingest),
+call_refs shape, and terminal-call-ref consistency), the payload field
+shapes the consumers read (the iterated list fields, and the search's
+matched_count object with its integer value — none ever passed the gate's
+ingest in another shape),
 and the delivery↔search integrity (session scoping, recording order,
 delivered identities an ordered subsequence of the search's returned set).
 
@@ -317,6 +319,24 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
             )
             for key in list_keys:
                 _check_payload_list(event, key, index.problems)
+            if event_type == "memory_search_end":
+                # the protocol's own match count, read as {value, precision}
+                # by the recall op: ingest requires the object with an
+                # integer value (bools rejected — True must not pass for 1),
+                # so a present-but-corrupt shape — non-dict, missing value,
+                # non-integer value — only reaches the log through
+                # hand-editing: report it, never let it degrade silently to
+                # len(returned), which understates a truncated search. An
+                # explicit null stays the None-means-absent convention the
+                # neighboring checks share (identical degrade downstream).
+                matched = event["payload"].get("matched_count")
+                if matched is not None and not (
+                    isinstance(matched, dict) and is_int(matched.get("value"))
+                ):
+                    index.problems.append(
+                        f"seq {seq}: memory_search_end payload.matched_count "
+                        "is not an object with an integer value"
+                    )
 
     def _delivery_order(event: dict) -> tuple[bool, int]:
         # the tool path guarantees an int seq (load_events fabricates one),
