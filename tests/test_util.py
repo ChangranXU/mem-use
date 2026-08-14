@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from util import atomic_write, tmp_sibling
+from util import atomic_write, check_writable, tmp_sibling
 
 
 def test_atomic_write_lone_surrogate_text_stays_writable(tmp_path):
@@ -28,3 +28,16 @@ def test_atomic_write_failure_leaves_no_staging_sibling(tmp_path):
     with pytest.raises(OSError):
         atomic_write(target, "payload")
     assert not tmp_sibling(target).exists()
+
+
+def test_check_writable_fails_fast_on_unwritable_paths(tmp_path):
+    """The CLI-misuse probe both CLIs share: a directory target or a
+    read-only/missing parent fails with a targeted SystemExit before any
+    work is paid for; a writable path passes silently and leaves no staging
+    sibling behind."""
+    check_writable(tmp_path / "ok.json")
+    assert not tmp_sibling(tmp_path / "ok.json").exists()
+    with pytest.raises(SystemExit, match="is a directory"):
+        check_writable(tmp_path)
+    with pytest.raises(SystemExit, match="cannot write report"):
+        check_writable(tmp_path / "missing" / "out.json")

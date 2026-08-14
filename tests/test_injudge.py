@@ -2517,6 +2517,107 @@ def test_content_parts_array_joins_text_parts_only(monkeypatch):
     assert len(record) == 1
 
 
+def test_chat_content_parts_plain_strings_join(monkeypatch):
+    """Some OpenAI-compatible gateways send a content-parts array as plain
+    strings (no type-tagged blocks): those parts ARE the answer — read as
+    "no answer", the identical request would burn the whole attempt budget
+    and end in a JudgeError without judge_raw."""
+    record = []
+    half = len(GOOD) // 2
+    monkeypatch.setattr(
+        "injudge.judge.urlopen",
+        fake_urlopen_factory(
+            record,
+            payload={"choices": [{"message": {"content": [GOOD[:half], GOOD[half:]]}}]},
+        ),
+    )
+    span, steps = _judge_input_fixture()
+    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
+    assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
+    assert len(record) == 1
+
+
+def test_truncated_complete_answer_takes_the_corrective_retry(monkeypatch):
+    """A complete verdict followed by trailing prose that rambles into the
+    token budget carries the truncation signal, but the answer COMPLETED —
+    the cut removed prose, not the contract. That is a contract violation
+    (the corrective retry changes the request, so no deterministic
+    re-truncation), never budget exhaustion: "increase max_tokens" could not
+    help it."""
+    record = []
+
+    def _open(req, timeout=None):
+        record.append(json.loads(req.data.decode()))
+        if len(record) == 1:  # the complete verdict, then prose into the budget
+            return FakeResponse({"choices": [
+                {"finish_reason": "length",
+                 "message": {"content": GOOD + "\n\nI hope this helps…"}}]})
+        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
+
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
+    span, steps = _judge_input_fixture()
+    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m",
+                      output_format="prompt")
+    verdict = judge_span(span, steps, cfg, [])
+    assert verdict["verdict"] == "positive"
+    assert len(record) == 2  # the corrective retry, not a budget error
+    # the retry carried the corrective note naming the violation
+    assert any(
+        m["role"] == "user" and "not valid per the output contract" in m["content"]
+        for m in record[1]["messages"]
+    )
+
+
+def test_truncated_complete_answer_still_degrades_free_at_structured_tier(monkeypatch):
+    """At the structured tier, a complete verdict plus trailing prose is
+    output-side proof the endpoint ignored the format field (constrained
+    decoding cannot emit prose) — the truncation signal on such an answer
+    must not block the free tier discovery."""
+    record = []
+
+    def _open(req, timeout=None):
+        record.append(json.loads(req.data.decode()))
+        if len(record) == 1:
+            return FakeResponse({"choices": [
+                {"finish_reason": "length",
+                 "message": {"content": GOOD + " trailing prose"}}]})
+        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
+
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
+    span, steps = _judge_input_fixture()
+    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
+    warnings = []
+    verdict = judge_span(span, steps, cfg, warnings)
+    assert verdict["verdict"] == "positive"
+    assert any("degrading to json" in w for w in warnings)
+    assert cfg.learned_tier == "json"
+
+
+def test_truncated_out_of_contract_rescued_draft_is_retried_not_budget_error(monkeypatch):
+    """A rescued reasoning_content draft is a COMPLETE object by
+    construction: when it violates the contract (here a missing memories
+    array) the corrective retry fixes the shape — the truncation signal on
+    the drained content channel must not misread it as budget exhaustion."""
+    record = []
+
+    def _open(req, timeout=None):
+        record.append(json.loads(req.data.decode()))
+        if len(record) == 1:
+            return FakeResponse({"choices": [
+                {"finish_reason": "length",
+                 "message": {"content": "",
+                             "reasoning_content": '{"analysis": "no memories"}'}}]})
+        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
+
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
+    span, steps = _judge_input_fixture()
+    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m",
+                      output_format="prompt", max_attempts=3)
+    verdict = judge_span(span, steps, cfg, [])
+    assert verdict["verdict"] == "positive"
+    assert len(record) == 2
+
+
 def test_thinking_params_per_format():
     """THINKING / THINKING_EFFORT map to provider-native request fields."""
     msgs = [{"role": "user", "content": "U"}]

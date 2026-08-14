@@ -696,8 +696,9 @@ function showOp(opId){
         // the thousands-formatted token count only when it really is a number —
         // 0 included: a redacted/unsized placement counts 0 tokens, and hiding
         // the line would misread as "no deliveries" (injudge warns about the
-        // understatement separately)
-        const dcTxt=typeof dc.approx_tokens_total==="number"?`<span class="meta">delivered ${esc(dc.deliveries)}× ≈${dc.approx_tokens_total.toLocaleString()} tokens</span>`:"";
+        // understatement separately). A missing deliveries count renders "?",
+        // never an empty blank.
+        const dcTxt=typeof dc.approx_tokens_total==="number"?`<span class="meta">delivered ${esc(dc.deliveries==null?"?":dc.deliveries)}× ≈${dc.approx_tokens_total.toLocaleString()} tokens</span>`:"";
         h+=`<div class="mrow"><div><span class="chip" style="color:${VD_COLOR[v]||"var(--muted)"}">${esc(v)}</span>${d.confidence!=null?`<span class="meta">conf ${esc(d.confidence)}</span>`:""}<span class="meta">${esc(x.verdict_span)}</span>${d.auto?`<span class="meta">auto: ${esc(d.auto)}</span>`:""}${dcTxt}</div>`;
         if(d.error) h+=`<div class="flagbox">judge error: ${esc(d.error)}</div>`;
         if(d.analysis) h+=`<div class="vline" style="white-space:normal">${esc(d.analysis)}</div>`;

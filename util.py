@@ -41,6 +41,21 @@ def atomic_write(path: Path, text: str) -> None:
         tmp.unlink(missing_ok=True)
 
 
+def check_writable(path: Path) -> None:
+    """Fail fast on an unwritable report path (CLI misuse): probe the staging
+    sibling atomic_write writes through, so a read-only or missing parent
+    fails with a targeted SystemExit before any work is paid for, never as a
+    raw traceback at write time."""
+    if path.is_dir():
+        raise SystemExit(f"error: output path {path} is a directory")
+    probe = tmp_sibling(path)
+    try:
+        probe.write_text("", encoding="utf-8")
+        probe.unlink()
+    except OSError as e:
+        raise SystemExit(f"error: cannot write report to {path}: {e}") from e
+
+
 def print_validation(validation: list[dict]) -> None:
     """The one validation-printing rule both CLIs share: warn/error entries
     go to stderr, informational ones to stdout."""

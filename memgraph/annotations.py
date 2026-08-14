@@ -22,12 +22,14 @@ without `memory_*` events yields an empty index — and never raises on
 corrupted events: structural violations are collected in `problems` (the
 recorder's own retrieval/verify tooling remains the strict checker; these
 tools report and carry on). The checked set covers what the consumers trust:
-event pairing, session/binding completeness and lane placement, per-session
+event pairing, session/binding completeness and lane placement (every event
+of an operation — the recorder's within-operation lane check), per-session
 operation-id keying, the proxy-stamped per-event fields (annotation-id
-presence/uniqueness, the binding vocabulary, call_refs shape, and
-terminal-call-ref consistency), and the delivery↔search integrity (session
-scoping, recording order, delivered identities an ordered subsequence of
-the search's returned set).
+presence/uniqueness, the binding-status and logical-role vocabularies,
+call_refs shape, and terminal-call-ref consistency), the payload list-field
+shapes the consumers iterate (a non-list never passed the gate's ingest),
+and the delivery↔search integrity (session scoping, recording order,
+delivered identities an ordered subsequence of the search's returned set).
 
 Stdlib only, like the rest of the tools. Every entry carries the recorder's
 portable memory identity (namespace / identity_scheme / identity_strength /
@@ -116,6 +118,18 @@ class AnnotationIndex:
         return lane.get("main"), lane.get("memory")
 
 
+def _check_payload_list(event: dict, key: str, problems: list[str]) -> None:
+    """Report a corrupt non-list payload field the consumers iterate (the
+    gate's ingest rejects non-lists, so one only reaches the log through
+    corruption — the same report the recorder's retrieval index makes). The
+    consumers still degrade the field to [], but never silently."""
+    value = event["payload"].get(key)  # the pass guaranteed a dict payload
+    if value is not None and not isinstance(value, list):
+        problems.append(
+            f"seq {event.get('seq')}: {event['type']} payload.{key} is not a list"
+        )
+
+
 def build_annotation_index(events: list[dict]) -> AnnotationIndex:
     """One streaming pass grouping memory_* events; problems, never raises."""
     index = AnnotationIndex()
@@ -199,6 +213,15 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
             if not isinstance(role, str):
                 index.problems.append(f"seq {seq}: memory_role_bind has a non-string logical_role")
                 continue
+            if role not in ("main", "memory"):
+                # the protocol binds exactly these two roles (the gate rejects
+                # any other at ingest): an unknown one only reaches the log
+                # through corruption — report it and skip the bind, the same
+                # refusal the recorder's retrieval index makes
+                index.problems.append(
+                    f"seq {seq}: memory_role_bind has unknown logical_role {role!r}"
+                )
+                continue
             binds = index.binds.setdefault(sid, {})
             if role in binds:
                 index.problems.append(f"seq {seq}: session {sid} binds {role} twice")
@@ -224,6 +247,10 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
                 index.problems.append(f"seq {seq}: duplicate delivery_id {delivery_id}")
                 continue
             seen_delivery_ids.add(delivery_id)
+            # the delivered set the recall op and the subsequence check below
+            # iterate: a corrupt non-list must surface, not silently become
+            # zero delivered memories
+            _check_payload_list(event, "memories", index.problems)
             index.deliveries.append(event)
             continue
 
@@ -267,6 +294,7 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
                 index.problems.append(f"seq {seq}: memory_change after the operation end")
                 continue
             operation.changes.append(event)
+            _check_payload_list(event, "before", index.problems)
         else:
             expected_end = (
                 "memory_generate_end" if operation.kind == "generation"
@@ -282,6 +310,13 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
                 index.problems.append(f"seq {seq}: operation {operation_id} ends twice")
                 continue  # first end wins (same duplicate policy as the start)
             operation.end = event
+            list_keys = (
+                ("produced", "error_codes")
+                if event_type == "memory_generate_end"
+                else ("returned",)
+            )
+            for key in list_keys:
+                _check_payload_list(event, key, index.problems)
 
     def _delivery_order(event: dict) -> tuple[bool, int]:
         # the tool path guarantees an int seq (load_events fabricates one),
@@ -306,7 +341,17 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
         # anywhere else names a lane drift the consumers cannot see.
         if "memory" in binds:
             for op in index.operations.values():
-                if op.start["payload"].get("trace_session_id") == sid and op.lane != binds["memory"]:
+                if op.start["payload"].get("trace_session_id") != sid:
+                    continue
+                # every recorded event of the operation, never just the first
+                # stamped lane: a change/end crossing to another lane after
+                # the start is the same drift the recorder flags as "crosses
+                # lanes within one operation" (a != comparison never raises
+                # on a corrupt unhashable source)
+                if any(
+                    event is not None and event.get("proxy_source") != binds["memory"]
+                    for event in [op.start, *op.changes, op.end]
+                ):
                     index.problems.append(
                         f"operation {op.operation_id}: events outside the bound memory lane"
                     )
@@ -419,7 +464,15 @@ def resolved_content_text(ref: Any, events: list[dict], lanes: dict) -> str | No
     bound proxy_source). The other locator kinds (call_request / call_response
     / artifact) point at captured call bodies or sidecar files that are not
     part of the .jsonl input, and redacted/unavailable carry no text at all —
-    all of those resolve to None, like content_text."""
+    all of those resolve to None, like content_text.
+
+    The log is append-only: a message_retracted annuls the record it replaces
+    and the replacement re-records at the same rewound msg slot, so one
+    (lane, msg_index) can hold several message_end events and the FIRST may be
+    dead text. The resolver returns the slot's latest un-annulled record —
+    the same annul rule injudge's prompt_tokens_total applies (a retraction
+    pops the latest record at the slot).
+    """
     text = content_text(ref)
     if text is not None or not isinstance(ref, dict):
         return text
@@ -437,17 +490,19 @@ def resolved_content_text(ref: Any, events: list[dict], lanes: dict) -> str | No
     lane = lanes.get(role, _MISSING_LANE)
     if lane is _MISSING_LANE:
         return None
+    live: list[str] = []  # the slot's un-annulled message_end texts, record order
     for e in events:
         msg = e.get("msg")
-        if (
-            e.get("type") == "message_end"
-            and is_int(msg)
-            and msg == msg_index
-            and e.get("proxy_source") == lane
-        ):
-            if text := message_text(e.get("content")):
-                return text
-    return None
+        if not is_int(msg) or msg != msg_index or e.get("proxy_source") != lane:
+            continue
+        if e.get("type") == "message_retracted":
+            if live:
+                live.pop()
+        elif e.get("type") == "message_end":
+            live.append(message_text(e.get("content")))
+    # the latest live record carrying text (an empty content resolves to
+    # nothing, like the scan before)
+    return next((t for t in reversed(live) if t), None)
 
 
 def content_chars(ref: Any) -> int | None:

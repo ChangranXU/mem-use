@@ -30,11 +30,16 @@ content, never a format refusal) and fails the span, as does any other
 non-429 4xx (auth, unknown URL, payload too large); with OUTPUT_FORMAT
 pinned there is no chain to walk, so a 400/422 fails the span the same way
 (recorded per span, the run continues) rather than aborting the run. A
-response cut at the output-token budget is a budget property of that
-answer, never proof of an ignored format field: it becomes an error
-verdict naming the truncation with the partial text kept — no free degrade
-(one span's budget must not memoize the weakest tier for the run), and no
-same-budget retry, which would deterministically re-truncate. A valid but
+response cut at the output-token budget MID-ANSWER (no complete JSON value
+in it) is a budget property of that answer, never proof of an ignored
+format field: it becomes an error verdict naming the truncation with the
+partial text kept — no free degrade (one span's budget must not memoize
+the weakest tier for the run), and no same-budget retry, which would
+deterministically re-truncate. A complete-but-out-of-contract answer
+carrying the truncation signal is not that failure — the cut only removed
+trailing prose (or the shape is the model's own error) — so it routes
+through the tier chain / corrective retry like any other violation. A
+valid but
 schema-violating answer at the json tier is a model error (JSON mode never
 promised schema conformance) and takes the same-tier corrective retry: a
 same-tier retry never repeats a failed request blindly — it appends a
@@ -352,15 +357,20 @@ def resolve_config(
     return cfg
 
 
-def _chat_message(payload: dict) -> dict:
-    """choices[0].message of a chat-completions body; {} on any shape drift
-    (a proxy answering 200 with off-shape JSON must read as "no answer",
-    never crash the run)."""
+def _chat_choice(payload: dict) -> dict:
+    """choices[0] of a chat-completions body; {} on any shape drift (a proxy
+    answering 200 with off-shape JSON must read as "no answer", never crash
+    the run)."""
     if not isinstance(payload, dict):
         return {}
     choices = payload.get("choices")
     choice = choices[0] if isinstance(choices, list) and choices else {}
-    msg = choice.get("message") if isinstance(choice, dict) else {}
+    return choice if isinstance(choice, dict) else {}
+
+
+def _chat_message(payload: dict) -> dict:
+    """choices[0].message of a chat-completions body; {} on shape drift."""
+    msg = _chat_choice(payload).get("message")
     return msg if isinstance(msg, dict) else {}
 
 
@@ -437,6 +447,30 @@ def _reasoning_fallback_text(payload: dict) -> str | None:
         except (ValueError, RecursionError):
             pass
     return None
+
+
+def _complete_json_present(text: str) -> bool:
+    """Whether the answer holds a complete JSON value: the whole text parses
+    (a complete but wrong-SHAPE answer), or a complete top-level object sits
+    inside it (the verdict drafted, then trailing prose). Only when neither
+    holds is a strict-parse failure consistent with a mid-answer budget cut —
+    the distinction the truncation gate in judge_span needs: a completed
+    answer's contract violation is what the tier chain / corrective retry
+    addresses, and "increase max_tokens" cannot help it."""
+    try:
+        json.loads(text, parse_constant=_reject_constant)
+        return True
+    except (ValueError, RecursionError):
+        pass
+    decoder = json.JSONDecoder(parse_constant=_reject_constant)
+    for pos in _top_level_braces(text):
+        try:
+            obj, _end = decoder.raw_decode(text, pos)
+        except (ValueError, RecursionError):
+            continue  # a stray or unclosed brace is not the answer
+        if isinstance(obj, dict):
+            return True
+    return False
 
 
 def _endpoint(cfg: JudgeConfig) -> str:
@@ -605,26 +639,32 @@ def _extract_text(cfg: JudgeConfig, payload: dict) -> str | None:
     if isinstance(content, list):
         # an OpenAI-compatible endpoint may answer with a content-parts
         # array — join its text parts like the anthropic/responses branches
-        # join theirs; a non-text part (e.g. reasoning) carrying a "text"
-        # field is not the answer, and reading as "no answer" would burn
+        # join theirs (some compatible gateways send the parts as plain
+        # strings); a non-text part (e.g. reasoning) carrying a "text" field
+        # is not the answer, and reading as "no answer" would burn
         # the attempt budget on identical empty draws
         content = "".join(
-            p["text"]
+            p if isinstance(p, str) else p["text"]
             for p in content
-            if isinstance(p, dict) and p.get("type") == "text"
-            and isinstance(p.get("text"), str)
+            if isinstance(p, str)
+            or (isinstance(p, dict) and p.get("type") == "text"
+                and isinstance(p.get("text"), str))
         )
     return content if isinstance(content, str) and content.strip() else None
 
 
 def _truncated(cfg: JudgeConfig, payload: dict) -> bool:
-    """True when the provider cut the answer at the output-token budget.
+    """True when the provider signals the answer was cut at the output-token
+    budget.
 
-    A truncated answer is a budget property of THIS response, never proof
-    the endpoint ignored the tier's format field — misreading it as one
-    would degrade the tier for free over a condition no degrade can fix,
-    and a prompt-tier success would then memoize the weakest tier for the
-    rest of the run.
+    The bare signal is a budget property of THIS response, never proof the
+    endpoint ignored the tier's format field — misreading it as one would
+    degrade the tier for free over a condition no degrade can fix, and a
+    prompt-tier success would then memoize the weakest tier for the rest of
+    the run. judge_span's gate applies that rule only when the answer never
+    completed (no complete JSON value in it); a complete-but-out-of-contract
+    answer carrying the signal routes through the tier chain / corrective
+    retry instead.
     """
     if not isinstance(payload, dict):
         return False
@@ -633,9 +673,7 @@ def _truncated(cfg: JudgeConfig, payload: dict) -> bool:
     if cfg.api == "responses":
         details = payload.get("incomplete_details")
         return isinstance(details, dict) and details.get("reason") == "max_output_tokens"
-    choices = payload.get("choices")
-    choice = choices[0] if isinstance(choices, list) and choices else {}
-    reason = choice.get("finish_reason") if isinstance(choice, dict) else None
+    reason = _chat_choice(payload).get("finish_reason")
     # "length" is the OpenAI spelling; some compatible proxies pass through
     # the anthropic-style "max_tokens" instead
     return reason in ("length", "max_tokens")
@@ -1309,13 +1347,18 @@ def judge_span(
                         cfg.learned_tier = tier
                     return _assemble_verdict(obj, text, span, warnings)
                 last_error = f"judge output {error}"
-                if _truncated(cfg, payload):
+                if _truncated(cfg, payload) and not _complete_json_present(text):
                     # budget exhaustion, not a format-tier property: the cut
                     # answer never became the contract, and a same-budget
                     # retry re-truncates (deterministically at temperature
                     # 0). Record the honest failure — never a free degrade
                     # that misreads truncation as an ignored format field
                     # (and memoizes the weakest tier off one span's budget).
+                    # A COMPLETE answer carrying the truncation signal is not
+                    # this failure: the cut only removed trailing prose (or
+                    # the shape is the model's own error), so it falls
+                    # through to the tier chain / corrective retry below,
+                    # which changes the request instead of re-truncating.
                     return _error_verdict(
                         f"judge response truncated at the output budget "
                         f"(judge output {error}); increase max_tokens",

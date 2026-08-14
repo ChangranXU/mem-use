@@ -18,7 +18,7 @@ import argparse
 import json
 from pathlib import Path
 
-from util import atomic_write, tmp_sibling
+from util import atomic_write, check_writable
 from injudge.judge import (
     JudgeError,
     auto_verdict_no_subsequent_turn,
@@ -109,20 +109,10 @@ def main(argv: list[str] | None = None) -> int:
         # fail fast on unwritable report paths, before any paid judge call:
         # flush() rewrites the artifact after every trajectory, so an output
         # that cannot be written would abort the run mid-way and lose the
-        # completed judging. The probe writes the staging sibling atomic_write
-        # later targets (a read-only or missing parent fails here, not after
-        # the judging is paid for).
+        # completed judging.
         for out_path in (args.json_out, args.output):
-            if out_path is None:
-                continue
-            if out_path.is_dir():
-                raise SystemExit(f"error: output path {out_path} is a directory")
-            probe = tmp_sibling(out_path)
-            try:
-                probe.write_text("", encoding="utf-8")
-                probe.unlink()
-            except OSError as e:
-                raise SystemExit(f"error: cannot write report to {out_path}: {e}") from e
+            if out_path is not None:
+                check_writable(out_path)
         env_path = args.env or _DEFAULT_ENV
         if not env_path.is_file():
             raise SystemExit(f"error: no .env file at {env_path} (or use --dry-run)")

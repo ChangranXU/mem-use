@@ -212,6 +212,19 @@ def test_discover_trajectories_names_unmatched_paths(tmp_path):
         discover_trajectories([tmp_path / "runs" / "t1", empty])
 
 
+def test_cli_unwritable_output_fails_fast(tmp_path):
+    """An unwritable report path is CLI misuse: a targeted SystemExit before
+    any graph work (the style guide's fail-fast rule — the same probe injudge
+    runs before any paid judge call), never a raw OSError traceback at write
+    time."""
+    from memgraph.__main__ import main
+
+    with pytest.raises(SystemExit, match="is a directory"):
+        main([str(tmp_path), "-o", str(tmp_path)])
+    with pytest.raises(SystemExit, match="cannot write report"):
+        main([str(tmp_path), "-o", str(tmp_path / "missing" / "g.html")])
+
+
 # ---------------------------------------------------------------- linking
 
 
@@ -1387,7 +1400,7 @@ def test_render_html_escapes_artifact_controlled_numbers():
     assert "conf ${esc(m.confidence)}" in html
     assert "conf ${esc(d.confidence)}" in html
     assert 'typeof dc.approx_tokens_total==="number"' in html
-    assert "delivered ${esc(dc.deliveries)}" in html
+    assert 'delivered ${esc(dc.deliveries==null?"?":dc.deliveries)}' in html
     assert 'steps ${esc(evSteps.join(",")||"?")}' in html
 
 

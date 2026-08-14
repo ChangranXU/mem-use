@@ -272,7 +272,10 @@ def _delivery_step(
 def list_field(holder: dict, key: str) -> list:
     """A list field of a recorded payload; [] when absent or a corrupt
     non-list — a truthy scalar on a hand-edited artifact must degrade, never
-    crash the parse (the never-raises rule). Shared with injudge's step
+    crash the parse (the never-raises rule). The schema-v6 payload list
+    fields the tools iterate (memories/before/produced/returned/error_codes)
+    get their non-list corruption reported in build_annotation_index, so this
+    empty-list degrade is never the only trace. Shared with injudge's step
     stream, which applies the same guard to a message's tool_calls."""
     value = holder.get(key)
     return value if isinstance(value, list) else []

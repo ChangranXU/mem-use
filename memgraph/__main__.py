@@ -10,7 +10,7 @@ import argparse
 import json
 from pathlib import Path
 
-from util import atomic_write, print_validation
+from util import atomic_write, check_writable, print_validation
 from memgraph.graph import load_and_build
 from memgraph.html import render_html
 from memgraph.verdicts import apply_verdicts, load_verdict_report
@@ -48,6 +48,12 @@ def main(argv: list[str] | None = None) -> int:
                     help="optional injudge.report JSON (from injudge): color "
                     "recall nodes by verdict and show analysis/usage in popovers")
     args = ap.parse_args(argv)
+
+    # fail fast on unwritable outputs before any work (the same CLI-misuse
+    # rule injudge applies before any paid judge call)
+    check_writable(args.output)
+    if args.json_out:
+        check_writable(args.json_out)
 
     graph = load_and_build(args.paths)
     if args.verdicts:

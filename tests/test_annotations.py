@@ -961,6 +961,134 @@ def test_lane_placement_violations_are_problems():
     )
 
 
+def test_operation_lane_drift_after_the_start_is_a_problem():
+    """Lane placement checks EVERY recorded event of the operation — a change
+    or end crossing to another lane after the start is the drift the
+    recorder's retrieval index flags as "crosses lanes within one operation";
+    comparing only the first stamped lane would miss it."""
+    def gen_events(op, start_seq, lanes):
+        evs = [
+            {"seq": start_seq, "type": "memory_generate_start",
+             "proxy_source": lanes[0], "annotation_id": f"a-{start_seq}",
+             "binding_status": "not_requested",
+             "payload": {"trace_session_id": "S", "operation_id": op,
+                         "trigger": "step", "inputs": []}},
+            {"seq": start_seq + 1, "type": "memory_change",
+             "proxy_source": lanes[1], "annotation_id": f"a-{start_seq + 1}",
+             "binding_status": "not_requested",
+             "payload": {"trace_session_id": "S", "operation_id": op,
+                         "change_id": f"c-{op}", "action": "delete",
+                         "before": [], "after": [],
+                         "change_index": 0, "change_count": 1}},
+            {"seq": start_seq + 2, "type": "memory_generate_end",
+             "proxy_source": lanes[2], "annotation_id": f"a-{start_seq + 2}",
+             "binding_status": "not_requested",
+             "payload": {"trace_session_id": "S", "operation_id": op,
+                         "status": "completed", "produced": [], "change_count": 1,
+                         "error_codes": []}},
+        ]
+        return evs
+
+    idx = build_annotation_index([
+        *_structural_events(),
+        *gen_events("op-drift", 4, (MEM, MAIN, MEM)),  # the change drifts
+        *gen_events("op-clean", 7, (MEM, MEM, MEM)),
+    ])
+    assert any("op-drift" in p and "outside the bound memory lane" in p
+               for p in idx.problems)
+    assert not any("op-clean" in p for p in idx.problems)
+
+
+def test_unknown_logical_role_is_a_problem_never_bound():
+    """The gate binds exactly main/memory (any other role is rejected at
+    ingest): an unknown role reaches the log only through corruption —
+    reported and skipped like the recorder's retrieval index does, never
+    indexed into the binding map for the lane cross-checks to cascade off."""
+    idx = build_annotation_index([
+        *_structural_events(),
+        {"seq": 4, "type": "memory_role_bind", "proxy_source": "AUX",
+         "binding_status": "not_requested",
+         "payload": {"trace_session_id": "S", "logical_role": "critic"}},
+    ])
+    assert "critic" not in idx.binds["S"]
+    assert any("unknown logical_role 'critic'" in p for p in idx.problems)
+
+
+def test_non_list_payload_list_fields_are_problems():
+    """The payload list fields the consumers iterate (delivery memories,
+    generation produced/error_codes, search returned, change before) never
+    passed ingest as non-lists: a corrupt one is reported like the recorder's
+    retrieval index does — the consumers' [] degrade is never the only trace."""
+    idx = build_annotation_index([
+        *_structural_events(),
+        {"seq": 4, "type": "memory_generate_start", "proxy_source": MEM,
+         "annotation_id": "a-1", "binding_status": "not_requested",
+         "payload": {"trace_session_id": "S", "operation_id": "op-g",
+                     "trigger": "step", "inputs": []}},
+        {"seq": 5, "type": "memory_change", "proxy_source": MEM,
+         "annotation_id": "a-2", "binding_status": "not_requested",
+         "payload": {"trace_session_id": "S", "operation_id": "op-g",
+                     "change_id": "c-0", "action": "delete", "before": "oops",
+                     "after": [], "change_index": 0, "change_count": 1}},
+        {"seq": 6, "type": "memory_generate_end", "proxy_source": MEM,
+         "annotation_id": "a-3", "binding_status": "not_requested",
+         "payload": {"trace_session_id": "S", "operation_id": "op-g",
+                     "status": "failed", "produced": "oops", "change_count": 1,
+                     "error_codes": "oops"}},
+        {"seq": 7, "type": "memory_search_start", "proxy_source": MEM,
+         "annotation_id": "a-4", "binding_status": "not_requested",
+         "payload": {"trace_session_id": "S", "operation_id": "op-s",
+                     "query": {}}},
+        {"seq": 8, "type": "memory_search_end", "proxy_source": MEM,
+         "annotation_id": "a-5", "binding_status": "no_call",
+         "payload": {"trace_session_id": "S", "operation_id": "op-s",
+                     "status": "completed", "returned": "oops"}},
+        {"seq": 9, "type": "memory_delivery", "proxy_source": MAIN,
+         "annotation_id": "a-6", "binding_status": "no_call",
+         "payload": {"trace_session_id": "S", "delivery_id": "d-oops",
+                     "search_operation_id": "op-s", "status": "placed",
+                     "memories": "oops"}},
+    ])
+    for field in ("before", "produced", "error_codes", "returned", "memories"):
+        assert any(f"payload.{field} is not a list" in p for p in idx.problems), field
+
+
+def test_delivery_non_list_memories_warns_and_degrades(tmp_path):
+    """The end-to-end shape: a hand-edited delivery whose memories are a
+    string yields a zero-memory recall op AND a parse-time warning — corrupt
+    input lands in validation/warnings and the run carries on."""
+    b = AnnotatedBuilder().agent_turn(with_task=True).recall(cure_ref("k1", "v"))
+    for e in b.events:
+        if e["type"] == "memory_delivery":
+            e["payload"]["memories"] = "oops"
+    _, ops, warnings = parse(b, tmp_path)
+    (recall,) = [o for o in ops if o.kind == "recall"]
+    assert recall.memories == []
+    assert any("payload.memories is not a list" in w for w in warnings)
+
+
+def test_task_locator_resolves_the_live_record_after_a_retraction(tmp_path):
+    """The log is append-only: a retraction annuls the record it replaces and
+    the replacement re-records at the same rewound msg slot. The resolver
+    must return the LIVE text (the annul rule prompt_tokens_total applies),
+    never the annulled first record."""
+    locator_task = {
+        "availability": "trajectory_message",
+        "sha256": "0" * 64,
+        "locator": {"logical_role": "main", "msg_index": 1},
+    }
+    b = AnnotatedBuilder(task_ref=locator_task)
+    # the task message recorded, then retracted and re-recorded rewritten
+    b._emit("message_end", proxy_source=b.main, role="user", msg=1,
+            content="the old task")
+    b._emit("message_retracted", proxy_source=b.main, msg=1, turn=1)
+    b._emit("message_end", proxy_source=b.main, role="user", msg=1,
+            content="the rewritten task")
+    b.agent_turn()
+    traj, _, _ = parse(b, tmp_path)
+    assert traj.task == "the rewritten task"
+
+
 def test_index_never_raises_on_a_delivery_without_seq():
     """The tool path fabricates trailing seqs (load_events), but a direct
     caller can hand the index a seq-less delivery: the delivery sort must

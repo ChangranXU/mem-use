@@ -24,7 +24,8 @@
   vocabulary (e.g. extracting memories by matching "## CURE Memory" in prompt
   text is forbidden).
 - Corrupt input is tolerated, never fatal: malformed JSONL lines, non-integer
-  seqs, unknown binding statuses, broken session/operation links all land in
+  seqs, unknown binding statuses or logical roles, non-list payload
+  list-fields, broken session/operation links all land in
   `validation`/warnings and the run carries on (the recorder's own
   retrieval/verify tooling remains the strict checker). Hand-edited artifacts
   must degrade, never raise — every field read off a possibly-corrupt event
@@ -41,10 +42,13 @@
   The judge walks the conformance tier chain structured → json → prompt
   (anthropic: structured → prompt); tier discovery on a 400/422 or a
   proven-ignored format field is free, everything else consumes
-  `MAX_ATTEMPTS`. An answer cut at the output-token budget is a budget
-  property, never proof of an ignored format field: it becomes an `error`
-  verdict naming the truncation (no degrade, no same-budget retry). An
-  empty-content answer that finished normally (a server-side quirk) earns a
+  `MAX_ATTEMPTS`. An answer cut at the output-token budget mid-way (no
+  complete JSON value in it) is a budget property, never proof of an ignored
+  format field: it becomes an `error` verdict naming the truncation (no
+  degrade, no same-budget retry). A complete-but-out-of-contract answer
+  carrying the truncation signal is not a budget failure — the cut only
+  removed trailing prose — and routes through the chain / corrective retry.
+  An empty-content answer that finished normally (a server-side quirk) earns a
   fresh draw of the identical request — and on openai-chat a complete
   verdict drafted into `reasoning_content` is recovered instead (noted per
   span; the other APIs carry no such channel). With `OUTPUT_FORMAT` pinned
@@ -56,7 +60,7 @@
 The project is structured as:
 
 ```bash
-util.py                      # shared helpers: atomic_write (crash-safe artifact writes), tmp_sibling, utf8_safe, print_validation
+util.py                      # shared helpers: atomic_write (crash-safe artifact writes), tmp_sibling, utf8_safe, check_writable, print_validation
 memgraph/annotations.py      # schema-v6 memory-annotation index + MemoryRef mapping
 memgraph/model.py            # Trajectory / MemoryOp / MemoryUnit / Edge dataclasses
 memgraph/parse_trajectory.py # trajectory.jsonl → ops (annotation-driven, turn table)
