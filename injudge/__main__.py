@@ -92,13 +92,18 @@ def main(argv: list[str] | None = None) -> int:
         help="print the judge input per span; no .env read, no judge calls, no files written",
     )
     ap.add_argument("--limit", type=int, default=None,
-                    help="judge at most N spans with the LLM (rest: unjudged; "
-                    "rule-judged auto-neutral spans always verdict — they cost "
-                    "no judge call)")
+                    help="judge at most N spans with the LLM (rest: unjudged); "
+                    "also caps --dry-run to printing the first N spans' judge "
+                    "inputs (rule-judged auto-neutral spans always verdict — "
+                    "they cost no judge call)")
     ap.add_argument("--json", dest="json_out", type=Path, default=Path("injudge-report.json"),
                     help="JSON artifact path (default: injudge-report.json)")
     ap.add_argument("-o", "--output", type=Path, default=None, help="optional markdown report path")
     args = ap.parse_args(argv)
+    # the same fail-fast rule the .env knobs get: a negative --limit would
+    # silently judge nothing and leave an all-unjudged artifact behind
+    if args.limit is not None and args.limit < 0:
+        raise SystemExit("error: --limit must be a non-negative integer")
 
     trajs, ops_by_traj, events_by_traj, load_warnings = load_trajectories(args.paths)
     # memgraph's linking pass doubles as the input-validation layer
@@ -267,10 +272,17 @@ def main(argv: list[str] | None = None) -> int:
         flush()  # incremental: completed trajectories survive a crash
 
     if args.dry_run:
+        # the span count describes the workload found; only the spans a
+        # judge call would take were printed (a --limit cap, or rule-judged
+        # auto-neutral spans that cost no call) — name that count when it
+        # differs, so the headline never overstates what was printed
+        printed = (
+            f" ({taken} printed)" if taken != len(operations) else ""
+        )
         print(
             f"injudge --dry-run: {len(trajectories)} trajectories, "
             f"{sum(n_injections_by_traj.values())} injections, "
-            f"{len(operations)} spans (no judge calls made)"
+            f"{len(operations)} spans{printed} (no judge calls made)"
         )
         return 0
 

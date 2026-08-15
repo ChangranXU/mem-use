@@ -1175,6 +1175,31 @@ def test_apply_verdicts_unmatched_seq_warns_and_annotates_nothing(tmp_path):
                for v in graph["validation"])
 
 
+def test_apply_verdicts_shared_unmatched_seq_named_once(tmp_path):
+    """Two colliding recall ops whose seq the report does NOT carry: the
+    no-match note names the seq once, never once per colliding op (the
+    report-side de-duplication's mirror on the op side)."""
+    from memgraph.verdicts import apply_verdicts
+
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.recall(ref=cure_ref("key_a"))
+    b.recall(ref=cure_ref("key_a"))
+    b.write(tmp_path / "run", run_id="run-1")
+    p = tmp_path / "run" / "trajectory.jsonl"
+    evs = [json.loads(line) for line in p.read_text().splitlines()]
+    deliveries = [e for e in evs if e["type"] == "memory_delivery"]
+    deliveries[0]["seq"] = deliveries[1]["seq"]  # corrupt: both ops share one seq
+    p.write_text("\n".join(json.dumps(e) for e in evs) + "\n", encoding="utf-8")
+    graph = load_and_build([tmp_path])
+    shared = deliveries[1]["seq"]
+    # the report carries an injection at some OTHER seq: the shared one is
+    # unmatched (not refused — the ambiguity refusal needs a report entry)
+    apply_verdicts(graph, verdict_report("run-1", "T99:S1", [(shared + 100, 2, "first")]))
+    msgs = [v["msg"] for v in graph["validation"]]
+    notes = [m for m in msgs if "no injection verdict matches seq" in m]
+    assert len(notes) == 1 and str(shared) in notes[0]
+
+
 def test_apply_verdicts_corrupt_entries_warn(tmp_path):
     """A hand-edited report can carry operation/trajectory entries without
     usable ids: they can never join — validation notes, never silent drops."""

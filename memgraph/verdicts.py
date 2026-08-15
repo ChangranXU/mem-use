@@ -233,12 +233,21 @@ def apply_verdicts(graph: dict, report: dict, source: str = "") -> None:
         # report when the report did carry (two) verdicts
         matched |= refused
         already_noted = refused | report_ambiguous.get(run_id, set())
+        noted_missing: set[int] = set()  # seqs already blamed for an unmatched op
         for op in recall_by_traj.get(traj.get("id"), ()):
             if op.get("seq") in already_noted:
                 continue
             entry = seq_map.get(op.get("seq"))
             if entry is None:
-                note("warn", f"{op.get('id')}: no injection verdict matches seq {op.get('seq')}")
+                # two ops can share one seq (the corruption the refusal
+                # above notes when the report carries the seq too): the seq
+                # is named once, never once per colliding op
+                if op.get("seq") not in noted_missing:
+                    noted_missing.add(op.get("seq"))
+                    note(
+                        "warn",
+                        f"{op.get('id')}: no injection verdict matches seq {op.get('seq')}",
+                    )
                 continue
             matched.add(op["seq"])
             span = span_of(entry)  # guaranteed by the ingest filter above

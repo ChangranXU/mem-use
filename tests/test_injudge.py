@@ -1940,6 +1940,30 @@ def test_masking_skips_degenerate_short_keys():
     assert _mask_key("sk-secret guided", "sk-secret") == "*** guided"
 
 
+def test_masking_covers_every_urlencoded_spelling():
+    """A URL-logging gateway can percent-encode the key with any encoder —
+    quote (leaves '/' literal), quote_plus, fully-encoded — and some emit
+    lowercase hex escapes. Each spelling must mask (the leak the masking
+    feature exists to prevent), with _masked_head's straddle headroom
+    covering the longest of them."""
+    from urllib.parse import quote, quote_plus
+
+    from injudge.judge import _mask_key, _masked_head
+
+    key = "sk-ab/cd+ef=gh"
+    for encoded in (quote(key), quote(key, safe=""), quote_plus(key),
+                    quote_plus(key).lower()):
+        assert encoded not in _mask_key(f"echo {encoded}", key)
+    # the raw key itself still masks, and unrelated text passes through
+    assert _mask_key(f"Bearer {key}", key) == "Bearer ***"
+    assert _mask_key("no credential here", key) == "no credential here"
+    # an encoded form straddling the cap masks whole, in every spelling
+    for encoded in sorted({quote(key), quote(key, safe=""), quote_plus(key)},
+                          key=len, reverse=True):
+        text = "x" * (100 - 5) + encoded + " tail"
+        assert encoded not in _masked_head(text, key, 100)
+
+
 def test_masked_head_headroom_covers_the_urlencoded_form():
     """A urlencoded key runs up to ~3x the raw one (base64-style keys): the
     straddle headroom must cover the LONGEST masked form, or an encoded key
@@ -3085,7 +3109,11 @@ def test_truncated_stray_object_exhaustion_names_the_budget(monkeypatch):
     """A genuine mid-answer cut holding a stray complete object slips past
     the completeness gate (the object reads as a finished answer) and burns
     the corrective budget on re-truncations — the final error must name the
-    output budget, never end in a bare "not valid JSON" that points nowhere."""
+    output budget, never end in a bare "not valid JSON" that points nowhere.
+    The gate stays bypassed by design: a tail-based cut detector cannot
+    tell a prose tail beginning with "{" (a finished verdict plus trimmed
+    prose — a redraw can still conform) from a reopened cut object without
+    guessing, and a wrong guess would fail fast on a judgeable span."""
     record = []
 
     def _open(req, timeout=None):
@@ -3937,7 +3965,9 @@ def test_cli_tolerates_corrupt_usage_fields(tmp_path):
 
 def test_cli_dry_run_honors_limit(monkeypatch, tmp_path, capsys):
     """--limit caps the dry run too: only the first N spans' judge inputs are
-    printed (the README's `--dry-run --limit 3` inspection workflow)."""
+    printed (the README's `--dry-run --limit 3` inspection workflow), and
+    the summary names the printed count so the headline span total never
+    overstates what was printed."""
     a = TrajBuilder().agent_turn(with_task=True)
     a.recall(REF_A)
     a.recall(REF_B)
@@ -3949,6 +3979,16 @@ def test_cli_dry_run_honors_limit(monkeypatch, tmp_path, capsys):
     out = capsys.readouterr().out
     assert out.count("SPAN TO EVALUATE") == 1
     assert "T1:S1" in out and "T1:S2" not in out
+    assert "2 spans (1 printed)" in out
+
+
+def test_cli_negative_limit_fails_fast(tmp_path):
+    """A negative --limit judges nothing and would silently write an
+    all-unjudged artifact — the same fail-fast rule the .env knobs get."""
+    a = TrajBuilder().agent_turn(with_task=True).recall(REF_A)
+    _write_run(tmp_path / "runs", "t1", a)
+    with pytest.raises(SystemExit, match="--limit"):
+        injudge_main.main([str(tmp_path / "runs"), "--dry-run", "--limit", "-1"])
 
 
 def test_cli_limit_marks_unjudged(monkeypatch, tmp_path):

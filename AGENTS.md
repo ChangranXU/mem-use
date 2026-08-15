@@ -37,7 +37,13 @@
   detach retraction/order pairings from their targets — a genuinely
   non-increasing seq is noted, never re-sorted, and a real seq colliding
   with an earlier synthetic one gets its own collision note (the recorded
-  stream never regressed; only the reader pre-claimed its number). Hand-edited artifacts
+  stream never regressed; only the reader pre-claimed its number). The
+  collision's downstream cost is bounded: the colliding ops share a
+  (run_id, seq) join key, so the verdict merge's ambiguity guard refuses
+  both — the corrupt copy costs that one real delivery its verdict
+  annotation, the price of keeping the synthetic at the event's file
+  position (a trailing fabrication would fabricate order violations in
+  other pairings instead). Hand-edited artifacts
   must degrade, never raise — every field read off a possibly-corrupt event
   is shape-guarded (a JSON `true` is never an int index; unhashable values
   never reach a dict/set lookup).
@@ -164,10 +170,11 @@ These are load-bearing; never weaken them:
   messages (config errors name keys, never values) — endpoint output
   echoing the request (an auth/proxy fault reflecting the credential — an
   HTTP error page or a 200 answer alike) is masked before any of its text
-  reaches a verdict, judge_raw, or validation note (a key shorter than 8
-  characters is treated as no credential and left unmasked: masking its
-  every occurrence would destroy the kept endpoint output while protecting
-  nothing).
+  reaches a verdict, judge_raw, or validation note, in the raw and every
+  percent-encoded spelling (quote, quote_plus, fully-encoded, and each in
+  lowercase hex). A key shorter than 8 characters is treated as no
+  credential and left unmasked: masking its every occurrence would destroy
+  the kept endpoint output while protecting nothing.
 - The memgraph HTML is an untrusted-content host: every trajectory- or
   artifact-controlled value interpolated into it is escaped — the embedded
   graph JSON has every `<` (plus U+2028/U+2029) unicode-escaped, the title is

@@ -42,8 +42,11 @@ the weakest tier for the run), and no same-budget retry, which would
 deterministically re-truncate. A complete-but-out-of-contract answer
 carrying the truncation signal is not that failure — the cut only removed
 trailing prose (or the shape is the model's own error) — so it routes
-through the tier chain / corrective retry like any other violation. A
-valid but
+through the tier chain / corrective retry like any other violation; a cut
+holding a stray complete object still slips past the completeness check
+(a stray complete object inside it reads as a finished answer), burns the
+corrective budget, and ends in an error naming both the violation and the
+budget. A valid but
 schema-violating answer at the json tier is a model error (JSON mode never
 promised schema conformance) and takes the same-tier corrective retry: a
 same-tier retry never repeats a failed request blindly — it appends a
@@ -62,13 +65,14 @@ from __future__ import annotations
 import http.client
 import json
 import math
+import re
 import time
 from collections import Counter
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.error import HTTPError
-from urllib.parse import quote_plus
+from urllib.parse import quote, quote_plus
 from urllib.request import Request, urlopen  # module-level: tests monkeypatch urlopen
 
 from injudge.model import AgentStep, InjectionSpan, step_range
@@ -1338,16 +1342,30 @@ _MASK_MIN_KEY = 8  # a key this short is no credential: masking its every
 # occurrence (a single letter matches ordinary words) would destroy the
 # kept endpoint output while protecting nothing
 
+_HEX_ESCAPE = re.compile("%[0-9A-Fa-f]{2}")
+
+
+def _key_forms(api_key: str) -> set[str]:
+    """Every spelling of the key an echoing endpoint can carry: the raw
+    value plus the percent-encoded forms a URL-logging gateway produces —
+    quote (leaves '/' literal), quote_plus (encodes it, maps space to '+'),
+    safe='' (encodes everything) — each also in the lowercase-hex variant
+    some encoders emit (the key's own characters keep their case, so only
+    the escapes are lowercased)."""
+    forms = {api_key, quote(api_key), quote(api_key, safe=""), quote_plus(api_key)}
+    return forms | {_HEX_ESCAPE.sub(lambda m: m.group(0).lower(), f) for f in forms}
+
 
 def _mask_key(text: str, api_key: str) -> str:
     """The configured key masked wherever endpoint output could echo it
     back: an auth/proxy fault page reflecting the request (the credential
     header) must never write the .env secret into a verdict, validation
-    note, or report artifact. Covers the raw value and its urlencoded form
-    (a gateway spelling the request as a URL carries that form)."""
+    note, or report artifact. Covers the raw value and every urlencoded
+    spelling (a gateway spelling the request as a URL carries those, in
+    either hex case)."""
     if not api_key or len(api_key) < _MASK_MIN_KEY:
         return text
-    for form in {api_key, quote_plus(api_key)}:
+    for form in sorted(_key_forms(api_key), key=len, reverse=True):
         text = text.replace(form, "***")
     return text
 
@@ -1355,11 +1373,17 @@ def _mask_key(text: str, api_key: str) -> str:
 def _masked_head(text: str, api_key: str, cap: int) -> str:
     """The capped, masked form of a kept endpoint dump. The head is taken
     before masking — with headroom for the LONGEST masked form (the
-    urlencoded spelling of a base64-style key runs up to ~3× the raw one),
-    so a key straddling the cut in either form still masks whole — because
-    masking first would spend two replace passes over a full body the cap
+    urlencoded spellings of a base64-style key run up to ~3× the raw one),
+    so a key straddling the cut in any form still masks whole — because
+    masking first would spend every replace pass over a full body the cap
     keeps only the start of."""
-    return _mask_key(text[: cap + len(quote_plus(api_key))], api_key)[:cap]
+    if not api_key or len(api_key) < _MASK_MIN_KEY:
+        return text[:cap]
+    forms = _key_forms(api_key)
+    head = text[: cap + max(map(len, forms))]
+    for form in sorted(forms, key=len, reverse=True):
+        head = head.replace(form, "***")
+    return head[:cap]
 
 
 def judge_span(
@@ -1535,7 +1559,7 @@ def judge_span(
                 last_error = f"judge output {error}"
                 truncated = _truncated(cfg, payload)
                 # a full extra parse of the answer — spent only when the
-                # truncation signal makes either consumer of it reachable
+                # truncation signal makes it reachable
                 complete = _complete_json_present(text) if truncated else None
                 if truncated and complete is None:
                     # budget exhaustion, not a format-tier property: the cut
@@ -1545,7 +1569,7 @@ def judge_span(
                     # that misreads truncation as an ignored format field
                     # (and memoizes the weakest tier off one span's budget).
                     # A COMPLETE answer carrying the truncation signal is not
-                    # this failure: the cut only removed trailing prose (or
+                    # this failure — the cut only removed trailing prose (or
                     # the shape is the model's own error), so it falls
                     # through to the tier chain / corrective retry below,
                     # which changes the request instead of re-truncating.
