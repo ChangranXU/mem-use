@@ -930,6 +930,61 @@ def test_dedup_claims_no_id_for_a_delivery_lost_to_a_corrupt_delivery_id():
     assert not any("duplicate recorded annotation_id" in p for p in idx.problems)
 
 
+def test_dedup_claims_no_id_for_a_bind_lost_to_a_corrupt_role():
+    """The logical_role vocabulary check gates the claim too: a first
+    role-bind copy dropped for a corrupt role applied nothing, so the
+    at-least-once re-record must land the binding — never read as a
+    'duplicate' (which would erase the lane binding and every turn
+    classification built on it)."""
+    idx = build_annotation_index([
+        {"seq": 1, "type": "memory_session", "payload": {"trace_session_id": "S"}},
+        {"seq": 2, "type": "memory_role_bind", "annotation_id": "rb-1",
+         "payload": {"trace_session_id": "S", "logical_role": 42}},  # corrupt
+        {"seq": 3, "type": "memory_role_bind", "annotation_id": "rb-1",
+         "proxy_source": MEM,
+         "payload": {"trace_session_id": "S", "logical_role": "memory"}},
+    ])
+    assert idx.binds == {"S": {"memory": MEM}}
+    assert any("non-string logical_role" in p for p in idx.problems)
+    assert not any("duplicate recorded annotation_id" in p for p in idx.problems)
+
+
+def test_dedup_claims_no_id_for_a_start_lost_to_a_corrupt_operation_id():
+    """The operation_id shape check gates the claim as well: a corrupt first
+    generate_start applied nothing, so the re-record must open the operation
+    its change/end events then belong to — never be swallowed as a
+    'duplicate' (which would erase the whole generation operation)."""
+    idx = build_annotation_index([
+        {"seq": 1, "type": "memory_session", "payload": {"trace_session_id": "S"}},
+        {"seq": 2, "type": "memory_generate_start", "annotation_id": "gs-1",
+         "payload": {"trace_session_id": "S", "operation_id": 99}},  # corrupt
+        {"seq": 3, "type": "memory_generate_start", "annotation_id": "gs-1",
+         "payload": {"trace_session_id": "S", "operation_id": "op-1", "trigger": "step"}},
+        {"seq": 4, "type": "memory_generate_end", "annotation_id": "ge-1",
+         "payload": {"trace_session_id": "S", "operation_id": "op-1",
+                     "status": "completed", "produced": [], "change_count": 0,
+                     "state_evidence": "complete", "error_codes": []}},
+    ])
+    assert list(idx.operations) == ["op-1"]
+    assert idx.operations["op-1"].end is not None
+    assert any("missing operation_id" in p for p in idx.problems)
+    assert not any("duplicate recorded annotation_id" in p for p in idx.problems)
+
+
+def test_doubly_corrupt_delivery_reports_both_problems():
+    """A delivery corrupt in both a proxy-stamped field and its delivery_id
+    reports both problems: the delivery_id check runs at the delivery's
+    apply site, after the per-event checks every memory event gets."""
+    idx = build_annotation_index([
+        {"seq": 1, "type": "memory_session", "payload": {"trace_session_id": "S"}},
+        {"seq": 2, "type": "memory_delivery", "annotation_id": "d-1",
+         "binding_status": "weird",
+         "payload": {"trace_session_id": "S", "delivery_id": 123}},
+    ])
+    assert any("unknown binding_status" in p for p in idx.problems)
+    assert any("non-string delivery_id" in p for p in idx.problems)
+
+
 def test_lanes_use_the_first_binding_per_role_across_sessions():
     """A multi-session index summarizes each display lane from the first
     session that binds it (the turn classification merges all sessions'

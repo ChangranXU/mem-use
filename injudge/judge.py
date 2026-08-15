@@ -981,10 +981,15 @@ class _NonJSONConstant(ValueError):
     """NaN/Infinity in the judge's answer: neither is valid JSON (RFC 8259)."""
 
 
-# The int() digit-limit refusal's out-of-contract reason: valid JSON (RFC
-# 8259 sets no limit) that only Python's conversion limit refuses — a model
-# error at every conformance tier, never proof of an ignored format field.
+# The two out-of-contract reasons the free-degrade gate classifies by: the
+# int() digit-limit refusal (valid JSON — RFC 8259 sets no limit — that only
+# Python's conversion limit refuses, hence a model error at every tier) and
+# the invalid-JSON refusal (the json tier's output-side proof of a
+# format-ignoring endpoint). Constants, not literals at the use sites, so
+# the producer in _strict_parse and the consumer in judge_span cannot drift
+# apart.
 _DIGIT_LIMIT_ERROR = "carries an integer literal past the digit limit"
+_NOT_JSON_ERROR = "is not valid JSON"
 
 
 def _reject_constant(value: str) -> None:
@@ -1024,7 +1029,7 @@ def _strict_parse(text: str) -> tuple[dict | None, str | None]:
         # free "ignored the format field" degrade
         return None, "nests too deeply to parse"
     except (json.JSONDecodeError, _NonJSONConstant):
-        return None, "is not valid JSON"
+        return None, _NOT_JSON_ERROR
     except ValueError:
         # the int() digit-limit refusal is the one remaining plain ValueError
         # here — and a >4300-digit integer literal IS valid JSON (RFC 8259
@@ -1571,7 +1576,7 @@ def judge_span(
                     and not rescued
                     and (
                         (tier == "structured" and error != _DIGIT_LIMIT_ERROR)
-                        or error == "is not valid JSON"
+                        or error == _NOT_JSON_ERROR
                     )
                 ):
                     # the violation text interpolates endpoint-provided values

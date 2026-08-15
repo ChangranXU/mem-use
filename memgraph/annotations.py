@@ -166,7 +166,11 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
                     # the recorder's at-least-once commit can re-record an
                     # identical event after a mid-write failure: flag it and
                     # drop the copy — applying it twice would double-count
-                    # its effects (a duplicated delete change edges twice)
+                    # its effects (a duplicated delete change edges twice).
+                    # The id is claimed only at the event's APPLY site below
+                    # (every shape/vocabulary check first): a first copy
+                    # lost to corruption applied nothing, so the re-record
+                    # is the one copy that applies, never a "duplicate".
                     index.problems.append(f"seq {seq}: duplicate recorded annotation_id {annotation_id}")
                     continue
             except TypeError:
@@ -183,19 +187,6 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
         if not isinstance(sid, str):
             index.problems.append(f"seq {seq}: {event_type} has a missing trace_session_id")
             continue
-        if event_type == "memory_delivery" and not isinstance(payload.get("delivery_id"), str):
-            # shape-checked before the claim below: a first copy lost to a
-            # corrupt delivery id applied nothing, so an at-least-once
-            # re-record must not read as a "duplicate"
-            index.problems.append(
-                f"seq {seq}: memory_delivery has a missing or non-string delivery_id"
-            )
-            continue
-        if annotation_id is not None:
-            # claim the id only once the event's own shape is applicable: a
-            # first copy lost to a corrupt payload, session, or delivery id
-            # must not swallow an at-least-once re-record as a "duplicate"
-            seen_annotation_ids.add(annotation_id)
 
         # Proxy-stamped event-level fields, checked for every memory event
         # (the same checks the recorder's retrieval index runs): the binding
@@ -231,6 +222,8 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
             if sid in index.sessions:
                 index.problems.append(f"seq {seq}: second memory_session for {sid}")
                 continue
+            if annotation_id is not None:
+                seen_annotation_ids.add(annotation_id)
             index.sessions[sid] = event
             continue
         if sid not in index.sessions:
@@ -262,13 +255,22 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
             # unhashable one would crash them)
             if src is not None and not isinstance(src, str):
                 continue
+            if annotation_id is not None:
+                seen_annotation_ids.add(annotation_id)
             binds[role] = src
             continue
         if event_type == "memory_delivery":
-            delivery_id = payload["delivery_id"]  # a string — checked before the claim
+            delivery_id = payload.get("delivery_id")
+            if not isinstance(delivery_id, str):
+                index.problems.append(
+                    f"seq {seq}: memory_delivery has a missing or non-string delivery_id"
+                )
+                continue
             if delivery_id in seen_delivery_ids:
                 index.problems.append(f"seq {seq}: duplicate delivery_id {delivery_id}")
                 continue
+            if annotation_id is not None:
+                seen_annotation_ids.add(annotation_id)
             seen_delivery_ids.add(delivery_id)
             # the delivered set the recall op and the subsequence check below
             # iterate: a corrupt non-list must surface, not silently become
@@ -297,6 +299,8 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
             if event_type not in ("memory_generate_start", "memory_search_start"):
                 index.problems.append(f"seq {seq}: {event_type} without a recorded operation start")
                 continue
+            if annotation_id is not None:
+                seen_annotation_ids.add(annotation_id)
             kind = "generation" if event_type == "memory_generate_start" else "search"
             operation = index.operations[operation_id] = AnnotatedOperation(
                 operation_id=operation_id, kind=kind
@@ -316,6 +320,8 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
                 # structural violation, never attributed to the closed op
                 index.problems.append(f"seq {seq}: memory_change after the operation end")
                 continue
+            if annotation_id is not None:
+                seen_annotation_ids.add(annotation_id)
             operation.changes.append(event)
             _check_payload_list(event, "before", index.problems)
         else:
@@ -332,6 +338,8 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
             if operation.end is not None:
                 index.problems.append(f"seq {seq}: operation {operation_id} ends twice")
                 continue  # first end wins (same duplicate policy as the start)
+            if annotation_id is not None:
+                seen_annotation_ids.add(annotation_id)
             operation.end = event
             list_keys = (
                 ("produced", "error_codes")

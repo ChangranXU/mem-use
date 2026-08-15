@@ -135,12 +135,12 @@ def test_corrupt_seq_event_never_hijacks_a_turn(tmp_path):
     assert any("non-integer seq" in w for w in warnings)
 
 
-def test_corrupt_seq_op_sorts_after_valid_ops(tmp_path):
-    """The same positional fabrication holds under the op-building re-sorts:
-    a delivery appended with its seq missing takes a synthetic seq past every
-    real one, so it numbers last and takes the most-recent-turn attribution
-    of its tail position (a best-effort guess; its true position is
-    unknown)."""
+def test_appended_corrupt_seq_op_numbers_last(tmp_path):
+    """Under the op-building re-sorts a corrupt-seq event keeps its FILE
+    position (the synthetic seq only makes it comparable, never re-ordered)
+    — this fixture appends it after the valid op, so it numbers last and
+    takes the most-recent-turn attribution of its tail position (a
+    best-effort guess; its true position is unknown)."""
     b = TrajBuilder().agent_turn(with_task=True)
     b.recall()  # search + agent turn + bound delivery (the valid op)
     delivery = next(e for e in b.events if e["type"] == "memory_delivery")
