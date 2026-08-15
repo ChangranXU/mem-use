@@ -299,12 +299,10 @@ def build_graph(
     # creation is causally impossible within the loaded set — the store entry
     # predates it (or lanes are misordered). Flag, never silently link. Lanes
     # may overlap in wall-clock time (concurrent runs sharing one store), so
-    # prefer each op's `at` timestamp; when NEITHER op carries a parseable
-    # one, fall back to load order (trajectory time, then seq). With exactly
-    # one timestamp missing, load order is evidence only within one
-    # trajectory (seq order = recording order there); across trajectories it
-    # is run-START order, not op time, and a corrupt timestamp must not
-    # fabricate a causal warning.
+    # prefer each op's `at` timestamp; load order is evidence only within one
+    # trajectory (seq order = recording order there) — across trajectories it
+    # is run-START order, not op time, and a corrupt or missing timestamp
+    # must not fabricate a causal warning, whichever side lacks one.
     order = {op.id: i for i, op in enumerate(all_ops)}
     at_by_id = {op.id: _parse_at(op.at) for op in all_ops}
     for mem in registry.values():
@@ -317,9 +315,6 @@ def build_graph(
             rat = at_by_id.get(r["op"])
             if cat is not None and rat is not None:
                 if rat < cat:
-                    early.append(r)
-            elif cat is None and rat is None:
-                if order[r["op"]] < cpos:
                     early.append(r)
             elif r["traj"] == mem.created_traj and order[r["op"]] < cpos:
                 early.append(r)

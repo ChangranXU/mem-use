@@ -38,7 +38,12 @@ def atomic_write(path: Path, text: str) -> None:
         tmp.write_bytes(utf8_safe(text))
         os.replace(tmp, path)
     finally:
-        tmp.unlink(missing_ok=True)
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            # cleanup is best-effort: raising here would mask the write
+            # error that led into the finally in the first place
+            pass
 
 
 def check_writable(path: Path) -> None:

@@ -2501,6 +2501,73 @@ def test_truncated_signal_with_a_complete_answer_routes_through_the_chain(monkey
     assert cfg.learned_tier == "json"
 
 
+def test_quote_bracketed_complete_answer_routes_through_the_chain(monkeypatch):
+    """Prose quotes put a side string-tracker out of step with the JSON it
+    guards: a complete verdict bracketed by an unmatched prose quote must
+    still be recognized as complete (the budget cut ate prose at most) and
+    route through the tier chain — never the budget error that would leave
+    the span's memories unjudged."""
+    record = []
+
+    def _open(req, timeout=None):
+        record.append(json.loads(req.data.decode()))
+        if len(record) == 1:  # complete verdict inside quoted prose, then cut
+            return FakeResponse({"choices": [
+                {"finish_reason": "length",
+                 "message": {"content": f'He said "the verdict is {GOOD}" — final.'}}]})
+        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
+
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
+    span, steps = _judge_input_fixture()
+    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
+    verdict = judge_span(span, steps, cfg, [])
+    assert verdict["verdict"] == "positive"
+    assert len(record) == 2  # a free tier discovery, then the clean redraw
+
+
+def test_nan_in_a_closed_object_with_truncation_signal_still_degrades_free(monkeypatch):
+    """A syntactically closed object carrying NaN is a COMPLETED answer —
+    the budget did not cut it mid-value, so the truncation signal must not
+    turn it into a budget error: the invalid constant is the json tier's
+    free-degrade proof ("is not valid JSON") instead."""
+    nan_text = json.dumps({**json.loads(GOOD), "confidence": float("nan")})
+    record = []
+
+    def _open(req, timeout=None):
+        record.append(json.loads(req.data.decode()))
+        if len(record) == 1:
+            return FakeResponse({"choices": [
+                {"finish_reason": "length", "message": {"content": nan_text}}]})
+        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
+
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
+    span, steps = _judge_input_fixture()
+    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
+    warnings = []
+    verdict = judge_span(span, steps, cfg, warnings)
+    assert verdict["verdict"] == "positive"
+    assert len(record) == 2
+    assert any("degrading to json" in w for w in warnings)
+
+
+def test_huge_integer_answer_never_crashes_the_run(monkeypatch):
+    """A 4300+-digit integer makes the decoder raise plain ValueError (not
+    JSONDecodeError); the truncation gate must degrade to an error verdict,
+    never let the exception escape judge_span and kill the whole run."""
+    huge = '{"memories": [], "n": ' + "1" * 5000  # cut before any value closes
+
+    def _open(req, timeout=None):
+        return FakeResponse({"choices": [
+            {"finish_reason": "length", "message": {"content": huge}}]})
+
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
+    span, steps = _judge_input_fixture()
+    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
+    verdict = judge_span(span, steps, cfg, [])
+    assert verdict["verdict"] == "error"
+    assert "truncated at the output budget" in verdict["error"]
+
+
 def test_truncated_stray_object_exhaustion_names_the_budget(monkeypatch):
     """A genuine mid-answer cut holding a stray complete object slips past
     the completeness gate (the object reads as a finished answer) and burns
@@ -2523,6 +2590,33 @@ def test_truncated_stray_object_exhaustion_names_the_budget(monkeypatch):
     assert "increase max_tokens" in verdict["error"]
     # two free tier discoveries, then the five paid corrective retries
     assert len(record) == 7
+
+
+def test_whole_answer_wrong_shape_exhaustion_never_blames_the_budget(monkeypatch):
+    """A whole-text answer with a contract violation FINISHED — its
+    truncation signal cut nothing that mattered (or is spurious), so the
+    exhaustion error must name the violation alone: "increase max_tokens"
+    could not fix a wrong enum and must not over-claim it (the budget note
+    is the stray-object slip's alone — see the test above)."""
+    bad = json.loads(GOOD)
+    bad["memories"][0]["influence"]["value"] = "sometimes"  # outside the enum
+    bad_text = json.dumps(bad)
+    record = []
+
+    def _open(req, timeout=None):
+        record.append(json.loads(req.data.decode()))
+        return FakeResponse({"choices": [
+            {"finish_reason": "length", "message": {"content": bad_text}}]})
+
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
+    span, steps = _judge_input_fixture()
+    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m",
+                      output_format="prompt", max_attempts=2)
+    verdict = judge_span(span, steps, cfg, [])
+    assert verdict["verdict"] == "error"
+    assert "outside the contract" in verdict["error"]
+    assert "increase max_tokens" not in verdict["error"]
+    assert len(record) == 2  # the attempt plus one corrective retry
 
 
 def test_truncated_signal_per_api():

@@ -106,16 +106,24 @@ def apply_verdicts(graph: dict, report: dict, source: str = "") -> None:
                 f"verdict report: duplicate trajectory id {traj_id!r}; the later entry wins",
             )
         traj_run[traj_id] = run_id
-    # a run_id covering several report trajectories merges their seq maps;
-    # on a seq collision the later report entry wins
+    # a run_id covering several report trajectories merges their seq maps
     for r in sorted(r for r, n in Counter(traj_run.values()).items() if n > 1):
         note(
             "warn",
             f"verdict report covers run_id {r!r} more than once; their seq maps "
-            "merge — later entries overwrite earlier ones on collision",
+            "merge (a seq claimed by several injections annotates neither — "
+            "see the (run_id, seq) ambiguity notes)",
         )
-    # per run_id: seq -> injection roll-up entry
+    # per run_id: seq -> injection roll-up entry. One (run_id, seq) claimed
+    # by TWO injections makes the join ambiguous — a corrupt log can hand two
+    # recall ops the same seq (load_events' synthetic seq for a corrupt event
+    # can equal a later real one), and a shared run_id merges different
+    # trajectories' seq maps into the same collision. Dropping the key
+    # annotates neither op — the same refusal the shared-run_id guard below
+    # makes — never one delivery's verdict onto the other.
     inj_by_traj: dict[str, dict[int, dict]] = {}
+    seen_keys: set[tuple[str, int]] = set()
+    ambiguous_keys: set[tuple[str, int]] = set()
     for entry in entries("injections"):
         seq = entry.get("seq")
         span = span_of(entry)
@@ -133,6 +141,11 @@ def apply_verdicts(graph: dict, report: dict, source: str = "") -> None:
         traj = span.get("traj")
         run_id = traj_run.get(traj) if isinstance(traj, str) else None
         if is_int(seq) and run_id:
+            key = (run_id, seq)
+            if key in seen_keys:
+                ambiguous_keys.add(key)
+                continue
+            seen_keys.add(key)
             inj_by_traj.setdefault(run_id, {})[seq] = entry
         else:
             # same no-silent-drop rule as the dangling span above: a corrupt
@@ -143,6 +156,14 @@ def apply_verdicts(graph: dict, report: dict, source: str = "") -> None:
                 f"verdict report: injection (span {entry.get('span_id')!r}, "
                 f"seq {seq!r}) has no joinable (run_id, seq) key; skipped",
             )
+    for run_id, seq in sorted(ambiguous_keys):
+        del inj_by_traj[run_id][seq]
+        note(
+            "warn",
+            f"verdict report: run_id {run_id!r} carries two injections at seq "
+            f"{seq}; the (run_id, seq) join is ambiguous — no verdicts "
+            "annotated for it",
+        )
 
     # a run_id shared by several loaded trajectories makes the join ambiguous:
     # annotate neither rather than cross-contaminating both (runless

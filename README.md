@@ -86,10 +86,11 @@ Options:
   judge's analysis and per-memory usage. The join is by `(run_id, op seq)`;
   unmatched injections — either join direction, or an injection naming a
   span the report does not define — are validation notes, never errors, and
-  a run_id shared by several loaded trajectories is ambiguous — skipped with
-  a warning rather than cross-annotated. On the report side, a run_id covering several
-  report trajectories merges their seq maps — later entries win collisions,
-  with a warning.
+  an ambiguous join key — a run_id shared by several loaded trajectories, or
+  one `(run_id, seq)` claimed by several report injections — annotates
+  neither side, with a warning, never one verdict onto the other. On the
+  report side, a run_id covering several report trajectories merges their
+  seq maps.
 
 ## injudge — recall-injection verdicts
 

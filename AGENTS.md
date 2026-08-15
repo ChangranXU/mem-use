@@ -173,8 +173,9 @@ These are load-bearing; never weaken them:
   operations, injections, aggregates, validation}`), rewritten after every
   trajectory so a crash keeps completed work. memgraph joins it by
   `(run_id, op seq)`; unmatched entries in either direction are validation
-  notes, never errors, and an ambiguous run_id (shared by several loaded
-  trajectories) is skipped with a warning.
+  notes, never errors, and an ambiguous join key — a run_id shared by
+  several loaded trajectories, or one `(run_id, seq)` claimed by several
+  report injections — is skipped with a warning, never cross-annotated.
 - Bump the report schema version deliberately, and call out any
   artifact-format change explicitly in the PR.
 

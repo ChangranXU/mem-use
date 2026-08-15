@@ -384,29 +384,23 @@ def _top_level_braces(text: str) -> list[int]:
     scan after the value's end, and a failure skips to the decoder's error
     position — everything it swallowed sits inside an unclosed value (a
     genuine mid-answer cut), where a complete nested fragment is never the
-    answer. Stray prose braces fail fast and cheap (a missed rescue, never a
-    wrong one)."""
+    answer. No string tracking on the side: prose quotes put any tracker
+    out of step with the JSON it would guard, and a "{" the tracker misread
+    as quoted is exactly a completed answer the scan must not miss (a
+    missed rescue, never a wrong one — every recorded position is
+    raw_decode-proven)."""
     positions = []
     skip = 0  # candidates before here sit inside an already-scanned value
     decoder = json.JSONDecoder()
-    in_string = False
-    escaped = False
     for i, ch in enumerate(text):
-        if in_string:
-            if escaped:
-                escaped = False
-            elif ch == "\\":
-                escaped = True
-            elif ch == '"':
-                in_string = False
-            continue
-        if ch == '"':
-            in_string = True
-        elif ch == "{" and i >= skip:
+        if ch == "{" and i >= skip:
             try:
                 _obj, end = decoder.raw_decode(text, i)
-            except json.JSONDecodeError as e:
-                skip = max(i + 1, e.pos)
+            except ValueError as e:
+                # JSONDecodeError and the plain-ValueError int digit-limit
+                # refusal alike — the decoder's error position (when it has
+                # one) sits past everything it swallowed inside the value
+                skip = max(i + 1, getattr(e, "pos", 0))
             except RecursionError:
                 skip = i + 1
             else:
@@ -462,28 +456,32 @@ def _reasoning_fallback_text(payload: dict) -> str | None:
     return None
 
 
-def _complete_json_present(text: str) -> bool:
-    """Whether the answer holds a complete JSON value: the whole text parses
-    (a complete but wrong-SHAPE answer), or a complete top-level object sits
-    inside it (the verdict drafted, then trailing prose). Only when neither
-    holds is a strict-parse failure consistent with a mid-answer budget cut —
-    the distinction the truncation gate in judge_span needs: a completed
-    answer's contract violation is what the tier chain / corrective retry
-    addresses, and "increase max_tokens" cannot help it."""
+def _complete_json_present(text: str) -> str | None:
+    """How the answer holds a complete JSON value: "whole" — the entire text
+    is one complete JSON value (a complete but wrong-SHAPE answer; NaN/
+    Infinity constants included, because its braces closed — the budget did
+    not cut it mid-value, the invalid constant is the json tier's
+    free-degrade proof instead); "embedded" — a complete top-level object
+    sits inside it (the verdict drafted, then trailing prose, or a stray
+    object before a genuine cut); None — neither holds, the only reading
+    consistent with a strict-parse failure caused by a mid-answer budget
+    cut. That distinction is what the truncation gate in judge_span needs:
+    a completed answer's contract violation is what the tier chain /
+    corrective retry addresses, and "increase max_tokens" cannot help it."""
     try:
-        json.loads(text, parse_constant=_reject_constant)
-        return True
+        json.loads(text)
+        return "whole"
     except (ValueError, RecursionError):
         pass
-    decoder = json.JSONDecoder(parse_constant=_reject_constant)
+    decoder = json.JSONDecoder()
     for pos in _top_level_braces(text):
         try:
             obj, _end = decoder.raw_decode(text, pos)
         except (ValueError, RecursionError):
             continue  # a stray or unclosed brace is not the answer
         if isinstance(obj, dict):
-            return True
-    return False
+            return "embedded"
+    return None
 
 
 def _endpoint(cfg: JudgeConfig) -> str:
@@ -1361,7 +1359,9 @@ def judge_span(
                         cfg.learned_tier = tier
                     return _assemble_verdict(obj, text, span, warnings)
                 last_error = f"judge output {error}"
-                if _truncated(cfg, payload) and not _complete_json_present(text):
+                truncated = _truncated(cfg, payload)
+                complete = _complete_json_present(text)
+                if truncated and complete is None:
                     # budget exhaustion, not a format-tier property: the cut
                     # answer never became the contract, and a same-budget
                     # retry re-truncates (deterministically at temperature
@@ -1408,7 +1408,13 @@ def judge_span(
                 # misreport a working tier's transport exhaustion.
                 last_text = text
                 last_text_error = last_error
-                last_truncated = _truncated(cfg, payload)
+                # Only an embedded-complete answer slipped past the budget
+                # gate above (a stray object in it read as finished, so the
+                # cut may have eaten the real answer's tail). A whole-text
+                # answer FINISHED — its truncation signal cut nothing that
+                # mattered (or is spurious), so the exhaustion path below
+                # must not claim more tokens could fix a wrong shape.
+                last_truncated = truncated and complete == "embedded"
                 messages = messages + [
                     {"role": "assistant", "content": text},
                     {"role": "user", "content": _corrective_note(error)},

@@ -520,8 +520,32 @@ def test_traj_without_run_json_orders_by_dirname(tmp_path):
 
 
 def test_recall_before_observed_creation_is_flagged(tmp_path):
-    # T1 recalls key_a; the later T2 creates it — the recall cannot have seen
-    # this creation; the graph must flag, not silently link.
+    # Within one trajectory, seq order IS recording order, so a recall
+    # positioned before the memory's first observed creation — with no
+    # timestamps to consult — is causally impossible and must be flagged,
+    # never silently linked.
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.recall(ref=cure_ref("key_a", "v"))
+    for _ in range(2):
+        b.agent_turn()
+    b.memory_turn()
+    b.generate(produced=[cure_ref("key_a", "v")], extraction_step="3")
+    b.write(tmp_path / "20260101-000000.000Z-run", run_id="run")
+    graph = load_and_build([tmp_path])
+    mem = next(m for m in graph["memories"] if m["key"] == "key_a")
+    assert mem["recalled_before_creation"], "expected chronology flag on key_a"
+    assert mem["recalled_before_creation"][0]["traj"] == "T1"
+    assert any("precede its first observed creation" in v["msg"] for v in graph["validation"])
+
+
+def test_chronology_no_timestamps_cross_traj_yields_no_warning(tmp_path):
+    """With neither op carrying a parseable timestamp, load order across
+    trajectories is run-START order, not op time — concurrent runs sharing
+    one store can create in a later-started lane before an earlier-started
+    lane recalls, so the chronology check has no causal evidence and must
+    not fabricate a warning (the same rule as the one-corrupt-timestamp
+    case; within one trajectory seq order still decides — see
+    test_recall_before_observed_creation_is_flagged)."""
     r = TrajBuilder().agent_turn(with_task=True).recall(ref=cure_ref("key_a", "v"))
     r.write(tmp_path / "20260101-000000.000Z-early", run_id="early")
     c = TrajBuilder()
@@ -532,17 +556,15 @@ def test_recall_before_observed_creation_is_flagged(tmp_path):
     c.write(tmp_path / "20260101-010000.000Z-late", run_id="late")
     graph = load_and_build([tmp_path])
     mem = next(m for m in graph["memories"] if m["key"] == "key_a")
-    assert mem["recalled_before_creation"], "expected chronology flag on key_a"
-    assert mem["recalled_before_creation"][0]["traj"] == "T1"
-    assert any("precede its first observed creation" in v["msg"] for v in graph["validation"])
+    assert not mem["recalled_before_creation"]
 
 
 def test_chronology_one_corrupt_timestamp_cross_traj_yields_no_warning(tmp_path):
     """With exactly one op's timestamp parseable, load order across
     trajectories is run-START order, not op time — the chronology check has
     no time evidence and must not fabricate a 'recall precedes creation'
-    warning. (With neither parseable, load order is the designed fallback —
-    see test_recall_before_observed_creation_is_flagged.)"""
+    warning. (With neither parseable the same cross-trajectory refusal
+    holds — see test_chronology_no_timestamps_cross_traj_yields_no_warning.)"""
     r = TrajBuilder().agent_turn(with_task=True).recall(ref=cure_ref("key_a", "v"))
     for e in r.events:
         e["at"] = "corrupt-timestamp"  # the recall op's at never parses
@@ -1125,8 +1147,11 @@ def test_apply_verdicts_duplicate_run_id_is_ambiguous_not_contaminating(tmp_path
 
 def test_apply_verdicts_duplicate_report_run_id_merges_with_warning(tmp_path):
     """A report covering one run_id twice (e.g. the same run judged twice)
-    merges both trajectories' seq maps — later entries overwrite earlier ones
-    on a seq collision — and the merge is warned about, never silent."""
+    merges both trajectories' seq maps — but one seq claimed by TWO
+    injections makes the (run_id, seq) join ambiguous, and an ambiguous key
+    annotates neither op (never one judging's verdict onto the other),
+    while non-colliding seqs merge through. Both the merge and the
+    ambiguity are warned about, never silent."""
     from memgraph.verdicts import apply_verdicts
 
     b = TrajBuilder().agent_turn(with_task=True).recall().recall()
@@ -1145,11 +1170,16 @@ def test_apply_verdicts_duplicate_report_run_id_merges_with_warning(tmp_path):
     report["injections"] += other["injections"]
     apply_verdicts(graph, report)
     recalls = [o for o in graph["ops"] if o["kind"] == "recall"]
-    assert recalls[0]["verdict"] == "positive"  # later report entry won the collision
-    assert recalls[0]["verdict_span"] == "T88:S1"
+    assert "verdict" not in recalls[0]  # the colliding seq annotated neither op
+    assert "verdict_span" not in recalls[0]
     assert recalls[1]["verdict"] == "restated"  # non-colliding seqs merge through
+    assert recalls[1]["span_verdict"] == "positive"
     msgs = [v["msg"] for v in graph["validation"]]
-    assert any("more than once" in m and "overwrite" in m for m in msgs)
+    assert any("more than once" in m for m in msgs)
+    assert any(
+        "two injections at seq" in m and "ambiguous" in m and str(seqs[0]) in m
+        for m in msgs
+    )
 
 
 def test_apply_verdicts_duplicate_operation_id_warns(tmp_path):
