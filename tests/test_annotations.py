@@ -11,7 +11,11 @@ import hashlib
 
 from injudge.spans import content_fingerprint, group_spans
 from injudge.steps import build_step_stream
-from memgraph.annotations import build_annotation_index, ref_to_memory
+from memgraph.annotations import (
+    build_annotation_index,
+    ref_to_memory,
+    resolved_content_text,
+)
 from memgraph.graph import load_and_build
 from annotated_fixtures import (
     MAIN,
@@ -1014,6 +1018,82 @@ def test_unknown_logical_role_is_a_problem_never_bound():
     assert any("unknown logical_role 'critic'" in p for p in idx.problems)
 
 
+def test_role_bind_missing_proxy_source_is_reported_and_never_bound():
+    """The proxy stamps the proxy_source KEY on every recorded memory event
+    (null on the unprefixed lane), so an absent key is corruption, never the
+    unprefixed lane. Binding None would read as the unprefixed lane and flag
+    every clean event of the session as off-lane — a misleading cascade with
+    the actual corruption unreported. The corrupt bind is reported and
+    skipped, so the session's missing-binding note (and the parser's op-lane
+    fallback) names the real shape instead."""
+    events = [dict(e) for e in _structural_events()]
+    bind = next(e for e in events
+                if e["type"] == "memory_role_bind"
+                and e["payload"]["logical_role"] == "memory")
+    del bind["proxy_source"]
+    events.append(
+        {"seq": 4, "type": "memory_search_start", "proxy_source": MEM,
+         "annotation_id": "a-1", "binding_status": "not_requested",
+         "payload": {"trace_session_id": "S", "operation_id": "op-s",
+                     "query": {}}}
+    )
+    idx = build_annotation_index(events)
+    assert any("memory_role_bind is missing its proxy_source" in p
+               for p in idx.problems)
+    assert "memory" not in idx.binds["S"]
+    assert any("needs exactly one main and one memory binding" in p
+               for p in idx.problems)
+    # no off-lane cascade over the session's clean events
+    assert not any("outside the bound memory lane" in p for p in idx.problems)
+
+
+def test_search_end_corrupt_returned_entry_is_reported():
+    """A corrupt returned entry (non-object, or a memory with no usable
+    identity fields) is reported at the search end — never silently filtered
+    out of the subsequence haystack, where every delivery of the search
+    would take the blame as "not an ordered search subsequence" while the
+    search's own corrupt shape stayed unreported. The corrupt entry still
+    degrades to a null identity IN the haystack: filtering it out would let
+    the check pass vacuously over a shortened haystack."""
+    v1 = {"version_id": "v1", "namespace": "ns"}
+
+    def search_pair(seq, op_id, returned):
+        return [
+            {"seq": seq, "type": "memory_search_start", "proxy_source": MEM,
+             "annotation_id": f"a-{seq}", "binding_status": "not_requested",
+             "payload": {"trace_session_id": "S", "operation_id": op_id,
+                         "query": {}}},
+            {"seq": seq + 1, "type": "memory_search_end", "proxy_source": MEM,
+             "annotation_id": f"a-{seq + 1}", "binding_status": "no_call",
+             "payload": {"trace_session_id": "S", "operation_id": op_id,
+                         "status": "completed", "returned": returned}},
+        ]
+
+    def delivery(seq, delivery_id, op, memories):
+        return {"seq": seq, "type": "memory_delivery", "proxy_source": MAIN,
+                "annotation_id": f"a-{seq}", "binding_status": "no_call",
+                "payload": {"trace_session_id": "S", "delivery_id": delivery_id,
+                            "search_operation_id": op, "status": "placed",
+                            "memories": memories}}
+
+    idx = build_annotation_index([
+        *_structural_events(),
+        # op-1: the corrupt entry empties the haystack → the delivery's blame
+        # fires too, but the search's own shape is named with it
+        *search_pair(4, "op-1", ["corrupt-entry"]),
+        delivery(6, "d-blamed", "op-1", [v1]),
+        # op-2: the valid entry still carries the subsequence — the delivery
+        # is clean, only the corrupt returned entry is reported
+        *search_pair(7, "op-2", ["corrupt-entry", {"ordinal": 1, "memory": v1}]),
+        delivery(9, "d-clean", "op-2", [v1]),
+    ])
+    assert sum("returned entry has no usable identity fields" in p
+               for p in idx.problems) == 2
+    assert any("d-blamed" in p and "not an ordered search subsequence" in p
+               for p in idx.problems)
+    assert not any("d-clean" in p for p in idx.problems)
+
+
 def test_non_list_payload_list_fields_are_problems():
     """The payload list fields the consumers iterate (delivery memories,
     generation produced/error_codes, search returned, change before) never
@@ -1107,9 +1187,10 @@ def test_delivery_non_list_memories_warns_and_degrades(tmp_path):
 
 def test_task_locator_resolves_the_live_record_after_a_retraction(tmp_path):
     """The log is append-only: a retraction annuls the record it replaces and
-    the replacement re-records at the same rewound msg slot. The resolver
-    must return the LIVE text (the annul rule prompt_tokens_total applies),
-    never the annulled first record."""
+    the replacement re-records at the same rewound msg slot. Without a
+    digest match (this fixture's sha256 names nothing), the resolver falls
+    back to the slot's LIVE text (the annul rule prompt_tokens_total
+    applies), never the annulled first record."""
     locator_task = {
         "availability": "trajectory_message",
         "sha256": "0" * 64,
@@ -1127,11 +1208,88 @@ def test_task_locator_resolves_the_live_record_after_a_retraction(tmp_path):
     assert traj.task == "the rewritten task"
 
 
+def test_locator_resolves_the_declared_digest_record():
+    """The locator's declared sha256 names the exact record the adapter
+    referred to — the digest rule the gate's own verifier resolves by — so
+    a later retraction or rewrite of the slot can never rewrite the answer
+    (a search query must display as it was live at search-execution time).
+    Only without a digest match does the latest un-annulled record speak."""
+    old = hashlib.sha256("the query as issued".encode()).hexdigest()
+    ref = {"availability": "trajectory_message", "sha256": old,
+           "locator": {"logical_role": "main", "msg_index": 1}}
+    events = [
+        {"seq": 1, "type": "message_end", "proxy_source": MAIN, "role": "user",
+         "msg": 1, "content": "the query as issued"},
+        {"seq": 5, "type": "message_retracted", "proxy_source": MAIN, "msg": 1},
+        {"seq": 6, "type": "message_end", "proxy_source": MAIN, "role": "user",
+         "msg": 1, "content": "rewritten long after the search"},
+    ]
+    assert resolved_content_text(ref, events, {"main": MAIN}) == "the query as issued"
+    # same slot across a rewrite epoch (dropped un-retracted): the digest
+    # still names the referred record, never the newer epoch's text
+    epoch_events = [events[0], {**events[2], "seq": 7}]
+    assert resolved_content_text(ref, epoch_events, {"main": MAIN}) == "the query as issued"
+    # a digest naming the live record resolves it; one naming nothing
+    # (corrupt or fixture ref) falls back to the latest un-annulled record
+    new = hashlib.sha256("rewritten long after the search".encode()).hexdigest()
+    assert (resolved_content_text({**ref, "sha256": new}, events, {"main": MAIN})
+            == "rewritten long after the search")
+    assert (resolved_content_text({**ref, "sha256": "0" * 64}, events, {"main": MAIN})
+            == "rewritten long after the search")
+
+
+def test_corrupt_seq_retraction_keeps_its_stream_position(tmp_path):
+    """A retraction whose seq was hand-edited away keeps its file position
+    (the append-only log's recording order) under a synthetic seq one past
+    the highest seen — a trailing fabrication would move it past the
+    replacement record, annulling the replacement and resurrecting the
+    retracted text it was meant to kill."""
+    locator_task = {
+        "availability": "trajectory_message",
+        "sha256": "0" * 64,
+        "locator": {"logical_role": "main", "msg_index": 1},
+    }
+    b = AnnotatedBuilder(task_ref=locator_task)
+    b._emit("message_end", proxy_source=b.main, role="user", msg=1,
+            content="the old task")
+    b._emit("message_retracted", proxy_source=b.main, msg=1, turn=1)
+    b._emit("message_end", proxy_source=b.main, role="user", msg=1,
+            content="the rewritten task")
+    b.agent_turn()
+    for e in b.events:
+        if e["type"] == "message_retracted":
+            del e["seq"]
+    traj, _, warnings = parse(b, tmp_path)
+    assert traj.task == "the rewritten task"
+    assert any("non-integer seq" in w for w in warnings)
+
+
+def test_corrupt_seq_delivery_order_check_still_fires(tmp_path):
+    """A delivery recorded before its search end with its seq hand-edited
+    away keeps its file position, so the synthetic seq still precedes the
+    search end's and the order violation fires — a trailing fabrication
+    (a seq past every valid event) could never trip the check, masking the
+    exact corruption the check exists to name."""
+    b = AnnotatedBuilder().agent_turn(with_task=True)
+    sid = b.search()
+    b.agent_turn()
+    b.delivery(sid, memories=[], bind=b.last_call)
+    # hand-edit: move the delivery BEFORE its search end and strip its seq
+    di = next(i for i, e in enumerate(b.events) if e["type"] == "memory_delivery")
+    ei = next(i for i, e in enumerate(b.events) if e["type"] == "memory_search_end")
+    delivery = b.events.pop(di)
+    del delivery["seq"]
+    b.events.insert(ei, delivery)
+    _, _, warnings = parse(b, tmp_path)
+    assert any("non-integer seq" in w for w in warnings)
+    assert any("recorded before its search end" in w for w in warnings)
+
+
 def test_index_never_raises_on_a_delivery_without_seq():
-    """The tool path fabricates trailing seqs (load_events), but a direct
-    caller can hand the index a seq-less delivery: the delivery sort must
-    degrade (corrupt seqs sort last, stably), never raise — the module's
-    never-raises docstring covers direct callers too."""
+    """The tool path fabricates positional synthetic seqs (load_events), but
+    a direct caller can hand the index a seq-less delivery: the delivery sort
+    must degrade (corrupt seqs sort last, stably), never raise — the
+    module's never-raises docstring covers direct callers too."""
     idx = build_annotation_index([
         {"seq": 1, "type": "memory_session", "annotation_id": "a-0",
          "payload": {"trace_session_id": "S"}},

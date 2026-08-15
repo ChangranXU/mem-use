@@ -26,10 +26,13 @@ event pairing, session/binding completeness and lane placement (every event
 of an operation — the recorder's within-operation lane check), per-session
 operation-id keying, the proxy-stamped per-event fields (annotation-id
 presence/uniqueness, the binding-status and logical-role vocabularies,
-call_refs shape, and terminal-call-ref consistency), the payload field
-shapes the consumers read (the iterated list fields, and the search's
-matched_count object with its integer value — none ever passed the gate's
-ingest in another shape),
+call_refs shape, terminal-call-ref consistency, and the proxy_source key's
+presence — the proxy stamps it on every recorded memory event, null on the
+unprefixed lane, so an absent one is corruption, never the unprefixed
+lane), the payload field shapes the consumers read (the iterated list
+fields, the search's matched_count object with its integer value, and
+usable returned-entry identities — none ever passed the gate's ingest in
+another shape),
 and the delivery↔search integrity (session scoping, recording order,
 delivered identities an ordered subsequence of the search's returned set).
 
@@ -45,6 +48,7 @@ projection and fall back to the portable identity fields (item_id/version_id
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -187,6 +191,14 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
         status = event.get("binding_status")
         if not isinstance(status, str) or status not in BINDING_STATUSES:
             index.problems.append(f"seq {seq}: unknown binding_status {status!r}")
+        if "proxy_source" not in event:
+            # The proxy stamps the key on every recorded memory event (null
+            # on the unprefixed lane), so an absent one is corruption, never
+            # the unprefixed lane — reading it as None would silently
+            # misplace the event's lane (the bind below would bind the
+            # unprefixed lane, and every clean event of the session would
+            # then flag as off-lane with the real corruption unreported).
+            index.problems.append(f"seq {seq}: {event_type} is missing its proxy_source")
         refs = event.get("call_refs")
         if not isinstance(refs, list):
             if refs is not None:
@@ -228,6 +240,13 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
             if role in binds:
                 index.problems.append(f"seq {seq}: session {sid} binds {role} twice")
                 continue  # first binding wins (same duplicate policy as sessions/deliveries)
+            if "proxy_source" not in event:
+                # reported with the per-event checks above; a corrupt bind is
+                # no bind — recording None would read as the unprefixed lane
+                # and cascade off-lane flags over the session's clean events.
+                # The session's missing-binding report and the parser's
+                # op-lane fallback then name the real shape.
+                continue
             src = event.get("proxy_source")
             if src is not None and not isinstance(src, str):
                 # a corrupt lane names nothing — and an unhashable one would
@@ -337,6 +356,28 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
                         f"seq {seq}: memory_search_end payload.matched_count "
                         "is not an object with an integer value"
                     )
+                # Same never-silent rule for the returned entries the
+                # subsequence check iterates: ingest requires each to be an
+                # object carrying a MemoryRef, so a corrupt entry (non-object,
+                # or a memory with no usable identity fields) only reaches
+                # the log through hand-editing — report it here, or the
+                # delivery-side check below would blame every delivery of
+                # this search with "not an ordered search subsequence" while
+                # the search's own corrupt shape stays unreported.
+                returned = event["payload"].get("returned")
+                if isinstance(returned, list) and any(
+                    all(
+                        field is None
+                        for field in _ref_identity(
+                            item.get("memory") if isinstance(item, dict) else None
+                        )
+                    )
+                    for item in returned
+                ):
+                    index.problems.append(
+                        f"seq {seq}: memory_search_end payload.returned entry "
+                        "has no usable identity fields"
+                    )
 
     def _delivery_order(event: dict) -> tuple[bool, int]:
         # the tool path guarantees an int seq (load_events fabricates one),
@@ -426,8 +467,15 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
                 f"delivery {delivery_id}: memory entry has no usable identity fields"
             )
         returned_items = search.end["payload"].get("returned")
+        # Total map, like the delivered side above: a corrupt returned entry
+        # degrades to a null identity (already reported at the search end)
+        # rather than vanishing from the haystack — filtering it out would
+        # let the check pass vacuously over a shortened haystack.
         returned = (
-            [_ref_identity(item.get("memory")) for item in returned_items if isinstance(item, dict)]
+            [
+                _ref_identity(item.get("memory") if isinstance(item, dict) else None)
+                for item in returned_items
+            ]
             if isinstance(returned_items, list)
             else []
         )
@@ -477,6 +525,13 @@ def message_text(value: object) -> str:
 _MISSING_LANE = object()
 
 
+def _text_sha256(text: str) -> str:
+    """sha256 over the exact recorded text bytes (surrogatepass — the same
+    digest form the gate's own text_sha256/verifier matches trajectory_message
+    locators against)."""
+    return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
+
+
 def resolved_content_text(ref: Any, events: list[dict], lanes: dict) -> str | None:
     """Text of a ContentRef whose content trajectory.jsonl itself carries:
     inline text directly, or a `trajectory_message` locator resolved against
@@ -486,12 +541,17 @@ def resolved_content_text(ref: Any, events: list[dict], lanes: dict) -> str | No
     part of the .jsonl input, and redacted/unavailable carry no text at all —
     all of those resolve to None, like content_text.
 
-    The log is append-only: a message_retracted annuls the record it replaces
-    and the replacement re-records at the same rewound msg slot, so one
-    (lane, msg_index) can hold several message_end events and the FIRST may be
-    dead text. The resolver returns the slot's latest un-annulled record —
-    the same annul rule injudge's prompt_tokens_total applies (a retraction
-    pops the latest record at the slot).
+    One (lane, msg_index) slot can hold several message_end records: the log
+    is append-only, so a message_retracted annuls the record it replaces (the
+    replacement re-records at the rewound slot) and a history_rewritten drops
+    whole epochs un-retracted. The locator's declared sha256 names the exact
+    record the adapter referred to — the digest rule the gate's own verifier
+    resolves by — so a matching record answers no matter how the slot changed
+    afterward (a later retraction/rewrite can never rewrite the answer). Only
+    without a digest match (a corrupt or digest-less ref) does the slot's
+    latest un-annulled record speak — the same annul rule injudge's
+    prompt_tokens_total applies (a retraction pops the latest record at the
+    slot).
     """
     text = content_text(ref)
     if text is not None or not isinstance(ref, dict):
@@ -510,6 +570,7 @@ def resolved_content_text(ref: Any, events: list[dict], lanes: dict) -> str | No
     lane = lanes.get(role, _MISSING_LANE)
     if lane is _MISSING_LANE:
         return None
+    declared = ref.get("sha256")
     live: list[str] = []  # the slot's un-annulled message_end texts, record order
     for e in events:
         msg = e.get("msg")
@@ -519,7 +580,13 @@ def resolved_content_text(ref: Any, events: list[dict], lanes: dict) -> str | No
             if live:
                 live.pop()
         elif e.get("type") == "message_end":
-            live.append(message_text(e.get("content")))
+            content = e.get("content")
+            # the verifier digests string contents only; a non-str content
+            # (parts list) or an empty string (resolves to nothing, like the
+            # scan below) never matches and falls to the live record
+            if isinstance(content, str) and content and _text_sha256(content) == declared:
+                return content
+            live.append(message_text(content))
     # the latest live record carrying text (an empty content resolves to
     # nothing, like the scan before)
     return next((t for t in reversed(live) if t), None)

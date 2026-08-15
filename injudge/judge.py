@@ -376,10 +376,19 @@ def _chat_message(payload: dict) -> dict:
 
 def _top_level_braces(text: str) -> list[int]:
     """Positions of "{" opening a top-level JSON object — not nested inside
-    another JSON value, not inside a string. Stray braces in prose degrade
-    the depth count harmlessly (a missed rescue, never a wrong one)."""
+    another JSON value, not inside a string. Prose brackets are not JSON
+    values, so a depth count is no proof of nesting: an unclosed "[" in
+    leading prose must not blind the scan to a complete object after it (the
+    truncation gate would misread that completed answer as a budget cut).
+    Each candidate is raw_decode-proven instead: a success continues the
+    scan after the value's end, and a failure skips to the decoder's error
+    position — everything it swallowed sits inside an unclosed value (a
+    genuine mid-answer cut), where a complete nested fragment is never the
+    answer. Stray prose braces fail fast and cheap (a missed rescue, never a
+    wrong one)."""
     positions = []
-    depth = 0
+    skip = 0  # candidates before here sit inside an already-scanned value
+    decoder = json.JSONDecoder()
     in_string = False
     escaped = False
     for i, ch in enumerate(text):
@@ -393,12 +402,16 @@ def _top_level_braces(text: str) -> list[int]:
             continue
         if ch == '"':
             in_string = True
-        elif ch in "{[":
-            if ch == "{" and depth == 0:
+        elif ch == "{" and i >= skip:
+            try:
+                _obj, end = decoder.raw_decode(text, i)
+            except json.JSONDecodeError as e:
+                skip = max(i + 1, e.pos)
+            except RecursionError:
+                skip = i + 1
+            else:
                 positions.append(i)
-            depth += 1
-        elif ch in "}]":
-            depth = max(0, depth - 1)
+                skip = end
     return positions
 
 
@@ -1246,6 +1259,7 @@ def judge_span(
     tries = 0
     last_text = ""  # latest out-of-contract answer; transport failures never erase it
     last_text_error = ""  # that answer's own contract violation (assigned with last_text)
+    last_truncated = False  # ... and whether that answer carried the truncation signal
     rejection: str | None = None  # full body of the 400/422 the last degrade answered
     while True:
         req = _build_request(cfg, messages, tier)
@@ -1394,6 +1408,7 @@ def judge_span(
                 # misreport a working tier's transport exhaustion.
                 last_text = text
                 last_text_error = last_error
+                last_truncated = _truncated(cfg, payload)
                 messages = messages + [
                     {"role": "assistant", "content": text},
                     {"role": "user", "content": _corrective_note(error)},
@@ -1425,6 +1440,15 @@ def judge_span(
             break
         time.sleep(pause if pause is not None else (1 if tries == 1 else 4))
     if last_text:
+        if last_truncated:
+            # the recorded answer was cut at the output budget yet slipped
+            # past the completeness gate (a stray complete object in it read
+            # as a finished answer): the retries re-truncated, so name the
+            # budget — the bare violation alone would never point at it
+            last_text_error += (
+                "; the answer was also cut at the output-token budget — "
+                "increase max_tokens"
+            )
         return _error_verdict(last_text_error, last_text, span, warnings)
     raise JudgeError(last_error)
 

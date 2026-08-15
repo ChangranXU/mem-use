@@ -97,8 +97,8 @@ def test_malformed_jsonl_line_skipped(tmp_path):
 def test_corrupt_jsonl_lines_never_abort_the_run(tmp_path):
     """Recorder corruption must not take down parsing (annotations promise:
     never raises on corrupted events) — a non-object line is skipped and a
-    missing/non-integer seq gets a synthetic trailing seq, each with a
-    warning."""
+    missing/non-integer seq gets a synthetic seq one past the highest seen,
+    each with a warning."""
     b = TrajBuilder().agent_turn(with_task=True)
     lines = [json.dumps(e) for e in b.events]
     lines[2] = json.dumps({**b.events[2], "seq": None})  # null seq mid-stream
@@ -115,11 +115,12 @@ def test_corrupt_jsonl_lines_never_abort_the_run(tmp_path):
 
 
 def test_corrupt_seq_event_never_hijacks_a_turn(tmp_path):
-    """A missing/non-integer seq gets a fabricated seq past the highest valid
-    one, so the event sorts AFTER all valid events (file order among
-    themselves): at seq 0 it would precede every real event and win the
-    first-wins turn classification — hijacking the turn's lane attribution
-    and collapsing the step count it feeds."""
+    """A missing/non-integer seq gets a synthetic seq one past the highest
+    seen so far and the event keeps its FILE position (the append-only log's
+    recording order) — never a fabricated position that could jump the
+    first-wins turn-classification queue either way (ahead via a seq-0 sort,
+    or past every real event via a trailing fabrication, where it would lose
+    a classification it truly won)."""
     b = TrajBuilder().agent_turn(with_task=True).agent_turn()
     lines = [json.dumps(e) for e in b.events]
     # a memory-lane assistant message_end for turn 1 with its seq missing
@@ -135,11 +136,11 @@ def test_corrupt_seq_event_never_hijacks_a_turn(tmp_path):
 
 
 def test_corrupt_seq_op_sorts_after_valid_ops(tmp_path):
-    """The same trailing fabrication holds under the op-building re-sorts: a
-    delivery with its seq missing must not jump ahead of the valid ops (a
-    fabricated 0 would make it R1 at a fabricated step) — it numbers last
-    and takes the most-recent-turn attribution of its fabricated tail
-    position (a best-effort guess; its true position is unknown)."""
+    """The same positional fabrication holds under the op-building re-sorts:
+    a delivery appended with its seq missing takes a synthetic seq past every
+    real one, so it numbers last and takes the most-recent-turn attribution
+    of its tail position (a best-effort guess; its true position is
+    unknown)."""
     b = TrajBuilder().agent_turn(with_task=True)
     b.recall()  # search + agent turn + bound delivery (the valid op)
     delivery = next(e for e in b.events if e["type"] == "memory_delivery")
@@ -1401,6 +1402,9 @@ def test_render_html_escapes_artifact_controlled_numbers():
     assert "conf ${esc(d.confidence)}" in html
     assert 'typeof dc.approx_tokens_total==="number"' in html
     assert 'delivered ${esc(dc.deliveries==null?"?":dc.deliveries)}' in html
+    # the thousands-formatted count interpolates into innerHTML too — the
+    # locale string goes through esc() like every other datum
+    assert "esc(dc.approx_tokens_total.toLocaleString())" in html
     assert 'steps ${esc(evSteps.join(",")||"?")}' in html
 
 

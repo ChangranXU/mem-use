@@ -60,16 +60,21 @@ def load_events(path: Path, warnings: list[str]) -> list[dict]:
     """Read trajectory.jsonl, tolerating malformed lines.
 
     One corrupt line must never abort the run: non-JSON and non-object lines
-    are skipped with a warning, and an event whose `seq` is missing or not an
-    integer gets a warning and a fabricated seq continuing past the highest
-    valid one (every downstream reader can then assume an int seq). The
-    trailing values keep corrupt events AFTER all valid events, in file
-    order, under any seq-keyed re-sort downstream (op numbering, op/delivery
-    ordering): at seq 0 they would precede every real event and win the
-    first-wins turn-classification slots, hijacking those turns' attribution.
+    are skipped with a warning. The log is append-only — seq IS recording
+    order — so the stream keeps file order, the one order every positional
+    consumer trusts (retraction/replacement pairing, first-wins turn
+    classification, operation assembly); the recorder's own retrieval reads
+    file order too. An event whose `seq` is missing or not an integer gets a
+    warning and a synthetic seq one past the highest seq seen so far: it
+    keeps its stream position and every downstream reader can still assume
+    an int seq. Moving it to the end instead would detach it from the
+    records it pairs with (a retraction would annul its own replacement, a
+    delivery's order check could never fire) — the residual is a synthetic
+    seq colliding with a later real one, which the non-increasing note
+    surfaces.
     """
     events = []
-    corrupt = []
+    high = 0  # highest seq emitted so far, valid or synthetic
     # binary read + strict per-line decode: a non-UTF-8 byte must not abort
     # the whole read, and errors="replace" alone would land it in a string
     # VALUE silently (the line still parses, so the corruption would flow
@@ -104,18 +109,25 @@ def load_events(path: Path, warnings: list[str]) -> list[dict]:
                 continue
             seq = event.get("seq")
             if not is_int(seq):
+                high += 1
+                event["seq"] = high
                 warnings.append(
                     f"{path.name}:{lineno}: event has a missing or non-integer seq "
-                    f"({seq!r}); assigned a synthetic trailing seq"
+                    f"({seq!r}); assigned synthetic seq {high}"
                 )
-                corrupt.append(event)
-                continue
+            else:
+                if seq <= high:
+                    # append-only recording makes seqs strictly increasing
+                    # (gaps allowed): a repeated or regressed value is
+                    # hand-edit corruption — reported, and the file order
+                    # kept (re-sorting would move the event's neighbors past
+                    # their pairing partners just the same)
+                    warnings.append(
+                        f"{path.name}:{lineno}: non-increasing seq {seq}; "
+                        "keeping file order"
+                    )
+                high = max(high, seq)
             events.append(event)
-    events.sort(key=lambda e: e["seq"])
-    base = events[-1]["seq"] if events else 0
-    for offset, event in enumerate(corrupt, 1):
-        event["seq"] = base + offset
-    events.extend(corrupt)
     return events
 
 

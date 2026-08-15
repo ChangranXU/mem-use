@@ -23,12 +23,19 @@
   non-CURE adapter still parses; nothing may key behavior off one adapter's
   vocabulary (e.g. extracting memories by matching "## CURE Memory" in prompt
   text is forbidden).
-- Corrupt input is tolerated, never fatal: malformed JSONL lines, non-integer
-  seqs, unknown binding statuses or logical roles, non-list payload
-  list-fields, corrupt matched_count shapes, broken session/operation links
-  all land in
+- Corrupt input is tolerated, never fatal: malformed JSONL lines, corrupt
+  seqs, unknown binding statuses or logical roles, missing proxy_source keys
+  (the proxy stamps the key on every recorded memory event, null on the
+  unprefixed lane — an absent one is corruption, never the unprefixed lane),
+  non-list payload list-fields, corrupt matched_count or returned-entry
+  shapes, broken session/operation links all land in
   `validation`/warnings and the run carries on (the recorder's own
-  retrieval/verify tooling remains the strict checker). Hand-edited artifacts
+  retrieval/verify tooling remains the strict checker). The log is
+  append-only, so the event stream keeps file order (the recorder's own
+  retrieval reads file order too): a missing/non-integer seq gets a synthetic
+  seq one past the highest seen so far — never a trailing one, which would
+  detach retraction/order pairings from their targets — and a non-increasing
+  seq is noted, never re-sorted. Hand-edited artifacts
   must degrade, never raise — every field read off a possibly-corrupt event
   is shape-guarded (a JSON `true` is never an int index; unhashable values
   never reach a dict/set lookup).
@@ -48,7 +55,11 @@
   format field: it becomes an `error` verdict naming the truncation (no
   degrade, no same-budget retry). A complete-but-out-of-contract answer
   carrying the truncation signal is not a budget failure — the cut only
-  removed trailing prose — and routes through the chain / corrective retry.
+  removed trailing prose — and routes through the chain / corrective retry;
+  a truncated answer that still slips past the completeness check (a stray
+  complete object inside it reads as a finished answer) exhausts the
+  corrective budget and ends in an error naming both the violation and the
+  budget.
   An empty-content answer that finished normally (a server-side quirk) earns a
   fresh draw of the identical request — and on openai-chat a complete
   verdict drafted into `reasoning_content` is recovered instead (noted per

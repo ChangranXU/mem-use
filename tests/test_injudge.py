@@ -30,6 +30,7 @@ from injudge.judge import (
     _POS_EFFECT,
     _assemble_verdict,
     _build_request,
+    _complete_json_present,
     _error_verdict,
     _render_steps,
     _strict_parse,
@@ -50,7 +51,7 @@ from injudge.report import (
 )
 from injudge.spans import content_fingerprint, group_spans
 from injudge.steps import build_step_stream, prompt_tokens_total
-from memgraph.parse_trajectory import parse_trajectory
+from memgraph.parse_trajectory import load_events, parse_trajectory
 from annotated_fixtures import MEM, TASK
 from annotated_fixtures import AnnotatedBuilder as TrajBuilder
 from annotated_fixtures import cure_ref
@@ -2457,6 +2458,73 @@ def test_truncated_answer_is_a_budget_error_never_a_tier_degrade(monkeypatch):
     assert cfg.learned_tier == "structured"  # the memo is never poisoned
 
 
+def test_complete_json_present_reads_past_unclosed_prose_brackets():
+    """A depth count is no proof of nesting: an unclosed "[" in leading
+    prose must not blind the scan to the complete verdict object after it
+    (the truncation gate would misread that completed answer as a budget
+    cut), while a complete fragment nested inside a genuinely cut object is
+    never the answer."""
+    assert _complete_json_present(GOOD)
+    # prose with an unclosed bracket, then the complete verdict, then the cut
+    assert _complete_json_present("Signals: [relevance, accuracy\n" + GOOD + "\ncut")
+    # a genuine mid-answer cut holds no complete top-level object
+    assert not _complete_json_present(GOOD[:200])
+    # a stray complete object still counts (documented residual: the gate
+    # stays bypassed; the exhaustion path names the budget instead)
+    assert _complete_json_present('{"confidence": 0.9}\n' + GOOD[:200])
+
+
+def test_truncated_signal_with_a_complete_answer_routes_through_the_chain(monkeypatch):
+    """A finish_reason "length" answer whose prose (with an unclosed
+    bracket) precedes a COMPLETE verdict is not a budget cut — the cut only
+    removed trailing prose. It must route through the tier chain (a paid
+    redraw can produce a clean answer), never the final budget error that
+    would leave the span's memories unjudged."""
+    record = []
+
+    def _open(req, timeout=None):
+        record.append(json.loads(req.data.decode()))
+        if len(record) == 1:  # complete verdict after unclosed prose, then cut
+            return FakeResponse({"choices": [
+                {"finish_reason": "length",
+                 "message": {"content": "Signals: [relevance\n" + GOOD + "\ncut"}}]})
+        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
+
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
+    span, steps = _judge_input_fixture()
+    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
+    warnings = []
+    verdict = judge_span(span, steps, cfg, warnings)
+    assert verdict["verdict"] == "positive"
+    assert len(record) == 2  # one free tier discovery, then the redraw
+    assert any("degrading to json" in w for w in warnings)
+    assert cfg.learned_tier == "json"
+
+
+def test_truncated_stray_object_exhaustion_names_the_budget(monkeypatch):
+    """A genuine mid-answer cut holding a stray complete object slips past
+    the completeness gate (the object reads as a finished answer) and burns
+    the corrective budget on re-truncations — the final error must name the
+    output budget, never end in a bare "not valid JSON" that points nowhere."""
+    record = []
+
+    def _open(req, timeout=None):
+        record.append(json.loads(req.data.decode()))
+        return FakeResponse({"choices": [
+            {"finish_reason": "length",
+             "message": {"content": '{"confidence": 0.9}\n' + GOOD[:200]}}]})
+
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
+    span, steps = _judge_input_fixture()
+    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
+    verdict = judge_span(span, steps, cfg, [])
+    assert verdict["verdict"] == "error"
+    assert "is not valid JSON" in verdict["error"]
+    assert "increase max_tokens" in verdict["error"]
+    # two free tier discoveries, then the five paid corrective retries
+    assert len(record) == 7
+
+
 def test_truncated_signal_per_api():
     """Each API family's truncation spelling is recognized (chat finish_reason
     "length" / the anthropic-style "max_tokens" some proxies pass through;
@@ -3119,6 +3187,29 @@ def test_prompt_tokens_corrupt_retraction_warns_as_overcount():
         for w in warnings
     )
     assert not any("usage record(s)" in w for w in warnings)
+
+
+def test_prompt_tokens_corrupt_seq_retraction_annuls_its_own_record(tmp_path):
+    """A retraction whose SEQ was hand-edited away keeps its file position
+    under a synthetic seq (load_events), so it still annuls the record it
+    replaced — a trailing fabrication would move it past the replacement and
+    pop THAT instead, billing the annulled record and dropping the billed
+    one."""
+    b = TrajBuilder().agent_turn(with_task=True)
+    b._emit("message_end", proxy_source="MAIN", role="assistant", msg=9, turn=1,
+            content="", usage={"prompt_tokens": 200})
+    b._emit("message_retracted", proxy_source="MAIN", msg=9, turn=1)
+    # the replacement is turn-less (origin=history) but carries the usage
+    b._emit("message_end", proxy_source="MAIN", role="assistant", msg=9,
+            content="", origin="history", usage={"prompt_tokens": 100})
+    for e in b.events:
+        if e["type"] == "message_retracted":
+            del e["seq"]
+    load_warnings = []
+    events = load_events(b.write(tmp_path / "t") / "trajectory.jsonl", load_warnings)
+    warnings = []
+    assert prompt_tokens_total(events, warnings) == 100
+    assert any("non-integer seq" in w for w in load_warnings)
 
 
 def test_span_fingerprint_tolerates_a_lone_surrogate_value():
