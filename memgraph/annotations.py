@@ -183,10 +183,18 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
         if not isinstance(sid, str):
             index.problems.append(f"seq {seq}: {event_type} has a missing trace_session_id")
             continue
+        if event_type == "memory_delivery" and not isinstance(payload.get("delivery_id"), str):
+            # shape-checked before the claim below: a first copy lost to a
+            # corrupt delivery id applied nothing, so an at-least-once
+            # re-record must not read as a "duplicate"
+            index.problems.append(
+                f"seq {seq}: memory_delivery has a missing or non-string delivery_id"
+            )
+            continue
         if annotation_id is not None:
             # claim the id only once the event's own shape is applicable: a
-            # first copy lost to a corrupt payload or session must not
-            # swallow an at-least-once re-record as a "duplicate"
+            # first copy lost to a corrupt payload, session, or delivery id
+            # must not swallow an at-least-once re-record as a "duplicate"
             seen_annotation_ids.add(annotation_id)
 
         # Proxy-stamped event-level fields, checked for every memory event
@@ -257,12 +265,7 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
             binds[role] = src
             continue
         if event_type == "memory_delivery":
-            delivery_id = payload.get("delivery_id")
-            if not isinstance(delivery_id, str):
-                index.problems.append(
-                    f"seq {seq}: memory_delivery has a missing or non-string delivery_id"
-                )
-                continue
+            delivery_id = payload["delivery_id"]  # a string — checked before the claim
             if delivery_id in seen_delivery_ids:
                 index.problems.append(f"seq {seq}: duplicate delivery_id {delivery_id}")
                 continue
@@ -605,8 +608,15 @@ def resolved_content_text(
             content = e.get("content")
             # the verifier digests string contents only; a non-str content
             # (parts list) or an empty string (resolves to nothing, like the
-            # scan below) never matches and falls to the live record
-            if isinstance(content, str) and content and _text_sha256(content) == declared:
+            # scan below) never matches and falls to the live record. The
+            # digest is computed only when a declared one exists to match —
+            # a digest-less ref hashes every live record for nothing.
+            if (
+                isinstance(declared, str)
+                and isinstance(content, str)
+                and content
+                and _text_sha256(content) == declared
+            ):
                 return content
             live.append(message_text(content))
     # the latest live record carrying text (an empty content resolves to

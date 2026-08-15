@@ -2209,6 +2209,34 @@ def test_digit_limit_answer_at_json_tier_is_retried_never_degraded_free(monkeypa
     assert "past the digit limit" in record[1]["messages"][-1]["content"]
 
 
+def test_digit_limit_answer_at_structured_tier_is_retried_never_degraded_free(monkeypatch):
+    """At the structured tier a digit-limit answer is the model's own error
+    too: a >4300-digit integer is valid JSON and legal inside the contract's
+    unbounded integer fields (evidence steps/seqs), so a strict endpoint can
+    legitimately produce one — the corrective retry stays at the SAME tier.
+    A free degrade would misread a Python parser limit as an ignored format
+    field and memoize a weaker tier off a valid answer."""
+    huge = '{"memories": [], "confidence": ' + "9" * 5000 + "}"
+    answers = iter([huge, GOOD])
+    record = []
+
+    def _open(req, timeout=None):
+        body = json.loads(req.data.decode())
+        record.append(body)
+        return FakeResponse({"choices": [{"message": {"content": next(answers)}}]})
+
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
+    span, steps = _judge_input_fixture()
+    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
+    verdict = judge_span(span, steps, cfg, [])
+    assert verdict["verdict"] == "positive"
+    # both requests stayed at the structured tier — no free degrade to json
+    assert [b.get("response_format", {}).get("type") for b in record] == [
+        "json_schema", "json_schema"]
+    assert cfg.learned_tier == "structured"
+    assert "past the digit limit" in record[1]["messages"][-1]["content"]
+
+
 def test_empty_400s_walk_the_whole_chain(monkeypatch):
     """An EMPTY rejection body is silence, not an unchanged rejection: a
     gateway dropping per-tier error text must not be diagnosed tier-
@@ -2331,6 +2359,44 @@ def test_rejection_chain_resets_when_a_tier_answers_200(monkeypatch):
     assert "HTTP 400" in str(excinfo.value)
     assert [b.get("response_format", {}).get("type") for b in record] == [
         "json_schema", "json_object", None]
+
+
+def test_rejection_chain_resets_on_an_unparseable_200_body(monkeypatch):
+    """A 200 whose body fails to decode or parse is still an ANSWER, not
+    silence: the identical-rejection chain resets there too, so a later 400
+    repeating a pre-answer body fails the span on the plain HTTP message
+    instead of the tier-independent misreading — the same reset a parseable
+    200 gets (the endpoint answered between the two rejections)."""
+    body = b'{"error": {"message": "generic gateway rejection"}}'
+    answered_garbled = []
+
+    class GarbledResponse:
+        def read(self):
+            return b"\xff\xfe garbled"  # not UTF-8: the decode fails first
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def _open(req, timeout=None):
+        payload = json.loads(req.data.decode())
+        if "response_format" in payload:
+            raise http_error(400, body)  # both format tiers reject identically
+        if not answered_garbled:
+            answered_garbled.append(True)
+            return GarbledResponse()  # the final tier's request got a garbled 200
+        raise http_error(400, body)  # the retry repeats the old rejection body
+
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
+    monkeypatch.setattr("injudge.judge.time.sleep", lambda s: None)
+    span, steps = _judge_input_fixture()
+    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
+    with pytest.raises(JudgeError) as excinfo:
+        judge_span(span, steps, cfg, [])
+    assert "unchanged across conformance tiers" not in str(excinfo.value)
+    assert "HTTP 400" in str(excinfo.value)
 
 
 def test_tier_degrades_on_out_of_contract_output(monkeypatch):

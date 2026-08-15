@@ -981,6 +981,12 @@ class _NonJSONConstant(ValueError):
     """NaN/Infinity in the judge's answer: neither is valid JSON (RFC 8259)."""
 
 
+# The int() digit-limit refusal's out-of-contract reason: valid JSON (RFC
+# 8259 sets no limit) that only Python's conversion limit refuses — a model
+# error at every conformance tier, never proof of an ignored format field.
+_DIGIT_LIMIT_ERROR = "carries an integer literal past the digit limit"
+
+
 def _reject_constant(value: str) -> None:
     """json.loads parse_constant hook: NaN/Infinity are not valid JSON
     (RFC 8259) — rejecting them at parse time classifies the answer as "is
@@ -1026,7 +1032,7 @@ def _strict_parse(text: str) -> tuple[dict | None, str | None]:
         # one: a model error taking the corrective retry, never the
         # output-side proof of an ignored format field that earns a free
         # degrade (and memoizes the weakest tier off a valid answer)
-        return None, "carries an integer literal past the digit limit"
+        return None, _DIGIT_LIMIT_ERROR
     if not isinstance(obj, dict):
         return None, "is not a JSON object"
     memories = obj.get("memories")
@@ -1379,11 +1385,14 @@ def judge_span(
     ignored the format field — any violation _strict_parse checks at the
     structured tier (an out-of-range confidence is not among them: the
     schema's 0–1 bound is a semantic correction clamped in code, not a
-    parsed violation), invalid JSON at the json tier (JSON mode guarantees
+    parsed violation; the int digit-limit refusal is not among them
+    either: a >4300-digit literal is valid, schema-legal JSON), invalid
+    JSON at the json tier (JSON mode guarantees
     valid JSON, never schema conformance) — is the same endpoint property
     discovered from the output side, so the tier degrades free too; a
-    valid-but-wrong-shape answer at the json tier is a model error and
-    takes the corrective retry instead.
+    valid-but-wrong-shape answer at the json tier, and a digit-limit
+    answer at any tier, are model errors and take the corrective retry
+    instead.
     The learned-tier memo records only a tier that produced a conforming
     answer, so later spans start at a tier proven to work. At the final
     tier (or with OUTPUT_FORMAT pinned) a retry must change the request —
@@ -1483,7 +1492,12 @@ def judge_span(
         except (ValueError, RecursionError) as e:
             # invalid UTF-8, unparseable JSON, an int past the digit limit,
             # pathological nesting — the body never became a payload
-            # (ValueError covers both UnicodeDecodeError and JSONDecodeError)
+            # (ValueError covers both UnicodeDecodeError and JSONDecodeError).
+            # The HTTP exchange itself completed with a 200, so the endpoint
+            # DID answer: the identical-rejection chain is broken here too,
+            # same as the parsed-answer branch — a garbled proxy response is
+            # not silence.
+            rejection = None
             last_error = f"unparseable response body: {e}"
         else:
             # the endpoint ANSWERED this request (whatever the answer's
@@ -1539,17 +1553,26 @@ def judge_span(
                 # Free tier discovery from the output side — the endpoint
                 # provably ignored this tier's format field. At the structured
                 # tier any contract violation proves it (strict json_schema
-                # guarantees the whole contract). At the json tier only
-                # invalid JSON proves it: JSON mode guarantees valid JSON,
-                # never schema conformance, so a valid-but-wrong-shape answer
-                # is a model error, not an endpoint property — degrading
-                # would only weaken enforcement for no reason. A rescued
+                # guarantees the whole contract) except the digit-limit
+                # refusal: an int literal past Python's limit is valid JSON
+                # and inside the contract's unbounded integer fields (evidence
+                # steps/seqs), so a strict endpoint can legitimately produce
+                # one — a model error at this tier too, never proof the field
+                # was ignored (the same classification the json tier's rule
+                # below gives it). At the json tier only invalid JSON proves
+                # it: JSON mode guarantees valid JSON, never schema
+                # conformance, so a valid-but-wrong-shape answer is a model
+                # error, not an endpoint property — degrading would only
+                # weaken enforcement for no reason. A rescued
                 # reasoning_content draft never passed through the format
                 # channel at all, so its violation proves nothing either.
                 if (
                     nxt is not None
                     and not rescued
-                    and (tier == "structured" or error == "is not valid JSON")
+                    and (
+                        (tier == "structured" and error != _DIGIT_LIMIT_ERROR)
+                        or error == "is not valid JSON"
+                    )
                 ):
                     # the violation text interpolates endpoint-provided values
                     # (memory keys, signal values) — mask it before it reaches

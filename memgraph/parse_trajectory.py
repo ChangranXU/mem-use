@@ -542,7 +542,7 @@ def parse_trajectory(
         binds = index.binds.get(sid, {})
         if "memory" in binds:
             memory_lanes.add(binds["memory"])
-    main_lane, memory_lane = index.lanes()
+    main_lane = index.lanes()[0]
     lane_fallback = index.annotated and not memory_lanes
     if lane_fallback:
         memory_lanes = {
@@ -566,13 +566,14 @@ def parse_trajectory(
             f"{run_id}: main and memory traffic share {names}; memory turns "
             "on it are indistinguishable — those turns count as agent steps"
         )
-    if lane_fallback:
-        # the fallback's singular display lane summarizes the op-event lanes,
-        # so it is derived from the FINAL set — after the shared-lane guard.
-        # A straddling fallback set {unprefixed, MEM} with an unprefixed main
-        # lane leaves {MEM}; a stale pre-guard None would render every
-        # rewrite marker of the MEM lane as non-memory traffic.
-        memory_lane = next(iter(memory_lanes)) if len(memory_lanes) == 1 else None
+    # the singular display lane always derives from the FINAL set — after
+    # the shared-lane guard, on the bound path as much as the fallback one:
+    # a lane the guard dropped is not memory traffic (its turns count as
+    # agent steps), so rendering its rewrite markers as memory traffic would
+    # contradict the classification. A straddling fallback set {unprefixed,
+    # MEM} with an unprefixed main lane leaves {MEM}; a stale pre-guard lane
+    # would color every rewrite marker of the surviving lane wrong.
+    memory_lane = next(iter(memory_lanes)) if len(memory_lanes) == 1 else None
     if len(memory_lanes) > 1:
         warnings.append(
             f"{run_id}: multiple memory lanes bound {sorted(map(str, memory_lanes))}; "

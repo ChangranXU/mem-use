@@ -911,6 +911,25 @@ def test_dedup_claims_an_id_only_for_an_applied_event():
     assert not any("duplicate recorded annotation_id" in p for p in idx.problems)
 
 
+def test_dedup_claims_no_id_for_a_delivery_lost_to_a_corrupt_delivery_id():
+    """The delivery_id shape check gates the claim like the payload and
+    session checks do: a first copy dropped for a corrupt delivery_id
+    applied nothing, so a later copy under the same annotation_id with a
+    valid delivery_id must be applied — never swallowed as a 'duplicate'
+    (which would erase the recall op outright)."""
+    idx = build_annotation_index([
+        {"seq": 1, "type": "memory_session", "payload": {"trace_session_id": "S"}},
+        {"seq": 2, "type": "memory_delivery", "annotation_id": "recov-2",
+         "payload": {"trace_session_id": "S", "delivery_id": 123}},  # corrupt
+        {"seq": 3, "type": "memory_delivery", "annotation_id": "recov-2",
+         "payload": {"trace_session_id": "S", "delivery_id": "d1",
+                     "status": "placed", "memories": []}},
+    ])
+    assert [d["payload"]["delivery_id"] for d in idx.deliveries] == ["d1"]
+    assert any("non-string delivery_id" in p for p in idx.problems)
+    assert not any("duplicate recorded annotation_id" in p for p in idx.problems)
+
+
 def test_lanes_use_the_first_binding_per_role_across_sessions():
     """A multi-session index summarizes each display lane from the first
     session that binds it (the turn classification merges all sessions'

@@ -287,6 +287,26 @@ def test_unprefixed_main_lane_run_parses_without_false_corruption(tmp_path):
     assert not any("not recorded on the bound main lane" in w for w in warnings)
 
 
+def test_shared_lane_display_follows_the_final_lane_set(tmp_path):
+    """A lane bound to BOTH roles (corrupt input — the recorder's ingest
+    forbids the sharing) is dropped from the memory-lane set, so its turns
+    count as agent steps; the DISPLAY lane must drop with it on the bound
+    path too, or the HTML would render that lane's rewrite markers as
+    memory traffic while its turns are agent steps."""
+    b = TrajBuilder(main="LANE", mem="LANE").agent_turn(with_task=True)
+    b.memory_turn()  # on the shared lane, indistinguishable from an agent turn
+    d = tmp_path / "shared"
+    d.mkdir()
+    (d / "trajectory.jsonl").write_text(
+        "\n".join(json.dumps(e) for e in b.events) + "\n", encoding="utf-8")
+    warnings = []
+    traj, ops, _events = parse_trajectory(d, warnings)
+    assert traj.memory_lane is None
+    assert traj.memory_lanes == set()
+    assert traj.n_steps == 2  # both shared-lane turns count as agent steps
+    assert any("main and memory traffic share" in w for w in warnings)
+
+
 def test_corrupt_field_values_degrade_never_crash(tmp_path):
     """Hand-corrupted container/scalar fields must degrade, never raise: a
     truthy non-dict extensions/placement and a non-string `at` are for the

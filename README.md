@@ -162,17 +162,19 @@ flowchart LR
 An invalid judge answer never becomes a verdict on its own: a 400/422
 rejecting the tier's format field, or out-of-contract output that proves the
 field was ignored (any violation the strict parse checks at the structured
-tier; invalid JSON at the json tier — JSON mode guarantees valid JSON, never
-schema conformance), walks the conformance tier chain — **structured**
+tier, except the int digit-limit refusal — a >4300-digit literal is valid,
+schema-legal JSON; invalid JSON at the json tier — JSON mode guarantees
+valid JSON, never schema conformance), walks the conformance tier chain —
+**structured**
 (constrained decoding) → **json** (JSON mode; no such tier on anthropic) →
 **prompt** — without
 consuming the attempt budget (both are the same endpoint property discovered
 on the request or the output side: this tier does not work here), and the
 first tier producing a conforming answer is memoized for later spans. A
 valid-but-wrong-shape answer at the json tier is a model error, not a tier
-discovery (so is an integer literal past Python's int digit limit — valid
-JSON per RFC 8259, which sets no limit): like any retry at the final tier
-it consumes the budget and
+discovery (so is an integer literal past Python's int digit limit at every
+tier — valid JSON per RFC 8259, which sets no limit): like any retry at the
+final tier it consumes the budget and
 appends the invalid answer plus a corrective note, so corrective retries
 never repeat an identical request. A 400/422 whose NON-EMPTY body repeats unchanged at
 the FINAL (format-less) tier — with no answered request in between —

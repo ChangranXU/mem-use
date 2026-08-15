@@ -57,9 +57,11 @@
   format field: it becomes an `error` verdict naming the truncation (no
   degrade, no same-budget retry). A complete-but-out-of-contract answer
   carrying the truncation signal is not a budget failure — the cut only
-  removed trailing prose, and an integer literal past Python's digit limit
-  reads as a finished answer too (RFC 8259 sets no limit, so its braces
-  closed) — and routes through the chain / corrective retry;
+  removed trailing prose — and routes through the chain / corrective
+  retry; an integer literal past Python's digit limit reads as a finished
+  answer too (RFC 8259 sets no limit, so its braces closed) and is a model
+  error at every tier, taking the corrective retry, never the free degrade
+  an ignored format field earns;
   a truncated answer that still slips past the completeness check (a stray
   complete object inside it reads as a finished answer) exhausts the
   corrective budget and ends in an error naming both the violation and the
@@ -162,7 +164,10 @@ These are load-bearing; never weaken them:
   messages (config errors name keys, never values) — endpoint output
   echoing the request (an auth/proxy fault reflecting the credential — an
   HTTP error page or a 200 answer alike) is masked before any of its text
-  reaches a verdict, judge_raw, or validation note.
+  reaches a verdict, judge_raw, or validation note (a key shorter than 8
+  characters is treated as no credential and left unmasked: masking its
+  every occurrence would destroy the kept endpoint output while protecting
+  nothing).
 - The memgraph HTML is an untrusted-content host: every trajectory- or
   artifact-controlled value interpolated into it is escaped — the embedded
   graph JSON has every `<` (plus U+2028/U+2029) unicode-escaped, the title is

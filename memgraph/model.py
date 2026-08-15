@@ -22,7 +22,9 @@ class Trajectory:
     started_at: str | None = None
     status: str | None = None
     n_steps: int = 0  # agent steps (non-memory-lane turns)
-    memory_lane: str | None = None  # proxy_source of the bound memory lane
+    # the single lane of the final memory-lanes set, after the shared-lane
+    # guard; None when several lanes are bound or none survived it
+    memory_lane: str | None = None
     # all bound memory-lane proxy_sources (internal; None = the unprefixed lane)
     memory_lanes: set[str | None] = field(default_factory=set)
     adapter: str | None = None  # memory adapter name@version
