@@ -28,12 +28,14 @@ from injudge.judge import (
     _INFLUENCE,
     _NOVELTY,
     _POS_EFFECT,
+    _SCAN_PROBE,
     _assemble_verdict,
     _build_request,
     _complete_json_present,
     _error_verdict,
     _render_steps,
     _strict_parse,
+    _top_level_objects,
     _truncated,
     auto_verdict_no_subsequent_turn,
     judge_span,
@@ -723,11 +725,12 @@ def _signals(rel=True, acc="uncontradicted", nov="novel", inf="none", pe=None):
 
 
 def parse_verdict(text, span, warnings):
-    """Test facade over the strict-parse → assemble chain judge_span inlines."""
+    """Test facade over the strict-parse → assemble chain judge_span inlines.
+    No api key in play, so the mask argument is empty."""
     obj, error = _strict_parse(text or "")
     if obj is None:
-        return _error_verdict(f"judge output {error}", text, span, warnings)
-    return _assemble_verdict(obj, text or "", span, warnings)
+        return _error_verdict(f"judge output {error}", text, span, warnings, "")
+    return _assemble_verdict(obj, text or "", span, warnings, "")
 
 
 GOOD = json.dumps({
@@ -955,8 +958,10 @@ def test_parse_verdict_overflow_literal_confidence_is_error():
 def test_parse_verdict_huge_int_confidence_never_raises():
     """A confidence with thousands of digits is numeric and finite, but any
     float() conversion of it overflows: the range check/clamp must stay in
-    the numeric domain, and a digit count past the parser's limit is plain
-    invalid output — an error verdict, never an uncaught exception."""
+    the numeric domain. A digit count past the parser's int() limit is
+    valid JSON (RFC 8259 sets no limit) the judge still cannot be read
+    through: a model error — an error verdict, never an uncaught exception
+    and never an "is not valid JSON" misclassification."""
     payload = json.loads(GOOD)
     payload["confidence"] = 10 ** 4000  # json round-trips it; float() cannot
     warnings = []
@@ -966,7 +971,7 @@ def test_parse_verdict_huge_int_confidence_never_raises():
     warnings = []
     raw = GOOD.replace('"confidence": 0.8', '"confidence": ' + "9" * 5000)
     v = parse_verdict(raw, _FakeSpan(), warnings)
-    assert v["verdict"] == "error" and "not valid JSON" in v["error"]
+    assert v["verdict"] == "error" and "past the digit limit" in v["error"]
 
 
 def test_clamped_confidence_warning_is_bounded():
@@ -1662,10 +1667,9 @@ def test_reasoning_rescue_picks_the_closing_top_level_object(monkeypatch):
 
 def test_reasoning_rescue_recovers_an_array_wrapped_verdict(monkeypatch):
     """A reasoning model may draft the verdict wrapped in an array: "[{...}]"
-    nests the object one level down, so no top-level-object scan finds it —
-    the greedy first-"{"-to-last-"}" span recovers the object inside the
-    single wrap (it straddles several objects and never parses, so it can
-    only fire when the precise scan found nothing)."""
+    nests the object one level down — no problem for the rescue scan, which
+    tracks no array nesting and records the object inside as a span like any
+    other (still raw_decode-proven, still strictly parsed downstream)."""
     span, steps = _judge_input_fixture()
     rc = "wrapping the answer in an array:\n[" + GOOD + "]"
     payload = {"choices": [{"message": {"content": "", "reasoning_content": rc}}]}
@@ -1678,7 +1682,22 @@ def test_reasoning_rescue_recovers_an_array_wrapped_verdict(monkeypatch):
     assert len(record) == 1  # rescued without a retry
 
 
-def test_build_request_format_fields_per_tier():
+def test_reasoning_rescue_recovers_a_draft_past_the_probe_window(monkeypatch):
+    """A drafted verdict longer than the probe window is rescued even when
+    the window boundary slices a literal inside it — the span scan's
+    full-tail proof covers what the probe cannot decide."""
+    span, steps = _judge_input_fixture()
+    cut_at = GOOD.index("true")  # key_a's relevance literal
+    prose = "x" * (_SCAN_PROBE - cut_at - 3)  # the window ends inside `true`
+    rc = prose + GOOD
+    payload = {"choices": [{"message": {"content": "", "reasoning_content": rc}}]}
+    record = []
+    monkeypatch.setattr("injudge.judge.urlopen",
+                        fake_urlopen_factory(record, payload))
+    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m",
+                      output_format="json")
+    assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
+    assert len(record) == 1  # rescued without a retry
     """Each tier's provider-native format field; the prompt tier sends none."""
     msgs = [{"role": "system", "content": "S"}, {"role": "user", "content": "U"}]
 
@@ -1791,11 +1810,14 @@ def test_tier_degrades_on_400_then_memoized(monkeypatch):
     assert [b.get("response_format", {}).get("type") for b in record] == ["json_object"]
 
 
-def test_tier_independent_400_fails_fast(monkeypatch):
-    """A 400 repeating unchanged after the format field changed is no format
-    refusal — a tier-independent config fault (e.g. max_tokens over the model
-    limit) no degrade can fix: the span fails on the second request instead
-    of walking the whole chain (and doing so again on every later span)."""
+def test_tier_independent_400_fails_at_the_format_less_tier(monkeypatch):
+    """A 400 repeating unchanged up to the FINAL (format-less) tier is no
+    format refusal — a tier-independent config fault (e.g. max_tokens over
+    the model limit) no degrade can fix: the span fails there on the
+    endpoint's message. The repeat can only be judged at the format-less
+    tier — a gateway rejecting every format field with ONE generic body
+    repeats it across the format tiers too, and failing fast on the first
+    repeat would strand the walk before the tier that answers."""
     record = []
 
     def _open(req, timeout=None):
@@ -1809,9 +1831,382 @@ def test_tier_independent_400_fails_fast(monkeypatch):
     with pytest.raises(JudgeError, match="unchanged across conformance tiers"):
         judge_span(span, steps, cfg, warnings)
     assert [b.get("response_format", {}).get("type") for b in record] == [
-        "json_schema", "json_object"]  # never reaches the prompt tier
-    assert not any("degrading to prompt" in w for w in warnings)
+        "json_schema", "json_object", None]  # the full walk, decided at the end
     assert cfg.learned_tier == "structured"  # memo untouched
+
+
+def test_generic_body_400s_walk_to_the_prompt_tier(monkeypatch):
+    """A gateway rejecting EVERY request carrying a format field with one
+    generic non-empty 400 body is not a tier-independent fault — the
+    format-less prompt tier answers it: the identical-body repeat across
+    the format tiers must not fail the span before that tier is tried."""
+    record = []
+
+    def _open(req, timeout=None):
+        body = json.loads(req.data.decode())
+        record.append(body)
+        if "response_format" in body:
+            raise http_error(400, b'{"error": {"message": "Bad Request"}}')
+        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
+
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
+    span, steps = _judge_input_fixture()
+    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
+    warnings = []
+    assert judge_span(span, steps, cfg, warnings)["verdict"] == "positive"
+    assert [b.get("response_format", {}).get("type") for b in record] == [
+        "json_schema", "json_object", None]  # walked to the prompt tier
+    assert cfg.learned_tier == "prompt"
+    # the next span starts at the working tier — no repeated rejections
+    record.clear()
+    assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
+    assert [b.get("response_format", {}).get("type") for b in record] == [None]
+
+
+def test_endpoint_echo_never_leaks_the_api_key(monkeypatch):
+    """An auth/proxy fault page reflecting the request (credential header
+    included) flows into the span's recorded error — the key must be masked
+    before any of that text reaches a verdict, note, or artifact, in its raw
+    AND urlencoded forms (a gateway spelling the request as a URL)."""
+    key = "sk-secret+key"
+    echo = (
+        f'{{"error": "auth failed: Authorization Bearer {key} '
+        f'(request logged as /v1/chat/completions?api_key={key.replace("+", "%2B")})"}}'
+    ).encode()
+
+    def _open(req, timeout=None):
+        raise http_error(401, echo)
+
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
+    span, steps = _judge_input_fixture()
+    cfg = JudgeConfig(base_url="http://x", api_key=key, model="m")
+    with pytest.raises(JudgeError) as excinfo:
+        judge_span(span, steps, cfg, [])
+    message = str(excinfo.value)
+    assert key not in message and "sk-secret%2Bkey" not in message
+    assert "***" in message
+
+
+def test_echoed_key_in_a_200_answer_never_reaches_judge_raw(monkeypatch):
+    """A broken auth/proxy endpoint can reflect the request — credential
+    header included — inside a 200 ANSWER, not just an error page: that
+    text reaches judge_raw in the error verdict, so it is masked like the
+    4xx/5xx paths (both the raw and urlencoded key forms)."""
+    key = "sk-secret+key"
+    echo = (
+        f"auth failed: Authorization Bearer {key} "
+        f"(request logged as /v1/chat/completions?api_key={key.replace('+', '%2B')})"
+    )
+    payload = {"choices": [{"message": {"content": echo}}]}
+    record = []
+    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory(record, payload))
+    span, steps = _judge_input_fixture()
+    cfg = JudgeConfig(base_url="http://x", api_key=key, model="m", max_attempts=1)
+    verdict = judge_span(span, steps, cfg, [])
+    assert verdict["verdict"] == "error"  # the echo is out of contract
+    assert key not in verdict["judge_raw"] and "sk-secret%2Bkey" not in verdict["judge_raw"]
+    assert "***" in verdict["judge_raw"]
+
+
+def test_echoed_key_in_a_conforming_verdict_never_reaches_the_artifact(monkeypatch):
+    """A 200 verdict is endpoint output too: the key echoed into its
+    analysis, evidence claims, or per-signal notes would land verbatim in
+    injudge.report/v4 — mask it in every copied field, not just judge_raw."""
+    key = "sk-secret+key"
+    obj = json.loads(GOOD)
+    obj["analysis"] = f"the agent saw {key} in the injection"
+    obj["evidence"][0]["claim"] = f"grep quoted {key} at step 3"
+    obj["memories"][0]["positive_effect"]["note"] = f"acted on {key}"
+    payload = {"choices": [{"message": {"content": json.dumps(obj)}}]}
+    record = []
+    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory(record, payload))
+    span, steps = _judge_input_fixture()
+    cfg = JudgeConfig(base_url="http://x", api_key=key, model="m")
+    verdict = judge_span(span, steps, cfg, [])
+    assert verdict["verdict"] == "positive"  # a conforming answer
+    for field in (verdict["analysis"], verdict["evidence"][0]["claim"],
+                  verdict["rubric"]["key_a"]["positive_effect"]["note"],
+                  verdict["memory_usage"]["key_a"]["evidence"]):
+        assert key not in field and "sk-secret%2Bkey" not in field
+        assert "***" in field
+
+
+def test_masking_skips_degenerate_short_keys():
+    """A key shorter than any real credential (one letter matches ordinary
+    words) is no secret: masking it would destroy the kept endpoint output
+    while protecting nothing."""
+    from injudge.judge import _mask_key
+    assert _mask_key("key_a guided", "k") == "key_a guided"
+    assert _mask_key("sk-secret guided", "sk-secret") == "*** guided"
+
+
+def test_masked_head_headroom_covers_the_urlencoded_form():
+    """A urlencoded key runs up to ~3x the raw one (base64-style keys): the
+    straddle headroom must cover the LONGEST masked form, or an encoded key
+    sitting across the cap keeps an unmasked prefix in the kept head."""
+    from urllib.parse import quote_plus
+
+    from injudge.judge import _masked_head
+
+    key = "sk-a+bb/cc=dd"  # 3 encoded chars: the encoded form outgrows the raw
+    enc = quote_plus(key)
+    assert len(enc) > len(key)
+    # the encoded form starts just before the cap: its prefix is what the
+    # cap keeps, and only whole-form masking removes it
+    text = "x" * (100 - 5) + enc + " tail"
+    head = _masked_head(text, key, 100)
+    assert key not in head and enc not in head
+
+
+def test_strict_parse_violation_naming_the_key_stays_masked(monkeypatch):
+    """A strict-parse error interpolates endpoint-provided memory keys and
+    signal values; a 200 answer echoing the credential into one flows into
+    the span's error verdict and the validation warnings — mask both, like
+    every other echo path."""
+    key = "sk-secret+key"
+    obj = json.loads(GOOD)
+    # a signal value outside the contract: the error names it verbatim
+    obj["memories"][0]["relevance"]["value"] = key
+    payload = {"choices": [{"message": {"content": json.dumps(obj)}}]}
+    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory([], payload))
+    span, steps = _judge_input_fixture()
+    cfg = JudgeConfig(base_url="http://x", api_key=key, model="m", max_attempts=1)
+    warnings: list[str] = []
+    verdict = judge_span(span, steps, cfg, warnings)
+    assert verdict["verdict"] == "error"
+    for echo in (verdict["error"], *warnings):
+        assert key not in echo and "sk-secret%2Bkey" not in echo
+        assert "***" in echo
+
+
+def test_unknown_rubric_key_and_malformed_evidence_warnings_stay_masked(monkeypatch):
+    """The judge's own keys and malformed evidence entries are endpoint
+    output kept in validation notes: an echoed credential inside either
+    must be masked before it reaches the artifact."""
+    key = "sk-secret+key"
+    obj = json.loads(GOOD)
+    # a rubric entry (valid rubric shape) for a key the span never delivered
+    obj["memories"].append({
+        "key": key,
+        "relevance": {"value": True, "note": ""},
+        "accuracy": {"value": "corroborated", "note": ""},
+        "novelty": {"value": "novel", "note": ""},
+        "influence": {"value": "none", "note": ""},
+        "positive_effect": {"value": None, "note": ""},
+    })
+    # a malformed (non-object) evidence entry embedding the echo
+    obj["evidence"].append(f"auth Bearer {key}")
+    payload = {"choices": [{"message": {"content": json.dumps(obj)}}]}
+    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory([], payload))
+    span, steps = _judge_input_fixture()
+    cfg = JudgeConfig(base_url="http://x", api_key=key, model="m")
+    warnings: list[str] = []
+    verdict = judge_span(span, steps, cfg, warnings)
+    assert verdict["verdict"] == "positive"  # the span's own keys stay covered
+    dropped = [w for w in warnings if "dropped" in w]
+    # the span delivers key_a only: GOOD's key_b and the echoed key are both
+    # unknown rubric entries, plus the malformed evidence entry
+    assert len(dropped) == 3
+    for w in dropped:
+        assert key not in w and "sk-secret%2Bkey" not in w
+
+
+def test_top_level_objects_huge_int_never_misreads_completeness():
+    """An int literal past the digit limit is a Python conversion limit, not
+    invalid JSON: the scan must not materialize it (parse_int=str), so a
+    COMPLETE answer holding one keeps its span and reads "whole" — its
+    braces closed, so the truncation gate can never blame the budget for a
+    wrong shape — while a genuinely cut answer after it still scans as cut."""
+    huge = "9" * 5000
+    complete = '{"memories": [], "analysis": "x", "confidence": ' + huge + "}"
+    assert _top_level_objects(complete) == [(0, len(complete))]
+    assert _complete_json_present(complete) == "whole"
+    cut = '{"memories": [{"key": "k", "n": ' + huge + ', "note": {"a": 1}'
+    assert _top_level_objects(cut) == []
+    assert _complete_json_present(cut) is None
+
+
+def test_top_level_objects_stray_brace_prose_stays_linear(monkeypatch):
+    """Every "{" candidate in stray-brace prose must fail its raw_decode
+    probe inside the bounded window: a full-text failure costs O(position)
+    in the exception's line/column formatting alone (quadratic), and an
+    unterminated string stops the scan outright — escape parity is local,
+    so no candidate past it can parse."""
+    import injudge.judge as judge_mod
+
+    calls = []
+
+    class CountingDecoder(json.JSONDecoder):
+        def raw_decode(self, s, idx=0):
+            calls.append(len(s) - idx)
+            return super().raw_decode(s, idx)
+
+    monkeypatch.setattr(judge_mod.json, "JSONDecoder", CountingDecoder)
+    prose = '{" ' * 4000 + "x" * 50
+    assert _top_level_objects(prose) == []
+    assert calls and all(size <= _SCAN_PROBE for size in calls)  # no full-tail scans
+    calls.clear()
+    unterminated = 'prefix {"abc ' + "{ " * 500  # no closing quote anywhere past it
+    assert _top_level_objects(unterminated) == []
+    assert len(calls) == 2  # one probe + one full-tail proof, then the scan stops
+
+
+def _object_cut_at_the_probe_window(token_prefix: str, token_rest: str) -> str:
+    """A complete {"k": "…", "b": <token>} JSON object whose first
+    _SCAN_PROBE chars end exactly inside the token (the window boundary
+    slices it)."""
+    pad = _SCAN_PROBE - len('{"k": "') - len('", "b": ') - len(token_prefix)
+    probe = '{"k": "' + "x" * pad + '", "b": ' + token_prefix
+    assert len(probe) == _SCAN_PROBE
+    return probe + token_rest + "}"
+
+
+def test_top_level_objects_window_cut_inside_a_token_still_proves():
+    """A complete object LONGER than the probe window whose boundary slices
+    a token (a literal prefix, a dangling decimal/exponent/sign, a
+    half-written \\u escape) has not genuinely failed to parse: the error
+    that close to the cut may be window-induced, so the candidate still
+    gets its full-tail proof and records the span. Misreading it loses the
+    answer — the truncation gate would call a finished answer a budget cut,
+    and the reasoning_content rescue would miss a large draft."""
+    for prefix, rest in (
+        ("tru", "e"), ("fals", "e"), ("nul", "l"),
+        ("12.", "5"), ("1e", "5"), ("1e+", "5"), ("-", "5"), ("-Infinit", "y"),
+    ):
+        text = _object_cut_at_the_probe_window(prefix, rest)
+        assert _top_level_objects(text) == [(0, len(text))], (prefix, rest)
+    # a half-written \\uXXXX escape inside a string value
+    pad = _SCAN_PROBE - len('{"k": "') - len("\\u12")
+    text = '{"k": "' + "x" * pad + "\\u12" + '34z"}'
+    assert len('{"k": "' + "x" * pad + "\\u12") == _SCAN_PROBE
+    assert _top_level_objects(text) == [(0, len(text))]
+
+
+def test_truncation_gate_huge_int_answer_is_not_a_false_budget_cut(monkeypatch):
+    """A COMPLETE-but-unparseable answer carrying the truncation signal (an
+    int past the digit limit is valid JSON, but Python's int() refuses it —
+    a model error, not "invalid JSON") is not the mid-answer budget cut the
+    gate exists for: the gate must read its completeness, so the error names
+    the model's own violation — not just "increase max_tokens" for a cut
+    that never happened."""
+    huge = '{"memories": [], "confidence": ' + "9" * 5000 + "}"
+    payload = {"choices": [{"finish_reason": "length", "message": {"content": huge}}]}
+    record = []
+    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory(record, payload))
+    span, steps = _judge_input_fixture()
+    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m",
+                      output_format="json", max_attempts=1)
+    verdict = judge_span(span, steps, cfg, [])
+    assert verdict["verdict"] == "error"
+    assert "past the digit limit" in verdict["error"]
+    assert "is not valid JSON" not in verdict["error"]
+    assert "truncated at the output budget (judge output" not in verdict["error"]
+
+
+def test_strict_parse_digit_limit_is_distinct_from_invalid_json():
+    """A >4300-digit integer literal is valid JSON (RFC 8259 sets no limit):
+    Python's int() refusal is a model error with its own reason, never the
+    "is not valid JSON" classification that reads as an ignored format
+    field at the json tier. NaN/Infinity stay "not valid JSON"."""
+    obj, error = _strict_parse('{"n": ' + "1" * 5000 + "}")
+    assert obj is None and error == "carries an integer literal past the digit limit"
+    obj, error = _strict_parse('{"n": ')
+    assert obj is None and error == "is not valid JSON"
+
+
+def test_top_level_objects_structural_failure_keeps_inner_objects():
+    """A candidate failing on a STRUCTURAL error (an offending character at
+    the decoder's position) proves only itself dead: a raw_decode-proven
+    complete object starting before that position is still the answer. The
+    skip must resume at the next live brace, never jump past it — a jump
+    would read a truncated answer holding that object as having no complete
+    JSON (a false budget error) and miss the reasoning_content rescue."""
+    text = '{"x": "abc {"a": 1}'
+    assert _top_level_objects(text) == [(11, 19)]
+    assert _complete_json_present(text) == "embedded"
+    # same inner object without the malformed prefix
+    assert _top_level_objects('prose {"a": 1}') == [(6, 14)]
+    # a genuine cut still jumps (the error position IS the end: every later
+    # brace sits inside the one unfinished value)
+    assert _top_level_objects('{"a": {"b": 1') == []
+
+
+def test_top_level_objects_structural_chain_stays_linear():
+    """Deeply nested malformed input must not chain one full-tail proof per
+    brace (O(text²) on adversarial answers): a full-tail failure repeating
+    the previous one's position means the candidate sits inside that
+    parse's extent — skip to the error, never re-probe the interior."""
+    import time
+    text = '{"a":' * 20000 + "!"
+    t0 = time.perf_counter()
+    assert _top_level_objects(text) == []
+    assert time.perf_counter() - t0 < 1.0
+
+
+def test_whole_digit_limit_answer_exhaustion_never_blames_the_budget(monkeypatch):
+    """A whole-text answer holding an int past the digit limit FINISHED —
+    its braces closed, so no token budget can fix its wrong shape: the
+    exhaustion error names the digit-limit violation alone, never "increase
+    max_tokens" (the truncation signal the endpoint attached is spurious)."""
+    huge = '{"memories": [], "confidence": ' + "9" * 5000 + "}"
+    payload = {"choices": [{"finish_reason": "length", "message": {"content": huge}}]}
+    record = []
+    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory(record, payload))
+    span, steps = _judge_input_fixture()
+    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m",
+                      output_format="prompt", max_attempts=1)
+    verdict = judge_span(span, steps, cfg, [])
+    assert verdict["verdict"] == "error"
+    assert "past the digit limit" in verdict["error"]
+    assert "increase max_tokens" not in verdict["error"]
+
+
+def test_chat_content_parts_output_text_spelling_is_read(monkeypatch):
+    """A compatible gateway emitting the Responses API's output_text part
+    spelling inside a chat content-parts body carries the answer in exactly
+    that part: reading it as "no answer" would burn the whole attempt
+    budget on identical empty draws."""
+    half = len(GOOD) // 2
+    payload = {"choices": [{"message": {"content": [
+        {"type": "reasoning", "text": "thinking…"},
+        {"type": "output_text", "text": GOOD[:half]},
+        {"type": "output_text", "text": GOOD[half:]},
+    ]}}]}
+    record = []
+    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory(record, payload))
+    span, steps = _judge_input_fixture()
+    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
+    assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
+    assert len(record) == 1
+    obj, error = _strict_parse('{"n": NaN}')
+    assert obj is None and error == "is not valid JSON"
+
+
+def test_digit_limit_answer_at_json_tier_is_retried_never_degraded_free(monkeypatch):
+    """At the json tier a digit-limit answer is the model's own error: the
+    corrective retry changes the request at the SAME tier. A free degrade
+    would read valid JSON from a conforming JSON-mode endpoint as proof it
+    ignored the format field — and memoize the weakest tier for the run."""
+    huge = '{"memories": [], "confidence": ' + "9" * 5000 + "}"
+    answers = iter([huge, GOOD])
+    record = []
+
+    def _open(req, timeout=None):
+        body = json.loads(req.data.decode())
+        record.append(body)
+        return FakeResponse({"choices": [{"message": {"content": next(answers)}}]})
+
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
+    span, steps = _judge_input_fixture()
+    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", learned_tier="json")
+    verdict = judge_span(span, steps, cfg, [])
+    assert verdict["verdict"] == "positive"
+    # both requests stayed at the json tier — no free degrade to prompt
+    assert [b.get("response_format", {}).get("type") for b in record] == [
+        "json_object", "json_object"]
+    assert cfg.learned_tier == "json"
+    # the retry carried the corrective note naming the digit-limit violation
+    assert "past the digit limit" in record[1]["messages"][-1]["content"]
 
 
 def test_empty_400s_walk_the_whole_chain(monkeypatch):
@@ -1884,6 +2279,58 @@ def test_rejections_differing_past_the_message_cap_still_walk(monkeypatch):
     assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
     assert [b.get("response_format", {}).get("type") for b in record] == [
         "json_schema", "json_object", None]  # walked the chain to the prompt tier
+
+
+def test_identical_rejection_at_the_final_tier_fails_tier_independent(monkeypatch):
+    """The unchanged-rejection fail-fast fires when NOTHING answered between
+    the two identical 400 bodies: no format field is left to refuse at the
+    prompt tier, so the repeat is tier-independent (a config fault or the
+    span's own content), not a format refusal."""
+    body = b'{"error": {"message": "max_tokens too large"}}'
+    record = []
+
+    def _open(req, timeout=None):
+        record.append(json.loads(req.data.decode()))
+        raise http_error(400, body)
+
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
+    span, steps = _judge_input_fixture()
+    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
+    with pytest.raises(JudgeError) as excinfo:
+        judge_span(span, steps, cfg, [])
+    assert "unchanged across conformance tiers" in str(excinfo.value)
+    assert [b.get("response_format", {}).get("type") for b in record] == [
+        "json_schema", "json_object", None]
+
+
+def test_rejection_chain_resets_when_a_tier_answers_200(monkeypatch):
+    """structured 400 (body B) → json 200 with out-of-contract output (free
+    degrade) → prompt 400 with the SAME body B: the endpoint answered a
+    request in between, so the two rejections never went "unchanged across
+    conformance tiers" — the span fails on the plain HTTP message instead
+    of the tier-independent misreading."""
+    body = b'{"error": {"message": "generic gateway rejection"}}'
+    record = []
+
+    def _open(req, timeout=None):
+        payload = json.loads(req.data.decode())
+        record.append(payload)
+        rf = payload.get("response_format", {}).get("type")
+        if rf == "json_schema":
+            raise http_error(400, body)
+        if rf == "json_object":
+            return FakeResponse({"choices": [{"message": {"content": "not json"}}]})
+        raise http_error(400, body)  # prompt tier
+
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
+    span, steps = _judge_input_fixture()
+    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
+    with pytest.raises(JudgeError) as excinfo:
+        judge_span(span, steps, cfg, [])
+    assert "unchanged across conformance tiers" not in str(excinfo.value)
+    assert "HTTP 400" in str(excinfo.value)
+    assert [b.get("response_format", {}).get("type") for b in record] == [
+        "json_schema", "json_object", None]
 
 
 def test_tier_degrades_on_out_of_contract_output(monkeypatch):
@@ -2728,6 +3175,35 @@ def test_truncated_complete_answer_takes_the_corrective_retry(monkeypatch):
         m["role"] == "user" and "not valid per the output contract" in m["content"]
         for m in record[1]["messages"]
     )
+
+
+def test_window_cut_out_of_contract_answer_is_not_a_false_budget_cut(monkeypatch):
+    """The truncation gate's completeness check relies on the object scan:
+    a finished answer LONGER than the probe window whose boundary slices a
+    literal must still read as complete. Misreading it would give a
+    complete-but-out-of-contract answer carrying the truncation signal the
+    budget-cut error verdict instead of the corrective retry that can
+    actually fix the shape."""
+    pad = _SCAN_PROBE - len('{"memories": [], "pad": "') - len('", "flag": tru')
+    big = ('{"memories": [], "pad": "' + "x" * pad + '", "flag": tru'
+           'e, "confidence": "high"}')  # string confidence: out of contract
+    record = []
+
+    def _open(req, timeout=None):
+        record.append(json.loads(req.data.decode()))
+        if len(record) == 1:  # the big finished answer, prose cut at the budget
+            return FakeResponse({"choices": [
+                {"finish_reason": "length",
+                 "message": {"content": big + " trailing prose"}}]})
+        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
+
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
+    span, steps = _judge_input_fixture()
+    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m",
+                      output_format="prompt")
+    verdict = judge_span(span, steps, cfg, [])
+    assert verdict["verdict"] == "positive"
+    assert len(record) == 2  # the corrective retry, not a budget error
 
 
 def test_truncated_complete_answer_still_degrades_free_at_structured_tier(monkeypatch):

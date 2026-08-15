@@ -24,12 +24,16 @@ enforced — constrained decoding (structured) → JSON mode (json) → the
 prompt alone (prompt). The attempt loop walks the chain on a format-field
 rejection (400/422) or on out-of-contract output that proves the field was
 ignored — both are free tier discoveries — memoizing the first tier that
-produces a conforming answer; a 400/422 repeating unchanged after the
-format field changed is tier-independent (a config fault or the span's own
-content, never a format refusal) and fails the span, as does any other
-non-429 4xx (auth, unknown URL, payload too large); with OUTPUT_FORMAT
-pinned there is no chain to walk, so a 400/422 fails the span the same way
-(recorded per span, the run continues) rather than aborting the run. A
+produces a conforming answer; a 400/422 repeating unchanged at the final
+(format-less) tier is tier-independent (a config fault or the span's own
+content, never a format refusal) and fails the span — the repeat is only
+judged there because a gateway rejecting every format field with one
+generic error body repeats it across the FORMAT tiers too, and only the
+format-less tier tells that from a tier-independent fault — as does any
+other non-429 4xx (auth, unknown URL, payload too large); with
+OUTPUT_FORMAT pinned there is no chain to walk, so a 400/422 fails the
+span the same way (recorded per span, the run continues) rather than
+aborting the run. A
 response cut at the output-token budget MID-ANSWER (no complete JSON value
 in it) is a budget property of that answer, never proof of an ignored
 format field: it becomes an error verdict naming the truncation with the
@@ -64,6 +68,7 @@ from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.error import HTTPError
+from urllib.parse import quote_plus
 from urllib.request import Request, urlopen  # module-level: tests monkeypatch urlopen
 
 from injudge.model import AgentStep, InjectionSpan, step_range
@@ -374,39 +379,127 @@ def _chat_message(payload: dict) -> dict:
     return msg if isinstance(msg, dict) else {}
 
 
-def _top_level_braces(text: str) -> list[int]:
-    """Positions of "{" opening a top-level JSON object — not nested inside
-    another JSON value, not inside a string. Prose brackets are not JSON
+# per-candidate probe window in _top_level_objects: a parse failure decided
+# inside the window is genuine, so full-text scans stay rare
+_SCAN_PROBE = 4096
+# ... but genuine only when decided CLEAR of the window's end: the boundary
+# can slice a token mid-way, and an incomplete trailing token errors at most
+# this many chars before it ("-Infinit", the longest cuttable literal
+# prefix — a dangling "."/"e+"/"-" ends 1–2 short, a half-written \uXXXX
+# escape 4). A failure that close to the cut may be window-induced, so the
+# candidate still gets the full-tail proof (an unterminated string —
+# unbounded — names itself by message instead).
+_SCAN_TOKEN_TAIL = 8
+
+
+def _top_level_objects(text: str) -> list[tuple[int, int]]:
+    """(start, end) spans of the JSON objects in `text`, each span
+    raw_decode-proven (callers need no second parse). Every "{" outside an
+    already-recorded span is a candidate — one nested in prose brackets or
+    an array ("[{...}]") records like a top-level one; only the interior of
+    an already-proven object is skipped. Prose brackets are not JSON
     values, so a depth count is no proof of nesting: an unclosed "[" in
-    leading prose must not blind the scan to a complete object after it (the
-    truncation gate would misread that completed answer as a budget cut).
-    Each candidate is raw_decode-proven instead: a success continues the
-    scan after the value's end, and a failure skips to the decoder's error
-    position — everything it swallowed sits inside an unclosed value (a
-    genuine mid-answer cut), where a complete nested fragment is never the
-    answer. No string tracking on the side: prose quotes put any tracker
+    leading prose must not blind the scan to a complete object after it
+    (the truncation gate would misread that completed answer as a budget
+    cut). Each candidate is raw_decode-proven instead: a success continues
+    the scan after the value's end, and a failure skips ahead by what the
+    failure proves — a cut (the parser consumed the whole input wanting
+    more: its error position IS the end) proves every later "{" sits inside
+    the one unfinished value, so the scan jumps there; a structural
+    failure (an offending character AT the error position) proves only
+    THIS candidate dead — a complete object may still start before that
+    position, so the scan resumes at the next "{" in between, never past
+    it. No string tracking on the side: prose quotes put any tracker
     out of step with the JSON it would guard, and a "{" the tracker misread
     as quoted is exactly a completed answer the scan must not miss (a
-    missed rescue, never a wrong one — every recorded position is
+    missed rescue, never a wrong one — every recorded span is
     raw_decode-proven)."""
-    positions = []
+    spans = []
     skip = 0  # candidates before here sit inside an already-scanned value
-    decoder = json.JSONDecoder()
+    # parse_int=str: the spans are grammar-only, and materializing a huge
+    # int literal trips the int digit limit mid-scan — a refusal carrying
+    # no error position, so a COMPLETE answer holding one scanned as cut
+    # while a cut one scanned as finished (the truncation gate's two
+    # misreadings); skipping the conversion keeps both honest
+    decoder = json.JSONDecoder(parse_int=str)
+    structural_pos: int | None = None  # last full-tail structural failure
+    # Where the scan resumes after the candidate at `candidate` failed at
+    # `failure_pos` within a region ending at `end` (the probe window or the
+    # full text): past every brace the failure proves dead, never past one
+    # it leaves alive. None (a digit-limit refusal names no position) and a
+    # cut (the parser consumed the whole region: its error position IS the
+    # end) prove every later brace dead; a structural failure proves only
+    # THIS candidate dead, so the scan resumes at the next live brace
+    # before the offender — with one guard: a full-tail failure repeating
+    # the previous one's position means the candidate sits inside that
+    # parse's extent (nested structure — never the answer), and re-probing
+    # every such brace would chain O(text) full-tail proofs on adversarial
+    # nested input.
+    def _skip_past(candidate: int, failure_pos: int | None, end: int) -> int:
+        if failure_pos is None:
+            return candidate + 1
+        if failure_pos >= end:  # the parser ran out of text: a genuine cut
+            return failure_pos
+        nxt = text.find("{", candidate + 1, failure_pos)
+        return nxt if nxt != -1 else failure_pos
+
     for i, ch in enumerate(text):
-        if ch == "{" and i >= skip:
-            try:
-                _obj, end = decoder.raw_decode(text, i)
-            except ValueError as e:
-                # JSONDecodeError and the plain-ValueError int digit-limit
-                # refusal alike — the decoder's error position (when it has
-                # one) sits past everything it swallowed inside the value
-                skip = max(i + 1, getattr(e, "pos", 0))
-            except RecursionError:
-                skip = i + 1
+        if ch != "{" or i < skip:
+            continue
+        # Probe a bounded window first: a full-text failure costs
+        # O(position) in the exception's line/column formatting alone —
+        # quadratic on stray-brace prose. A window success needs no
+        # re-check: an object closes on its "}" inside the window, ending
+        # the value either way.
+        window = text[i : i + _SCAN_PROBE]
+        try:
+            _obj, end = decoder.raw_decode(window, 0)
+        except RecursionError:
+            skip = i + 1
+            continue
+        except ValueError as e:
+            pos = getattr(e, "pos", None)
+            if pos is None or (
+                pos < len(window) - _SCAN_TOKEN_TAIL
+                and getattr(e, "msg", "") != "Unterminated string starting at"
+            ):
+                # genuine failure, decided clear of the cut: a JSON parse
+                # error depends only on the text up to its position — a
+                # guarantee a token sliced by the boundary does NOT give
+                # (it errors within _SCAN_TOKEN_TAIL of the end, or names
+                # itself "Unterminated string"). pos is window-relative:
+                # make it absolute for _skip_past's brace search.
+                skip = _skip_past(
+                    i, None if pos is None else i + pos, i + len(window)
+                )
+                continue
+        else:
+            spans.append((i, i + end))
+            skip = i + end
+            continue
+        # the failure came from the window's boundary region (a token sliced
+        # by the cut, or a string running into it): possibly window-induced —
+        # prove the candidate on the full tail
+        try:
+            _obj, end = decoder.raw_decode(text, i)
+        except RecursionError:
+            skip = i + 1
+        except ValueError as e:
+            if getattr(e, "msg", "") == "Unterminated string starting at":
+                # no unescaped quote exists past the string start (escape
+                # parity is a local property), so no candidate beyond it
+                # can parse — stop rather than re-scanning the tail per "{"
+                break
+            pos = getattr(e, "pos", None)
+            if pos is not None and pos == structural_pos:
+                skip = pos  # nested inside the previous candidate's extent
             else:
-                positions.append(i)
-                skip = end
-    return positions
+                structural_pos = pos
+                skip = _skip_past(i, pos, len(text))
+        else:
+            spans.append((i, end))
+            skip = end
+    return spans
 
 
 def _reasoning_fallback_text(payload: dict) -> str | None:
@@ -429,30 +522,14 @@ def _reasoning_fallback_text(payload: dict) -> str | None:
     text = rc.strip()
     # last top-level object first: the drafted verdict closes the reasoning
     # (a greedy first-to-last span could straddle several objects and never
-    # parse). raw_decode ignores trailing prose after the object.
-    decoder = json.JSONDecoder()
-    for pos in reversed(_top_level_braces(text)):
-        try:
-            obj, end = decoder.raw_decode(text, pos)
-        except (ValueError, RecursionError):
-            # JSONDecodeError, the int digit limit, pathological nesting —
-            # an unparseable draft just isn't a rescue
-            continue
-        if isinstance(obj, dict):
-            return text[pos:end]
-    # No top-level object parsed: the model may have wrapped the verdict in
-    # an array — "[{...}]" nests the object one level down, so the scan above
-    # records no position for it. The greedy first-"{"-to-last-"}" span is
-    # exactly the object inside a single wrap; a span straddling several
-    # top-level objects never parses, so a successful rescue here is one the
-    # precise scan provably could not produce.
-    start, stop = text.find("{"), text.rfind("}")
-    if 0 <= start < stop:
-        try:
-            if isinstance(json.loads(text[start:stop + 1]), dict):
-                return text[start:stop + 1]
-        except (ValueError, RecursionError):
-            pass
+    # parse). Spans are raw_decode-proven, so no second parse is needed;
+    # raw_decode ignores trailing prose after the object. An array-wrapped
+    # draft ("[{...}]") needs no special case: the scan tracks no array
+    # nesting, so the object inside records as a span like any other.
+    objects = _top_level_objects(text)
+    if objects:
+        start, stop = objects[-1]
+        return text[start:stop]
     return None
 
 
@@ -461,27 +538,28 @@ def _complete_json_present(text: str) -> str | None:
     is one complete JSON value (a complete but wrong-SHAPE answer; NaN/
     Infinity constants included, because its braces closed — the budget did
     not cut it mid-value, the invalid constant is the json tier's
-    free-degrade proof instead); "embedded" — a complete top-level object
-    sits inside it (the verdict drafted, then trailing prose, or a stray
-    object before a genuine cut); None — neither holds, the only reading
-    consistent with a strict-parse failure caused by a mid-answer budget
-    cut. That distinction is what the truncation gate in judge_span needs:
-    a completed answer's contract violation is what the tier chain /
-    corrective retry addresses, and "increase max_tokens" cannot help it."""
+    free-degrade proof instead; an int literal past Python's digit limit
+    included too, for the same reason — the braces closed, and the refusal
+    is a Python conversion limit, not invalid JSON); "embedded" — a complete
+    top-level object sits inside it (the verdict drafted, then trailing
+    prose, or a stray object before a genuine cut); None — neither holds,
+    the only reading consistent with a strict-parse failure caused by a
+    mid-answer budget cut. That distinction is what the truncation gate in
+    judge_span needs: a completed answer's contract violation is what the
+    tier chain / corrective retry addresses, and "increase max_tokens"
+    cannot help it."""
     try:
-        json.loads(text)
+        # parse_int=str: the one parse covers every complete answer — the
+        # grammar is unchanged by the hook, and materializing a huge int
+        # literal trips the int digit limit (a >4300-digit literal IS valid
+        # JSON, RFC 8259 sets no limit), which would misread a finished
+        # answer as a cut one. NaN/Infinity parse fine (no parse_constant
+        # here): valid-or-not, their braces closed.
+        json.loads(text, parse_int=str)
         return "whole"
     except (ValueError, RecursionError):
         pass
-    decoder = json.JSONDecoder()
-    for pos in _top_level_braces(text):
-        try:
-            obj, _end = decoder.raw_decode(text, pos)
-        except (ValueError, RecursionError):
-            continue  # a stray or unclosed brace is not the answer
-        if isinstance(obj, dict):
-            return "embedded"
-    return None
+    return "embedded" if _top_level_objects(text) else None
 
 
 def _endpoint(cfg: JudgeConfig) -> str:
@@ -651,14 +729,16 @@ def _extract_text(cfg: JudgeConfig, payload: dict) -> str | None:
         # an OpenAI-compatible endpoint may answer with a content-parts
         # array — join its text parts like the anthropic/responses branches
         # join theirs (some compatible gateways send the parts as plain
-        # strings); a non-text part (e.g. reasoning) carrying a "text" field
-        # is not the answer, and reading as "no answer" would burn
-        # the attempt budget on identical empty draws
+        # strings; one emitting the Responses API's output_text spelling in
+        # a chat body carries the answer in exactly that part, so it joins
+        # too — reading it as "no answer" would burn the attempt budget on
+        # identical empty draws); a non-text part (e.g. reasoning) carrying
+        # a "text" field is not the answer
         content = "".join(
             p if isinstance(p, str) else p["text"]
             for p in content
             if isinstance(p, str)
-            or (isinstance(p, dict) and p.get("type") == "text"
+            or (isinstance(p, dict) and p.get("type") in ("text", "output_text")
                 and isinstance(p.get("text"), str))
         )
     return content if isinstance(content, str) and content.strip() else None
@@ -897,14 +977,21 @@ def _valid_value(signal: str, value: object) -> bool:
     return isinstance(value, str) and value in allowed
 
 
+class _NonJSONConstant(ValueError):
+    """NaN/Infinity in the judge's answer: neither is valid JSON (RFC 8259)."""
+
+
 def _reject_constant(value: str) -> None:
     """json.loads parse_constant hook: NaN/Infinity are not valid JSON
     (RFC 8259) — rejecting them at parse time classifies the answer as "is
     not valid JSON", which at the json tier is the output-side proof of a
     format-ignoring endpoint (JSON mode guarantees valid JSON) and earns the
     free degrade; a lenient parse would misread it as the model's own
-    schema error and burn the attempt budget on corrective retries."""
-    raise ValueError(f"non-JSON constant {value!r}")
+    schema error and burn the attempt budget on corrective retries. The
+    dedicated subclass keeps the constant apart from the int() digit-limit
+    refusal — the one other plain ValueError json.loads can raise here, and
+    valid JSON (RFC 8259 sets no limit), hence a model error instead."""
+    raise _NonJSONConstant(f"non-JSON constant {value!r}")
 
 
 def _strict_parse(text: str) -> tuple[dict | None, str | None]:
@@ -930,10 +1017,16 @@ def _strict_parse(text: str) -> tuple[dict | None, str | None]:
         # the model's own error (JSON mode guarantees valid JSON), never a
         # free "ignored the format field" degrade
         return None, "nests too deeply to parse"
-    except ValueError:
-        # JSONDecodeError, a NaN/Infinity constant, and the int digit-limit
-        # refusal: the judge's answer never became a parsed object
+    except (json.JSONDecodeError, _NonJSONConstant):
         return None, "is not valid JSON"
+    except ValueError:
+        # the int() digit-limit refusal is the one remaining plain ValueError
+        # here — and a >4300-digit integer literal IS valid JSON (RFC 8259
+        # sets no limit), so a JSON-mode endpoint can legitimately produce
+        # one: a model error taking the corrective retry, never the
+        # output-side proof of an ignored format field that earns a free
+        # degrade (and memoizes the weakest tier off a valid answer)
+        return None, "carries an integer literal past the digit limit"
     if not isinstance(obj, dict):
         return None, "is not a JSON object"
     memories = obj.get("memories")
@@ -1060,18 +1153,26 @@ def blank_verdict() -> dict:
     }
 
 
-def _error_verdict(error: str, text: str, span: InjectionSpan, warnings: list[str]) -> dict:
+def _error_verdict(
+    error: str, text: str, span: InjectionSpan, warnings: list[str], api_key: str
+) -> dict:
     """The honest failure record: verdict "error" with the raw text kept —
-    never a silent neutral."""
+    never a silent neutral. Both kept forms are endpoint output, masked like
+    every other echo path: a broken proxy can reflect the request —
+    credential header included — inside a 200 answer, and the error string
+    itself interpolates endpoint-provided keys/values (a strict-parse
+    violation naming the echoed key) that lands in the report artifact and
+    validation notes just like judge_raw does."""
+    masked_error = _mask_key(error, api_key)
     verdict = blank_verdict()
-    verdict["error"] = error
-    verdict["judge_raw"] = (text or "")[:2000]
-    warnings.append(f"{span.id}: {error}")
+    verdict["error"] = masked_error
+    verdict["judge_raw"] = _masked_head(text or "", api_key, 2000)
+    warnings.append(f"{span.id}: {masked_error}")
     return verdict
 
 
 def _assemble_verdict(
-    obj: dict, text: str, span: InjectionSpan, warnings: list[str]
+    obj: dict, text: str, span: InjectionSpan, warnings: list[str], api_key: str
 ) -> dict:
     """Contract validation and assembly of a shape-valid judge object into
     the internal verdict record; memory_usage and the span verdict derive
@@ -1111,7 +1212,12 @@ def _assemble_verdict(
         )
     for key in entries:
         if key not in span_keys:
-            warnings.append(f"{span.id}: rubric entry for unknown key {key!r} dropped")
+            # the judge's own key is endpoint output (an echoed credential
+            # would land verbatim in the validation notes) — mask it
+            warnings.append(
+                f"{span.id}: rubric entry for unknown key "
+                f"{_mask_key(repr(key), api_key)} dropped"
+            )
     covered = 0
     for key in span_keys:
         if not key:
@@ -1123,7 +1229,8 @@ def _assemble_verdict(
         else:
             covered += 1
             signals = {
-                s: {"value": entry[s]["value"], "note": str(entry[s].get("note") or "")}
+                s: {"value": entry[s]["value"],
+                    "note": _mask_key(str(entry[s].get("note") or ""), api_key)}
                 for s in _SIGNALS
             }
         # positive_effect pairs with acted-on influence
@@ -1147,13 +1254,17 @@ def _assemble_verdict(
         verdict["memory_usage"][key] = usage_entry
     if any(span_keys) and covered == 0:
         return _error_verdict(
-            "judge rubric covers none of the span's memories", text, span, warnings)
+            "judge rubric covers none of the span's memories", text, span,
+            warnings, api_key)
     if not any(span_keys):
         warnings.append(f"{span.id}: span delivers no parseable memories; rubric empty")
 
     verdict["verdict"] = derive_verdict(verdict["memory_usage"])
     verdict["confidence"] = _clamp_confidence(obj["confidence"], span.id, warnings)
-    verdict["analysis"] = str(obj.get("analysis") or "")
+    # analysis/evidence/notes are endpoint output copied into the artifact:
+    # mask like every other echo path — a 200 verdict reflecting the
+    # credential into any of them must not leak the key into the report
+    verdict["analysis"] = _mask_key(str(obj.get("analysis") or ""), api_key)
     evidence = obj.get("evidence")
     if not isinstance(evidence, list):
         # display-only field: out-of-contract but not retried — one note,
@@ -1163,9 +1274,13 @@ def _assemble_verdict(
         evidence = []
     for ev in evidence:
         if not isinstance(ev, dict):
-            warnings.append(f"{span.id}: dropped malformed evidence entry {ev!r}")
+            # endpoint output kept in a validation note: mask it too
+            warnings.append(
+                f"{span.id}: dropped malformed evidence entry "
+                f"{_mask_key(repr(ev), api_key)}"
+            )
             continue
-        claim = str(ev.get("claim") or "")
+        claim = _mask_key(str(ev.get("claim") or ""), api_key)
         if not claim:
             warnings.append(f"{span.id}: dropped evidence entry without a claim")
             continue
@@ -1208,6 +1323,34 @@ def _retry_after(e: HTTPError) -> float | None:
     return min(max(delay, 0.0), 120.0) if math.isfinite(delay) else None
 
 
+_MASK_MIN_KEY = 8  # a key this short is no credential: masking its every
+# occurrence (a single letter matches ordinary words) would destroy the
+# kept endpoint output while protecting nothing
+
+
+def _mask_key(text: str, api_key: str) -> str:
+    """The configured key masked wherever endpoint output could echo it
+    back: an auth/proxy fault page reflecting the request (the credential
+    header) must never write the .env secret into a verdict, validation
+    note, or report artifact. Covers the raw value and its urlencoded form
+    (a gateway spelling the request as a URL carries that form)."""
+    if not api_key or len(api_key) < _MASK_MIN_KEY:
+        return text
+    for form in {api_key, quote_plus(api_key)}:
+        text = text.replace(form, "***")
+    return text
+
+
+def _masked_head(text: str, api_key: str, cap: int) -> str:
+    """The capped, masked form of a kept endpoint dump. The head is taken
+    before masking — with headroom for the LONGEST masked form (the
+    urlencoded spelling of a base64-style key runs up to ~3× the raw one),
+    so a key straddling the cut in either form still masks whole — because
+    masking first would spend two replace passes over a full body the cap
+    keeps only the start of."""
+    return _mask_key(text[: cap + len(quote_plus(api_key))], api_key)[:cap]
+
+
 def judge_span(
     span: InjectionSpan,
     steps: list[AgentStep],
@@ -1221,14 +1364,18 @@ def judge_span(
     prompt). A 400/422 rejects the REQUEST as a format-tier refusal (free —
     no generation was produced), so the tier degrades without consuming the
     attempt budget — unless the identical NON-EMPTY rejection repeats at the
-    weaker tier: unchanged after the format field changed, it is
-    tier-independent (a config fault like an over-limit max_tokens, or the
-    span's own content), never a format refusal, and fails the span on the
-    endpoint's message. An empty rejection body is silence, not an unchanged
-    rejection — it never triggers the fail-fast (a gateway dropping per-tier
-    error text still gets the full walk). Any other non-429 4xx (auth, unknown
-    URL, payload too large) is an endpoint/config fault, not a format problem,
-    and fails the span immediately. Out-of-contract OUTPUT that proves the endpoint
+    FINAL (format-less) tier: unchanged with no format field left to refuse,
+    it is tier-independent (a config fault like an over-limit max_tokens, or
+    the span's own content), never a format refusal, and fails the span on
+    the endpoint's message. The repeat is judged only there: a gateway
+    rejecting every format field with one generic error body repeats it
+    across the FORMAT tiers too, and an early fail-fast would strand the
+    walk before the tier that answers. An empty rejection body is silence,
+    not an unchanged rejection — it never triggers the fail-fast (a gateway
+    dropping per-tier error text still gets the full walk). Any other
+    non-429 4xx (auth, unknown URL, payload too large) is an endpoint/config
+    fault, not a format problem, and fails the span immediately.
+    Out-of-contract OUTPUT that proves the endpoint
     ignored the format field — any violation _strict_parse checks at the
     structured tier (an out-of-range confidence is not among them: the
     schema's 0–1 bound is a semantic correction clamped in code, not a
@@ -1258,7 +1405,7 @@ def judge_span(
     last_text = ""  # latest out-of-contract answer; transport failures never erase it
     last_text_error = ""  # that answer's own contract violation (assigned with last_text)
     last_truncated = False  # ... and whether that answer carried the truncation signal
-    rejection: str | None = None  # full body of the 400/422 the last degrade answered
+    rejection: str | None = None  # full body of the last 400/422; any answered request resets it
     while True:
         req = _build_request(cfg, messages, tier)
         pause: float | None = None
@@ -1271,7 +1418,7 @@ def judge_span(
                 body = e.read().decode("utf-8", "replace")
             except Exception:
                 pass
-            detail = body[:300]  # messages/artifacts stay capped; comparisons do not
+            detail = _masked_head(body, cfg.api_key, 300)  # capped in messages/artifacts; comparisons are not
             if e.code == 429 or e.code >= 500:
                 last_error = f"HTTP {e.code}: {detail}"
                 pause = _retry_after(e)
@@ -1296,25 +1443,28 @@ def judge_span(
                     ) from e
                 nxt = _next_tier(cfg.api, tier)
                 if nxt is None:
-                    raise JudgeError(f"HTTP {e.code}: {detail}") from e
-                if rejection is not None and body and body == rejection:
-                    # A non-empty rejection repeating after the format field
-                    # changed is tier-independent — a config fault (an
-                    # over-limit max_tokens, an unsupported thinking field) or
-                    # the span's own content — not a format refusal a degrade
-                    # could fix: fail the span on the endpoint's message
-                    # instead of walking the rest of the chain on every span.
-                    # The comparison runs on the FULL body: two distinct
+                    # The final tier sends NO format field, so the identical
+                    # NON-EMPTY rejection repeating here is tier-independent
+                    # — a config fault (an over-limit max_tokens, an
+                    # unsupported thinking field) or the span's own content,
+                    # not a format refusal a degrade could fix: fail the span
+                    # on the endpoint's message. Only the final tier can make
+                    # that call: a gateway rejecting every format field with
+                    # ONE generic error body repeats it across the format
+                    # tiers too, and failing fast on the first repeat would
+                    # strand the walk before the tier that answers. The
+                    # comparison runs on the FULL body: two distinct
                     # rejections sharing a long envelope prefix (only a
                     # trailing field differs) are not "the identical
                     # rejection". An EMPTY body is silence, not an unchanged
                     # rejection: a gateway that drops per-tier error text
-                    # still gets the full walk (a tier-independent fault then
-                    # fails at chain end with the same HTTP code).
-                    raise JudgeError(
-                        f"HTTP {e.code} unchanged across conformance tiers "
-                        f"(tier-independent, not a format refusal): {detail}"
-                    ) from e
+                    # still gets the full walk.
+                    if rejection is not None and body and body == rejection:
+                        raise JudgeError(
+                            f"HTTP {e.code} unchanged across conformance tiers "
+                            f"(tier-independent, not a format refusal): {detail}"
+                        ) from e
+                    raise JudgeError(f"HTTP {e.code}: {detail}") from e
                 warnings.append(
                     f"{span.id}: tier {tier} rejected (HTTP {e.code}); degrading to {nxt}")
                 rejection = body
@@ -1336,6 +1486,11 @@ def judge_span(
             # (ValueError covers both UnicodeDecodeError and JSONDecodeError)
             last_error = f"unparseable response body: {e}"
         else:
+            # the endpoint ANSWERED this request (whatever the answer's
+            # contract status): the identical-rejection chain is broken — a
+            # later 400/422 repeating a pre-answer body is not "unchanged
+            # across conformance tiers", so the stored rejection resets here
+            rejection = None
             text = _extract_text(cfg, payload)
             rescued = False  # answer recovered from reasoning_content
             if text is None and cfg.api == "openai-chat":
@@ -1357,10 +1512,12 @@ def judge_span(
                     # — the same rule the degrade path below applies.
                     if not rescued:
                         cfg.learned_tier = tier
-                    return _assemble_verdict(obj, text, span, warnings)
+                    return _assemble_verdict(obj, text, span, warnings, cfg.api_key)
                 last_error = f"judge output {error}"
                 truncated = _truncated(cfg, payload)
-                complete = _complete_json_present(text)
+                # a full extra parse of the answer — spent only when the
+                # truncation signal makes either consumer of it reachable
+                complete = _complete_json_present(text) if truncated else None
                 if truncated and complete is None:
                     # budget exhaustion, not a format-tier property: the cut
                     # answer never became the contract, and a same-budget
@@ -1376,7 +1533,7 @@ def judge_span(
                     return _error_verdict(
                         f"judge response truncated at the output budget "
                         f"(judge output {error}); increase max_tokens",
-                        text, span, warnings,
+                        text, span, warnings, cfg.api_key,
                     )
                 nxt = None if cfg.output_format else _next_tier(cfg.api, tier)
                 # Free tier discovery from the output side — the endpoint
@@ -1394,8 +1551,12 @@ def judge_span(
                     and not rescued
                     and (tier == "structured" or error == "is not valid JSON")
                 ):
+                    # the violation text interpolates endpoint-provided values
+                    # (memory keys, signal values) — mask it before it reaches
+                    # the validation notes, like every other echo path
                     warnings.append(
-                        f"{span.id}: tier {tier} output out of contract ({error}); a proxy "
+                        f"{span.id}: tier {tier} output out of contract "
+                        f"({_mask_key(error, cfg.api_key)}); a proxy "
                         f"likely ignored the format field — degrading to {nxt}"
                     )
                     tier = nxt
@@ -1435,11 +1596,14 @@ def judge_span(
                     "judge response truncated at the output budget with no "
                     "message content (the budget went to reasoning); "
                     "increase max_tokens",
-                    "", span, warnings,
+                    "", span, warnings, cfg.api_key,
                 )
             # empty content with a normal finish is a server-side quirk —
             # worth a fresh draw of the identical request at the same tier
-            last_error = f"response carries no message content: {str(payload)[:300]}"
+            last_error = (
+                "response carries no message content: "
+                f"{_masked_head(str(payload), cfg.api_key, 300)}"
+            )
         # shared backoff tail: transport failures and empty-content draws
         tries += 1
         if tries >= cfg.max_attempts:
@@ -1455,7 +1619,7 @@ def judge_span(
                 "; the answer was also cut at the output-token budget — "
                 "increase max_tokens"
             )
-        return _error_verdict(last_text_error, last_text, span, warnings)
+        return _error_verdict(last_text_error, last_text, span, warnings, cfg.api_key)
     raise JudgeError(last_error)
 
 

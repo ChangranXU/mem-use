@@ -24,18 +24,20 @@
   vocabulary (e.g. extracting memories by matching "## CURE Memory" in prompt
   text is forbidden).
 - Corrupt input is tolerated, never fatal: malformed JSONL lines, corrupt
-  seqs, unknown binding statuses or logical roles, missing proxy_source keys
-  (the proxy stamps the key on every recorded memory event, null on the
-  unprefixed lane — an absent one is corruption, never the unprefixed lane),
-  non-list payload list-fields, corrupt matched_count or returned-entry
-  shapes, broken session/operation links all land in
-  `validation`/warnings and the run carries on (the recorder's own
-  retrieval/verify tooling remains the strict checker). The log is
+  seqs, unknown binding statuses or logical roles, non-string proxy_source
+  values (an ABSENT key is the unprefixed lane — the recorder's JSONL
+  writer drops the null, the same read its own retrieval index makes; only
+  a non-string value is corruption), non-list payload list-fields, corrupt
+  matched_count or returned-entry shapes, broken session/operation links
+  all land in `validation`/warnings and the run carries on (the recorder's
+  own retrieval/verify tooling remains the strict checker). The log is
   append-only, so the event stream keeps file order (the recorder's own
   retrieval reads file order too): a missing/non-integer seq gets a synthetic
   seq one past the highest seen so far — never a trailing one, which would
-  detach retraction/order pairings from their targets — and a non-increasing
-  seq is noted, never re-sorted. Hand-edited artifacts
+  detach retraction/order pairings from their targets — a genuinely
+  non-increasing seq is noted, never re-sorted, and a real seq colliding
+  with an earlier synthetic one gets its own collision note (the recorded
+  stream never regressed; only the reader pre-claimed its number). Hand-edited artifacts
   must degrade, never raise — every field read off a possibly-corrupt event
   is shape-guarded (a JSON `true` is never an int index; unhashable values
   never reach a dict/set lookup).
@@ -55,7 +57,9 @@
   format field: it becomes an `error` verdict naming the truncation (no
   degrade, no same-budget retry). A complete-but-out-of-contract answer
   carrying the truncation signal is not a budget failure — the cut only
-  removed trailing prose — and routes through the chain / corrective retry;
+  removed trailing prose, and an integer literal past Python's digit limit
+  reads as a finished answer too (RFC 8259 sets no limit, so its braces
+  closed) — and routes through the chain / corrective retry;
   a truncated answer that still slips past the completeness check (a stray
   complete object inside it reads as a finished answer) exhausts the
   corrective budget and ends in an error naming both the violation and the
@@ -72,7 +76,7 @@
 The project is structured as:
 
 ```bash
-util.py                      # shared helpers: atomic_write (crash-safe artifact writes), tmp_sibling, utf8_safe, check_writable, print_validation
+util.py                      # shared helpers: atomic_write (crash-safe artifact writes), tmp_sibling, utf8_safe, check_writable, print_safe, print_validation
 memgraph/annotations.py      # schema-v6 memory-annotation index + MemoryRef mapping
 memgraph/model.py            # Trajectory / MemoryOp / MemoryUnit / Edge dataclasses
 memgraph/parse_trajectory.py # trajectory.jsonl → ops (annotation-driven, turn table)
@@ -155,7 +159,10 @@ These are load-bearing; never weaken them:
 - The judge API key comes from the checkout's `.env` and is sent only to the
   judge
   endpoint: it must never appear in artifacts, reports, logs, or error
-  messages (config errors name keys, never values).
+  messages (config errors name keys, never values) — endpoint output
+  echoing the request (an auth/proxy fault reflecting the credential — an
+  HTTP error page or a 200 answer alike) is masked before any of its text
+  reaches a verdict, judge_raw, or validation note.
 - The memgraph HTML is an untrusted-content host: every trajectory- or
   artifact-controlled value interpolated into it is escaped — the embedded
   graph JSON has every `<` (plus U+2028/U+2029) unicode-escaped, the title is
@@ -175,7 +182,8 @@ These are load-bearing; never weaken them:
   `(run_id, op seq)`; unmatched entries in either direction are validation
   notes, never errors, and an ambiguous join key — a run_id shared by
   several loaded trajectories, or one `(run_id, seq)` claimed by several
-  report injections — is skipped with a warning, never cross-annotated.
+  report injections or by several recall ops — is skipped with a warning,
+  never cross-annotated.
 - Bump the report schema version deliberately, and call out any
   artifact-format change explicitly in the PR.
 

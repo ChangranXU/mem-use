@@ -44,6 +44,7 @@ from memgraph.annotations import (
     operation_rejection_counts,
     ref_key,
     ref_to_memory,
+    slot_index,
     resolved_content_text,
 )
 from memgraph.model import MemoryOp, Trajectory
@@ -70,11 +71,14 @@ def load_events(path: Path, warnings: list[str]) -> list[dict]:
     an int seq. Moving it to the end instead would detach it from the
     records it pairs with (a retraction would annul its own replacement, a
     delivery's order check could never fire) — the residual is a synthetic
-    seq colliding with a later real one, which the non-increasing note
-    surfaces.
+    seq colliding with a later real one, which its own collision note
+    surfaces (distinct from the non-increasing note naming genuine
+    hand-edit regression).
     """
     events = []
-    high = 0  # highest seq emitted so far, valid or synthetic
+    high: int | None = None  # highest seq emitted so far, valid or synthetic
+    real_high: int | None = None  # highest seq a recorded event actually carried
+    synthetics: set[int] = set()  # seqs this reader assigned to corrupt events
     # binary read + strict per-line decode: a non-UTF-8 byte must not abort
     # the whole read, and errors="replace" alone would land it in a string
     # VALUE silently (the line still parses, so the corruption would flow
@@ -109,24 +113,44 @@ def load_events(path: Path, warnings: list[str]) -> list[dict]:
                 continue
             seq = event.get("seq")
             if not is_int(seq):
-                high += 1
+                high = (high if high is not None else 0) + 1
+                synthetics.add(high)
                 event["seq"] = high
                 warnings.append(
                     f"{path.name}:{lineno}: event has a missing or non-integer seq "
                     f"({seq!r}); assigned synthetic seq {high}"
                 )
             else:
-                if seq <= high:
+                if high is not None and seq <= high:
                     # append-only recording makes seqs strictly increasing
-                    # (gaps allowed): a repeated or regressed value is
-                    # hand-edit corruption — reported, and the file order
-                    # kept (re-sorting would move the event's neighbors past
-                    # their pairing partners just the same)
-                    warnings.append(
-                        f"{path.name}:{lineno}: non-increasing seq {seq}; "
-                        "keeping file order"
-                    )
-                high = max(high, seq)
+                    # (gaps allowed): a repeated or regressed value against
+                    # the REAL seqs is hand-edit corruption — reported, and
+                    # the file order kept (re-sorting would move the event's
+                    # neighbors past their pairing partners just the same).
+                    # The FIRST recorded seq has no predecessor, so it can
+                    # never be non-increasing (the recorder's own streams are
+                    # 1-based, but a clean 0-based stream is increasing too).
+                    # A value equal to one of the synthetic seqs this reader
+                    # assigned to earlier corrupt events collides with a
+                    # pre-claimed number: the recorded stream itself was in
+                    # order, so the note names the collision instead of
+                    # implying this clean event regressed. Anything else at
+                    # or below high merely fills a gap under a synthetic
+                    # (e.g. seq 0 after a corrupt first line took synthetic
+                    # 1): nothing collided or regressed — no note.
+                    if real_high is not None and seq <= real_high:
+                        warnings.append(
+                            f"{path.name}:{lineno}: non-increasing seq {seq}; "
+                            "keeping file order"
+                        )
+                    elif seq in synthetics:
+                        warnings.append(
+                            f"{path.name}:{lineno}: seq {seq} collides with the "
+                            "synthetic seq assigned to an earlier corrupt event; "
+                            "keeping file order"
+                        )
+                high = seq if high is None else max(high, seq)
+                real_high = seq if real_high is None else max(real_high, seq)
             events.append(event)
     return events
 
@@ -368,6 +392,7 @@ def _recall_op_from_delivery(
     index: AnnotationIndex,
     table: _TurnTable,
     events: list[dict],
+    slots: dict,
     warnings: list[str],
     run_id: str,
 ) -> MemoryOp:
@@ -402,7 +427,7 @@ def _recall_op_from_delivery(
         # trajectory_message locator against this event stream — the
         # other locator kinds carry no text resolvable here
         query = resolved_content_text(
-            search.start["payload"].get("query"), events, locator_lanes
+            search.start["payload"].get("query"), events, locator_lanes, slots
         )
         if query is not None:
             op.query = query[:_QUERY_CAP] + ("…" if len(query) > _QUERY_CAP else "")
@@ -498,6 +523,9 @@ def parse_trajectory(
                       model=model, started_at=started_at, status=status)
 
     index = build_annotation_index(events)
+    # one slot index for every locator resolution below (session task, each
+    # recall op's query) — a per-lookup scan would be O(recalls × events)
+    slots = slot_index(events)
     for problem in index.problems:
         warnings.append(f"{run_id}: annotation structure: {problem}")
     if not index.annotated:
@@ -515,9 +543,11 @@ def parse_trajectory(
         if "memory" in binds:
             memory_lanes.add(binds["memory"])
     main_lane, memory_lane = index.lanes()
-    if index.annotated and not memory_lanes:
-        memory_lanes = {op.lane for op in index.operations.values()}
-        memory_lane = next(iter(memory_lanes)) if len(memory_lanes) == 1 else None
+    lane_fallback = index.annotated and not memory_lanes
+    if lane_fallback:
+        memory_lanes = {
+            lane for op in index.operations.values() for lane in op.event_lanes
+        }
         warnings.append(
             f"{run_id}: annotated run without a memory role binding; classifying "
             f"memory turns by the operation events' own lanes {sorted(map(str, memory_lanes))}"
@@ -536,6 +566,13 @@ def parse_trajectory(
             f"{run_id}: main and memory traffic share {names}; memory turns "
             "on it are indistinguishable — those turns count as agent steps"
         )
+    if lane_fallback:
+        # the fallback's singular display lane summarizes the op-event lanes,
+        # so it is derived from the FINAL set — after the shared-lane guard.
+        # A straddling fallback set {unprefixed, MEM} with an unprefixed main
+        # lane leaves {MEM}; a stale pre-guard None would render every
+        # rewrite marker of the MEM lane as non-memory traffic.
+        memory_lane = next(iter(memory_lanes)) if len(memory_lanes) == 1 else None
     if len(memory_lanes) > 1:
         warnings.append(
             f"{run_id}: multiple memory lanes bound {sorted(map(str, memory_lanes))}; "
@@ -564,7 +601,8 @@ def parse_trajectory(
         task_ref = payload.get("task")
         if task_ref is not None:
             traj.task = resolved_content_text(
-                task_ref, events, index.binds.get(payload.get("trace_session_id"), {})
+                task_ref, events,
+                index.binds.get(payload.get("trace_session_id"), {}), slots,
             )
             if traj.task is None:
                 availability = (
@@ -640,7 +678,7 @@ def parse_trajectory(
         ops.append(
             _recall_op_from_delivery(
                 event, f"{traj_id}:R{n_recall}", traj_id, index, table, events,
-                warnings, run_id
+                slots, warnings, run_id
             )
         )
 

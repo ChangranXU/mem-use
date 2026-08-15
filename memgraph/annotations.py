@@ -26,10 +26,11 @@ event pairing, session/binding completeness and lane placement (every event
 of an operation — the recorder's within-operation lane check), per-session
 operation-id keying, the proxy-stamped per-event fields (annotation-id
 presence/uniqueness, the binding-status and logical-role vocabularies,
-call_refs shape, terminal-call-ref consistency, and the proxy_source key's
-presence — the proxy stamps it on every recorded memory event, null on the
-unprefixed lane, so an absent one is corruption, never the unprefixed
-lane), the payload field shapes the consumers read (the iterated list
+call_refs shape, terminal-call-ref consistency, and the proxy_source value —
+the proxy stamps it on every recorded memory event, and its JSONL writer
+drops the null of the unprefixed lane, so an absent key IS that lane, the
+same read the recorder's own retrieval makes; only a non-string value is
+corruption), the payload field shapes the consumers read (the iterated list
 fields, the search's matched_count object with its integer value, and
 usable returned-entry identities — none ever passed the gate's ingest in
 another shape),
@@ -80,18 +81,22 @@ class AnnotatedOperation:
     end: dict[str, Any] | None = None
 
     @property
-    def lane(self) -> str | None:
-        """The lane the operation's events were recorded on: the first
-        recorded proxy_source (None only when no event carries one). A
-        corrupt non-string source names no lane — skipped like an absent
-        one (an unhashable one would crash the lane sets downstream)."""
-        for event in [self.start, *self.changes, self.end]:
+    def event_lanes(self) -> set[str | None]:
+        """The lanes the operation's events were recorded on, one entry per
+        recorded event. An absent proxy_source IS a lane — the unprefixed
+        one (the recorder's JSONL writer drops the null; the same read the
+        per-event check and the role binds make) — so a mixed-lane operation
+        reports every lane it touched, not just its first named one. Only a
+        corrupt non-string source is skipped: it names no lane, and an
+        unhashable one would crash the set."""
+        lanes: set[str | None] = set()
+        for event in (self.start, *self.changes, self.end):
             if event is None:
                 continue
             src = event.get("proxy_source")
-            if isinstance(src, str):
-                return src
-        return None
+            if src is None or isinstance(src, str):
+                lanes.add(src)
+        return lanes
 
 
 @dataclass(slots=True)
@@ -191,14 +196,15 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
         status = event.get("binding_status")
         if not isinstance(status, str) or status not in BINDING_STATUSES:
             index.problems.append(f"seq {seq}: unknown binding_status {status!r}")
-        if "proxy_source" not in event:
-            # The proxy stamps the key on every recorded memory event (null
-            # on the unprefixed lane), so an absent one is corruption, never
-            # the unprefixed lane — reading it as None would silently
-            # misplace the event's lane (the bind below would bind the
-            # unprefixed lane, and every clean event of the session would
-            # then flag as off-lane with the real corruption unreported).
-            index.problems.append(f"seq {seq}: {event_type} is missing its proxy_source")
+        # The recorder serializes the unprefixed lane's null proxy_source
+        # away (its own JSONL writer drops null values), so an ABSENT key is
+        # the unprefixed lane — the same read its retrieval index makes —
+        # never corruption. A present non-string value never passed the
+        # gate's ingest and must be reported, never treated as a lane (an
+        # unhashable one would crash the lane sets downstream).
+        src = event.get("proxy_source")
+        if src is not None and not isinstance(src, str):
+            index.problems.append(f"seq {seq}: {event_type} has a non-string proxy_source")
         refs = event.get("call_refs")
         if not isinstance(refs, list):
             if refs is not None:
@@ -240,20 +246,13 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
             if role in binds:
                 index.problems.append(f"seq {seq}: session {sid} binds {role} twice")
                 continue  # first binding wins (same duplicate policy as sessions/deliveries)
-            if "proxy_source" not in event:
-                # reported with the per-event checks above; a corrupt bind is
-                # no bind — recording None would read as the unprefixed lane
-                # and cascade off-lane flags over the session's clean events.
-                # The session's missing-binding report and the parser's
-                # op-lane fallback then name the real shape.
-                continue
-            src = event.get("proxy_source")
+            # an absent proxy_source is the unprefixed lane (the recorder's
+            # serialization drops the null — see the per-event check above),
+            # so the bind records None for it; a non-string value was
+            # reported by that same check and binds nothing — landing it
+            # would poison the memory_lanes sets the parser builds (an
+            # unhashable one would crash them)
             if src is not None and not isinstance(src, str):
-                # a corrupt lane names nothing — and an unhashable one would
-                # crash the memory_lanes set the parser builds from this
-                index.problems.append(
-                    f"seq {seq}: memory_role_bind has a non-string proxy_source"
-                )
                 continue
             binds[role] = src
             continue
@@ -390,6 +389,18 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
     for operation in index.operations.values():
         if operation.end is None:
             index.problems.append(f"operation {operation.operation_id}: missing end event")
+    # group once by session: the lane-placement checks below are per-session,
+    # and a rescan of every operation/delivery per session is quadratic on
+    # multi-session logs
+    ops_by_session: dict[str, list[AnnotatedOperation]] = {}
+    for op in index.operations.values():
+        sid = op.start["payload"].get("trace_session_id")
+        ops_by_session.setdefault(sid, []).append(op)
+    deliveries_by_session: dict[str, list[dict]] = {}
+    for event in index.deliveries:
+        deliveries_by_session.setdefault(
+            event["payload"].get("trace_session_id"), []
+        ).append(event)
     for sid in index.sessions:
         binds = index.binds.get(sid, {})
         if "main" not in binds or "memory" not in binds:
@@ -401,9 +412,7 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
         # lane, its deliveries on the bound main lane — an event recorded
         # anywhere else names a lane drift the consumers cannot see.
         if "memory" in binds:
-            for op in index.operations.values():
-                if op.start["payload"].get("trace_session_id") != sid:
-                    continue
+            for op in ops_by_session.get(sid, []):
                 # every recorded event of the operation, never just the first
                 # stamped lane: a change/end crossing to another lane after
                 # the start is the same drift the recorder flags as "crosses
@@ -417,11 +426,8 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
                         f"operation {op.operation_id}: events outside the bound memory lane"
                     )
         if "main" in binds:
-            for event in index.deliveries:
-                if (
-                    event["payload"].get("trace_session_id") == sid
-                    and event.get("proxy_source") != binds["main"]
-                ):
+            for event in deliveries_by_session.get(sid, []):
+                if event.get("proxy_source") != binds["main"]:
                     index.problems.append(
                         f"delivery {event['payload'].get('delivery_id')}: "
                         "not recorded on the bound main lane"
@@ -532,14 +538,31 @@ def _text_sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
 
 
-def resolved_content_text(ref: Any, events: list[dict], lanes: dict) -> str | None:
+def slot_index(events: list[dict]) -> dict[tuple[str | None, int], list[dict]]:
+    """(lane, msg_index) -> that slot's events, record order — the index both
+    locator resolution and the digest scan run on, so one pass serves every
+    recall op's query lookup and the session task alike (a per-locator scan
+    would re-walk the whole stream per recall: O(recalls × events))."""
+    slots: dict[tuple[str | None, int], list[dict]] = {}
+    for e in events:
+        src, msg = e.get("proxy_source"), e.get("msg")
+        if isinstance(src, str) or src is None:  # a corrupt source names no slot
+            if is_int(msg):
+                slots.setdefault((src, msg), []).append(e)
+    return slots
+
+
+def resolved_content_text(
+    ref: Any, events: list[dict], lanes: dict, slots: dict | None = None
+) -> str | None:
     """Text of a ContentRef whose content trajectory.jsonl itself carries:
     inline text directly, or a `trajectory_message` locator resolved against
     the same event stream (`lanes` maps the locator's logical_role to its
-    bound proxy_source). The other locator kinds (call_request / call_response
-    / artifact) point at captured call bodies or sidecar files that are not
-    part of the .jsonl input, and redacted/unavailable carry no text at all —
-    all of those resolve to None, like content_text.
+    bound proxy_source; `slots` is the caller-shared `slot_index(events)`
+    — built once when omitted). The other locator kinds (call_request /
+    call_response / artifact) point at captured call bodies or sidecar files
+    that are not part of the .jsonl input, and redacted/unavailable carry no
+    text at all — all of those resolve to None, like content_text.
 
     One (lane, msg_index) slot can hold several message_end records: the log
     is append-only, so a message_retracted annuls the record it replaces (the
@@ -550,8 +573,9 @@ def resolved_content_text(ref: Any, events: list[dict], lanes: dict) -> str | No
     afterward (a later retraction/rewrite can never rewrite the answer). Only
     without a digest match (a corrupt or digest-less ref) does the slot's
     latest un-annulled record speak — the same annul rule injudge's
-    prompt_tokens_total applies (a retraction pops the latest record at the
-    slot).
+    prompt_tokens_total applies, but tolerant of corruption: a retraction
+    matching no live record (a duplicated hand-edit) is skipped, never
+    allowed to pop a live record it never annulled.
     """
     text = content_text(ref)
     if text is not None or not isinstance(ref, dict):
@@ -572,10 +596,8 @@ def resolved_content_text(ref: Any, events: list[dict], lanes: dict) -> str | No
         return None
     declared = ref.get("sha256")
     live: list[str] = []  # the slot's un-annulled message_end texts, record order
-    for e in events:
-        msg = e.get("msg")
-        if not is_int(msg) or msg != msg_index or e.get("proxy_source") != lane:
-            continue
+    index = slots if slots is not None else slot_index(events)
+    for e in index.get((lane, msg_index), []):
         if e.get("type") == "message_retracted":
             if live:
                 live.pop()

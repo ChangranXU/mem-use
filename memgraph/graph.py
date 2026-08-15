@@ -51,9 +51,8 @@ def _traj_sort_key(traj_dir: Path, started_at: str | None) -> tuple[int, datetim
     same way). The leading tag keeps the datetimes and the plain-name
     fallback from ever comparing across kinds."""
     dt = _parse_at(started_at)
-    name = ""
+    name = traj_dir.resolve().name
     if dt is None:
-        name = traj_dir.resolve().name
         m = _TS_PREFIX.match(name)
         if m:
             try:

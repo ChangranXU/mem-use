@@ -3,11 +3,13 @@ the lone-surrogate artifact-write fallback (a legal recorder payload — JSON
 \\ud800 escapes json.loads round-trips — must never crash an artifact write).
 """
 
+import io
 import json
+import sys
 
 import pytest
 
-from util import atomic_write, check_writable, tmp_sibling
+from util import atomic_write, check_writable, print_safe, tmp_sibling
 
 
 def test_atomic_write_lone_surrogate_text_stays_writable(tmp_path):
@@ -28,6 +30,19 @@ def test_atomic_write_failure_leaves_no_staging_sibling(tmp_path):
     with pytest.raises(OSError):
         atomic_write(target, "payload")
     assert not tmp_sibling(target).exists()
+
+
+def test_print_safe_degrades_on_a_lone_surrogate_next_to_non_ascii(monkeypatch):
+    """The fallback must survive every trigger of the first print: a lone
+    surrogate mixed with non-ASCII (a \\ud800 run_id next to an é) makes the
+    first print raise UnicodeEncodeError on a UTF-8 stream — and the escape
+    must degrade the display, never crash the run before its artifacts are
+    reported. A pure-ASCII fallback also covers an ASCII-only stream."""
+    buf = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
+    monkeypatch.setattr(sys, "stdout", buf)
+    print_safe("run x\ud800é done")
+    buf.flush()
+    assert buf.buffer.getvalue() == b"run x\\ud800\\xe9 done\n"
 
 
 def test_check_writable_fails_fast_on_unwritable_paths(tmp_path):

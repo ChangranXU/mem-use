@@ -10,9 +10,10 @@ place:
 - `verdict_span`: the injudge span id;
 - `span_verdict`: the span's verdict on every one of its injections, first
   or restated (the role-independent outcome, for coloring);
-- `verdict_detail` (first injections only): confidence, analysis, evidence,
-  memory_usage, rubric, delivery_cost, auto, error — rendered in the op
-  popover.
+- `verdict_detail` (every injection of an annotated span): confidence,
+  analysis, evidence, memory_usage, rubric, delivery_cost, auto, error —
+  the span's record, stamped on each of its ops so a loaded path set
+  missing the "first" injection still shows it; rendered in the op popover.
 
 Unmatched lanes/ops are validation notes, never errors: the graph renders
 identically whether or not verdicts are present.
@@ -156,8 +157,10 @@ def apply_verdicts(graph: dict, report: dict, source: str = "") -> None:
                 f"verdict report: injection (span {entry.get('span_id')!r}, "
                 f"seq {seq!r}) has no joinable (run_id, seq) key; skipped",
             )
+    report_ambiguous: dict[str, set[int]] = {}
     for run_id, seq in sorted(ambiguous_keys):
         del inj_by_traj[run_id][seq]
+        report_ambiguous.setdefault(run_id, set()).add(seq)
         note(
             "warn",
             f"verdict report: run_id {run_id!r} carries two injections at seq "
@@ -184,6 +187,16 @@ def apply_verdicts(graph: dict, report: dict, source: str = "") -> None:
             "is ambiguous — no verdicts annotated for it",
         )
 
+    # recall ops grouped by trajectory once: the per-trajectory join below
+    # consults its own ops three times (existence probe, seq-collision
+    # Counter, annotation pass) — a rescan of all graph ops per trajectory
+    # is O(trajectories × ops) three times over. Join keys come from the
+    # pipeline (always true ints, always string traj ids), so no shape guard.
+    recall_by_traj: dict[str, list[dict]] = {}
+    for o in graph.get("ops") or []:
+        if o.get("kind") == "recall":
+            recall_by_traj.setdefault(o.get("traj"), []).append(o)
+
     n_annotated = 0
     for traj in graph.get("trajectories") or []:
         run_id = traj.get("run_id")
@@ -191,10 +204,7 @@ def apply_verdicts(graph: dict, report: dict, source: str = "") -> None:
         # a corrupt run.json value is unjoinable — and possibly unhashable
         seq_map = inj_by_traj.get(run_id) if isinstance(run_id, str) else None
         if seq_map is None or run_id in ambiguous:
-            if seq_map is None and any(
-                o.get("kind") == "recall" and o.get("traj") == traj.get("id")
-                for o in graph.get("ops") or []
-            ):
+            if seq_map is None and traj.get("id") in recall_by_traj:
                 note(
                     "info",
                     f"{run_id or traj.get('id')}: no verdicts in the report "
@@ -202,8 +212,29 @@ def apply_verdicts(graph: dict, report: dict, source: str = "") -> None:
                 )
             continue
         matched: set[int] = set()
-        for op in graph.get("ops") or []:
-            if op.get("traj") != traj.get("id") or op.get("kind") != "recall":
+        # The same ambiguity the report side guards: two recall ops of THIS
+        # trajectory can share one seq (a corrupt log — load_events' synthetic
+        # seq, or a hand-edited repeat), and one injection's verdict must
+        # never stamp both.
+        op_seqs = Counter(o["seq"] for o in recall_by_traj.get(traj.get("id"), ()))
+        refused = {
+            seq for seq, n in op_seqs.items() if n > 1 and seq in seq_map
+        }
+        for seq in sorted(refused):
+            note(
+                "warn",
+                f"{run_id}: {op_seqs[seq]} recall ops share seq {seq}; the "
+                "(run_id, seq) join is ambiguous — no verdicts "
+                "annotated for it",
+            )
+        # the injections at refused seqs were refused, not unmatched — the
+        # same holds for the seqs the report-side ambiguity guard deleted:
+        # "no verdict matches" there would misread the refusal as a stale
+        # report when the report did carry (two) verdicts
+        matched |= refused
+        already_noted = refused | report_ambiguous.get(run_id, set())
+        for op in recall_by_traj.get(traj.get("id"), ()):
+            if op.get("seq") in already_noted:
                 continue
             entry = seq_map.get(op.get("seq"))
             if entry is None:
@@ -214,18 +245,21 @@ def apply_verdicts(graph: dict, report: dict, source: str = "") -> None:
             op["verdict"] = entry.get("verdict")
             op["verdict_span"] = entry.get("span_id")
             op["span_verdict"] = span.get("verdict")  # span outcome regardless of role
-            if entry.get("role") == "first":
-                op["verdict_detail"] = {
-                    "verdict": span.get("verdict"),
-                    "confidence": span.get("confidence"),
-                    "analysis": span.get("analysis"),
-                    "evidence": span.get("evidence") or [],
-                    "memory_usage": span.get("memory_usage") or {},
-                    "rubric": span.get("rubric"),
-                    "delivery_cost": span.get("delivery_cost"),
-                    "auto": span.get("auto"),
-                    "error": span.get("error"),
-                }
+            # the span's full detail rides on every one of its injections:
+            # the report's "first" marker names its own trajectory view, so a
+            # loaded path set whose first injection is absent would otherwise
+            # render every restated op of the span as a bare verdict chip
+            op["verdict_detail"] = {
+                "verdict": span.get("verdict"),
+                "confidence": span.get("confidence"),
+                "analysis": span.get("analysis"),
+                "evidence": span.get("evidence") or [],
+                "memory_usage": span.get("memory_usage") or {},
+                "rubric": span.get("rubric"),
+                "delivery_cost": span.get("delivery_cost"),
+                "auto": span.get("auto"),
+                "error": span.get("error"),
+            }
             n_annotated += 1
         unmatched = sorted(set(seq_map) - matched)
         if unmatched:

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from util import print_validation
+from util import print_safe, print_validation
 
 from injudge.aggregate import aggregate, policy_rollup
 from injudge.judge import RUBRIC_SIGNALS
@@ -342,7 +342,7 @@ def print_summary(artifact: dict) -> int:
         if rates.get("positive") is not None
         else ""
     )
-    print(
+    print_safe(
         f"injudge: {agg.get('n_trajectories', 0)} trajectories, {agg['n_injections']} injections "
         f"({agg['restated_injections']} restated), {agg['n_spans']} spans: "
         f"+{agg['positive']} −{agg['negative']} ○{agg['neutral']}"
@@ -353,26 +353,26 @@ def print_summary(artifact: dict) -> int:
     cost = agg.get("cost") or {}
     if cost.get("approx_tokens_total"):
         byv = cost.get("approx_tokens_by_verdict") or {}
-        print(
+        print_safe(
             f"  delivery cost: ≈{cost['approx_tokens_total']:,} injected tokens "
             f"(+{byv.get('positive', 0):,} −{byv.get('negative', 0):,} ○{byv.get('neutral', 0):,})"
         )
     if (txt := _headline_line(agg.get("headline") or {})) is not None:
-        print(f"  {txt}")
+        print_safe(f"  {txt}")
     if (txt := _policy_line(agg.get("policy") or {})) is not None:
-        print(f"  {txt}")
+        print_safe(f"  {txt}")
     rub = agg.get("rubric") or {}
     if (txt := _rubric_line(rub)) is not None:
-        print(f"  rubric: {rub['deliveries']} memory-deliveries — {txt}")
+        print_safe(f"  rubric: {rub['deliveries']} memory-deliveries — {txt}")
     for t in artifact["trajectories"]:
         ta = artifact["aggregates"]["per_trajectory"][t["id"]]
         name = t.get("instance_id") or t.get("run_id")
         searches = (t.get("policy") or {}).get("n_searches")
         search_txt = f"{searches} searches, " if searches is not None else ""
         if ta["n_spans"] == 0 and ta["n_injections"] == 0:
-            print(f"  {t['id']} {name}: {search_txt}0 injections (empty verdict set)")
+            print_safe(f"  {t['id']} {name}: {search_txt}0 injections (empty verdict set)")
             continue
-        print(
+        print_safe(
             f"  {t['id']} {name}: {search_txt}{ta['n_injections']} inj, {ta['n_spans']} spans — "
             f"{_verdict_tally(ta)}"
         )

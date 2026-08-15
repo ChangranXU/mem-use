@@ -161,6 +161,132 @@ def test_corrupt_seq_op_sorts_after_valid_ops(tmp_path):
     assert any("non-integer seq" in w for w in warnings)
 
 
+def test_synthetic_seq_collision_is_not_reported_as_non_increasing(tmp_path):
+    """A clean event whose real seq collides with the synthetic seq assigned
+    to an earlier corrupt event never regressed — the reader pre-claimed its
+    number — so its note must name the collision, never 'non-increasing'
+    (which would send triage after a legitimate event). A genuinely
+    regressed seq against the real ones keeps the non-increasing note."""
+    from memgraph.parse_trajectory import load_events
+
+    d = tmp_path / "t"
+    d.mkdir()
+    lines = [
+        json.dumps({"seq": 1, "type": "agent_start"}),
+        json.dumps({"seq": 3, "type": "message_end"}),
+        json.dumps({"type": "message_end"}),          # corrupt: no seq → synthetic 4
+        json.dumps({"seq": 4, "type": "message_end"}),  # clean: collides with the synthetic 4
+        json.dumps({"seq": 2, "type": "agent_end"}),   # genuine regression vs the real seqs
+    ]
+    (d / "trajectory.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    warnings = []
+    events = load_events(d / "trajectory.jsonl", warnings)
+    assert [e["seq"] for e in events] == [1, 3, 4, 4, 2]
+    assert any("assigned synthetic seq 4" in w for w in warnings)
+    collision = [w for w in warnings if "collides with the synthetic seq" in w]
+    assert len(collision) == 1 and "seq 4" in collision[0]
+    regression = [w for w in warnings if "non-increasing" in w]
+    assert len(regression) == 1 and "seq 2" in regression[0]
+
+
+def test_first_recorded_seq_is_never_non_increasing(tmp_path):
+    """The stream's first recorded seq has no predecessor — it can never be
+    non-increasing, whatever its value (the recorder's own streams are
+    1-based, but a clean 0-based stream is increasing too: nothing regressed
+    at its first event, so no corruption note fires)."""
+    from memgraph.parse_trajectory import load_events
+
+    d = tmp_path / "t"
+    d.mkdir()
+    lines = [json.dumps({"seq": i, "type": "agent_start"}) for i in range(3)]
+    (d / "trajectory.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    warnings = []
+    assert [e["seq"] for e in load_events(d / "trajectory.jsonl", warnings)] == [0, 1, 2]
+    assert warnings == []
+    # a repeat of the first value IS a genuine regression once a base exists
+    (d / "trajectory.jsonl").write_text(
+        "\n".join(json.dumps({"seq": 0, "type": "agent_start"}) for _ in range(2)) + "\n",
+        encoding="utf-8",
+    )
+    warnings = []
+    load_events(d / "trajectory.jsonl", warnings)
+    assert sum("non-increasing seq 0" in w for w in warnings) == 1
+
+
+def test_synthetic_first_seq_collides_with_a_later_real_one(tmp_path):
+    """A seq-less FIRST event takes synthetic seq 1 while no real seqs exist
+    yet; a later real seq 1 collides with that synthetic one (the recorded
+    stream never regressed) — the note names the collision, never
+    'non-increasing'."""
+    from memgraph.parse_trajectory import load_events
+
+    d = tmp_path / "t"
+    d.mkdir()
+    lines = [
+        json.dumps({"type": "agent_start"}),       # corrupt: no seq → synthetic 1
+        json.dumps({"seq": 1, "type": "message_end"}),  # clean: collides with it
+        json.dumps({"seq": 2, "type": "agent_end"}),    # clean
+    ]
+    (d / "trajectory.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    warnings = []
+    assert [e["seq"] for e in load_events(d / "trajectory.jsonl", warnings)] == [1, 1, 2]
+    assert any("assigned synthetic seq 1" in w for w in warnings)
+    collision = [w for w in warnings if "collides with the synthetic seq" in w]
+    assert len(collision) == 1 and "seq 1" in collision[0]
+    assert not any("non-increasing" in w for w in warnings)
+
+
+def test_real_seq_filling_a_gap_under_a_synthetic_is_no_collision(tmp_path):
+    """A corrupt first line takes synthetic seq 1; a clean 0-based stream's
+    real seq 0 after it neither collided (0 was never assigned) nor
+    regressed (no real predecessor exists) — no note. The real seq 1 that
+    follows DOES collide with the synthetic, and keeps its note."""
+    from memgraph.parse_trajectory import load_events
+
+    d = tmp_path / "t"
+    d.mkdir()
+    lines = [
+        json.dumps({"type": "agent_start"}),              # corrupt: no seq → synthetic 1
+        json.dumps({"seq": 0, "type": "message_end"}),    # clean: gap under the synthetic
+        json.dumps({"seq": 1, "type": "message_end"}),    # clean: collides with synthetic 1
+        json.dumps({"seq": 2, "type": "agent_end"}),      # clean
+    ]
+    (d / "trajectory.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    warnings = []
+    events = load_events(d / "trajectory.jsonl", warnings)
+    assert [e["seq"] for e in events] == [1, 0, 1, 2]
+    collision = [w for w in warnings if "collides with the synthetic seq" in w]
+    assert len(collision) == 1 and "seq 1" in collision[0]
+    assert not any("non-increasing" in w for w in warnings)
+
+
+def test_unprefixed_main_lane_run_parses_without_false_corruption(tmp_path):
+    """The recorder's JSONL writer drops null values, so a run whose main
+    lane is unprefixed records its main-lane events (session, main bind,
+    deliveries, agent traffic) WITHOUT the proxy_source key — the same read
+    the recorder's own retrieval makes. The tools must parse that as the
+    unprefixed lane: the main bind lands as None, deliveries sit on their
+    bound lane, and no proxy_source corruption is invented."""
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.recall(ref=cure_ref("key_a"))
+    events = []
+    for e in b.events:
+        if e.get("proxy_source") == b.main:
+            del e["proxy_source"]  # the unprefixed lane serializes to an absent key
+        events.append(e)
+    d = tmp_path / "unprefixed"
+    d.mkdir()
+    (d / "trajectory.jsonl").write_text(
+        "\n".join(json.dumps(e) for e in events) + "\n", encoding="utf-8")
+    warnings = []
+    traj, ops, _events = parse_trajectory(d, warnings)
+    (recall,) = [o for o in ops if o.kind == "recall"]
+    assert recall.step == 2  # bound to the second agent turn; lane-agnostic
+    assert traj.memory_lane == b.mem
+    assert not any("proxy_source" in w for w in warnings)
+    assert not any("not recorded on the bound main lane" in w for w in warnings)
+
+
 def test_corrupt_field_values_degrade_never_crash(tmp_path):
     """Hand-corrupted container/scalar fields must degrade, never raise: a
     truthy non-dict extensions/placement and a non-string `at` are for the
@@ -972,10 +1098,13 @@ def test_apply_verdicts_joins_by_run_id_and_seq(tmp_path):
     assert detail["rubric"]["key_a"]["influence"]["value"] == "none"
     assert detail["delivery_cost"]["approx_tokens_total"] == 100
     assert detail["memory_usage"]["key_a"]["usage"] == "ignored"
-    assert second["verdict"] == "restated"  # re-delivery: rolls up, no detail
+    assert second["verdict"] == "restated"  # re-delivery: rolls up as a role
     assert second["verdict_span"] == "T99:S1"
     assert second["span_verdict"] == "neutral"
-    assert "verdict_detail" not in second
+    # the span's full detail rides on every injection, restated included —
+    # the report's "first" marker names its own trajectory view, and a
+    # loaded path set missing it must still render the span's analysis
+    assert second["verdict_detail"]["analysis"] == "agent never touched the injected keys"
     assert graph["tool"]["verdicts"] == "injudge.json"
 
 
@@ -1180,6 +1309,36 @@ def test_apply_verdicts_duplicate_report_run_id_merges_with_warning(tmp_path):
         "two injections at seq" in m and "ambiguous" in m and str(seqs[0]) in m
         for m in msgs
     )
+
+
+def test_apply_verdicts_graph_side_seq_collision_annotates_neither(tmp_path):
+    """A corrupt log can hand two recall ops of ONE trajectory the same seq
+    (load_events' synthetic seq for a corrupt event, or a hand-edited
+    repeat): one report injection at that seq must annotate NEITHER op — the
+    graph-side mirror of the two-injections guard — never one verdict
+    stamped onto both, and the refusal is warned as ambiguous, not reported
+    as an unmatched injection."""
+    from memgraph.verdicts import apply_verdicts
+
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.recall(ref=cure_ref("key_a"))
+    b.recall(ref=cure_ref("key_a"))
+    b.write(tmp_path / "run", run_id="run-1")
+    p = tmp_path / "run" / "trajectory.jsonl"
+    evs = [json.loads(line) for line in p.read_text().splitlines()]
+    deliveries = [e for e in evs if e["type"] == "memory_delivery"]
+    deliveries[0]["seq"] = deliveries[1]["seq"]  # corrupt: both ops share one seq
+    p.write_text("\n".join(json.dumps(e) for e in evs) + "\n", encoding="utf-8")
+    graph = load_and_build([tmp_path])
+    seq = deliveries[1]["seq"]
+    recalls = [o for o in graph["ops"] if o["kind"] == "recall"]
+    assert [o["seq"] for o in recalls] == [seq, seq]
+    apply_verdicts(graph, verdict_report("run-1", "T99:S1", [(seq, 2, "first")]))
+    assert all("verdict_span" not in o for o in recalls)  # neither op annotated
+    assert "verdicts" not in graph.get("tool", {})
+    msgs = [v["msg"] for v in graph["validation"]]
+    assert any("2 recall ops share seq" in m and "ambiguous" in m for m in msgs)
+    assert not any("matched no recall op" in m for m in msgs)
 
 
 def test_apply_verdicts_duplicate_operation_id_warns(tmp_path):
@@ -1452,28 +1611,27 @@ def test_render_html_zero_token_delivery_cost_is_shown():
 
 
 def test_render_html_null_prototype_maps_for_artifact_keys():
-    """Verdict span ids (from the hand-editable --verdicts artifact) and
-    memory keys (trajectory-controlled) index lookup maps: null-prototype
+    """Memory keys (trajectory-controlled) index lookup maps: null-prototype
     maps make a "__proto__"/"constructor" value degrade to plain data instead
     of reparenting the map or resolving an inherited member."""
     from memgraph.html import render_html
 
     html = render_html({"trajectories": [], "ops": [], "memories": [],
                         "edges": [], "validation": []})
-    assert "const detailBySpan=Object.create(null);" in html
     assert "const idByKey=Object.create(null);" in html
 
 
-def test_render_html_restated_op_resolves_the_span_detail():
-    """injudge merges a span across a delivery gap that splits memgraph's
-    spans: the split-off leader is a restated injection carrying no
-    verdict_detail of its own — the popover resolves the span's detail
-    through the shared span id instead of showing a bare verdict chip."""
+def test_render_html_verdict_detail_reads_the_op_itself():
+    """apply_verdicts stamps the span's full detail on every annotated op,
+    restated included — the popover reads the op's own verdict_detail with
+    no span-id lookup side map (a split-off span leader with a different
+    span id used to need one; the detail now travels with every op)."""
     from memgraph.html import render_html
 
     html = render_html({"trajectories": [], "ops": [], "memories": [],
                         "edges": [], "validation": []})
-    assert "detailBySpan[x.verdict_span]" in html
+    assert "x.verdict_detail||{}" in html
+    assert "detailBySpan" not in html
 
 
 def test_render_html_verdict_popover_guards_corrupt_entries():
@@ -1521,3 +1679,51 @@ def test_render_html_payload_escapes_js_line_separators():
     payload = html.split("const G = ", 1)[1].split(";\n", 1)[0]
     assert "\u2028" not in payload and "\u2029" not in payload
     assert graph_payload(html)["memories"][0]["value"] == value
+
+
+def test_report_side_ambiguity_does_not_double_warn(tmp_path):
+    """When the report carries two injections at one (run_id, seq), the
+    ambiguity warning is the whole story: a per-op "no injection verdict
+    matches seq N" on top of it would misread the refusal as a stale report
+    when the report actually carried (two) verdicts."""
+    from memgraph.verdicts import apply_verdicts
+
+    b = (TrajBuilder().agent_turn(with_task=True).agent_turn()
+         .recall().recall())
+    b.write(tmp_path / "t1", run_id="run-1")
+    graph = load_and_build([tmp_path])
+    recalls = [o for o in graph["ops"] if o["kind"] == "recall"]
+    seqs = [o["seq"] for o in recalls]
+    steps = [o["step"] for o in recalls]
+    report = verdict_report("run-1", "T99:S1",
+                            [(seqs[0], steps[0], "first")])
+    report["injections"].append(
+        {"op_id": "dup", "span_id": "T99:S1", "seq": seqs[0],
+         "step": steps[0], "role": "restated", "verdict": "restated"})
+    apply_verdicts(graph, report, source="r.json")
+    ambiguous = [v for v in graph["validation"] if "join is ambiguous" in v["msg"]]
+    assert len(ambiguous) == 1
+    assert not any("no injection verdict matches" in v["msg"]
+                   and f"seq {seqs[0]}" in v["msg"]
+                   for v in graph["validation"])
+
+
+def test_lone_surrogate_run_id_never_aborts_the_stdout_summary(tmp_path):
+    """A hand-edited run_id carrying a \\ud800 JSON escape must not crash the
+    CLI's per-trajectory stdout line (an uncaught UnicodeEncodeError would
+    abort before the HTML is written); the line prints escaped instead."""
+    import subprocess, sys as _sys
+    b = TrajBuilder().agent_turn(with_task=True).recall()
+    d = b.write(tmp_path / "t1", run_id="run-\ud800-id")
+    root = Path(__file__).resolve().parent.parent
+    rc = subprocess.run(
+        [_sys.executable, "-m", "memgraph", str(d),
+         "-o", str(tmp_path / "g.html")],
+        cwd=root, capture_output=True, text=True,
+        errors="backslashreplace",
+    )
+    assert rc.returncode == 0, rc.stderr
+    assert (tmp_path / "g.html").exists()
+    # the recorded instance_id leads the line; the escaped run_id still
+    # reaches stdout through the (warn-level) validation notes unharmed
+    assert "T1 pydata__xarray-2905" in rc.stdout

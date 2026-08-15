@@ -28,6 +28,22 @@ def utf8_safe(text: str) -> bytes:
         return text.encode("utf-8", "backslashreplace")
 
 
+def print_safe(text: str, *, err: bool = False) -> None:
+    """Print trajectory-controlled text without crashing on a lone surrogate
+    (the utf8_safe rule, applied to stdout/stderr): a hand-edited run_id or
+    validation note carrying a \\ud800 escape must degrade the display, never
+    abort the run before its artifacts are reported."""
+    stream = sys.stderr if err else sys.stdout
+    try:
+        print(text, file=stream)
+    except UnicodeEncodeError:
+        # the fallback must survive every trigger of the first print — a lone
+        # surrogate AND a non-ASCII char together, or an ASCII-only stream —
+        # so it degrades to pure ASCII (surrogates and non-ASCII alike become
+        # backslash escapes), never to UTF-8 bytes an ascii decode would reject
+        print(text.encode("ascii", "backslashreplace").decode("ascii"), file=stream)
+
+
 def atomic_write(path: Path, text: str) -> None:
     """Write text to path atomically: a crash mid-write must never leave a
     truncated artifact behind, and a failed write must not leak the staging
@@ -65,5 +81,4 @@ def print_validation(validation: list[dict]) -> None:
     """The one validation-printing rule both CLIs share: warn/error entries
     go to stderr, informational ones to stdout."""
     for v in validation:
-        stream = sys.stderr if v["level"] in ("warn", "error") else sys.stdout
-        print(f"  [{v['level']}] {v['msg']}", file=stream)
+        print_safe(f"  [{v['level']}] {v['msg']}", err=v["level"] in ("warn", "error"))

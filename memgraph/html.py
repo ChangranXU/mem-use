@@ -199,14 +199,6 @@ const laneY=i=> TOP+i*(LANE_H+LANE_GAP)+LANE_H/2;
 const trajIdx=Object.fromEntries(trajs.map((t,i)=>[t.id,i]));
 const opsById=Object.fromEntries(G.ops.map(o=>[o.id,o]));
 const opOrder=Object.fromEntries(G.ops.map((o,i)=>[o.id,i]));
-// a restated injection carries no verdict_detail of its own (the span's first
-// injection holds it) — resolve it through the shared span id, so a memgraph
-// span split off from its injudge span (a delivery gap) still shows the detail.
-// Null-prototype map: span ids come from the (hand-editable) verdicts artifact
-// — a "__proto__"/"constructor" id must degrade to a bare chip, never reparent
-// the map or resolve an inherited member.
-const detailBySpan=Object.create(null);
-for(const o of G.ops) if(o.verdict_span&&o.verdict_detail) detailBySpan[o.verdict_span]=o.verdict_detail;
 
 // collapse consecutive recalls (per traj) with identical key sets into spans;
 // step-less recalls (truncated trajectories) become singleton spans, never merged
@@ -690,7 +682,7 @@ function showOp(opId){
       for(const x of vops){
         if(seen.has(x.verdict_span)) continue;
         seen.add(x.verdict_span);
-        const d=x.verdict_detail||detailBySpan[x.verdict_span]||{}, v=d.verdict||x.span_verdict||"unjudged";
+        const d=x.verdict_detail||{}, v=d.verdict||x.span_verdict||"unjudged";
         const dc=d.delivery_cost||{};
         // artifact-controlled numbers render escaped like any other datum;
         // the thousands-formatted token count only when it really is a number —

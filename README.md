@@ -87,10 +87,10 @@ Options:
   unmatched injections — either join direction, or an injection naming a
   span the report does not define — are validation notes, never errors, and
   an ambiguous join key — a run_id shared by several loaded trajectories, or
-  one `(run_id, seq)` claimed by several report injections — annotates
-  neither side, with a warning, never one verdict onto the other. On the
-  report side, a run_id covering several report trajectories merges their
-  seq maps.
+  one `(run_id, seq)` claimed by several report injections or by several
+  recall ops — annotates neither side, with a warning, never one verdict
+  onto the other. On the report side, a run_id covering several report
+  trajectories merges their seq maps.
 
 ## injudge — recall-injection verdicts
 
@@ -170,13 +170,19 @@ consuming the attempt budget (both are the same endpoint property discovered
 on the request or the output side: this tier does not work here), and the
 first tier producing a conforming answer is memoized for later spans. A
 valid-but-wrong-shape answer at the json tier is a model error, not a tier
-discovery: like any retry at the final tier it consumes the budget and
+discovery (so is an integer literal past Python's int digit limit — valid
+JSON per RFC 8259, which sets no limit): like any retry at the final tier
+it consumes the budget and
 appends the invalid answer plus a corrective note, so corrective retries
-never repeat an identical request. A 400/422 whose NON-EMPTY body repeats unchanged after
-the format field changed is tier-independent — a config fault (an
+never repeat an identical request. A 400/422 whose NON-EMPTY body repeats unchanged at
+the FINAL (format-less) tier — with no answered request in between —
+is tier-independent — a config fault (an
 over-limit max-tokens, an unsupported thinking field) or the span's own
 content, never a format rejection — and fails the span on the endpoint's
-message instead of walking on. An empty rejection body is silence, not an
+message instead of walking on. (The repeat is judged only there: a gateway
+rejecting every format field with one generic error body repeats it across
+the format tiers too, and only the format-less tier tells that from a
+tier-independent fault.) An empty rejection body is silence, not an
 unchanged rejection: it never triggers the fail-fast and gets the full
 tier walk. Any other non-429 4xx (auth, unknown URL, payload too large) is
 an endpoint/config fault, not a format refusal: it fails the span

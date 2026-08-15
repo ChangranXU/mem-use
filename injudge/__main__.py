@@ -18,7 +18,7 @@ import argparse
 import json
 from pathlib import Path
 
-from util import atomic_write, check_writable
+from util import atomic_write, check_writable, print_safe
 from injudge.judge import (
     JudgeError,
     auto_verdict_no_subsequent_turn,
@@ -243,7 +243,10 @@ def main(argv: list[str] | None = None) -> int:
                 verdict = _unjudged("beyond --limit")
             elif args.dry_run:
                 taken += 1
-                print(render_user(span, steps, t.task))
+                # the judge input embeds recorded memory values: print it
+                # surrogate-safe like the artifacts (a \ud800 value in a
+                # delivered memory must not abort the dry run)
+                print_safe(render_user(span, steps, t.task))
                 verdict = _unjudged("dry run")
             else:
                 taken += 1
@@ -274,9 +277,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.output:
         atomic_write(args.output, render_markdown(artifact))
     n_error = print_summary(artifact)
-    print(f"wrote {args.json_out}")
+    print_safe(f"wrote {args.json_out}")
     if args.output:
-        print(f"wrote {args.output}")
+        print_safe(f"wrote {args.output}")
     return 2 if n_error else 0
 
 

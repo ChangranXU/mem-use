@@ -541,6 +541,64 @@ def test_missing_role_binding_falls_back_to_operation_lanes(tmp_path):
     assert any("without a memory role binding" in w for w in warnings)
 
 
+def test_missing_memory_binding_fallback_collects_every_op_event_lane(tmp_path):
+    """No memory binding + an operation whose events straddle the unprefixed
+    lane and a named one: the fallback lane set covers BOTH (an absent
+    proxy_source IS the unprefixed lane), so an unprefixed memory-lane turn
+    is not misclassified as an agent step."""
+    b = AnnotatedBuilder(main=MAIN, mem=MEM)
+    # keep the main binding, drop the memory one
+    b.events = [e for e in b.events if not (
+        e.get("type") == "memory_role_bind"
+        and e["payload"].get("logical_role") == "memory")]
+    b.agent_turn(with_task=True)
+    b.memory_turn()
+    b.generate(extraction_step="1")
+    # the generation's start event lands on the unprefixed lane (absent key,
+    # the recorder's null-dropping JSONL write) while its end stays on MEM
+    start = next(e for e in b.events if e["type"] == "memory_generate_start")
+    del start["proxy_source"]
+    # an unprefixed memory-lane turn — classifiable as memory only when the
+    # fallback carries the unprefixed lane from the operation's start
+    b.turn += 1
+    b._emit("turn_start", turn=b.turn, call_id="000003-m")
+    b._emit("message_end", role="assistant", msg=2, turn=b.turn, content="{}")
+    b._emit("turn_end", turn=b.turn, status="completed")
+    for i, e in enumerate(b.events, 1):
+        e["seq"] = i
+    traj, _ops, warnings = parse(b, tmp_path)
+    assert traj.n_steps == 1  # only the main-lane agent turn counts
+    assert any("without a memory role binding" in w for w in warnings)
+
+
+def test_fallback_display_lane_follows_the_post_guard_lane_set(tmp_path):
+    """No memory binding + op events straddling {unprefixed, MEM} + an
+    unprefixed MAIN lane: the shared-lane guard drops the unprefixed lane
+    (one lane cannot separate the roles), and the fallback's singular
+    display lane must follow the FINAL set — a stale pre-guard None would
+    render every rewrite marker of the surviving MEM lane as non-memory
+    traffic in the HTML."""
+    b = AnnotatedBuilder(main=None, mem=MEM)
+    # keep the (unprefixed) main binding, drop the memory one
+    b.events = [e for e in b.events if not (
+        e.get("type") == "memory_role_bind"
+        and e["payload"].get("logical_role") == "memory")]
+    b.agent_turn(with_task=True)
+    b.memory_turn()
+    b.generate(extraction_step="1")
+    # the generation's start event lands on the unprefixed lane (absent key,
+    # the recorder's null-dropping JSONL write) while its end stays on MEM
+    start = next(e for e in b.events if e["type"] == "memory_generate_start")
+    start.pop("proxy_source", None)
+    for i, e in enumerate(b.events, 1):
+        e["seq"] = i
+    traj, _ops, warnings = parse(b, tmp_path)
+    assert traj.n_steps == 1  # the unprefixed main turn is the only agent step
+    assert (traj.memory_lane, traj.memory_lanes) == (MEM, {MEM})
+    assert any("without a memory role binding" in w for w in warnings)
+    assert any("share the unprefixed lane" in w for w in warnings)
+
+
 def test_shared_unprefixed_lane_counts_all_turns_as_agent_steps(tmp_path):
     """Bindings missing AND the operation events on the unprefixed lane: None
     as a memory lane would swallow every (equally unprefixed) agent turn and
@@ -689,11 +747,12 @@ def test_annotation_reader_never_raises_on_a_corrupt_lane():
           "payload": {"trace_session_id": "S", "logical_role": "main"}}]
     )
     assert idx.binds.get("S", {}) == {}  # the corrupt bind did not land
-    assert any("non-string proxy_source" in p for p in idx.problems)
+    # one note per corrupt event — never the per-event and bind-branch copies
+    assert sum("non-string proxy_source" in p for p in idx.problems) == 1
 
     op = AnnotatedOperation(operation_id="o", kind="generation")
     op.start = {"seq": 1, "type": "memory_generate_start", "proxy_source": ["MEM"]}
-    assert op.lane is None  # a corrupt lane names nothing
+    assert op.event_lanes == set()  # a corrupt lane names nothing
 
 
 def test_duplicate_operation_start_is_a_problem_not_the_end():
@@ -722,19 +781,20 @@ def test_duplicate_operation_start_is_a_problem_not_the_end():
     assert not any("ends twice" in p for p in idx.problems)
 
 
-def test_operation_lane_uses_the_first_recorded_proxy_source():
-    """The fallback lane comes from the first event that CARRIES a
-    proxy_source — an event without one must not mask a later event's lane
-    (nor may a genuinely unprefixed operation report a lane)."""
+def test_operation_event_lanes_cover_every_recorded_event():
+    """The fallback lane set comes from EVERY operation event: an absent
+    proxy_source is the unprefixed lane (the recorder's JSONL writer drops
+    the null), so a mixed-lane operation reports both lanes — never just the
+    first named one."""
     from memgraph.annotations import AnnotatedOperation
 
     op = AnnotatedOperation(operation_id="o", kind="generation")
     op.start = {"seq": 1, "type": "memory_generate_start"}  # no proxy_source
     op.end = {"seq": 2, "type": "memory_generate_end", "proxy_source": MEM}
-    assert op.lane == MEM
+    assert op.event_lanes == {None, MEM}  # unprefixed start + MEM end
     bare = AnnotatedOperation(operation_id="o2", kind="generation")
     bare.start = {"seq": 1, "type": "memory_generate_start"}
-    assert bare.lane is None  # genuinely unprefixed
+    assert bare.event_lanes == {None}  # genuinely unprefixed
 
 
 def test_mismatched_operation_events_are_problems_not_silent_swaps():
@@ -1018,14 +1078,13 @@ def test_unknown_logical_role_is_a_problem_never_bound():
     assert any("unknown logical_role 'critic'" in p for p in idx.problems)
 
 
-def test_role_bind_missing_proxy_source_is_reported_and_never_bound():
-    """The proxy stamps the proxy_source KEY on every recorded memory event
-    (null on the unprefixed lane), so an absent key is corruption, never the
-    unprefixed lane. Binding None would read as the unprefixed lane and flag
-    every clean event of the session as off-lane — a misleading cascade with
-    the actual corruption unreported. The corrupt bind is reported and
-    skipped, so the session's missing-binding note (and the parser's op-lane
-    fallback) names the real shape instead."""
+def test_role_bind_absent_proxy_source_binds_the_unprefixed_lane():
+    """The recorder's JSONL writer drops null values, so the unprefixed
+    lane's proxy_source is an ABSENT key — the same read its own retrieval
+    index makes. A bind without the key therefore binds the unprefixed lane
+    (None): no corruption note, and the lane-placement check flags the
+    genuine drift of the session's prefixed-lane events (never a false
+    cascade read as corruption). Only a non-string value is corruption."""
     events = [dict(e) for e in _structural_events()]
     bind = next(e for e in events
                 if e["type"] == "memory_role_bind"
@@ -1038,13 +1097,10 @@ def test_role_bind_missing_proxy_source_is_reported_and_never_bound():
                      "query": {}}}
     )
     idx = build_annotation_index(events)
-    assert any("memory_role_bind is missing its proxy_source" in p
-               for p in idx.problems)
-    assert "memory" not in idx.binds["S"]
-    assert any("needs exactly one main and one memory binding" in p
-               for p in idx.problems)
-    # no off-lane cascade over the session's clean events
-    assert not any("outside the bound memory lane" in p for p in idx.problems)
+    assert idx.binds["S"]["memory"] is None  # the unprefixed lane
+    assert not any("missing its proxy_source" in p for p in idx.problems)
+    # the search event's lane (MEM) is now a drift against the None binding
+    assert any("outside the bound memory lane" in p for p in idx.problems)
 
 
 def test_search_end_corrupt_returned_entry_is_reported():
@@ -1607,3 +1663,40 @@ def test_annotated_zero_operations_is_valid(tmp_path):
     assert graph["ops"] == []
     assert any("no generation operations" in v["msg"] for v in graph["validation"])
     assert any("zero memory operations" in v["msg"] for v in graph["validation"])
+
+
+def test_slot_index_matches_per_locator_scans_and_tolerates_extra_retractions():
+    """The shared (lane, msg) slot index must resolve identically to a
+    per-locator scan of the raw stream (it replaces one), and a retraction
+    matching no live record (a duplicated hand-edit) is skipped — popping a
+    live record it never annulled would blank the slot (prompt_tokens_total
+    warns about the same corruption instead)."""
+    ref = {"availability": "trajectory_message", "sha256": None,
+           "locator": {"logical_role": "main", "msg_index": 1}}
+    other = "OTHER"
+    events = [
+        {"seq": 1, "type": "message_end", "proxy_source": MAIN, "role": "user",
+         "msg": 1, "content": "first"},
+        {"seq": 2, "type": "message_retracted", "proxy_source": MAIN, "msg": 1},
+        {"seq": 3, "type": "message_end", "proxy_source": MAIN, "role": "user",
+         "msg": 1, "content": "second"},
+        {"seq": 4, "type": "message_retracted", "proxy_source": MAIN, "msg": 1},
+        {"seq": 5, "type": "message_retracted", "proxy_source": MAIN, "msg": 1},
+        {"seq": 6, "type": "message_end", "proxy_source": other, "role": "user",
+         "msg": 1, "content": "another lane"},
+    ]
+    assert resolved_content_text(ref, events, {"main": MAIN}) is None
+    # a digest-less ref over a fully-retracted slot resolves nothing — the
+    # extra duplicate retraction neither popped a ghost nor raised
+    from memgraph.annotations import slot_index
+    idx = slot_index(events)
+    assert idx[(MAIN, 1)] == [events[i] for i in range(5)]
+    assert idx[(other, 1)] == [events[5]]
+    # a duplicated retraction between records annuls only the live one it
+    # names — the later record stays live and answers
+    events2 = events[:2] + [
+        {"seq": 3, "type": "message_retracted", "proxy_source": MAIN, "msg": 1},
+        {"seq": 4, "type": "message_end", "proxy_source": MAIN, "role": "user",
+         "msg": 1, "content": "later record"},
+    ]
+    assert resolved_content_text(ref, events2, {"main": MAIN}) == "later record"

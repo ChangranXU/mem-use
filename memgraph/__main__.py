@@ -10,7 +10,7 @@ import argparse
 import json
 from pathlib import Path
 
-from util import atomic_write, check_writable, print_validation
+from util import atomic_write, check_writable, print_safe, print_validation
 from memgraph.graph import load_and_build
 from memgraph.html import render_html
 from memgraph.verdicts import apply_verdicts, load_verdict_report
@@ -79,15 +79,18 @@ def main(argv: list[str] | None = None) -> int:
         t_ext = sum(1 for o in ops if o["kind"] == "extract")
         t_rec = sum(1 for o in ops if o["kind"] == "recall")
         rej = sum(o["rejections"]["count"] for o in ops if o["kind"] == "extract")
-        print(
+        # run_id/instance_id come from hand-editable files: the print is
+        # surrogate-safe like the artifacts (a \ud800 run_id must not abort
+        # the run before the HTML is reported)
+        print_safe(
             f"  {t['id']} {t['instance_id'] or t['run_id']}: {t['n_steps']} steps, "
             f"{t_ext} extractions ({rej} rejections), {t_rec} recalls, "
             f"{t['n_searches']} searches"
         )
     print_validation(graph["validation"])
-    print(f"wrote {args.output}")
+    print_safe(f"wrote {args.output}")
     if args.json_out:
-        print(f"wrote {args.json_out}")
+        print_safe(f"wrote {args.json_out}")
     return 0
 
 
