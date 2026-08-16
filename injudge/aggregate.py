@@ -12,14 +12,15 @@ The counting rules:
   buckets, and a low-confidence list for triage — LLM-judged spans only:
   rule-judged auto-neutral spans carry no confidence (no judge ran), the
   same placeholder exclusion the rubric rollup applies.
-- per-memory usage tallies merge by (namespace, key) — the system's memory
-  identity pair, so two stores' same-keyed memories never conflate — over
+- per-memory usage tallies merge by (namespace, item) — the system's memory
+  identity pair, so two stores' (or one store's two items') same-keyed
+  memories never conflate — over
   LLM-judged spans only (a rule-judged auto-neutral span carries a
   placeholder "unclear" per memory, the same exclusion the rubric rollup and
   confidence apply); first_value/last_value surface value drift across those
-  spans. A key delivered under several namespaces in one op is judged once
+  spans. A key delivered under several identities in one op is judged once
   (the contract is one entry per key) but tallies under EACH of its
-  (namespace, key) identities.
+  (namespace, item) identities.
 - rubric signal rates are over judge-scored memory-deliveries (span × key)
   of judged spans only; null signals never dilute a rate. positive_effect is
   rated over the influential only (it is null by contract otherwise).
@@ -35,7 +36,7 @@ The counting rules:
 from __future__ import annotations
 
 from injudge.judge import RUBRIC_SIGNALS
-from memgraph.annotations import namespace_of
+from memgraph.annotations import item_key, namespace_of
 
 _VERDICTS = ("positive", "negative", "neutral")
 _USAGES = ("used", "noted", "ignored", "misused", "unclear")
@@ -45,23 +46,26 @@ _BUCKETS = ("[0,0.5)", "[0.5,0.8)", "[0.8,1.0]")
 _COUNTED = (*_VERDICTS, "error", "unjudged")
 
 
-def _key_namespaces(op: dict) -> dict[str, list[str | None]]:
-    """key -> the namespaces it is delivered under within one op, in delivery
-    order. The rubric and usage records speak in bare keys (the judge contract
-    is one entry per key); this resolves each back to its (namespace, key)
-    identity. A key delivered under several namespaces in one op (a
-    multi-store delivery the judge scored jointly) maps to them all, so the
-    joint judgment tallies under EACH of its (namespace, key) identities —
-    never a phantom namespace-less one."""
-    by_key: dict[str, list[str | None]] = {}
+def _key_identities(op: dict) -> dict[str, list[tuple[str | None, str]]]:
+    """key -> the (namespace, item) identities it is delivered under within
+    one op, in delivery order. The rubric and usage records speak in bare
+    keys (the judge contract is one entry per key); this resolves each back
+    to its item-level identity. A key delivered under several items in one
+    op (a multi-item delivery the judge scored jointly) maps to them all, so
+    the joint judgment tallies under EACH of its (namespace, item)
+    identities — never a phantom identity-less one."""
+    by_key: dict[str, list[tuple[str | None, str]]] = {}
     for m in op.get("memories") or []:
         key = m.get("key")
         if not key:
             continue
-        ns = namespace_of(m)
-        nss = by_key.setdefault(key, [])
-        if ns not in nss:
-            nss.append(ns)
+        item = item_key(m)
+        if not item:
+            continue
+        ident = (namespace_of(m), item)
+        idents = by_key.setdefault(key, [])
+        if ident not in idents:
+            idents.append(ident)
     return by_key
 
 
@@ -88,12 +92,13 @@ def _rubric_rollup(operations: list[dict]) -> dict:
     counts: dict[str, dict[str, int]] = {s: {} for s in RUBRIC_SIGNALS}
     contradicted: dict[tuple[str | None, str], list[str]] = {}
     irrelevant: dict[tuple[str | None, str], list[str]] = {}
+    key_of: dict[tuple[str | None, str], str] = {}  # identity -> display key
     reasons: dict[str, int] = {}
     deliveries = 0
     for op in operations:
         if op.get("verdict") not in _VERDICTS or op.get("auto"):
             continue  # error/unjudged/rule-judged spans: rubric untrusted or placeholder
-        namespaces = _key_namespaces(op)
+        identities = _key_identities(op)
         for key, signals in (op.get("rubric") or {}).items():
             if all((signals.get(s) or {}).get("value") is None for s in RUBRIC_SIGNALS):
                 # all-null entry: the judge never returned this key (a
@@ -104,7 +109,9 @@ def _rubric_rollup(operations: list[dict]) -> dict:
             for s in RUBRIC_SIGNALS:
                 b = _bucket_value((signals.get(s) or {}).get("value"))
                 counts[s][b] = counts[s].get(b, 0) + 1
-            idents = [(ns, key) for ns in namespaces.get(key) or [None]]
+            idents = identities.get(key) or [(None, key)]
+            for ident in idents:
+                key_of.setdefault(ident, key)
             if (signals.get("accuracy") or {}).get("value") == "contradicted":
                 for ident in idents:
                     contradicted.setdefault(ident, []).append(op["operation_id"])
@@ -139,15 +146,15 @@ def _rubric_rollup(operations: list[dict]) -> dict:
         },
         "no_footprint_reasons": reasons,
         "inaccurate_keys": [
-            {"namespace": ns, "key": k, "spans": spans}
-            for (ns, k), spans in sorted(
-                contradicted.items(), key=lambda item: (item[0][0] or "", item[0][1])
+            {"namespace": ns, "item_id": item, "key": key_of[(ns, item)], "spans": spans}
+            for (ns, item), spans in sorted(
+                contradicted.items(), key=lambda entry: (entry[0][0] or "", entry[0][1])
             )
         ],
         "irrelevant_keys": [
-            {"namespace": ns, "key": k, "spans": spans}
-            for (ns, k), spans in sorted(
-                irrelevant.items(), key=lambda item: (item[0][0] or "", item[0][1])
+            {"namespace": ns, "item_id": item, "key": key_of[(ns, item)], "spans": spans}
+            for (ns, item), spans in sorted(
+                irrelevant.items(), key=lambda entry: (entry[0][0] or "", entry[0][1])
             )
         ],
     }
@@ -203,24 +210,25 @@ def aggregate(operations: list[dict], n_injections: int, n_trajectories: int | N
                 out["confidence_buckets"][_BUCKETS[2]] += 1
         if op.get("verdict") not in _VERDICTS or op.get("auto"):
             continue  # error/unjudged/rule-judged spans: usage untrusted or placeholder
-        namespaces = _key_namespaces(op)
-        values = {
-            (namespace_of(m), m.get("key")): m.get("value")
-            for m in op.get("memories") or []
-            if m.get("key")
-        }
+        identities = _key_identities(op)
+        # identity -> the display key it rode in on (for the roll records)
+        key_of = {ident: key for key, idents in identities.items() for ident in idents}
+        values: dict[tuple[str | None, str], object] = {}
+        for m in op.get("memories") or []:
+            item = item_key(m)
+            if item:
+                values[(namespace_of(m), item)] = m.get("value")
         for key, entry in (op.get("memory_usage") or {}).items():
-            for ns in namespaces.get(key) or [None]:
-                ident = (ns, key)
-                roll = usage_roll.setdefault(
-                    ident,
-                    {
+            for ident in identities.get(key) or [(None, key)]:
+                roll = usage_roll.get(ident)
+                if roll is None:
+                    roll = usage_roll[ident] = {
+                        "key": key_of.get(ident, key),
                         "tallies": dict.fromkeys(_USAGES, 0),
                         "spans": [],
                         "first_value": values.get(ident),
                         "last_value": values.get(ident),
-                    },
-                )
+                    }
                 u = entry.get("usage")
                 roll["tallies"][u if u in roll["tallies"] else "unclear"] += 1
                 roll["spans"].append(op["operation_id"])
@@ -235,7 +243,7 @@ def aggregate(operations: list[dict], n_injections: int, n_trajectories: int | N
     denom = sum(counts[v] for v in _VERDICTS)
     out["rates"] = {v: (round(counts[v] / denom, 4) if denom else None) for v in _VERDICTS}
     out["memory_usage"] = [
-        {"namespace": ns, "key": key, **roll} for (ns, key), roll in usage_roll.items()
+        {"namespace": ns, "item_id": item, **roll} for (ns, item), roll in usage_roll.items()
     ]
     # headline: the pre-registered numbers for cross-system claims; the
     # wasted-token share follows the same judged-only rule as the rates —

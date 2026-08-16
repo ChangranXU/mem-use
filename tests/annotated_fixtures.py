@@ -23,20 +23,23 @@ def ev(seq, type, **kw):
 
 
 def cure_ref(key, value="v", memory_type="insight", confidence=0.9,
-             review_status="approved", store_id=1, version_id=None, namespace="ns"):
+             review_status="approved", store_id=1, version_id=None, namespace="ns",
+             item_id=None):
     """One CURE-row MemoryRef as emitted by the bridge's annotations.
 
     Like the real bridge, the version_id digests the row's semantic content
-    (a value change is a new version) and the inline content carries its
-    sha256; confidence/review metadata stay outside the identity. The
-    namespace names the store (the bridge hashes its DB path into it).
+    (a value change is a new version), the inline content carries its
+    sha256, and item_id is the stable item digest (unchanged across the
+    item's versions — two same-keyed rows differ in it); confidence/review
+    metadata stay outside the identity. The namespace names the store (the
+    bridge hashes its DB path into it).
     """
     digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
     return {
         "version_id": version_id or f"{store_id}:{digest[:16]}",
         "identity_strength": "native_stable",
         "identity_scheme": "cure-sqlite-row-version-v1",
-        "item_id": f"item-{key}",
+        "item_id": item_id or f"item-{key}",
         "namespace": namespace,
         "content": {"availability": "inline", "text": value, "sha256": digest},
         "extensions": {

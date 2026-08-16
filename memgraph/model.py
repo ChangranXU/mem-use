@@ -141,10 +141,15 @@ class MemoryOp:
 
 @dataclass
 class MemoryUnit:
-    """One memory, identified by its (namespace, key), linked across trajectories."""
+    """One memory, identified by its (namespace, item) pair — the store
+    namespace plus the item-level identity (the recorded portable `item_id`,
+    else the display key) — linked across trajectories. `key` stays the
+    human-readable display key; two same-keyed items in one store are two
+    MemoryUnits."""
 
     key: str
-    namespace: str | None = None  # store namespace scoping the key (None = none recorded)
+    namespace: str | None = None  # store namespace scoping the item (None = none recorded)
+    item_id: str | None = None  # the identity half of the pair (item_id, else key)
     memory_type: str | None = None
     confidence: float | None = None
     value: str | None = None
@@ -165,6 +170,7 @@ class MemoryUnit:
         return {
             "key": self.key,
             "namespace": self.namespace,
+            "item_id": self.item_id,
             "memory_type": self.memory_type,
             "confidence": self.confidence,
             "value": self.value,
@@ -189,8 +195,8 @@ class Edge:
 
     kind: str  # "creates" | "recalls" | "deletes" | "supersedes"
     op: str  # MemoryOp.id
-    memory: str  # MemoryUnit.key
-    namespace: str | None = None  # MemoryUnit.namespace — the key's half of the identity
+    memory: str  # the MemoryUnit's item identity (item_id-or-key), never the bare display key
+    namespace: str | None = None  # MemoryUnit.namespace — the identity's other half
     uncertain: bool = False
 
     def to_dict(self) -> dict:

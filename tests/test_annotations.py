@@ -67,7 +67,8 @@ def test_annotated_run_parses_from_annotations_alone(tmp_path):
     assert extract.candidates == [
         {"key": "k1", "value": "durable fact", "memory_type": "insight",
          "confidence": 0.9, "review_status": "approved", "needs_verification": False,
-         "namespace": "ns", "identity_scheme": "cure-sqlite-row-version-v1",
+         "namespace": "ns", "item_id": "item-k1",
+         "identity_scheme": "cure-sqlite-row-version-v1",
          "identity_strength": "native_stable", "version_id": f"1:{digest[:16]}",
          "content_sha256": digest}
     ]
@@ -199,6 +200,29 @@ def test_task_redacted_stays_none_without_a_warning(tmp_path):
     assert not any("task" in w for w in warnings)
 
 
+def test_inline_json_value_renders_as_canonical_json(tmp_path):
+    """Schema v6's structured inline content (json_value instead of text) is
+    legal on any ContentRef: a tolerant reader surfaces its canonical JSON
+    text — the form the gate digests — for the task, the search query, and
+    delivered memory values, instead of dropping it to None."""
+    json_task = {"availability": "inline",
+                 "json_value": {"b": 1, "a": [True, None]}}
+    b = AnnotatedBuilder(task_ref=json_task)
+    b.agent_turn()
+    json_ref = cure_ref("k1", "v")
+    json_ref["content"] = {"availability": "inline",
+                           "json_value": {"structured": "content"}}
+    b.recall(ref=json_ref, query="q")
+    traj, ops, warnings = parse(b, tmp_path)
+    assert traj.task == '{"a":[true,null],"b":1}'  # sorted keys, compact
+    assert not any("not resolvable" in w for w in warnings)
+    (recall,) = [o for o in ops if o.kind == "recall"]
+    assert recall.memories[0]["value"] == '{"structured":"content"}'
+    # json_value refs declare bytes, never chars: the placement content size
+    # falls back to the rendered text length rather than undercounting to 0
+    assert recall.content_chars == len("## CURE Memory Policy\n…")
+
+
 def test_annotated_extract_turn_classification_matches_step_stream(tmp_path):
     b = AnnotatedBuilder()
     for _ in range(10):
@@ -299,6 +323,22 @@ def test_declared_extraction_step_unicode_digit_never_crashes(tmp_path):
     b.agent_turn(with_task=True)
     b.memory_turn()
     b.generate(produced=[cure_ref("k1")], extraction_step="²")
+    _, ops, warnings = parse(b, tmp_path)
+    (extract,) = [o for o in ops if o.kind == "extract"]
+    assert extract.step == 1  # computed from the stream regardless
+    assert any("no cross-check possible" in w for w in warnings)
+
+
+def test_declared_extraction_step_past_the_int_digit_limit_never_crashes(tmp_path):
+    """A >4300-digit ASCII declared step passes isascii+isdigit but int()
+    refuses it (CPython's int-string digit limit): the corrupt value must
+    degrade to the no-cross-check warning, never abort the whole run with an
+    uncaught ValueError — the same refusal load_events and the verdicts
+    loader already catch on their own int-conversion paths."""
+    b = AnnotatedBuilder()
+    b.agent_turn(with_task=True)
+    b.memory_turn()
+    b.generate(produced=[cure_ref("k1")], extraction_step="9" * 5000)
     _, ops, warnings = parse(b, tmp_path)
     (extract,) = [o for o in ops if o.kind == "extract"]
     assert extract.step == 1  # computed from the stream regardless

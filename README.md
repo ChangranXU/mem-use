@@ -46,8 +46,10 @@ Extracts every memory-related action from the trajectories and renders the
 relationships: for each memory, **which (trajectory, step) created it** and
 **which (trajectory, step) later recalled it** — including cross-trajectory
 reuse when several runs are loaded together. Memory identity is the
-(store `namespace`, `key`) pair: the same key minted by two different
-stores is two memories, never one.
+(store `namespace`, item) pair — the item being the recorder's portable
+`item_id` when recorded, else the display key: the same key minted by two
+different stores — or carried by two different items in one store — is two
+memories, never one. Display stays the human-readable key everywhere.
 
 ```bash
 python3 -m memgraph <trajectory paths> -o memgraph.html --json memgraph.json
@@ -277,7 +279,7 @@ python3 -m memgraph <trajectory paths> --verdicts injudge.json -o memgraph-verdi
 
 ## Project layout
 
-- `util.py` — shared helpers: atomic_write (crash-safe artifact writes), tmp_sibling, utf8_safe, print_validation
+- `util.py` — shared helpers: atomic_write (crash-safe artifact writes), tmp_sibling, utf8_safe, check_writable, print_safe, print_validation
 - `memgraph/annotations.py` — schema-v6 memory-annotation index + MemoryRef mapping
 - `memgraph/model.py` — Trajectory / MemoryOp / MemoryUnit / Edge dataclasses
 - `memgraph/parse_trajectory.py` — trajectory.jsonl → ops (annotation-driven)

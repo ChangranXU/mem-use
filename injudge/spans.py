@@ -9,7 +9,7 @@ hatch: a memory no portable identity distinguishes (an operation-local
 version id over undigested content — legal for redacted/unavailable
 ContentRefs) fingerprints on its delivered (namespace, key, value) instead —
 the namespace keeps two stores' same-keyed deliveries apart (memory identity
-is the (namespace, key) pair). The triple degenerates to (namespace, key)
+is the (namespace, item) pair). The triple degenerates to (namespace, key)
 when no value was recorded (redacted content records none), so distinct
 redacted contents under one (namespace, key) share a span —
 indistinguishable by construction: nothing was recorded that could tell
@@ -32,7 +32,7 @@ import hashlib
 import json
 
 from injudge.model import InjectionSpan
-from memgraph.annotations import namespace_of
+from memgraph.annotations import item_key, namespace_of
 from memgraph.model import MemoryOp
 
 
@@ -48,8 +48,9 @@ def content_fingerprint(op: MemoryOp) -> str:
     distinguishes NOTHING (it is constant across one store's memories), so a
     memory with neither a (withheld-adjusted) version_id nor a content digest
     falls back to its delivered (namespace, key, value) — the namespace still
-    separates two stores' same-keyed deliveries (the registry's identity
-    pair), while the triple degenerates to (namespace, key) for redacted
+    separates two stores' same-keyed deliveries (the registry's (namespace,
+    item) pair), while the triple degenerates to (namespace, key) for
+    redacted
     content (no value is ever recorded), leaving distinct redacted contents
     under one (namespace, key) indistinguishable and sharing one span.
     """
@@ -119,7 +120,7 @@ def group_spans(recall_ops: list[MemoryOp], traj_id: str) -> list[InjectionSpan]
         )
         steps_seen.append([op.step] if op.step is not None else [])
 
-    prev: list[tuple] = []  # (namespace, key) identities of the previous span
+    prev: dict[tuple[str | None, str], str] = {}  # previous span: (namespace, item) identity -> display key
     for span, steps in zip(spans, steps_seen):
         if steps:
             span.step_first = min(steps)
@@ -128,18 +129,18 @@ def group_spans(recall_ops: list[MemoryOp], traj_id: str) -> list[InjectionSpan]
             span.step_gaps = [
                 s for s in range(span.step_first, span.step_last + 1) if s not in delivered
             ]
-        # The diff compares (namespace, key) pairs — memory identity is the
-        # pair, so a delivery switching stores IS a change — then speaks in
-        # distinct bare keys (the judge contract's vocabulary; one delivery
-        # may carry several versions of a key — graph.py notes the legal
-        # collapse). A key whose store changed lands in BOTH lists: the old
-        # (namespace, key) identity left, the new one arrived.
-        cur = list(
-            dict.fromkeys(
-                (namespace_of(m), m.get("key")) for m in span.memories if m.get("key")
-            )
-        )
-        span.new_keys = list(dict.fromkeys(k for ns, k in cur if (ns, k) not in prev))
-        span.removed_keys = list(dict.fromkeys(k for ns, k in prev if (ns, k) not in cur))
+        # The diff compares (namespace, item) identities — memory identity is
+        # the pair, so a delivery switching stores or another item reusing the
+        # key IS a change — then speaks in distinct bare keys (the judge
+        # contract's vocabulary; one delivery may carry several versions of an
+        # item — graph.py notes the legal collapse). A key whose item identity
+        # changed lands in BOTH lists: the old identity left, the new arrived.
+        cur: dict[tuple[str | None, str], str] = {}
+        for m in span.memories:
+            item = item_key(m)
+            if item:
+                cur.setdefault((namespace_of(m), item), m.get("key") or item)
+        span.new_keys = list(dict.fromkeys(cur[i] for i in cur if i not in prev))
+        span.removed_keys = list(dict.fromkeys(prev[i] for i in prev if i not in cur))
         prev = cur
     return spans

@@ -466,11 +466,11 @@ def test_cross_trajectory_create_then_recall(tmp_path):
     assert {r["traj"] for r in mem["recalls"]} == {"T2"}
     assert [r["step"] for r in mem["recalls"]] == [2, 3, 4]
     kinds = sorted((e["kind"], e["memory"]) for e in graph["edges"])
-    assert kinds == [("creates", "shared_k")] + [("recalls", "shared_k")] * 3
+    assert kinds == [("creates", "item-shared_k")] + [("recalls", "item-shared_k")] * 3
 
 
 def test_same_key_in_different_namespaces_is_two_memories(tmp_path):
-    """Memory identity is (namespace, key): two stores minting the same slug
+    """Memory identity is (namespace, item): two stores minting the same slug
     key are two memories — a cross-trajectory recall edge between them would
     fabricate reuse that never happened (the namespace is the store)."""
     cand_a = cure_ref("shared_k", "store A value", namespace="ns-a")
@@ -494,11 +494,62 @@ def test_same_key_in_different_namespaces_is_two_memories(tmp_path):
     assert by_ns["ns-b"]["origin"] == "not_observed"
     assert len(by_ns["ns-b"]["recalls"]) == 1
     kinds = sorted((e["kind"], e["memory"]) for e in graph["edges"])
-    assert kinds == [("creates", "shared_k"), ("recalls", "shared_k")]
-    # the (namespace, key) identity survives into the edge records: a consumer
+    assert kinds == [("creates", "item-shared_k"), ("recalls", "item-shared_k")]
+    # the (namespace, item) identity survives into the edge records: a consumer
     # must never have to guess which store's memory an edge points at
     by_edge = {(e["kind"], e["namespace"]) for e in graph["edges"]}
     assert by_edge == {("creates", "ns-a"), ("recalls", "ns-b")}
+
+
+def test_same_key_two_items_in_one_store_are_two_memories(tmp_path):
+    """Memory identity is (namespace, item): one store holding two items
+    under the same display key (nothing in schema v6 makes a display key
+    item-unique — the CURE store keys rows by id and can hold the same key
+    at another scope or memory_type) must not merge them: their portable
+    item_ids are distinct, so creation/recall edges must never cross."""
+    cand = cure_ref("dup_k", "value one", item_id="item-1")
+    recalled = cure_ref("dup_k", "value two", item_id="item-2")
+    a = TrajBuilder()
+    a.agent_turn(with_task=True)
+    a.memory_turn()
+    a.generate(produced=[cand], extraction_step="1", changes=[("create", [], [cand])])
+    a.write(tmp_path / "20260101-000000.000Z-run-a", run_id="run-a")
+
+    b = TrajBuilder()
+    b.agent_turn(with_task=True)
+    b.recall(ref=recalled)
+    b.write(tmp_path / "20260101-010000.000Z-run-b", run_id="run-b")
+
+    graph = load_and_build([tmp_path])
+    by_item = {m["item_id"]: m for m in graph["memories"]}
+    assert set(by_item) == {"item-1", "item-2"}
+    assert by_item["item-1"]["key"] == "dup_k"  # display stays the bare key
+    assert by_item["item-1"]["origin"] == "observed" and by_item["item-1"]["recalls"] == []
+    assert by_item["item-2"]["origin"] == "not_observed"
+    assert len(by_item["item-2"]["recalls"]) == 1
+    # edges name the item identity, never the ambiguous bare key
+    kinds = sorted((e["kind"], e["memory"]) for e in graph["edges"])
+    assert kinds == [("creates", "item-1"), ("recalls", "item-2")]
+
+
+def test_item_version_changes_keep_one_memory(tmp_path):
+    """The version-level tuple changes per version; item_id does not — an
+    update (a second candidate under a new version_id) joins the one
+    memory's lifecycle instead of minting a second."""
+    v1 = cure_ref("dup_k", "value one", item_id="item-1", version_id="1:aaa")
+    v2 = cure_ref("dup_k", "value two", item_id="item-1", version_id="1:bbb")
+    b = TrajBuilder()
+    b.agent_turn(with_task=True)
+    b.memory_turn()
+    b.generate(produced=[v1], extraction_step="1", changes=[("create", [], [v1])])
+    b.memory_turn()
+    b.generate(produced=[v2], extraction_step="1", changes=[("update", [v1], [v2])])
+    b.write(tmp_path / "t1", run_id="t1")
+    graph = load_and_build([tmp_path])
+    (mem,) = graph["memories"]
+    assert mem["key"] == "dup_k" and mem["value"] == "value two"
+    assert len(mem["updates"]) == 1
+    assert sorted(e["kind"] for e in graph["edges"]) == ["creates", "supersedes"]
 
 
 def test_deletion_scopes_to_the_target_store(tmp_path):
@@ -539,7 +590,7 @@ def test_deletion_of_observed_and_unobserved_memory(tmp_path):
     b.write(tmp_path / "t1", run_id="t1")
     graph = load_and_build([tmp_path])
     deletes = [e for e in graph["edges"] if e["kind"] == "deletes"]
-    assert sorted(e["memory"] for e in deletes) == ["dtype_fix", "old_k"]
+    assert sorted(e["memory"] for e in deletes) == ["item-dtype_fix", "item-old_k"]
     by_key = {m["key"]: m for m in graph["memories"]}
     assert by_key["dtype_fix"]["deleted_by"]["op"].endswith("E2")
     assert by_key["old_k"]["origin"] == "not_observed"  # exact ref, registered
@@ -1607,6 +1658,30 @@ def test_render_html_with_verdicts_embeds_them(tmp_path):
     assert 'typeof v==="boolean"' in html
 
 
+def test_cli_verdicts_flag_merges_through_main(tmp_path):
+    """The --verdicts flag through memgraph main(): the report joins onto the
+    recall ops before rendering — the HTML embeds the annotated graph and the
+    JSON artifact carries the verdict fields."""
+    from memgraph.__main__ import main
+
+    b = TrajBuilder().agent_turn(with_task=True).recall()
+    b.write(tmp_path / "t1", run_id="run-1")
+    graph = load_and_build([tmp_path])
+    (op,) = [o for o in graph["ops"] if o["kind"] == "recall"]
+    report = tmp_path / "injudge.json"
+    report.write_text(json.dumps(
+        verdict_report("run-1", "T99:S1", [(op["seq"], op["step"], "first")])
+    ))
+    out, jout = tmp_path / "g.html", tmp_path / "g.json"
+    assert main([str(tmp_path / "t1"), "-o", str(out), "--json", str(jout),
+                 "--verdicts", str(report)]) == 0
+    (jop,) = [o for o in json.loads(jout.read_text())["ops"] if o["kind"] == "recall"]
+    assert jop["verdict"] == "neutral" and jop["verdict_span"] == "T99:S1"
+    g = graph_payload(out.read_text())
+    (gop,) = [o for o in g["ops"] if o["kind"] == "recall"]
+    assert gop["verdict"] == "neutral" and g["tool"]["verdicts"] == str(report)
+
+
 def test_render_html_without_verdicts_has_no_verdict_payload(tmp_path):
     from memgraph.html import render_html
 
@@ -1667,8 +1742,8 @@ def test_render_html_escapes_trajectory_data_in_svg_titles():
 
     html = render_html({"trajectories": [], "ops": [], "memories": [],
                         "edges": [], "validation": []})
-    assert 'df.added.map(k=>"+"+esc(keyOf(k)))' in html
-    assert 'df.removed.map(k=>"−"+esc(keyOf(k)))' in html
+    assert 'df.added.map(k=>"+"+esc(dispKey(k)))' in html
+    assert 'df.removed.map(k=>"−"+esc(dispKey(k)))' in html
     assert 'srcs.map(s=>esc(s))' in html
     assert "` — verdict ${esc(svd[0])}" in html
     # the rewrite kept/dropped counts are trajectory-controlled too

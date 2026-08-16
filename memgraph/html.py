@@ -159,16 +159,19 @@ const G = __GRAPH_JSON__;
 function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 function hue(key){ let h=0; for(const c of key) h=(h*31+c.charCodeAt(0))>>>0; return h%360; }
 function memColor(id){ return `hsl(${hue(id)},65%,42%)`; }
-// Memory identity is the (namespace, key) pair — the same identity the graph
-// registry keys on; a bare key would collapse two stores' memories into one.
-// The id string is JSON: no separator to collide with key/namespace content,
-// null and "" stay distinct. A non-string namespace names no store (the same
-// rule as the registry's _namespace_of). Display text stays the bare key
-// everywhere; the namespace only disambiguates on demand (detail panel, list
-// tooltip).
-const memId=m=>JSON.stringify([typeof m.namespace==="string"?m.namespace:null,m.key]);
+// Memory identity is the (namespace, item) pair — the same identity the graph
+// registry keys on; a bare key would collapse two stores' (or two same-store
+// items') memories into one. The id string is JSON: no separator to collide
+// with identity content, null and "" stay distinct. A non-string namespace
+// names no store (the same rule as the registry's namespace_of). Display text
+// stays the bare key everywhere; the namespace only disambiguates on demand
+// (detail panel, list tooltip).
+const memId=m=>JSON.stringify([typeof m.namespace==="string"?m.namespace:null, m.item_id||m.key]);
 const keyOf=id=>JSON.parse(id)[1];
 const memById=Object.fromEntries(G.memories.map(m=>[memId(m),m]));
+// display text for a memory id: the registered memory's bare key (the item
+// identity itself only when the memory is not in the registry)
+const dispKey=id=>{const m=memById[id]; return m?m.key:keyOf(id);};
 // Bare-key contexts (injudge rubric keys, namespace-less deletion targets)
 // link only when exactly one loaded memory carries the key — never guess.
 // Null-prototype maps: memory keys are trajectory-controlled, so a key like
@@ -441,7 +444,7 @@ function buildSVG(){
       if(n>1&&lt&&lt.n_steps>0&&g.steps[1]!=null) w=Math.max(14,Math.min(w, X(lt.n_steps)+2-px));
       const stepTxt=g.steps[0]==null? "step ?" : `steps ${g.steps[0]}${g.steps[1]>g.steps[0]?"–"+g.steps[1]:""}`;
       const df=spanDiff[lead];
-      const diffTxt=df? ` — set change: ${df.added.map(k=>"+"+esc(keyOf(k))).concat(df.removed.map(k=>"−"+esc(keyOf(k)))).join(", ")}` : "";
+      const diffTxt=df? ` — set change: ${df.added.map(k=>"+"+esc(dispKey(k))).concat(df.removed.map(k=>"−"+esc(dispKey(k)))).join(", ")}` : "";
       // verdict coloring: a pill can cover several judged spans — it takes a
       // verdict color only when every judged span it covers agrees (verdicts
       // always follow the judged span, never the pill); a mixed pill stays
@@ -462,7 +465,7 @@ function buildSVG(){
   // ghost creation markers (origin not observed) — dashed ▲ with "?"
   for(const [mid,p] of Object.entries(ghostPos)){
     svg.push(`<g class="ghostnode" data-mem="${esc(mid)}" transform="translate(${p.x},${p.y})">
-      <path d="${tri(0,0,true,7)}" fill="none" stroke="${memColor(mid)}" stroke-width="1.6" stroke-dasharray="3 2.4"><title>${esc(keyOf(mid))} — origin not observed; creation predates the loaded trajectories (first seen recalled)</title></path>
+      <path d="${tri(0,0,true,7)}" fill="none" stroke="${memColor(mid)}" stroke-width="1.6" stroke-dasharray="3 2.4"><title>${esc(dispKey(mid))} — origin not observed; creation predates the loaded trajectories (first seen recalled)</title></path>
       <text y="-10" font-size="8.5" text-anchor="middle" fill="${memColor(mid)}">?</text></g>`);
   }
   // gutter for step-less ops (unattributed — truncated or unclassifiable)
@@ -593,7 +596,7 @@ function selectMemory(id){
     <pre>${esc(m.value||"")}</pre>`;
 }
 function memChip(id,sign,label){
-  return `<span class="chip memlink" data-mem="${esc(id)}" title="select memory">${sign||""}${esc(label||keyOf(id))}</span>`;
+  return `<span class="chip memlink" data-mem="${esc(id)}" title="select memory">${sign||""}${esc(label||dispKey(id))}</span>`;
 }
 // a bare key links only when it names exactly one loaded memory (an ambiguous
 // or unknown key renders as plain text, never a wrong link)
@@ -627,7 +630,7 @@ function showOp(opId){
       h+=`<h4>deletions (${o.deletions.length})</h4>`;
       for(const d of o.deletions){
         const tgt=d.target||"";
-        // the before-ref pins the exact (namespace, key); a ref-less target
+        // the before-ref pins the exact (namespace, item); a ref-less target
         // resolves by bare key only when unambiguous, else plain text
         const id=d.ref? memId(d.ref) : idByKey[tgt];
         h+=`<div class="mrow"><div>${id&&memById[id]?memChip(id,"",tgt):esc(tgt)}</div></div>`;
@@ -647,7 +650,7 @@ function showOp(opId){
     if(o.matched!=null||o.binding_status||o.query!=null)
       h+=`<div class="kv">${o.matched!=null?`search returned ${o.matched}`:""}${o.binding_status?` · binding ${esc(o.binding_status)}`:""}${o.query!=null?` · query “${esc(shorten(o.query,120))}”`:""}</div>`;
     const df=spanDiff[opId];
-    if(df) h+=`<div class="kv">set change: ${df.added.map(id=>memChip(id,"+",keyOf(id))).join(" ")}${df.added.length&&df.removed.length?" ":""}${df.removed.map(id=>memChip(id,"−",keyOf(id))).join(" ")}</div>`;
+    if(df) h+=`<div class="kv">set change: ${df.added.map(id=>memChip(id,"+",dispKey(id))).join(" ")}${df.added.length&&df.removed.length?" ":""}${df.removed.map(id=>memChip(id,"−",dispKey(id))).join(" ")}</div>`;
     if(o.memories.length){
       h+=`<h4>delivered (${o.memories.length})</h4>`;
       for(const dm of o.memories){

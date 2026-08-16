@@ -56,3 +56,18 @@ def test_check_writable_fails_fast_on_unwritable_paths(tmp_path):
         check_writable(tmp_path)
     with pytest.raises(SystemExit, match="cannot write report"):
         check_writable(tmp_path / "missing" / "out.json")
+
+
+def test_print_validation_routes_levels(capsys):
+    """The one validation-printing rule both CLIs share: warn/error entries
+    go to stderr, informational ones to stdout."""
+    from util import print_validation
+
+    print_validation([
+        {"level": "warn", "msg": "w"},
+        {"level": "error", "msg": "e"},
+        {"level": "info", "msg": "i"},
+    ])
+    out, err = capsys.readouterr()
+    assert out == "  [info] i\n"
+    assert err == "  [warn] w\n  [error] e\n"

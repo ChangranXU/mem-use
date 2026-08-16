@@ -1,12 +1,14 @@
 """Link memory operations across trajectories into a relationship graph.
 
-Memory identity is the (store `namespace`, memory `key`) pair, registry-scoped
-across ALL loaded trajectories — a memory created in one trajectory and
-recalled in another yields a cross-trajectory `recalls` edge, while the same
-key minted by two DIFFERENT stores (namespaces) is two memories, never one.
-A recalled key that no loaded extraction created becomes an
-"origin_not_observed" memory (the store entry predates the loaded set), never
-an error.
+Memory identity is the (store `namespace`, item) pair — the namespace plus
+the item-level identity (the recorder's portable `item_id` when recorded,
+else the display key) — registry-scoped across ALL loaded trajectories: a
+memory created in one trajectory and recalled in another yields a
+cross-trajectory `recalls` edge, while the same display key minted by two
+DIFFERENT stores (namespaces) — or carried by two different items in ONE
+store — is two memories, never one. A recalled key that no loaded extraction
+created becomes an "origin_not_observed" memory (the store entry predates
+the loaded set), never an error.
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-from memgraph.annotations import namespace_of
+from memgraph.annotations import item_key, namespace_of
 from memgraph.model import Edge, MemoryOp, MemoryUnit, Trajectory
 from memgraph.parse_trajectory import parse_trajectory
 
@@ -133,11 +135,12 @@ def build_graph(
                 if not key:
                     note("warn", f"{op.id}: candidate without a key ignored")
                     continue
-                ident = (namespace_of(cand), key)
+                ident = (namespace_of(cand), item_key(cand))
                 if ident not in registry:
                     registry[ident] = MemoryUnit(
                         key=key,
                         namespace=ident[0],
+                        item_id=ident[1],
                         memory_type=cand.get("memory_type"),
                         confidence=cand.get("confidence"),
                         value=cand.get("value"),
@@ -147,7 +150,7 @@ def build_graph(
                         created_traj=op.traj,
                         created_step=op.step,
                     )
-                    edges.append(Edge("creates", op.id, key, ident[0]))
+                    edges.append(Edge("creates", op.id, ident[1], ident[0]))
                 else:
                     mem = registry[ident]
                     recreated = mem.deleted_by is not None
@@ -160,7 +163,7 @@ def build_graph(
                         )
                         mem.deleted_by = None
                     if recreated and mem.created_op is None:
-                        # The key was registered by the deletion's before-ref
+                        # The item was registered by the deletion's before-ref
                         # (its true origin predates the loaded set), so this
                         # revival is the first OBSERVED creation — promote it:
                         # recall edges anchor at the real op instead of a ghost
@@ -173,7 +176,7 @@ def build_graph(
                         mem.created_step = op.step
                         mem.created_status = cand.get("review_status")
                         mem.origin = "observed"
-                        edges.append(Edge("creates", op.id, key, ident[0]))
+                        edges.append(Edge("creates", op.id, ident[1], ident[0]))
                     else:
                         # a revival changes state (deleted → alive) — it is
                         # never an unchanged re-state of an existing memory;
@@ -199,7 +202,7 @@ def build_graph(
                                 "duplicate": duplicate,
                             }
                         )
-                        edges.append(Edge("supersedes", op.id, key, ident[0], uncertain=duplicate))
+                        edges.append(Edge("supersedes", op.id, ident[1], ident[0], uncertain=duplicate))
                         if duplicate:
                             note(
                                 "info",
@@ -221,7 +224,7 @@ def build_graph(
                     continue
                 key = str(target)
                 ref = deletion.get("ref")
-                ident = (namespace_of(ref), key)
+                ident = (namespace_of(ref), item_key(ref))
                 if ident not in registry:
                     # The delete change carries the exact before-ref (always a
                     # dict — ref_to_memory output): the memory predates the
@@ -230,6 +233,7 @@ def build_graph(
                     registry[ident] = MemoryUnit(
                         key=key,
                         namespace=ident[0],
+                        item_id=ident[1],
                         memory_type=ref.get("memory_type"),
                         confidence=ref.get("confidence"),
                         value=ref.get("value"),
@@ -247,22 +251,22 @@ def build_graph(
                     "step": op.step,
                     "target": target,
                 }
-                edges.append(Edge("deletes", op.id, key, ident[0]))
+                edges.append(Edge("deletes", op.id, ident[1], ident[0]))
 
     for op in all_ops:
         if op.kind != "recall":
             continue
         if op.step is None:
             note("warn", f"{op.id}: recall injection could not be attributed to an agent step")
-        seen: set[tuple[str | None, str]] = set()  # a delivery may carry several versions of one key
+        seen: set[tuple[str | None, str]] = set()  # a delivery may carry several versions of one item
         for delivered in op.memories:
             key = delivered.get("key")
             if not key:
                 note("warn", f"{op.id}: delivered memory without a key ignored")
                 continue
-            ident = (namespace_of(delivered), key)
+            ident = (namespace_of(delivered), item_key(delivered))
             if ident in seen:
-                # one recall link per (op, memory) — judged once per key too;
+                # one recall link per (op, memory) — judged once per item too;
                 # the collapse is noted, never silent (injudge warns for the
                 # same collapse at verdict assembly)
                 note(
@@ -276,6 +280,7 @@ def build_graph(
                 registry[ident] = MemoryUnit(
                     key=key,
                     namespace=ident[0],
+                    item_id=ident[1],
                     memory_type=delivered.get("memory_type"),
                     confidence=delivered.get("confidence"),
                     value=delivered.get("value"),
@@ -288,7 +293,7 @@ def build_graph(
                     "loaded trajectories (origin not observed)",
                 )
             registry[ident].recalls.append({"op": op.id, "traj": op.traj, "step": op.step})
-            edges.append(Edge("recalls", op.id, key, ident[0]))
+            edges.append(Edge("recalls", op.id, ident[1], ident[0]))
 
     for op in all_ops:
         if op.kind == "extract" and op.flagged:

@@ -38,18 +38,19 @@ and the delivery↔search integrity (session scoping, recording order,
 delivered identities an ordered subsequence of the search's returned set).
 
 Stdlib only, like the rest of the tools. Every entry carries the recorder's
-portable memory identity (namespace / identity_scheme / identity_strength /
-version_id + content sha256 — the same fields the gate's own
-`memory_identity` compares on, never adapter-native vocabulary) so span
-fingerprinting works for any adapter; display fields (key/value/memory_type/
-confidence/review_status/needs_verification) prefer the `extensions.cure`
-projection and fall back to the portable identity fields (item_id/version_id
-+ content text) so non-CURE adapters still parse.
+portable memory identity (namespace / item_id / identity_scheme /
+identity_strength / version_id + content sha256 — the same fields the gate's
+own `memory_identity` compares on, never adapter-native vocabulary) so span
+fingerprinting and item-level grouping work for any adapter; display fields
+(key/value/memory_type/confidence/review_status/needs_verification) prefer
+the `extensions.cure` projection and fall back to the portable identity
+fields (item_id/version_id + content text) so non-CURE adapters still parse.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -514,11 +515,29 @@ def is_int(value: object) -> bool:
 
 
 def content_text(ref: Any) -> str | None:
-    """Text of an inline ContentRef; None for locator/redacted/unavailable."""
+    """Text of an inline ContentRef; None for locator/redacted/unavailable.
+
+    An inline `json_value` (the schema's structured-content alternative to
+    `text`) renders as its canonical JSON text — the same canonical form the
+    gate digests (sorted keys, compact separators): a tolerant reader
+    surfaces it for display and judging instead of dropping it to None.
+    """
     if not isinstance(ref, dict):
         return None
-    if ref.get("availability") == "inline" and isinstance(ref.get("text"), str):
-        return ref["text"]
+    if ref.get("availability") != "inline":
+        return None
+    text = ref.get("text")
+    if isinstance(text, str):
+        return text
+    if "json_value" in ref:
+        try:
+            return json.dumps(
+                ref["json_value"], ensure_ascii=False, sort_keys=True,
+                separators=(",", ":"),
+            )
+        except (TypeError, ValueError, RecursionError):
+            # a hand-edited unserializable value degrades to None, never raises
+            return None
     return None
 
 
@@ -564,7 +583,10 @@ def slot_index(events: list[dict]) -> dict[tuple[str | None, int], list[dict]]:
 
 
 def resolved_content_text(
-    ref: Any, events: list[dict], lanes: dict, slots: dict | None = None
+    ref: Any,
+    events: list[dict],
+    lanes: dict[str, str | None],
+    slots: dict[tuple[str | None, int], list[dict]] | None = None,
 ) -> str | None:
     """Text of a ContentRef whose content trajectory.jsonl itself carries:
     inline text directly, or a `trajectory_message` locator resolved against
@@ -653,7 +675,7 @@ def content_chars(ref: Any) -> int | None:
     return len(text) if text is not None else None
 
 
-def _cure_ext(holder: Any) -> dict:
+def _cure_ext(holder: Any) -> dict[str, Any]:
     """The extensions.cure projection of one payload/ref; {} when absent —
     or corrupt: a truthy non-dict `extensions` on a hand-edited artifact
     must degrade, never crash the reader (the never-raises rule)."""
@@ -664,7 +686,7 @@ def _cure_ext(holder: Any) -> dict:
     return cure if isinstance(cure, dict) else {}
 
 
-def _ref_identity(ref: Any) -> tuple:
+def _ref_identity(ref: Any) -> tuple[Any, Any, Any, Any]:
     """The gate's portable identity of one raw MemoryRef — (namespace,
     identity_scheme, version_id, content sha256): the tuple the recorder's
     `memory_identity` compares on for the delivery subsequence check. A
@@ -676,19 +698,40 @@ def _ref_identity(ref: Any) -> tuple:
     return (ref.get("namespace"), ref.get("identity_scheme"), ref.get("version_id"), sha)
 
 
-def _is_subsequence(needle: list, haystack: list) -> bool:
+def _is_subsequence(needle: list[Any], haystack: list[Any]) -> bool:
     """Ordered subsequence (each needle item consumed in haystack order)."""
     it = iter(haystack)
     return all(any(candidate == item for candidate in it) for item in needle)
 
 
 def namespace_of(memory: Any) -> str | None:
-    """The store namespace half of a memory's (namespace, key) identity; None
+    """The store namespace half of a memory's (namespace, item) identity; None
     when absent or corrupt — a non-string namespace names no store (and an
     unhashable one would crash the identity keys built from it). The one rule
     the graph registry and injudge's usage rollups share."""
     ns = memory.get("namespace") if isinstance(memory, dict) else None
     return ns if isinstance(ns, str) else None
+
+
+def item_key(memory: Any) -> str | None:
+    """The item-level identity half of a memory's (namespace, item) pair, read
+    off a mapped entry (ref_to_memory output): the recorder's portable
+    `item_id` when recorded (stable across the item's versions — the gate's
+    own version-level identity tuple changes per version, so it cannot group
+    a lifecycle), else the entry's display key as the best available
+    fallback. An adapter projecting only a human-readable key may let one
+    store hold several items under it (nothing in schema v6 makes a display
+    key item-unique), so grouping on the display key alone would merge
+    distinct memories; grouping on the version tuple would split one memory
+    per version. The one rule the graph registry, the span set-diff, and
+    injudge's usage rollups share — never adapter vocabulary alone."""
+    if not isinstance(memory, dict):
+        return None
+    item = memory.get("item_id")
+    if isinstance(item, str) and item:
+        return item
+    key = memory.get("key")
+    return key if isinstance(key, str) and key else None
 
 
 def ref_key(ref: Any) -> str | None:
@@ -710,13 +753,13 @@ def ref_to_memory(ref: Any) -> dict:
     """MemoryRef → the tools' delivered/candidate memory entry shape.
 
     `{key, value, memory_type, confidence, review_status, needs_verification}`
-    plus the recorder's portable identity `{namespace, identity_scheme,
-    identity_strength, version_id, content_sha256}` — the adapter-agnostic
-    identity span fingerprinting groups on (the gate's `memory_identity`:
-    namespace/scheme/version_id + content digest, never adapter-native
-    fields). Display values come from the adapter's `extensions.cure`
-    projection when present, else from the portable identity/content fields;
-    unavailable content degrades to None values instead of parse failure.
+    plus the recorder's portable identity `{namespace, item_id,
+    identity_scheme, identity_strength, version_id, content_sha256}` — the
+    adapter-agnostic fields span fingerprinting and item-level grouping work
+    on (the gate's `memory_identity`, never adapter-native fields). Display
+    values come from the adapter's `extensions.cure` projection when present,
+    else from the portable identity/content fields; unavailable content
+    degrades to None values instead of parse failure.
     """
     if not isinstance(ref, dict):
         return {
@@ -727,6 +770,7 @@ def ref_to_memory(ref: Any) -> dict:
             "review_status": None,
             "needs_verification": None,
             "namespace": None,
+            "item_id": None,
             "identity_scheme": None,
             "identity_strength": None,
             "version_id": None,
@@ -735,6 +779,7 @@ def ref_to_memory(ref: Any) -> dict:
     cure = _cure_ext(ref)
     content = ref.get("content")
     content_sha = content.get("sha256") if isinstance(content, dict) else None
+    item_id = ref.get("item_id")
     return {
         "key": ref_key(ref),
         "value": content_text(ref.get("content")),
@@ -743,6 +788,7 @@ def ref_to_memory(ref: Any) -> dict:
         "review_status": cure.get("review_status"),
         "needs_verification": cure.get("needs_verification"),
         "namespace": ref.get("namespace"),
+        "item_id": item_id if isinstance(item_id, str) and item_id else None,
         "identity_scheme": ref.get("identity_scheme"),
         "identity_strength": ref.get("identity_strength"),
         "version_id": ref.get("version_id"),

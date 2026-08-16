@@ -324,6 +324,17 @@ def resolve_config(
             f"error: judge endpoint not configured: missing {', '.join(missing)}; "
             f"keys present in the .env file: {present}"
         )
+    try:
+        api_key.encode("latin-1")
+    except UnicodeEncodeError:
+        # the key rides an HTTP header (http.client encodes latin-1), so a
+        # non-latin-1 value — a mangled paste — can never be sent: fail fast
+        # naming the key, never its value, instead of burning the attempt
+        # budget on a request-build error mislabeled as an unparseable body
+        raise SystemExit(
+            "error: OPENAI_API_KEY or API_KEY must be latin-1-encodable "
+            "(it is sent as an HTTP header value)"
+        ) from None
     api = (env.get("API") or "openai-chat").strip().lower()
     if api not in API_FORMATS:
         raise SystemExit(
@@ -397,6 +408,15 @@ _SCAN_PROBE = 4096
 # candidate still gets the full-tail proof (an unterminated string —
 # unbounded — names itself by message instead).
 _SCAN_TOKEN_TAIL = 8
+# Full-tail re-proofs allowed at ONE structural-failure position before the
+# scan jumps past it: a repeat means the candidate sits inside the extent
+# that already died there (never the answer itself), but its interior may
+# still hold a COMPLETE object closing before the offender — a few re-probes
+# recover those, while unbounded ones would chain O(text) full-tail proofs
+# on an adversarial nest whose every candidate fails at the same spot (a
+# quadratic scan). Full-tail failure positions are at least a probe window
+# apart, so the cap keeps the worst case linear with a small constant.
+_STRUCTURAL_REPROBES = 8
 
 
 def _top_level_objects(text: str) -> list[tuple[int, int]]:
@@ -404,8 +424,10 @@ def _top_level_objects(text: str) -> list[tuple[int, int]]:
     raw_decode-proven (callers need no second parse). Every "{" outside an
     already-recorded span is a candidate — one nested in prose brackets or
     an array ("[{...}]") records like a top-level one; the only interiors
-    skipped are an already-proven object's and the tail a cut proves to sit
-    inside one unfinished value (below). Prose brackets are not JSON
+    skipped are an already-proven object's, the tail a cut proves to sit
+    inside one unfinished value (below), and — past _STRUCTURAL_REPROBES
+    repeated failures at one position — the braces inside an extent whose
+    parse keeps dying at the same spot (the adversarial-nest guard, below). Prose brackets are not JSON
     values, so a depth count is no proof of nesting: an unclosed "[" in
     leading prose must not blind the scan to a complete object after it
     (the truncation gate would misread that completed answer as a budget
@@ -435,6 +457,7 @@ def _top_level_objects(text: str) -> list[tuple[int, int]]:
     # misreadings); skipping the conversion keeps both honest
     decoder = json.JSONDecoder(parse_int=str)
     structural_pos: int | None = None  # last full-tail structural failure
+    reprobes = 0  # full-tail re-proofs spent at structural_pos
     # Where the scan resumes after the candidate at `candidate` failed at
     # `failure_pos` within a region ending at `end` (the probe window or the
     # full text): past every brace the failure proves dead, never past one
@@ -442,11 +465,12 @@ def _top_level_objects(text: str) -> list[tuple[int, int]]:
     # cut (the parser consumed the whole region: its error position IS the
     # end) prove every later brace dead; a structural failure proves only
     # THIS candidate dead, so the scan resumes at the next live brace
-    # before the offender — with one guard: a full-tail failure repeating
-    # the previous one's position means the candidate sits inside that
-    # parse's extent (nested structure — never the answer), and re-probing
-    # every such brace would chain O(text) full-tail proofs on adversarial
-    # nested input.
+    # before the offender — with one bound: full-tail failures repeating one
+    # position mark candidates inside the extent that died there (nested
+    # structure — never the answer themselves), and their interiors are
+    # re-probed only _STRUCTURAL_REPROBES times before the scan jumps to the
+    # error; unbounded re-probing would chain O(text) full-tail proofs on
+    # adversarially nested input.
     def _skip_past(candidate: int, failure_pos: int | None, end: int) -> int:
         if failure_pos is None:
             return candidate + 1
@@ -502,10 +526,19 @@ def _top_level_objects(text: str) -> list[tuple[int, int]]:
                 # can parse — stop rather than re-scanning the tail per "{"
                 break
             pos = getattr(e, "pos", None)
-            if pos is not None and pos == structural_pos:
-                skip = pos  # nested inside the previous candidate's extent
+            if pos is None:
+                skip = _skip_past(i, None, len(text))
+            elif pos == structural_pos:
+                # nested inside the extent that already died at this
+                # position: never the answer itself — but its interior may
+                # still close a COMPLETE object before the offender, so
+                # resume at the next live brace like a first failure; only
+                # the re-probe cap stops an adversarial nest from chaining
+                # one full-tail proof per brace
+                reprobes += 1
+                skip = pos if reprobes > _STRUCTURAL_REPROBES else _skip_past(i, pos, len(text))
             else:
-                structural_pos = pos
+                structural_pos, reprobes = pos, 0
                 skip = _skip_past(i, pos, len(text))
         else:
             spans.append((i, end))
@@ -1558,8 +1591,11 @@ def judge_span(
             # URLError/TimeoutError are OSError subclasses; HTTPException
             # (IncompleteRead, BadStatusLine, ...) is not — a truncated or
             # garbled 200 body is the same transport class as a refused
-            # connection and must never escape to abort the run
-            last_error = f"{type(e).__name__}: {e}"
+            # connection and must never escape to abort the run. The
+            # exception text is masked like every other echo path: a
+            # BadStatusLine str IS the raw status line — endpoint output that
+            # can reflect the credential (an echoing proxy's reason phrase).
+            last_error = f"{type(e).__name__}: {_mask_key(str(e), cfg.api_key)}"
         except (ValueError, RecursionError) as e:
             # invalid UTF-8, unparseable JSON, an int past the digit limit,
             # pathological nesting — the body never became a payload
@@ -1567,9 +1603,10 @@ def judge_span(
             # The HTTP exchange itself completed with a 200, so the endpoint
             # DID answer: the identical-rejection chain is broken here too,
             # same as the parsed-answer branch — a garbled proxy response is
-            # not silence.
+            # not silence. The parser's message is masked too: it is
+            # endpoint-adjacent text on the same path to the artifact.
             rejection = None
-            last_error = f"unparseable response body: {e}"
+            last_error = f"unparseable response body: {_mask_key(str(e), cfg.api_key)}"
         else:
             # the endpoint ANSWERED this request (whatever the answer's
             # contract status): the identical-rejection chain is broken — a

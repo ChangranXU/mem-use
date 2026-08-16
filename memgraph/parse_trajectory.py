@@ -36,10 +36,13 @@ turn is the consumer) — its step is therefore always >= 1 or None.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
+from typing import Any
 
 from memgraph.annotations import (
     AnnotationIndex,
+    AnnotatedOperation,
     build_annotation_index,
     content_chars,
     is_int,
@@ -243,7 +246,7 @@ class _TurnTable:
         return self.step_of_turn[max(earlier, key=lambda t: self._classif_seq[t])]
 
 
-def _bound_turn(table: _TurnTable, ref) -> int | None:
+def _bound_turn(table: _TurnTable, ref: Any) -> int | None:
     """The turn of a call-binding ref (`terminal_call_ref`), else None.
 
     Only a string call_id can join the turn table: a corrupt non-scalar
@@ -308,7 +311,7 @@ def _delivery_step(
     return recent if recent is not None else table.step_after(event["seq"])
 
 
-def list_field(holder: dict, key: str) -> list:
+def list_field(holder: dict[str, Any], key: str) -> list[Any]:
     """A list field of a recorded payload; [] when absent or a corrupt
     non-list — a truthy scalar on a hand-edited artifact must degrade, never
     crash the parse (the never-raises rule). The schema-v6 payload list
@@ -320,14 +323,14 @@ def list_field(holder: dict, key: str) -> list:
     return value if isinstance(value, list) else []
 
 
-def _op_anchor(operation) -> dict:
+def _op_anchor(operation: AnnotatedOperation) -> dict[str, Any]:
     """The event a generation operation's step/seq attribution anchors on:
     its end, else its latest change, else its start (always recorded)."""
     return operation.end or (operation.changes[-1] if operation.changes else operation.start)
 
 
 def _extract_op_from_generation(
-    operation,
+    operation: AnnotatedOperation,
     op_id: str,
     traj_id: str,
     table: _TurnTable,
@@ -395,7 +398,7 @@ def _recall_op_from_delivery(
     index: AnnotationIndex,
     table: _TurnTable,
     events: list[dict],
-    slots: dict,
+    slots: dict[tuple[str | None, int], list[dict]],
     warnings: list[str],
     run_id: str,
 ) -> MemoryOp:
@@ -675,10 +678,16 @@ def parse_trajectory(
         if declared is not None:
             if declared == "final":
                 expected = table.n_agent_turns
-            elif declared.isascii() and declared.isdigit():
+            elif (
+                declared.isascii()
+                and declared.isdigit()
+                and len(declared) <= sys.get_int_max_str_digits()
+            ):
                 # str.isdigit admits non-decimal Unicode digits ("²".isdigit()
-                # is True) that int() then rejects — a corrupt declared step
-                # must degrade to the no-cross-check warning, never crash
+                # is True) that int() then rejects, and a digit run past the
+                # interpreter's int-string limit refuses it too (ValueError) —
+                # a corrupt declared step must degrade to the no-cross-check
+                # warning, never crash
                 expected = int(declared)
             else:
                 expected = None

@@ -29,6 +29,7 @@ from injudge.judge import (
     _NOVELTY,
     _POS_EFFECT,
     _SCAN_PROBE,
+    _STRUCTURAL_REPROBES,
     _assemble_verdict,
     _build_request,
     _complete_json_present,
@@ -475,7 +476,7 @@ def test_span_key_diff_counts_distinct_keys(tmp_path):
 
 
 def test_span_key_diff_tracks_the_namespace_half(tmp_path):
-    """Memory identity is the (namespace, key) pair: a delivery switching
+    """Memory identity is the (namespace, item) pair: a delivery switching
     stores under the same key is a DIFFERENT memory — the key lands in both
     removed (the old store's) and new (the new store's), never reported as
     unchanged."""
@@ -687,7 +688,7 @@ def test_fingerprint_fallback_degenerates_for_valueless_content():
 
 def test_fingerprint_fallback_keeps_the_namespace():
     """The fallback keys on the delivered (namespace, key, value): memory
-    identity is the (namespace, key) pair, so two stores' same-keyed redacted
+    identity is the (namespace, item) pair, so two stores' same-keyed redacted
     deliveries are two spans — dropping the namespace would collapse them
     into one span judged once."""
 
@@ -1137,7 +1138,7 @@ def test_aggregate_memory_value_drift():
 def test_aggregate_multi_namespace_delivery_tallies_each_identity():
     """A key delivered under several namespaces in one op is judged once (the
     contract is one entry per key) but tallies under EACH of its
-    (namespace, key) identities — never a phantom namespace-less entry that
+    (namespace, item) identities — never a phantom namespace-less entry that
     loses the value drift."""
     ops = [
         _op("T1:S1", "positive", 0.9, {"k": {"usage": "used", "evidence": ""}},
@@ -1159,7 +1160,7 @@ def test_aggregate_multi_namespace_delivery_tallies_each_identity():
 
 def test_rubric_rollup_lists_each_namespace_identity():
     """A jointly judged multi-store delivery lands on each of its
-    (namespace, key) identities in the inaccurate/irrelevant lists too."""
+    (namespace, item) identities in the inaccurate/irrelevant lists too."""
     rubric = {"k": {"accuracy": {"value": "contradicted", "note": ""}}}
     ops = [_op("T1:S1", "neutral", 0.9, rubric=rubric,
                memories=[{"key": "k", "value": "v1", "namespace": "nsA"},
@@ -1244,12 +1245,14 @@ def test_aggregate_rubric_rates():
     assert rub["counts"]["accuracy"] == {"uncontradicted": 1, "null": 1, "contradicted": 1}
     assert rub["counts"]["influence"] == {"acted_on": 1, "none": 2}
     assert rub["no_footprint_reasons"] == {"irrelevant": 1, "redundant": 1}
-    assert rub["inaccurate_keys"] == [{"namespace": None, "key": "ka", "spans": ["T1:S2"]}]
-    assert rub["irrelevant_keys"] == [{"namespace": None, "key": "kb", "spans": ["T1:S1"]}]
+    assert rub["inaccurate_keys"] == [
+        {"namespace": None, "item_id": "ka", "key": "ka", "spans": ["T1:S2"]}]
+    assert rub["irrelevant_keys"] == [
+        {"namespace": None, "item_id": "kb", "key": "kb", "spans": ["T1:S1"]}]
 
 
 def test_aggregate_usage_rollup_separates_namespaces():
-    """Memory identity is the (namespace, key) pair: one key minted by two
+    """Memory identity is the (namespace, item) pair: one key minted by two
     stores is two memories in the rollup — separate tallies and per-namespace
     value drift, never one merged entry whose last-seen value wins."""
     ops = [
@@ -1268,7 +1271,7 @@ def test_aggregate_usage_rollup_separates_namespaces():
 
 
 def test_rubric_key_lists_carry_the_namespace():
-    """inaccurate/irrelevant key lists join by the same (namespace, key)
+    """inaccurate/irrelevant key lists join by the same (namespace, item)
     identity — two stores' same-keyed memories list separately."""
     ops = [
         _op("T1:S1", "neutral", 0.9, rubric={"k": _signals(acc="contradicted")},
@@ -1277,8 +1280,8 @@ def test_rubric_key_lists_carry_the_namespace():
             memories=[{"key": "k", "value": "v", "namespace": "store-b"}]),
     ]
     assert aggregate(ops, 2)["rubric"]["inaccurate_keys"] == [
-        {"namespace": "store-a", "key": "k", "spans": ["T1:S1"]},
-        {"namespace": "store-b", "key": "k", "spans": ["T1:S2"]},
+        {"namespace": "store-a", "item_id": "k", "key": "k", "spans": ["T1:S1"]},
+        {"namespace": "store-b", "item_id": "k", "key": "k", "spans": ["T1:S2"]},
     ]
 
 
@@ -2011,6 +2014,36 @@ def test_masked_head_masks_before_capping():
     assert key[:6] not in out
 
 
+def test_transport_exception_text_stays_masked(monkeypatch):
+    """A BadStatusLine's str IS the endpoint's raw status line: an echoing
+    proxy can reflect the credential there (a channel no error-body masking
+    sees), and the transport-failure path interpolates it into the recorded
+    error — mask it like every other echo path."""
+    key = "sk-secret+key"
+
+    def _open(req, timeout=None):
+        raise http.client.BadStatusLine(f"HTTP/1.1 401 Bearer {key} rejected")
+
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
+    span, steps = _judge_input_fixture()
+    cfg = JudgeConfig(base_url="http://x", api_key=key, model="m", max_attempts=1)
+    with pytest.raises(JudgeError) as excinfo:
+        judge_span(span, steps, cfg, [])
+    message = str(excinfo.value)
+    assert key not in message and "sk-secret%2Bkey" not in message
+    assert "***" in message
+
+
+def test_config_rejects_a_non_latin1_key_before_any_paid_call():
+    """The key rides an HTTP header (http.client encodes latin-1), so a
+    mangled paste carrying non-latin-1 characters can never be sent: fail
+    fast naming the KEY (never its value) instead of burning the attempt
+    budget on a request-build error mislabeled 'unparseable response
+    body'."""
+    with pytest.raises(SystemExit, match="latin-1"):
+        resolve_config({"BASE_URL": "http://x", "API_KEY": "sk-中 文", "MODEL": "m"})
+
+
 def test_strict_parse_violation_naming_the_key_stays_masked(monkeypatch):
     """A strict-parse error interpolates endpoint-provided memory keys and
     signal values; a 200 answer echoing the credential into one flows into
@@ -2261,12 +2294,32 @@ def test_top_level_objects_structural_chain_stays_linear():
     """Deeply nested malformed input must not chain one full-tail proof per
     brace (O(text²) on adversarial answers): a full-tail failure repeating
     the previous one's position means the candidate sits inside that
-    parse's extent — skip to the error, never re-probe the interior."""
+    parse's extent — re-probe a bounded few, then skip to the error."""
     import time
     text = '{"a":' * 20000 + "!"
     t0 = time.perf_counter()
     assert _top_level_objects(text) == []
     assert time.perf_counter() - t0 < 1.0
+
+
+def test_top_level_objects_repeat_failure_recovers_the_inner_object():
+    """An outer and an inner candidate failing at the SAME trailing
+    position: the outer is nested structure, never the answer — but the
+    interior may still close a COMPLETE object before the offender. The
+    repeat-position guard must re-probe a bounded few braces (not jump
+    straight past them), or a truncated answer holding that object reads as
+    a pure budget cut (a false "increase max_tokens" verdict) and the
+    reasoning_content rescue misses it. Past the cap, the scan jumps."""
+    # the reported miss: {"c": 1} closes before the offender X
+    assert _top_level_objects('{"a": {"b": {"c": 1} X') == [(12, 20)]
+    assert _complete_json_present('{"a": {"b": {"c": 1} X') == "embedded"
+    # a complete object LONGER than the probe window inside the dead extent:
+    # its full-tail proof succeeds (only failing proofs count as re-probes)
+    text = '{"a": {"b": {"c": "' + "x" * 5000 + '"} X'
+    assert _complete_json_present(text) == "embedded"
+    # past the re-probe cap the adversarial nest is jumped: deeper nesting
+    # than the cap still yields no spans (and stays fast — the chain test)
+    assert _top_level_objects('{"a": ' * (_STRUCTURAL_REPROBES + 5) + "!") == []
 
 
 def test_whole_digit_limit_answer_exhaustion_never_blames_the_budget(monkeypatch):
@@ -2359,6 +2412,39 @@ def test_digit_limit_answer_at_structured_tier_is_retried_never_degraded_free(mo
         "json_schema", "json_schema"]
     assert cfg.learned_tier == "structured"
     assert "past the digit limit" in record[1]["messages"][-1]["content"]
+
+
+def test_deep_nesting_at_structured_tier_degrades_free(monkeypatch):
+    """At the structured tier a complete-but-pathologically-nested answer is
+    the output-side proof the endpoint ignored the format field: constrained
+    decoding bounds the answer to the schema's handful of levels, so no
+    conforming endpoint can produce 100k-deep nesting — unlike the
+    digit-limit literal, which is schema-LEGAL and stays a model error. The
+    tier degrades free (no attempt budget consumed, no corrective note); at
+    the json/prompt tiers the same answer is a model error instead (pinned
+    by the digit-limit and truncation-gate tests)."""
+    deep = ('{"memories": [], "analysis": "", "evidence": [], "confidence": 0.5, "x": '
+            + "[" * 100000 + "]" * 100000 + "}")
+    answers = iter([deep, GOOD])
+    record = []
+
+    def _open(req, timeout=None):
+        body = json.loads(req.data.decode())
+        record.append(body)
+        return FakeResponse({"choices": [{"message": {"content": next(answers)}}]})
+
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
+    span, steps = _judge_input_fixture()
+    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", max_attempts=1)
+    warnings = []
+    verdict = judge_span(span, steps, cfg, warnings)
+    assert verdict["verdict"] == "positive"
+    # structured, then a FREE degrade to json — with max_attempts=1 a
+    # consumed budget would have exhausted instead
+    assert [b.get("response_format", {}).get("type") for b in record] == [
+        "json_schema", "json_object"]
+    assert cfg.learned_tier == "json"
+    assert any("nests too deeply" in w and "degrading to json" in w for w in warnings)
 
 
 def test_empty_400s_walk_the_whole_chain(monkeypatch):
@@ -3620,6 +3706,18 @@ def test_resolve_config_precedence():
     assert "x" not in str(exc.value).split("keys present")[0]
 
 
+def test_load_env_unreadable_or_non_utf8_fails_fast(tmp_path):
+    """An unreadable or non-UTF-8 .env is CLI misuse: a targeted SystemExit,
+    never an uncaught traceback (the .env is read before any paid judge
+    call)."""
+    with pytest.raises(SystemExit, match="cannot read the .env file"):
+        load_env(tmp_path)  # a directory is not readable as text
+    p = tmp_path / ".env"
+    p.write_bytes(b"API_KEY=sk-\xff\xfe\n")
+    with pytest.raises(SystemExit, match="cannot read the .env file"):
+        load_env(p)
+
+
 # ---------------------------------------------------------------- CLI
 
 
@@ -4165,3 +4263,17 @@ def test_cli_default_env_is_checkout_env(monkeypatch, tmp_path):
     assert rc == 0
     assert json.loads(out.read_text())["tool"]["judge_model"] == "judge-m"
     assert len(record) == 1
+
+
+def test_cli_missing_env_fails_fast_before_any_paid_call(monkeypatch, tmp_path):
+    """No .env file at all is CLI misuse: a targeted SystemExit naming the
+    path, raised before any paid judge call — never an uncaught traceback
+    mid-run."""
+    a = TrajBuilder().agent_turn(with_task=True).recall(REF_A)
+    _write_run(tmp_path / "runs", "t1", a)
+    calls = []
+    monkeypatch.setattr("injudge.judge.urlopen", lambda *a, **k: calls.append(1))
+    with pytest.raises(SystemExit, match="no .env file"):
+        injudge_main.main([str(tmp_path / "runs"), "--json", str(tmp_path / "out.json"),
+                           "--env", str(tmp_path / "missing.env")])
+    assert calls == []

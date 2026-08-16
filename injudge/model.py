@@ -8,6 +8,7 @@ attribution (memgraph/parse_trajectory.py).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 
 def step_range(first: int, last: int) -> str:
@@ -30,7 +31,7 @@ class ToolExec:
     name: str | None = None
     # the parsed arguments dict — or the raw wire string when the gate
     # recorded arguments that were not JSON
-    args: dict | str = field(default_factory=dict)
+    args: dict[str, Any] | str = field(default_factory=dict)
     result: str | None = None
     status: str | None = None  # completed | no_result | interrupted | None (missing end)
     seq_start: int | None = None  # seq of tool_execution_start (None if never observed)
@@ -70,10 +71,11 @@ class InjectionSpan:
     `step_gaps` lists steps inside [step_first, step_last] where the memory
     was NOT delivered. `new_keys`/`removed_keys` diff against the previous
     span in the same trajectory (first span: all keys are new). The diff
-    compares (namespace, key) identities — memory identity is the pair, so a
-    delivery switching stores is a change — but speaks in distinct bare keys
-    (the judge contract's vocabulary): a key whose store changed appears in
-    BOTH lists (its old identity left, its new one arrived).
+    compares (namespace, item) identities — memory identity is the pair, so
+    a delivery switching stores or items is a change — but speaks in
+    distinct bare keys (the judge contract's vocabulary): a key whose item
+    identity changed appears in BOTH lists (its old identity left, its new
+    one arrived).
     `seq_first`/`seq_last` bracket the span's ops (min/max event seq); a
     truncated-tail op merged across newer spans can make the range overlap
     a neighbor's.

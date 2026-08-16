@@ -15,9 +15,14 @@
   conventions — a run without annotations yields zero memory operations plus
   a validation note, valid input, not an error.
 - The code is adapter-general: identity and grouping ride the recorder's
-  portable MemoryRef fields (`namespace` / `identity_scheme` / `version_id` /
-  content sha256 — the tuple the gate's own `memory_identity` compares on).
-  Adapter extensions (`extensions.cure`) are read only as a *display*
+  portable MemoryRef fields, never adapter vocabulary. Span fingerprints
+  compare the version-level tuple the gate's own `memory_identity` compares
+  on (`namespace` / `identity_scheme` / `version_id` / content sha256);
+  item-level grouping (the graph registry, the span set-diffs, injudge's
+  usage rollups) rides (`namespace`, `item_id`) — stable across an item's
+  versions, unlike the version tuple — with the display key as the fallback
+  when no `item_id` was recorded. Adapter extensions (`extensions.cure`)
+  are read only as a *display*
   projection (key, memory_type, confidence, review status, rejection counts,
   declared extraction step) with the portable fields as the fallback, so a
   non-CURE adapter still parses; nothing may key behavior off one adapter's
@@ -50,7 +55,8 @@
   "recorded before its search end". Hand-edited artifacts
   must degrade, never raise — every field read off a possibly-corrupt event
   is shape-guarded (a JSON `true` is never an int index; unhashable values
-  never reach a dict/set lookup).
+  never reach a dict/set lookup; a digit string past the interpreter's
+  int-string limit never reaches `int()`).
 - Step semantics are shared by both tools through one rule
   (`parse_trajectory.classifying_messages`): agent step = ordinal of
   completed non-memory-lane turns, 1-based; lanes come from `memory_role_bind`
@@ -79,8 +85,13 @@
   (the refusal fires at the literal, before later garbage): then the
   invalid-JSON classification wins and the json tier degrades free;
   pathological nesting past the parser's recursion limit is the same class
-  (a complete-but-too-deep answer's braces closed — no budget produces or
-  fixes it), so the truncation gate never reads it as a mid-way cut either;
+  for the truncation gate (a complete-but-too-deep answer's braces closed —
+  no budget produces or fixes it), so the gate never reads it as a mid-way
+  cut either — but unlike the digit-limit literal its depth is
+  schema-ILLEGAL (constrained decoding bounds the answer to the schema's
+  handful of levels), so at the structured tier it is proof of an ignored
+  format field and degrades free, while at the json/prompt tiers it stays a
+  model error taking the corrective retry;
   a truncated answer that still slips past the completeness check (a stray
   complete object inside it reads as a finished answer) exhausts the
   corrective budget and ends in an error naming both the violation and the
@@ -192,8 +203,9 @@ These are load-bearing; never weaken them:
 - The memgraph HTML is an untrusted-content host: every trajectory- or
   artifact-controlled value interpolated into it is escaped — the embedded
   graph JSON has every `<` (plus U+2028/U+2029) unicode-escaped, the title is
-  HTML-escaped, and every JS interpolation into innerHTML/SVG goes through
-  `esc()`.
+  HTML-escaped, and every JS string interpolation into innerHTML/SVG goes
+  through `esc()` (pipeline-typed ints and tool-generated op ids — never
+  trajectory text — interpolate bare).
 
 # Artifact contracts
 
