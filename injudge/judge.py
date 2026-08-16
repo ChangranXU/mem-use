@@ -400,8 +400,9 @@ def _top_level_objects(text: str) -> list[tuple[int, int]]:
     """(start, end) spans of the JSON objects in `text`, each span
     raw_decode-proven (callers need no second parse). Every "{" outside an
     already-recorded span is a candidate — one nested in prose brackets or
-    an array ("[{...}]") records like a top-level one; only the interior of
-    an already-proven object is skipped. Prose brackets are not JSON
+    an array ("[{...}]") records like a top-level one; the only interiors
+    skipped are an already-proven object's and the tail a cut proves to sit
+    inside one unfinished value (below). Prose brackets are not JSON
     values, so a depth count is no proof of nesting: an unclosed "[" in
     leading prose must not blind the scan to a complete object after it
     (the truncation gate would misread that completed answer as a budget
@@ -417,7 +418,11 @@ def _top_level_objects(text: str) -> list[tuple[int, int]]:
     out of step with the JSON it would guard, and a "{" the tracker misread
     as quoted is exactly a completed answer the scan must not miss (a
     missed rescue, never a wrong one — every recorded span is
-    raw_decode-proven)."""
+    raw_decode-proven). A candidate nested past the parser's recursion
+    limit ends the scan: it is never the answer (the contract nests a
+    handful of levels), its interior fragments are not either, and
+    re-probing each of them would repay a full descent to the limit per
+    brace — minutes of CPU on adversarially deep endpoint output."""
     spans = []
     skip = 0  # candidates before here sit inside an already-scanned value
     # parse_int=str: the spans are grammar-only, and materializing a huge
@@ -459,8 +464,7 @@ def _top_level_objects(text: str) -> list[tuple[int, int]]:
         try:
             _obj, end = decoder.raw_decode(window, 0)
         except RecursionError:
-            skip = i + 1
-            continue
+            break  # deeper than the parser's limit: never the answer — stop
         except ValueError as e:
             pos = getattr(e, "pos", None)
             if pos is None or (
@@ -487,7 +491,7 @@ def _top_level_objects(text: str) -> list[tuple[int, int]]:
         try:
             _obj, end = decoder.raw_decode(text, i)
         except RecursionError:
-            skip = i + 1
+            break  # deeper than the parser's limit: never the answer — stop
         except ValueError as e:
             if getattr(e, "msg", "") == "Unterminated string starting at":
                 # no unescaped quote exists past the string start (escape
@@ -985,15 +989,18 @@ class _NonJSONConstant(ValueError):
     """NaN/Infinity in the judge's answer: neither is valid JSON (RFC 8259)."""
 
 
-# The two out-of-contract reasons the free-degrade gate classifies by: the
+# The out-of-contract reasons the free-degrade gate classifies by: the
 # int() digit-limit refusal (valid JSON — RFC 8259 sets no limit — that only
-# Python's conversion limit refuses, hence a model error at every tier) and
-# the invalid-JSON refusal (the json tier's output-side proof of a
-# format-ignoring endpoint). Constants, not literals at the use sites, so
-# the producer in _strict_parse and the consumer in judge_span cannot drift
-# apart.
+# Python's conversion limit refuses, hence a model error at every tier), the
+# invalid-JSON refusal (the json tier's output-side proof of a
+# format-ignoring endpoint), and the pathological-nesting refusal (valid
+# JSON the parser's recursion limit rejects — schema-illegal nesting, so
+# proof of an ignored field at the structured tier, a model error at the
+# others). Constants, not literals at the use sites, so the producer in
+# _strict_parse and the consumer in judge_span cannot drift apart.
 _DIGIT_LIMIT_ERROR = "carries an integer literal past the digit limit"
 _NOT_JSON_ERROR = "is not valid JSON"
+_DEEP_NESTING_ERROR = "nests too deeply to parse"
 
 
 def _reject_constant(value: str) -> None:
@@ -1031,7 +1038,7 @@ def _strict_parse(text: str) -> tuple[dict | None, str | None]:
         # pathologically nested but VALID JSON — at the json tier this is
         # the model's own error (JSON mode guarantees valid JSON), never a
         # free "ignored the format field" degrade
-        return None, "nests too deeply to parse"
+        return None, _DEEP_NESTING_ERROR
     except (json.JSONDecodeError, _NonJSONConstant):
         return None, _NOT_JSON_ERROR
     except ValueError:
@@ -1040,7 +1047,21 @@ def _strict_parse(text: str) -> tuple[dict | None, str | None]:
         # sets no limit), so a JSON-mode endpoint can legitimately produce
         # one: a model error taking the corrective retry, never the
         # output-side proof of an ignored format field that earns a free
-        # degrade (and memoizes the weakest tier off a valid answer)
+        # degrade (and memoizes the weakest tier off a valid answer). But
+        # the refusal fires at the literal, before the scanner ever reaches
+        # LATER invalidity — re-check the grammar with the conversion
+        # disabled: a text that is not valid JSON at all (trailing garbage,
+        # a NaN past the literal) is the json tier's ignored-format proof,
+        # never a model error. The re-parse descends nesting the first parse
+        # never reached (it stopped at the literal), so it can hit the
+        # recursion limit of its own — the same deep-nesting classification,
+        # never an exception escaping into the run.
+        try:
+            json.loads(text, parse_int=str, parse_constant=_reject_constant)
+        except RecursionError:
+            return None, _DEEP_NESTING_ERROR
+        except ValueError:
+            return None, _NOT_JSON_ERROR
         return None, _DIGIT_LIMIT_ERROR
     if not isinstance(obj, dict):
         return None, "is not a JSON object"
@@ -1344,15 +1365,34 @@ _MASK_MIN_KEY = 8  # a key this short is no credential: masking its every
 
 _HEX_ESCAPE = re.compile("%[0-9A-Fa-f]{2}")
 
+# The byte values even a hand-rolled aggressive escaper leaves literal:
+# ASCII alphanumerics (quote & co. also leave the unreserved -_.~, which is
+# why the spelling that encodes them needs its own form below).
+_ASCII_ALNUM = frozenset(b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
+
 
 def _key_forms(api_key: str) -> set[str]:
     """Every spelling of the key an echoing endpoint can carry: the raw
     value plus the percent-encoded forms a URL-logging gateway produces —
     quote (leaves '/' literal), quote_plus (encodes it, maps space to '+'),
-    safe='' (encodes everything) — each also in the lowercase-hex variant
-    some encoders emit (the key's own characters keep their case, so only
-    the escapes are lowercased)."""
-    forms = {api_key, quote(api_key), quote(api_key, safe=""), quote_plus(api_key)}
+    safe='' (encodes it too; none of the three ever encodes the unreserved
+    -_.~ and alphanumerics), the fully-encoded spelling an aggressive
+    encoder emits (every byte percent-encoded), and the non-alphanumeric
+    spelling a hand-rolled escaper emits (every byte outside [A-Za-z0-9]
+    percent-encoded — an sk- key's dash becomes %2D) — each also in the
+    lowercase-hex variant some encoders emit (the key's own characters keep
+    their case, so only the escapes are lowercased)."""
+    forms = {
+        api_key,
+        quote(api_key),
+        quote(api_key, safe=""),
+        quote_plus(api_key),
+        "".join(f"%{b:02X}" for b in api_key.encode("utf-8")),
+        "".join(
+            chr(b) if b in _ASCII_ALNUM else f"%{b:02X}"
+            for b in api_key.encode("utf-8")
+        ),
+    }
     return forms | {_HEX_ESCAPE.sub(lambda m: m.group(0).lower(), f) for f in forms}
 
 
@@ -1371,19 +1411,12 @@ def _mask_key(text: str, api_key: str) -> str:
 
 
 def _masked_head(text: str, api_key: str, cap: int) -> str:
-    """The capped, masked form of a kept endpoint dump. The head is taken
-    before masking — with headroom for the LONGEST masked form (the
-    urlencoded spellings of a base64-style key run up to ~3× the raw one),
-    so a key straddling the cut in any form still masks whole — because
-    masking first would spend every replace pass over a full body the cap
-    keeps only the start of."""
-    if not api_key or len(api_key) < _MASK_MIN_KEY:
-        return text[:cap]
-    forms = _key_forms(api_key)
-    head = text[: cap + max(map(len, forms))]
-    for form in sorted(forms, key=len, reverse=True):
-        head = head.replace(form, "***")
-    return head[:cap]
+    """The capped, masked form of a kept endpoint dump. The mask runs over
+    the WHOLE text and the cap is taken after: masking shrinks each
+    occurrence to "***", so masking a capped head would let that shrink drag
+    a later occurrence — straddling the head's end, never fully masked — back
+    into the kept output as an unmasked key prefix."""
+    return _mask_key(text, api_key)[:cap]
 
 
 def judge_span(
@@ -1420,7 +1453,9 @@ def judge_span(
     valid JSON, never schema conformance) — is the same endpoint property
     discovered from the output side, so the tier degrades free too; a
     valid-but-wrong-shape answer at the json tier, and a digit-limit
-    answer at any tier, are model errors and take the corrective retry
+    answer at any tier (a text that is invalid JSON anyway classifies as
+    invalid JSON — the refusal fires at the literal before later garbage),
+    are model errors and take the corrective retry
     instead.
     The learned-tier memo records only a tier that produced a conforming
     answer, so later spans start at a tier proven to work. At the final
@@ -1443,7 +1478,7 @@ def judge_span(
     last_text = ""  # latest out-of-contract answer; transport failures never erase it
     last_text_error = ""  # that answer's own contract violation (assigned with last_text)
     last_truncated = False  # ... and whether that answer carried the truncation signal
-    rejection: str | None = None  # full body of the last 400/422; any answered request resets it
+    rejection: bytes | None = None  # raw body of the last 400/422; any answered request resets it
     while True:
         req = _build_request(cfg, messages, tier)
         pause: float | None = None
@@ -1451,11 +1486,15 @@ def judge_span(
             with urlopen(req, timeout=cfg.timeout) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
         except HTTPError as e:
-            body = ""
+            raw = b""
             try:
-                body = e.read().decode("utf-8", "replace")
+                raw = e.read()
             except Exception:
                 pass
+            # U+FFFD replacement makes distinct non-UTF-8 bodies decode equal:
+            # display text comes from the decode, the identity comparison from
+            # the raw bytes
+            body = raw.decode("utf-8", "replace")
             detail = _masked_head(body, cfg.api_key, 300)  # capped in messages/artifacts; comparisons are not
             if e.code == 429 or e.code >= 500:
                 last_error = f"HTTP {e.code}: {detail}"
@@ -1491,13 +1530,13 @@ def judge_span(
                     # ONE generic error body repeats it across the format
                     # tiers too, and failing fast on the first repeat would
                     # strand the walk before the tier that answers. The
-                    # comparison runs on the FULL body: two distinct
+                    # comparison runs on the FULL raw body: two distinct
                     # rejections sharing a long envelope prefix (only a
                     # trailing field differs) are not "the identical
                     # rejection". An EMPTY body is silence, not an unchanged
                     # rejection: a gateway that drops per-tier error text
                     # still gets the full walk.
-                    if rejection is not None and body and body == rejection:
+                    if rejection is not None and raw and raw == rejection:
                         raise JudgeError(
                             f"HTTP {e.code} unchanged across conformance tiers "
                             f"(tier-independent, not a format refusal): {detail}"
@@ -1505,7 +1544,7 @@ def judge_span(
                     raise JudgeError(f"HTTP {e.code}: {detail}") from e
                 warnings.append(
                     f"{span.id}: tier {tier} rejected (HTTP {e.code}); degrading to {nxt}")
-                rejection = body
+                rejection = raw
                 tier = nxt
                 continue
             else:

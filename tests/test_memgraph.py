@@ -135,6 +135,32 @@ def test_corrupt_seq_event_never_hijacks_a_turn(tmp_path):
     assert any("non-integer seq" in w for w in warnings)
 
 
+def test_corrupt_seq_classifies_by_file_position_first_wins(tmp_path):
+    """A seq-less corrupt classifier placed BEFORE the real one in the file
+    wins the first-wins classification — file position IS the recording
+    order the whole reader trusts (a trailing fabrication would instead
+    detach retraction/order pairings from their targets); the corruption is
+    never silent (its synthetic-seq note, and the collision note when a
+    later real seq takes the same number)."""
+    from memgraph.parse_trajectory import load_events
+
+    b = TrajBuilder().agent_turn(with_task=True).agent_turn()
+    corrupt = {"type": "message_end", "proxy_source": "EXTRACT",
+               "role": "assistant", "turn": 1, "content": "corrupt"}
+    lines = [json.dumps(corrupt)] + [json.dumps(e) for e in b.events]
+    d = tmp_path / "t"
+    d.mkdir()
+    (d / "trajectory.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    warnings = []
+    traj, _, _ = parse_trajectory(d, warnings)
+    # the corrupt event sits first in file order: turn 1 reads as a memory
+    # turn (the only positional evidence it has), with the corruption noted
+    assert traj.n_steps == 1
+    assert any("assigned synthetic seq 1" in w for w in warnings)
+    events = load_events(d / "trajectory.jsonl", [])
+    assert events[0]["seq"] == 1 and events[0]["content"] == "corrupt"
+
+
 def test_appended_corrupt_seq_op_numbers_last(tmp_path):
     """Under the op-building re-sorts a corrupt-seq event keeps its FILE
     position (the synthetic seq only makes it comparable, never re-ordered)
@@ -305,6 +331,47 @@ def test_shared_lane_display_follows_the_final_lane_set(tmp_path):
     assert traj.memory_lanes == set()
     assert traj.n_steps == 2  # both shared-lane turns count as agent steps
     assert any("main and memory traffic share" in w for w in warnings)
+
+
+def test_rewrite_markers_flag_memory_traffic_per_final_lane_set(tmp_path):
+    """On a multi-memory-lane run the singular display lane is None, so the
+    HTML cannot compare proxy_source against it (null === null would mark
+    unprefixed main-lane rewrites as memory traffic, and the named memory
+    lanes would never match): each rewrite marker carries its memory-traffic
+    flag computed at parse time against the final classification set."""
+    b = TrajBuilder(main="MAIN", mem="MEM1")
+    b.agent_turn(with_task=True)
+    sid2 = "22222222-2222-4333-8444-555555555555"
+    b.annotation("memory_session", {
+        "trace_session_id": sid2, "session_kind": "episode",
+        "adapter": b.adapter}, lane="MAIN")
+    b.annotation("memory_role_bind", {
+        "trace_session_id": sid2, "logical_role": "main",
+        "adapter": b.adapter}, lane="MAIN")
+    b.annotation("memory_role_bind", {
+        "trace_session_id": sid2, "logical_role": "memory",
+        "adapter": b.adapter}, lane="MEM2")
+    b.rewrite(src="MAIN", replay_tool_ends=False)   # main-lane rewrite
+    b.rewrite(src="MEM1", replay_tool_ends=False)   # memory-lane rewrite
+    traj, _, warnings = parse(b, tmp_path)
+    assert traj.memory_lane is None  # two memory lanes bound
+    assert traj.memory_lanes == {"MEM1", "MEM2"}
+    flags = {r["proxy_source"]: r["on_memory_lane"] for r in traj.rewrites}
+    assert flags == {"MAIN": False, "MEM1": True}
+    assert any("multiple memory lanes" in w for w in warnings)
+
+
+def test_render_html_colors_rewrites_by_the_memory_flag():
+    """The rewrite coloring reads the per-marker on_memory_lane flag computed
+    at parse time — never the singular memory_lane (None on multi-lane runs)
+    — so the JS holds no proxy_source === memory_lane comparison at all."""
+    from memgraph.html import render_html
+
+    html = render_html({"trajectories": [], "ops": [], "memories": [],
+                        "edges": [], "validation": []})
+    assert "rw.on_memory_lane?" in html
+    assert ".every(r=>r.on_memory_lane)" in html
+    assert "t.memory_lane" not in html
 
 
 def test_corrupt_field_values_degrade_never_crash(tmp_path):
@@ -1757,7 +1824,8 @@ def test_lone_surrogate_run_id_never_aborts_the_stdout_summary(tmp_path):
     """A hand-edited run_id carrying a \\ud800 JSON escape must not crash the
     CLI's per-trajectory stdout line (an uncaught UnicodeEncodeError would
     abort before the HTML is written); the line prints escaped instead."""
-    import subprocess, sys as _sys
+    import subprocess
+    import sys as _sys
     b = TrajBuilder().agent_turn(with_task=True).recall()
     d = b.write(tmp_path / "t1", run_id="run-\ud800-id")
     root = Path(__file__).resolve().parent.parent

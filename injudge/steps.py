@@ -330,8 +330,18 @@ def prompt_tokens_total(events: list[dict], warnings: list[str]) -> float:
     about, never silent: the total undercounts otherwise. A retraction
     matching no live record is out-of-order or duplicated corruption —
     warned about too, since an out-of-order one leaves its record billed.
+    "No live record" reads the slot's own record order: none un-annulled at
+    the slot, or the previous record/retraction event itself a retraction —
+    the recorder's stream alternates record/retraction at a slot (only a new
+    record re-arms it), so a retraction following a retraction is a
+    duplicated hand-edit; letting it pop the record beneath the first copy's
+    target would underbill the budget silently (two records go live at one
+    slot without an intervening retraction only across a history_rewritten
+    epoch — still billed exactly once — and the older one is no current
+    retraction's target).
     """
     live: dict[tuple, list[dict]] = {}  # (proxy_source, msg) -> unannulled records
+    last: dict[tuple, str] = {}  # slot key -> its latest usage-stream event type
     dropped_records = 0
     dropped_retractions = 0
     unmatched_retractions = 0
@@ -350,12 +360,13 @@ def prompt_tokens_total(events: list[dict], warnings: list[str]) -> float:
             continue
         if usage_record:
             live.setdefault(key, []).append(e)
+            last[key] = "message_end"
         else:
-            stack = live.get(key)
-            if stack:
-                stack.pop()
+            if last.get(key) == "message_end":
+                live[key].pop()
             else:
                 unmatched_retractions += 1
+            last[key] = "message_retracted"
     total = 0
     for stack in live.values():
         for e in stack:

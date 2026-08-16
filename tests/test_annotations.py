@@ -8,6 +8,7 @@ annotation events alone — never from prompt text or label conventions.
 """
 
 import hashlib
+import json
 
 from injudge.spans import content_fingerprint, group_spans
 from injudge.steps import build_step_stream
@@ -17,6 +18,7 @@ from memgraph.annotations import (
     resolved_content_text,
 )
 from memgraph.graph import load_and_build
+from memgraph.parse_trajectory import parse_trajectory
 from annotated_fixtures import (
     MAIN,
     MEM,
@@ -571,6 +573,29 @@ def test_missing_memory_binding_fallback_collects_every_op_event_lane(tmp_path):
     assert any("without a memory role binding" in w for w in warnings)
 
 
+def test_missing_binding_fallback_drops_the_drifted_main_lane(tmp_path):
+    """Bindings missing (corruption) and an operation's END drifted onto the
+    main lane: the fallback collects every op-event lane, but the session and
+    delivery events are main-lane traffic by protocol (the gate records both
+    only there), so the shared-lane guard treats their lanes as main-side —
+    a drifted main lane in the memory set would mark every agent turn on it
+    as a memory turn and collapse the step count to zero."""
+    b = AnnotatedBuilder(main=MAIN, mem=MEM)
+    b.events = [e for e in b.events if e.get("type") != "memory_role_bind"]
+    b.agent_turn(with_task=True)
+    b.memory_turn()
+    b.generate(extraction_step="1")
+    # the drift: the generation's end event lands on the main lane
+    end = next(e for e in b.events if e["type"] == "memory_generate_end")
+    end["proxy_source"] = MAIN
+    for i, e in enumerate(b.events, 1):
+        e["seq"] = i
+    traj, _ops, warnings = parse(b, tmp_path)
+    assert traj.n_steps == 1  # the main-lane agent turn still counts
+    assert traj.memory_lanes == {MEM}
+    assert any("share 'MAIN'" in w for w in warnings)
+
+
 def test_fallback_display_lane_follows_the_post_guard_lane_set(tmp_path):
     """No memory binding + op events straddling {unprefixed, MEM} + an
     unprefixed MAIN lane: the shared-lane guard drops the unprefixed lane
@@ -617,6 +642,26 @@ def test_shared_unprefixed_lane_counts_all_turns_as_agent_steps(tmp_path):
     assert any("share the unprefixed lane" in w for w in warnings)
     steps = build_step_stream(b.events, traj.memory_lanes, [])
     assert len(steps) == traj.n_steps  # injudge/memgraph attribution parity
+
+
+def test_fallback_keeps_distinct_unprefixed_memory_lane(tmp_path):
+    """Bindings missing, the session/delivery events stamped on a NAMED main
+    lane, and the operation events on the unprefixed one: the main-side
+    evidence is the named lane, so the unprefixed lane is genuinely the
+    memory lane — seeding the guard's main side with the unbound main lane
+    (None) would drop it on a bogus "share" and count the memory turn as an
+    agent step."""
+    b = AnnotatedBuilder(main=MAIN, mem=None)  # session stamped on MAIN
+    b.events = [e for e in b.events if e.get("type") != "memory_role_bind"]
+    b.agent_turn(with_task=True)
+    b.memory_turn()  # unprefixed: mem=None drops the proxy_source key
+    b.generate(extraction_step="1")
+    for i, e in enumerate(b.events, 1):
+        e["seq"] = i
+    traj, _ops, warnings = parse(b, tmp_path)
+    assert traj.memory_lanes == {None}
+    assert traj.n_steps == 1  # the MAIN turn only; the unprefixed turn is memory
+    assert not any("share" in w for w in warnings)
 
 
 def test_delivery_recent_turn_fallback_is_chronological_under_pipelining(tmp_path):
@@ -985,22 +1030,36 @@ def test_doubly_corrupt_delivery_reports_both_problems():
     assert any("non-string delivery_id" in p for p in idx.problems)
 
 
-def test_lanes_use_the_first_binding_per_role_across_sessions():
-    """A multi-session index summarizes each display lane from the first
-    session that binds it (the turn classification merges all sessions'
-    memory lanes — the display must not contradict it)."""
-    idx = build_annotation_index([
-        {"seq": 1, "type": "memory_session", "payload": {"trace_session_id": "S1"}},
-        {"seq": 2, "type": "memory_role_bind", "proxy_source": "M1",
-         "payload": {"trace_session_id": "S1", "logical_role": "main"}},
-        {"seq": 3, "type": "memory_session", "payload": {"trace_session_id": "S2"}},
-        {"seq": 4, "type": "memory_role_bind", "proxy_source": "A2",
-         "payload": {"trace_session_id": "S2", "logical_role": "main"}},
-        {"seq": 5, "type": "memory_role_bind", "proxy_source": "M2",
-         "payload": {"trace_session_id": "S2", "logical_role": "memory"}},
-    ])
-    # S1 binds no memory lane; the display falls to S2's instead of None
-    assert idx.lanes() == ("M1", "M2")
+def test_lane_guard_covers_every_sessions_main_binding(tmp_path):
+    """The shared-lane guard's main side carries EVERY session's main lane,
+    never just the first binder's: session 1 binds memory to EXTRACT, session
+    2 binds main to EXTRACT — that lane carries session-2 agent traffic, so
+    leaving it in the memory set would silently swallow its turns (and the
+    old first-binder-only main side never fired the share warning)."""
+    b = AnnotatedBuilder()  # session 1: main MAIN, memory EXTRACT
+    b.agent_turn(with_task=True)
+    b.memory_turn()
+    b.generate(extraction_step="1")
+    b.agent_turn()
+    sid2 = "99999999-8888-7777-6666-555555555555"
+    b.annotation("memory_session", {"trace_session_id": sid2,
+                                    "session_kind": "episode",
+                                    "adapter": {"name": "cure", "version": "0.1.0"}},
+                 lane=b.mem)
+    b.annotation("memory_role_bind", {"trace_session_id": sid2,
+                                      "logical_role": "main"}, lane=b.mem)
+    b.annotation("memory_role_bind", {"trace_session_id": sid2,
+                                      "logical_role": "memory"}, lane="MEM2")
+    b._emit("turn_start", turn=4, call_id="000004-y", proxy_source=b.mem)
+    b._emit("message_end", proxy_source=b.mem, role="assistant", msg=2,
+            turn=4, content="session-2 agent traffic on EXTRACT")
+    b._emit("turn_end", turn=4, status="completed", proxy_source=b.mem)
+    traj, _ops, warnings = parse(b, tmp_path)
+    # session 2's turn on EXTRACT counts (the silent swallow is the bug);
+    # session 1's memory turn on it counts too — the shared lane cannot
+    # separate its traffic, the warning's own rule
+    assert traj.n_steps == 4
+    assert any("main and memory traffic share 'EXTRACT'" in w for w in warnings)
 
 
 # ---------------------------------------------------------------- injudge integration
@@ -1394,6 +1453,41 @@ def test_corrupt_seq_retraction_keeps_its_stream_position(tmp_path):
     assert any("non-integer seq" in w for w in warnings)
 
 
+def test_synthetic_seq_collision_no_false_order_problem(tmp_path):
+    """A search end whose seq was hand-edited away keeps its file position
+    under a synthetic seq one past the highest seen — which pre-claims the
+    number a LATER real event legitimately carries. A delivery whose real seq
+    collides with that synthetic followed its search in the recorded stream
+    (file order proves it): the collision note names the reader's pre-claim,
+    and the delivery-order check must not false-fire on top of it."""
+    events = [
+        *_structural_events(),
+        {"seq": 4, "type": "memory_search_start", "proxy_source": MEM,
+         "binding_status": "not_requested", "annotation_id": "a-start",
+         "payload": {"trace_session_id": "S", "operation_id": "op-1",
+                     "query": {"availability": "inline", "text": "q"}}},
+        {"type": "memory_search_end", "proxy_source": MEM,  # seq stripped
+         "binding_status": "no_call", "annotation_id": "a-end",
+         "payload": {"trace_session_id": "S", "operation_id": "op-1",
+                     "status": "completed", "returned": []}},
+        {"seq": 5, "type": "memory_delivery", "proxy_source": MAIN,
+         "binding_status": "no_call", "annotation_id": "a-del",
+         "payload": {"trace_session_id": "S", "delivery_id": "d-1",
+                     "search_operation_id": "op-1", "status": "placed",
+                     "memories": []}},
+    ]
+    d = tmp_path / "t1"
+    d.mkdir()
+    (d / "trajectory.jsonl").write_text(
+        "\n".join(json.dumps(e) for e in events) + "\n", encoding="utf-8")
+    warnings = []
+    parse_trajectory(d, warnings)
+    # the search end took synthetic 5 (one past high), pre-claiming the
+    # delivery's real seq — the recorded stream itself was in order
+    assert any("collides with the synthetic seq" in w for w in warnings)
+    assert not any("recorded before its search end" in w for w in warnings)
+
+
 def test_corrupt_seq_delivery_order_check_still_fires(tmp_path):
     """A delivery recorded before its search end with its seq hand-edited
     away keeps its file position, so the synthetic seq still precedes the
@@ -1445,7 +1539,7 @@ def test_session_not_on_the_main_lane_is_a_problem():
 
 def test_delivery_search_integrity_problems():
     """The recall ops and span fingerprints trust the delivery↔search link:
-    a delivery recorded at/before its search's end, or delivering memories
+    a delivery recorded before its search's end, or delivering memories
     the search never returned (or returned in another order), is corruption —
     the same checks the recorder's retrieval index runs."""
     def search_events(op, seq, returned):
@@ -1473,7 +1567,7 @@ def test_delivery_search_integrity_problems():
     idx = build_annotation_index([
         *_structural_events(),
         *search_events("op-1", 5, [v1, v2]),
-        delivery(5, "d-early", "op-1", []),  # at its search's end seq
+        delivery(4, "d-early", "op-1", []),  # before its search's end seq
         delivery(6, "d-alien", "op-1", [{"version_id": "v9", "namespace": "ns"}]),
         delivery(7, "d-reordered", "op-1", [v2, v1]),  # right set, wrong order
         delivery(8, "d-ok", "op-1", [v2]),  # an in-order subset
@@ -1485,6 +1579,45 @@ def test_delivery_search_integrity_problems():
     assert any("d-reordered" in p and "not an ordered search subsequence" in p
                for p in idx.problems)
     assert not any("d-ok" in p for p in idx.problems)
+
+
+def test_delivery_order_seq_tie_defers_to_file_position():
+    """Equal delivery/search-end seqs are never a clean-stream state
+    (append-only seqs strictly increase): the tie is reader- or hand-edit
+    corruption, so only the file position can call the order. A delivery
+    sitting BEFORE its search end in the stream is a real violation; one
+    sitting AFTER it followed its search — the tie is the synthetic-collision
+    or duplicate-seq artifact (load_events' own notes cover it), and the
+    order check must not false-fire."""
+    def search_events(op, seq):
+        return [
+            {"seq": seq - 1, "type": "memory_search_start", "proxy_source": MEM,
+             "binding_status": "not_requested",
+             "payload": {"trace_session_id": "S", "operation_id": op, "query": {}}},
+            {"seq": seq, "type": "memory_search_end", "proxy_source": MEM,
+             "binding_status": "no_call",
+             "payload": {"trace_session_id": "S", "operation_id": op,
+                         "status": "completed", "returned": []}},
+        ]
+
+    def delivery(seq, delivery_id, op):
+        return {"seq": seq, "type": "memory_delivery", "proxy_source": MAIN,
+                "binding_status": "no_call",
+                "payload": {"trace_session_id": "S", "delivery_id": delivery_id,
+                            "search_operation_id": op, "status": "placed",
+                            "memories": []}}
+
+    s = search_events("op-1", 5)
+    # tied seqs, delivery BEFORE its search end in the stream: a violation
+    idx = build_annotation_index([
+        *_structural_events(), s[0], delivery(5, "d-before", "op-1"), s[1]])
+    assert any("d-before" in p and "recorded before its search end" in p
+               for p in idx.problems)
+    # tied seqs, delivery AFTER its search end: it followed — no violation
+    idx = build_annotation_index([
+        *_structural_events(), *s, delivery(5, "d-after", "op-1")])
+    assert not any("d-after" in p and "recorded before its search end" in p
+                   for p in idx.problems)
 
 
 def _other_session_events():
@@ -1774,3 +1907,26 @@ def test_slot_index_matches_per_locator_scans_and_tolerates_extra_retractions():
          "msg": 1, "content": "later record"},
     ]
     assert resolved_content_text(ref, events2, {"main": MAIN}) == "later record"
+
+
+def test_locator_duplicate_retraction_never_pops_beneath_its_copy():
+    """A duplicated message_retracted (a hand-edited copy) lands immediately
+    after its original at the slot: the recorder's stream alternates
+    record/retraction there (only a new record re-arms a retracted slot), so
+    a retraction following a retraction matches no live record of its own and
+    is skipped — never popping the record beneath the first copy's target,
+    one it never annulled (two records go live at one slot without an
+    intervening retraction only across a history_rewritten epoch)."""
+    ref = {"availability": "trajectory_message", "sha256": None,
+           "locator": {"logical_role": "main", "msg_index": 1}}
+    events = [
+        {"seq": 1, "type": "message_end", "proxy_source": MAIN, "role": "user",
+         "msg": 1, "content": "epoch one"},
+        {"seq": 2, "type": "message_end", "proxy_source": MAIN, "role": "user",
+         "msg": 1, "content": "epoch two"},
+        {"seq": 3, "type": "message_retracted", "proxy_source": MAIN, "msg": 1},
+        {"seq": 4, "type": "message_retracted", "proxy_source": MAIN, "msg": 1},
+    ]
+    # the retraction annuls the newer record; its duplicate pops nothing —
+    # the surviving un-annulled record still answers the digest-less ref
+    assert resolved_content_text(ref, events, {"main": MAIN}) == "epoch one"

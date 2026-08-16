@@ -43,16 +43,24 @@
   both — the corrupt copy costs that one real delivery its verdict
   annotation, the price of keeping the synthetic at the event's file
   position (a trailing fabrication would fabricate order violations in
-  other pairings instead). Hand-edited artifacts
+  other pairings instead). The delivery↔search order check cannot
+  false-fire on the collision either: an exact seq tie is never a
+  clean-stream state, so the check defers to the file position there and
+  only a delivery also sitting before its search end in the stream is
+  "recorded before its search end". Hand-edited artifacts
   must degrade, never raise — every field read off a possibly-corrupt event
   is shape-guarded (a JSON `true` is never an int index; unhashable values
   never reach a dict/set lookup).
 - Step semantics are shared by both tools through one rule
   (`parse_trajectory.classifying_messages`): agent step = ordinal of
   completed non-memory-lane turns, 1-based; lanes come from `memory_role_bind`
-  (falling back to the operation events' own lanes, with a warning, when
-  bindings are missing). Anything attributing steps elsewhere must reuse that
-  rule, never re-derive it.
+  (falling back to the operation events' own lanes — minus the lanes the
+  session/delivery events stamped, main-lane traffic by protocol — with a
+  warning, when bindings are missing). A lane that is main traffic in ANY
+  session — every session's main binding joins the guard's main side, never
+  just the first binder's — is dropped from the memory set with a warning;
+  its turns count as agent steps. Anything attributing steps elsewhere must
+  reuse that rule, never re-derive it.
 - injudge's span verdict is derived in code from the rubric (any misused ⇒
   negative, else any used ⇒ positive, else neutral) — never asked of the LLM.
   The judge walks the conformance tier chain structured → json → prompt
@@ -67,7 +75,9 @@
   retry; an integer literal past Python's digit limit reads as a finished
   answer too (RFC 8259 sets no limit, so its braces closed) and is a model
   error at every tier, taking the corrective retry, never the free degrade
-  an ignored format field earns;
+  an ignored format field earns — unless the text is invalid JSON anyway
+  (the refusal fires at the literal, before later garbage): then the
+  invalid-JSON classification wins and the json tier degrades free;
   a truncated answer that still slips past the completeness check (a stray
   complete object inside it reads as a finished answer) exhausts the
   corrective budget and ends in an error naming both the violation and the
@@ -171,7 +181,8 @@ These are load-bearing; never weaken them:
   echoing the request (an auth/proxy fault reflecting the credential — an
   HTTP error page or a 200 answer alike) is masked before any of its text
   reaches a verdict, judge_raw, or validation note, in the raw and every
-  percent-encoded spelling (quote, quote_plus, fully-encoded, and each in
+  percent-encoded spelling (quote, quote_plus, fully-encoded,
+  non-alphanumeric-encoded — an sk- key's dash as %2D — and each in
   lowercase hex). A key shorter than 8 characters is treated as no
   credential and left unmasked: masking its every occurrence would destroy
   the kept endpoint output while protecting nothing.
@@ -186,8 +197,10 @@ These are load-bearing; never weaken them:
 - memgraph's graph artifact (`--json`; also embedded verbatim in the HTML) is
   `{tool, trajectories, ops, memories, edges, validation}`. Fields the HTML
   does not read (e.g. `edges`, recall `content_chars`, the per-injection
-  verdict role marker) are still part of the JSON contract — the HTML embeds
-  the same dict by design; do not prune them from one consumer only.
+  verdict role marker, the singular `memory_lane` — the HTML colors rewrite
+  markers by each marker's own `on_memory_lane` flag, computed at parse time
+  against the final lane set) are still part of the JSON contract — the HTML
+  embeds the same dict by design; do not prune them from one consumer only.
 - injudge writes `injudge.report/v4` (`{tool, generated_at, trajectories,
   operations, injections, aggregates, validation}`), rewritten after every
   trajectory so a crash keeps completed work. memgraph joins it by

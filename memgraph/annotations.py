@@ -113,21 +113,6 @@ class AnnotationIndex:
     def annotated(self) -> bool:
         return bool(self.sessions or self.operations or self.deliveries)
 
-    def lanes(self) -> tuple[str | None, str | None]:
-        """(main_lane, memory_lane): each role from the first session that
-        binds it — a multi-session run's display summary, consistent with
-        the all-sessions merge the turn classification uses.
-
-        Either may be None (the unprefixed lane); missing bindings yield
-        (None, None) and are reported in `problems` already.
-        """
-        lane: dict[str, str | None] = {}
-        for sid in self.sessions:
-            for role in ("main", "memory"):
-                if role not in lane and role in self.binds.get(sid, {}):
-                    lane[role] = self.binds[sid][role]
-        return lane.get("main"), lane.get("memory")
-
 
 def _check_payload_list(event: dict, key: str, problems: list[str]) -> None:
     """Report a corrupt non-list payload field the consumers iterate (the
@@ -146,6 +131,14 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
     index = AnnotationIndex()
     seen_annotation_ids: set[str] = set()
     seen_delivery_ids: set[str] = set()
+    # Each event's file position — the positional truth every consumer
+    # trusts. The seq-based delivery-order check below defers to it on an
+    # exact tie: equal seqs are never a clean-stream state (append-only seqs
+    # strictly increase), so the equality is the reader's synthetic seq
+    # pre-claiming the delivery's real number (load_events' collision note
+    # covers it) or a hand-duplicated value (its non-increasing note covers
+    # it) — never evidence the delivery preceded its search end.
+    positions = {id(event): pos for pos, event in enumerate(events)}
 
     for event in events:
         # the set membership test hashes its operand: an unhashable
@@ -467,7 +460,14 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
         delivery_seq, end_seq = event.get("seq"), search.end.get("seq")
         if not all(is_int(value) for value in (delivery_seq, end_seq)):
             index.problems.append(f"delivery {delivery_id}: missing or non-integer seq")
-        elif delivery_seq <= end_seq:
+        elif delivery_seq < end_seq or (
+            # on an exact seq tie only the file position can call the order
+            # (see the positions map above): a delivery sitting AFTER its
+            # search end in the stream followed it — the tie is the synthetic
+            # collision's or a hand-duplicate's artifact, not a violation
+            delivery_seq == end_seq
+            and positions[id(event)] < positions[id(search.end)]
+        ):
             index.problems.append(f"delivery {delivery_id}: recorded before its search end")
         memories = payload.get("memories")
         # A total map, like the recorder's memory_identity: a malformed
@@ -585,8 +585,15 @@ def resolved_content_text(
     without a digest match (a corrupt or digest-less ref) does the slot's
     latest un-annulled record speak — the same annul rule injudge's
     prompt_tokens_total applies, but tolerant of corruption: a retraction
-    matching no live record (a duplicated hand-edit) is skipped, never
-    allowed to pop a live record it never annulled.
+    matching no live record is skipped, never allowed to pop a live record it
+    never annulled. "No live record" reads the slot's own record order: the
+    stack empty, or the previous record/retraction event itself a retraction
+    (the recorder's stream alternates record/retraction at a slot — one
+    retraction annuls the pending draft, and only a new record re-arms the
+    slot — so a retraction following a retraction is a duplicated hand-edit,
+    however deep the stack still is: two records go live at one slot without
+    an intervening retraction only across a history_rewritten epoch, and the
+    older one is the dropped epoch's, no current retraction's target).
     """
     text = content_text(ref)
     if text is not None or not isinstance(ref, dict):
@@ -608,11 +615,14 @@ def resolved_content_text(
     declared = ref.get("sha256")
     live: list[str] = []  # the slot's un-annulled message_end texts, record order
     index = slots if slots is not None else slot_index(events)
+    last_was_retract = False
     for e in index.get((lane, msg_index), []):
         if e.get("type") == "message_retracted":
-            if live:
+            if live and not last_was_retract:
                 live.pop()
+            last_was_retract = True
         elif e.get("type") == "message_end":
+            last_was_retract = False
             content = e.get("content")
             # the verifier digests string contents only; a non-str content
             # (parts list) or an empty string (resolves to nothing, like the

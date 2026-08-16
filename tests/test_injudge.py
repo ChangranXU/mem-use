@@ -1698,6 +1698,9 @@ def test_reasoning_rescue_recovers_a_draft_past_the_probe_window(monkeypatch):
                       output_format="json")
     assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
     assert len(record) == 1  # rescued without a retry
+
+
+def test_build_request_format_fields_per_tier():
     """Each tier's provider-native format field; the prompt tier sends none."""
     msgs = [{"role": "system", "content": "S"}, {"role": "user", "content": "U"}]
 
@@ -1942,32 +1945,39 @@ def test_masking_skips_degenerate_short_keys():
 
 def test_masking_covers_every_urlencoded_spelling():
     """A URL-logging gateway can percent-encode the key with any encoder —
-    quote (leaves '/' literal), quote_plus, fully-encoded — and some emit
-    lowercase hex escapes. Each spelling must mask (the leak the masking
-    feature exists to prevent), with _masked_head's straddle headroom
-    covering the longest of them."""
+    quote (leaves '/' literal), quote_plus, safe='' — encode every byte
+    outright, or encode every non-alphanumeric byte like a hand-rolled
+    escaper (none of the urllib spellings ever encodes the unreserved
+    -_.~ and alphanumerics, so an sk- key's dash only escapes in those two
+    aggressive spellings), and some emit lowercase hex escapes. Each
+    spelling must mask (the leak the masking feature exists to prevent),
+    even straddling _masked_head's cap."""
     from urllib.parse import quote, quote_plus
 
     from injudge.judge import _mask_key, _masked_head
 
     key = "sk-ab/cd+ef=gh"
+    full = "".join(f"%{b:02X}" for b in key.encode())
+    non_alnum = "sk%2Dab%2Fcd%2Bef%3Dgh"  # dash and friends encoded, letters kept
     for encoded in (quote(key), quote(key, safe=""), quote_plus(key),
-                    quote_plus(key).lower()):
+                    quote_plus(key).lower(), full, full.lower(),
+                    non_alnum, non_alnum.lower()):
         assert encoded not in _mask_key(f"echo {encoded}", key)
     # the raw key itself still masks, and unrelated text passes through
     assert _mask_key(f"Bearer {key}", key) == "Bearer ***"
     assert _mask_key("no credential here", key) == "no credential here"
     # an encoded form straddling the cap masks whole, in every spelling
-    for encoded in sorted({quote(key), quote(key, safe=""), quote_plus(key)},
+    for encoded in sorted({quote(key), quote(key, safe=""), quote_plus(key), full,
+                           non_alnum},
                           key=len, reverse=True):
         text = "x" * (100 - 5) + encoded + " tail"
         assert encoded not in _masked_head(text, key, 100)
 
 
-def test_masked_head_headroom_covers_the_urlencoded_form():
-    """A urlencoded key runs up to ~3x the raw one (base64-style keys): the
-    straddle headroom must cover the LONGEST masked form, or an encoded key
-    sitting across the cap keeps an unmasked prefix in the kept head."""
+def test_masked_head_straddling_urlencoded_form_masks_whole():
+    """A urlencoded key runs up to ~3x the raw one (base64-style keys), so a
+    spelling can sit across the cap with only a prefix inside it: masking the
+    whole text before capping removes even that prefix."""
     from urllib.parse import quote_plus
 
     from injudge.judge import _masked_head
@@ -1980,6 +1990,25 @@ def test_masked_head_headroom_covers_the_urlencoded_form():
     text = "x" * (100 - 5) + enc + " tail"
     head = _masked_head(text, key, 100)
     assert key not in head and enc not in head
+
+
+def test_masked_head_masks_before_capping():
+    """Masking shrinks every occurrence to "***": capping the head FIRST
+    would let that shrink drag a later occurrence straddling the head's end
+    (never fully inside it, so never masked) back into the kept output as an
+    unmasked key prefix. The mask therefore runs over the whole text and the
+    cap is taken after."""
+    from injudge.judge import _mask_key, _masked_head
+
+    key = "sk-leaktest99"
+    cap = 60
+    # two occurrences inside the head, a third straddling the cap's end —
+    # the headroom-era code leaked key[:len(key)-1] here
+    pre = key + "." + key + "."
+    text = pre + "x" * (cap + 1 - len(pre)) + key + "rest"
+    out = _masked_head(text, key, cap)
+    assert out == _mask_key(text, key)[:cap]
+    assert key[:6] not in out
 
 
 def test_strict_parse_violation_naming_the_key_stays_masked(monkeypatch):
@@ -2075,6 +2104,32 @@ def test_top_level_objects_stray_brace_prose_stays_linear(monkeypatch):
     assert len(calls) == 2  # one probe + one full-tail proof, then the scan stops
 
 
+def test_top_level_objects_pathological_nesting_stops_the_scan(monkeypatch):
+    """A candidate nested past the parser's recursion limit is never the
+    answer (the contract nests a handful of levels), and its interior
+    fragments are not either: the scan must stop at it. Re-probing each
+    interior brace would repay a full descent to the limit per brace —
+    minutes of CPU on adversarially deep endpoint output. Spans already
+    recorded stand."""
+    import injudge.judge as judge_mod
+
+    calls = []
+
+    class CountingDecoder(json.JSONDecoder):
+        def raw_decode(self, s, idx=0):
+            calls.append(len(s) - idx)
+            return super().raw_decode(s, idx)
+
+    monkeypatch.setattr(judge_mod.json, "JSONDecoder", CountingDecoder)
+    deep = '{"a": ' * 200_000  # past every interpreter's json recursion limit
+    assert _top_level_objects(deep) == []
+    assert len(calls) <= 2  # one window probe + at most one full-tail proof
+    calls.clear()
+    # a complete answer BEFORE the pathological value keeps its span
+    assert _top_level_objects(GOOD + " " + deep) == [(0, len(GOOD))]
+    assert len(calls) <= 3
+
+
 def _object_cut_at_the_probe_window(token_prefix: str, token_rest: str) -> str:
     """A complete {"k": "…", "b": <token>} JSON object whose first
     _SCAN_PROBE chars end exactly inside the token (the window boundary
@@ -2136,6 +2191,30 @@ def test_strict_parse_digit_limit_is_distinct_from_invalid_json():
     assert obj is None and error == "carries an integer literal past the digit limit"
     obj, error = _strict_parse('{"n": ')
     assert obj is None and error == "is not valid JSON"
+
+
+def test_strict_parse_digit_limit_plus_garbage_is_invalid_json():
+    """The int() refusal fires AT the literal, before the scanner reaches
+    later invalidity — a >4300-digit literal followed by trailing garbage
+    (or a NaN past it) is not valid JSON at all, so it takes the json tier's
+    ignored-format classification (the free degrade), never the model-error
+    path that burns corrective attempts."""
+    huge = "1" * 5000
+    for text in (huge + " garbage", '{"n": ' + huge + "} NaN", '{"n": ' + huge + "]}"):
+        obj, error = _strict_parse(text)
+        assert obj is None and error == "is not valid JSON", text[-20:]
+
+
+def test_strict_parse_digit_limit_plus_deep_nesting_never_raises():
+    """A >4300-digit literal BEFORE pathological nesting: the first parse
+    stops at the literal (the digit-limit refusal), so the grammar re-check
+    with the conversion disabled is the one that descends the nesting — its
+    RecursionError must classify as the deep-nesting model error, never
+    escape _strict_parse and abort the whole run (the run continues with a
+    per-span error, the never-raise-on-corrupt-endpoint-output invariant)."""
+    text = '{"n": ' + "1" * 5000 + ', "x": ' + "[" * 100000 + "]" * 100000 + "}"
+    obj, error = _strict_parse(text)
+    assert obj is None and error == "nests too deeply to parse"
 
 
 def test_top_level_objects_structural_failure_keeps_inner_objects():
@@ -2202,8 +2281,6 @@ def test_chat_content_parts_output_text_spelling_is_read(monkeypatch):
     cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
     assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
     assert len(record) == 1
-    obj, error = _strict_parse('{"n": NaN}')
-    assert obj is None and error == "is not valid JSON"
 
 
 def test_digit_limit_answer_at_json_tier_is_retried_never_degraded_free(monkeypatch):
@@ -2353,6 +2430,25 @@ def test_identical_rejection_at_the_final_tier_fails_tier_independent(monkeypatc
     assert "unchanged across conformance tiers" in str(excinfo.value)
     assert [b.get("response_format", {}).get("type") for b in record] == [
         "json_schema", "json_object", None]
+
+
+def test_distinct_non_utf8_400_bodies_are_not_the_identical_rejection(monkeypatch):
+    """Distinct non-UTF-8 400 bodies decode (U+FFFD replacement) to the same
+    string: the unchanged-rejection fail-fast must compare the RAW bytes —
+    two genuinely different rejections are not the tier-independent repeat
+    even when their decodes are identical."""
+    bodies = iter([b'{"error": "\xff"}', b'{"error": "\xfe"}', b'{"error": "\xfc"}'])
+
+    def _open(req, timeout=None):
+        raise http_error(400, next(bodies))
+
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
+    span, steps = _judge_input_fixture()
+    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
+    with pytest.raises(JudgeError) as excinfo:
+        judge_span(span, steps, cfg, [])
+    assert "unchanged across conformance tiers" not in str(excinfo.value)
+    assert "HTTP 400" in str(excinfo.value)
 
 
 def test_rejection_chain_resets_when_a_tier_answers_200(monkeypatch):
@@ -3832,6 +3928,29 @@ def test_prompt_tokens_total_unmatched_retraction_warns():
         warnings,
     )
     assert total == 0 and warnings == []
+
+
+def test_prompt_tokens_total_duplicate_retraction_never_unbills():
+    """A duplicated retraction lands immediately after its original at the
+    slot (the recorder's stream alternates record/retraction — only a new
+    record re-arms a retracted slot), so it matches no live record of its
+    own: counted with the unmatched retractions, never popping the record
+    beneath the first copy's target. That record is the surviving one of a
+    history_rewritten epoch — billed exactly once like every delivered
+    message — and popping it would underbill the budget silently."""
+    events = [
+        {"type": "message_end", "role": "assistant", "proxy_source": "MAIN",
+         "msg": 9, "turn": 1, "usage": {"prompt_tokens": 40}},  # epoch one
+        {"type": "message_end", "role": "assistant", "proxy_source": "MAIN",
+         "msg": 9, "turn": 2, "usage": {"prompt_tokens": 60}},  # epoch two
+        {"type": "message_retracted", "proxy_source": "MAIN", "msg": 9, "turn": 2},
+        {"type": "message_retracted", "proxy_source": "MAIN", "msg": 9, "turn": 2},
+    ]
+    warnings = []
+    assert prompt_tokens_total(events, warnings) == 40
+    assert any(
+        "1 message_retracted event(s) matched no live usage record" in w for w in warnings
+    )
 
 
 def test_prompt_tokens_corrupt_retraction_warns_as_overcount():

@@ -9,7 +9,10 @@ names, or label conventions.
 
 - **Lanes** come from `memory_role_bind` events (logical `main`/`memory` →
   `proxy_source`). When bindings are missing (a protocol violation), the
-  lanes of the operation events themselves are the fallback, with a warning.
+  lanes of the operation events themselves are the fallback, with a warning
+  — minus the lanes the session/delivery events stamped: those are
+  main-lane traffic by protocol, so an operation event that drifted onto
+  one of them never pulls the agent's lane into the memory set.
 - **Extract ops** come from generation operations (`memory_generate_start` /
   `memory_change` / `memory_generate_end`): produced MemoryRefs as
   candidates, delete changes as deletions with exact refs, per-reason
@@ -533,16 +536,20 @@ def parse_trajectory(
             f"{run_id}: no memory annotations recorded; zero memory operations"
         )
 
-    # Lane identity from the role bindings. When bindings are missing (a
+    # Lane identity from the role bindings — every session's, never just the
+    # first binder's: a lane bound memory in one session and main in another
+    # is shared traffic for the whole run. When bindings are missing (a
     # protocol violation), fall back to the lanes the operation events were
     # themselves stamped with — the protocol's own lane record, not a name
     # convention — and warn.
     memory_lanes: set[str | None] = set()
+    main_side: set[str | None] = set()  # every lane bound or evidenced as main
     for sid in index.sessions:
         binds = index.binds.get(sid, {})
         if "memory" in binds:
             memory_lanes.add(binds["memory"])
-    main_lane = index.lanes()[0]
+        if "main" in binds:
+            main_side.add(binds["main"])
     lane_fallback = index.annotated and not memory_lanes
     if lane_fallback:
         memory_lanes = {
@@ -552,13 +559,23 @@ def parse_trajectory(
             f"{run_id}: annotated run without a memory role binding; classifying "
             f"memory turns by the operation events' own lanes {sorted(map(str, memory_lanes))}"
         )
-    shared = memory_lanes & {main_lane}
+        # With no bindings the shared-lane guard cannot see the main lane
+        # from them — but the session and delivery events are main-lane
+        # traffic by protocol (the gate records both only there), so a lane
+        # they stamp must join the guard's main side: one operation event
+        # that drifted onto the main lane would otherwise mark every agent
+        # turn on it as a memory turn and collapse the step count to zero
+        for e in (*index.sessions.values(), *index.deliveries):
+            src = e.get("proxy_source")
+            if src is None or isinstance(src, str):  # a corrupt source names no lane
+                main_side.add(src)
+    shared = memory_lanes & main_side
     if shared:
-        # A lane bound to BOTH roles cannot separate them: keeping it in the
+        # A lane that is main traffic in ANY session (or on the fallback's
+        # main-side evidence) cannot separate the roles: keeping it in the
         # memory set would classify its agent turns as memory turns — the
         # step count collapses to zero and all attribution disappears. Drop
-        # it (its turns count as agent steps), with a warning. main_lane None
-        # covers both the bound-unprefixed and the unbound-main case.
+        # it (its turns count as agent steps), with a warning.
         memory_lanes -= shared
         names = ", ".join("the unprefixed lane" if s is None else repr(s)
                           for s in sorted(shared, key=str))
@@ -619,6 +636,7 @@ def parse_trajectory(
     table = _TurnTable(events, memory_lanes)
     for e in events:
         if e.get("type") == "history_rewritten":
+            src = e.get("proxy_source")
             traj.rewrites.append(
                 {
                     "seq": e["seq"],
@@ -626,6 +644,17 @@ def parse_trajectory(
                     "kept": e.get("kept"),
                     "dropped": e.get("dropped"),
                     "proxy_source": e.get("proxy_source"),
+                    # memory-traffic marker per the FINAL classification set,
+                    # computed here where the set lives: the HTML's singular
+                    # memory_lane is None on multi-lane runs, so a
+                    # proxy_source === memory_lane comparison there would
+                    # misread the unprefixed lane as memory traffic and the
+                    # named memory lanes as main traffic
+                    "on_memory_lane": (
+                        src in memory_lanes
+                        if (src is None or isinstance(src, str))
+                        else False  # a corrupt non-string source names no lane
+                    ),
                 }
             )
 

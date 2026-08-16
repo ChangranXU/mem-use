@@ -173,7 +173,9 @@ on the request or the output side: this tier does not work here), and the
 first tier producing a conforming answer is memoized for later spans. A
 valid-but-wrong-shape answer at the json tier is a model error, not a tier
 discovery (so is an integer literal past Python's int digit limit at every
-tier — valid JSON per RFC 8259, which sets no limit): like any retry at the
+tier — valid JSON per RFC 8259, which sets no limit — unless the text is
+invalid JSON anyway, where the refusal fires at the literal before later
+garbage: then the invalid-JSON classification wins): like any retry at the
 final tier it consumes the budget and
 appends the invalid answer plus a corrective note, so corrective retries
 never repeat an identical request. A 400/422 whose NON-EMPTY body repeats unchanged at

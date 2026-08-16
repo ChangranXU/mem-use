@@ -33,7 +33,9 @@ class Trajectory:
     # like memory_lanes, never serialized into the artifacts)
     task: str | None = None
     n_searches: int = 0  # memory searches with a recorded end (any status: completed/failed/partial)
-    rewrites: list[dict] = field(default_factory=list)  # history_rewritten markers
+    # history_rewritten markers; on_memory_lane flags memory-lane traffic per
+    # the final classification set (the HTML colors rewrite markers by it)
+    rewrites: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {

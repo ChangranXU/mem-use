@@ -353,7 +353,7 @@ function buildSVG(){
       const x0=X(band.a)-8, x1=X(band.b)+8;
       const srcs=[...new Set(band.items.map(r=>r.proxy_source||"?"))];
       const tip=`${band.count} history rewrites at steps ${band.a}–${band.b} (${srcs.map(s=>esc(s)).join(" + ")})`;
-      const fill=srcs.length===1&&srcs[0]===t.memory_lane? "#ece4f7" : "#edf0f5";
+      const fill=band.items.every(r=>r.on_memory_lane)? "#ece4f7" : "#edf0f5";
       if(t.n_steps>0 && band.b-band.a+1>=0.8*t.n_steps){
         // rewrites at nearly every step — same band shape, but translucent with
         // a dashed border so a lane-long box stays in the background
@@ -371,7 +371,7 @@ function buildSVG(){
     }
     for(const rw of rewriteSingles[t.id]){
       const x=X(rw.step);
-      const rwCol=rw.proxy_source===t.memory_lane? "#b06ab3" : "#c3cbd8";
+      const rwCol=rw.on_memory_lane? "#b06ab3" : "#c3cbd8";
       svg.push(`<line x1="${x}" y1="${y-LANE_H/2+4}" x2="${x}" y2="${y+LANE_H/2-4}" stroke="${rwCol}" stroke-dasharray="3 3"><title>history rewritten (kept ${esc(rw.kept)}, dropped ${esc(rw.dropped)}${rw.proxy_source?", "+esc(rw.proxy_source):""})</title></line>`);
     }
   });
