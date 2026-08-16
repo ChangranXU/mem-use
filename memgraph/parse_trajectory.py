@@ -183,6 +183,18 @@ def classifying_messages(events: list[dict]) -> dict[int, dict]:
     return classified
 
 
+def agent_turns(classified: dict[int, dict], memory_lanes: set[str | None]) -> list[int]:
+    """The agent-lane turns in turn order: classified turns whose classifying
+    message was not recorded on a memory lane. Agent step = 1-based position
+    in this list — the one ordinal rule memgraph's _TurnTable and injudge's
+    step stream share (never re-derived per consumer, so the two tools' step
+    numbering cannot drift apart)."""
+    return sorted(
+        t for t, e in classified.items()
+        if e.get("proxy_source") not in memory_lanes
+    )
+
+
 class _TurnTable:
     """Turn classification for step attribution.
 
@@ -202,19 +214,17 @@ class _TurnTable:
                     # a corrupt non-string call_id can never join a ref — and
                     # an unhashable one would crash the call_turn keys below
                     self.turn_call.setdefault(t, call_id if isinstance(call_id, str) else None)
-        classified = {
-            t: (e.get("proxy_source"), e["seq"])
-            for t, e in classifying_messages(events).items()
-        }
+        classified_msgs = classifying_messages(events)
         self.n_turns = len(self.turn_call)
         self.call_turn: dict[str, int] = {  # reverse: call_id -> turn
             call: turn for turn, call in self.turn_call.items() if call
         }
-        self.n_mem_turns = sum(1 for src, _ in classified.values() if src in memory_lanes)
-        self.agent_turns: list[int] = sorted(
-            t for t, (src, _) in classified.items() if src not in memory_lanes
+        self.n_mem_turns = sum(
+            1 for e in classified_msgs.values()
+            if e.get("proxy_source") in memory_lanes
         )
-        self._classif_seq = {t: classified[t][1] for t in self.agent_turns}
+        self.agent_turns: list[int] = agent_turns(classified_msgs, memory_lanes)
+        self._classif_seq = {t: classified_msgs[t]["seq"] for t in self.agent_turns}
         self.step_of_turn = {t: i + 1 for i, t in enumerate(self.agent_turns)}
 
     @property

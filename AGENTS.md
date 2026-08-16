@@ -58,7 +58,8 @@
   never reach a dict/set lookup; a digit string past the interpreter's
   int-string limit never reaches `int()`).
 - Step semantics are shared by both tools through one rule
-  (`parse_trajectory.classifying_messages`): agent step = ordinal of
+  (`parse_trajectory.classifying_messages`, with the ordinal in
+  `parse_trajectory.agent_turns`): agent step = ordinal of
   completed non-memory-lane turns, 1-based; lanes come from `memory_role_bind`
   (falling back to the operation events' own lanes — minus the lanes the
   session/delivery events stamped, main-lane traffic by protocol — with a

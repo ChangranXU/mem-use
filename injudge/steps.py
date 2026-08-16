@@ -4,11 +4,11 @@ The step stream is the *influence surface* injection verdicts are computed
 from: one AgentStep per completed agent turn, carrying the assistant response
 (reasoning + content) and the tool executions with their results.
 
-Turn classification is memgraph/parse_trajectory.py's
-`classifying_messages` itself, so step numbering stays consistent with op
-attribution (the memory lanes to classify against come from the
-trajectory's memory role bindings — the same set memgraph's _TurnTable
-uses):
+Turn classification and the agent-turn ordinal are
+memgraph/parse_trajectory.py's `classifying_messages` and `agent_turns`
+themselves, so step numbering stays consistent with op attribution (the
+memory lanes to classify against come from the trajectory's memory role
+bindings — the same set memgraph's _TurnTable uses):
 
 - a turn is classified by the proxy_source of its FIRST turn-bearing
   assistant message_end; memory-label turns consume no agent step;
@@ -51,7 +51,7 @@ from __future__ import annotations
 
 from injudge.model import AgentStep, ToolExec
 from memgraph.annotations import is_int, message_text
-from memgraph.parse_trajectory import classifying_messages, list_field
+from memgraph.parse_trajectory import agent_turns, classifying_messages, list_field
 
 
 def _turn_of(e: dict) -> int | None:
@@ -209,14 +209,11 @@ def build_step_stream(
         ends_by_turn.setdefault(turn, []).append(e)
 
     steps: list[AgentStep] = []
-    agent_turns: list[int] = []
-    for turn in sorted(classified):
-        msg = classified[turn]
-        if msg.get("proxy_source") in memory_lanes:
-            continue  # memory-LLM turn consumes no agent step
-        agent_turns.append(turn)
+    # the shared ordinal rule (never re-derived): agent step = 1-based
+    # position among the agent-lane turns — a memory-LLM turn consumes none
+    turns = agent_turns(classified, memory_lanes)
 
-    for i, turn in enumerate(agent_turns):
+    for i, turn in enumerate(turns):
         msg = classified[turn]
         execs: dict[str, ToolExec] = {}
         order: list[str] = []
@@ -285,7 +282,7 @@ def build_step_stream(
         # A start without an end is expected at the trajectory's last step
         # (the run ends before the tool result returns) — only noteworthy
         # when the run continued past it.
-        if i + 1 < len(agent_turns):
+        if i + 1 < len(turns):
             for tid in order:
                 if execs[tid].seq_start is not None and execs[tid].seq_end is None:
                     warnings.append(f"turn {turn}: tool execution never ended ({tid})")
