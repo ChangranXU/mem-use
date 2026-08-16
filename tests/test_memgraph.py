@@ -374,6 +374,33 @@ def test_render_html_colors_rewrites_by_the_memory_flag():
     assert "t.memory_lane" not in html
 
 
+def test_later_session_divergent_task_is_noted(tmp_path):
+    """adapter/instance_id/task are per-run singulars projected from the first
+    recorded session (the judge's relevance rubric runs on that task): a
+    later session CARRYING a different value must surface as a warning, never
+    be silently ignored — while one recording nothing stays quiet."""
+    b = TrajBuilder().agent_turn(with_task=True)
+    sid2 = "22222222-2222-4333-8444-555555555555"
+    b.annotation("memory_session", {
+        "trace_session_id": sid2, "session_kind": "episode",
+        "adapter": {"name": "cure", "version": "9.9"},
+        "instance_id": "other__instance-1",
+        "task": {"availability": "inline", "text": "another task"}}, lane="MAIN")
+    b.annotation("memory_role_bind", {
+        "trace_session_id": sid2, "logical_role": "main",
+        "adapter": b.adapter}, lane="MAIN")
+    b.annotation("memory_role_bind", {
+        "trace_session_id": sid2, "logical_role": "memory",
+        "adapter": b.adapter}, lane="MEM")
+    traj, _, warnings = parse(b, tmp_path)
+    # the first session's projection stands
+    assert traj.instance_id == "pydata__xarray-2905"
+    divergent = [w for w in warnings if "than the first recorded session" in w]
+    assert sum("instance_id" in w for w in divergent) == 1
+    assert sum("task" in w for w in divergent) == 1
+    assert sum("adapter" in w for w in divergent) == 1
+
+
 def test_corrupt_field_values_degrade_never_crash(tmp_path):
     """Hand-corrupted container/scalar fields must degrade, never raise: a
     truthy non-dict extensions/placement and a non-string `at` are for the

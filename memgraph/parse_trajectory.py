@@ -635,6 +635,22 @@ def parse_trajectory(
                         "content ref not resolvable from trajectory.jsonl; "
                         "the judge runs without a task statement"
                     )
+    # adapter/instance_id/task are per-run singulars projected from the FIRST
+    # recorded session; a later session CARRYING a different value is
+    # surfaced, never silently ignored (the judge's relevance rubric runs on
+    # the projected task). An absent field is no statement — it never notes.
+    sessions = list(index.sessions.values())
+    for session in sessions[1:]:
+        other = session["payload"]
+        sid = other.get("trace_session_id")
+        for field_name in ("adapter", "instance_id", "task"):
+            value = other.get(field_name)
+            if value is not None and value != sessions[0]["payload"].get(field_name):
+                warnings.append(
+                    f"{run_id}: session {sid} carries a different {field_name} "
+                    "than the first recorded session; the first session's "
+                    "value is used"
+                )
 
     table = _TurnTable(events, memory_lanes)
     for e in events:

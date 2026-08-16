@@ -93,7 +93,8 @@
   format field and degrades free, while at the json/prompt tiers it stays a
   model error taking the corrective retry;
   a truncated answer that still slips past the completeness check (a stray
-  complete object inside it reads as a finished answer) exhausts the
+  complete top-level object inside it reads as a finished answer — a
+  fragment nested inside the cut value never does) exhausts the
   corrective budget and ends in an error naming both the violation and the
   budget.
   An empty-content answer that finished normally (a server-side quirk) earns a

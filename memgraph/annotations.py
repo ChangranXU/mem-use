@@ -107,7 +107,10 @@ class AnnotationIndex:
     sessions: dict[str, dict[str, Any]] = field(default_factory=dict)  # trace_session_id -> memory_session event
     binds: dict[str, dict[str, str | None]] = field(default_factory=dict)  # session -> {logical_role: lane}
     operations: dict[str, AnnotatedOperation] = field(default_factory=dict)
-    deliveries: list[dict[str, Any]] = field(default_factory=list)  # memory_delivery events, seq order
+    # memory_delivery events, in file order — recording order, the one order
+    # every positional consumer trusts (a corrupt seq is noted, never
+    # re-sorted: the R-numbering follows the recording, not a forged seq)
+    deliveries: list[dict[str, Any]] = field(default_factory=list)
     problems: list[str] = field(default_factory=list)
 
     @property
@@ -383,14 +386,6 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
                         "has no usable identity fields"
                     )
 
-    def _delivery_order(event: dict) -> tuple[bool, int]:
-        # the tool path guarantees an int seq (load_events fabricates one),
-        # but a direct caller can hand in a corrupt/missing one — sort it
-        # last in stable file order, never raise (the never-raises rule)
-        seq = event.get("seq")
-        return (not is_int(seq), seq if is_int(seq) else 0)
-
-    index.deliveries.sort(key=_delivery_order)
     for operation in index.operations.values():
         if operation.end is None:
             index.problems.append(f"operation {operation.operation_id}: missing end event")

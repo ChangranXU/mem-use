@@ -122,7 +122,7 @@ def apply_verdicts(graph: dict, report: dict, source: str = "") -> None:
     # trajectories' seq maps into the same collision. Dropping the key
     # annotates neither op — the same refusal the shared-run_id guard below
     # makes — never one delivery's verdict onto the other.
-    inj_by_traj: dict[str, dict[int, dict]] = {}
+    inj_by_run: dict[str, dict[int, dict]] = {}
     seen_keys: set[tuple[str, int]] = set()
     ambiguous_keys: set[tuple[str, int]] = set()
     for entry in entries("injections"):
@@ -147,7 +147,7 @@ def apply_verdicts(graph: dict, report: dict, source: str = "") -> None:
                 ambiguous_keys.add(key)
                 continue
             seen_keys.add(key)
-            inj_by_traj.setdefault(run_id, {})[seq] = entry
+            inj_by_run.setdefault(run_id, {})[seq] = entry
         else:
             # same no-silent-drop rule as the dangling span above: a corrupt
             # seq (a JSON true is not seq 1) or a span whose trajectory maps
@@ -159,7 +159,7 @@ def apply_verdicts(graph: dict, report: dict, source: str = "") -> None:
             )
     report_ambiguous: dict[str, set[int]] = {}
     for run_id, seq in sorted(ambiguous_keys):
-        del inj_by_traj[run_id][seq]
+        del inj_by_run[run_id][seq]
         report_ambiguous.setdefault(run_id, set()).add(seq)
         note(
             "warn",
@@ -170,7 +170,7 @@ def apply_verdicts(graph: dict, report: dict, source: str = "") -> None:
 
     # a run_id shared by several loaded trajectories makes the join ambiguous:
     # annotate neither rather than cross-contaminating both (runless
-    # trajectories never join — inj_by_traj keys truthy run_ids only — so a
+    # trajectories never join — inj_by_run keys truthy run_ids only — so a
     # missing run_id is not "shared", just unjoinable). Join keys are strings
     # in the schema; the isinstance check also keeps corrupt run.json values
     # (mixed types crash sorted(), unhashable ones crash the set) out.
@@ -202,7 +202,7 @@ def apply_verdicts(graph: dict, report: dict, source: str = "") -> None:
         run_id = traj.get("run_id")
         # only a string run_id can join (the report side's keys are strings);
         # a corrupt run.json value is unjoinable — and possibly unhashable
-        seq_map = inj_by_traj.get(run_id) if isinstance(run_id, str) else None
+        seq_map = inj_by_run.get(run_id) if isinstance(run_id, str) else None
         if seq_map is None or run_id in ambiguous:
             if seq_map is None and traj.get("id") in recall_by_traj:
                 note(

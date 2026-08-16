@@ -104,6 +104,30 @@ def discover_trajectories(paths: list[Path]) -> list[Path]:
     return [found[k] for k in sorted(found)]
 
 
+def _register(
+    registry: dict[tuple[str | None, str], MemoryUnit],
+    ident: tuple[str | None, str],
+    entry: dict,
+    key: str,
+    origin: str,
+) -> MemoryUnit:
+    """Register the MemoryUnit one ref-shaped entry (an extraction candidate,
+    a deletion's before-ref, a delivered ref) first named: display fields
+    ride the entry, identity rides the (namespace, item) pair."""
+    unit = MemoryUnit(
+        key=key,
+        namespace=ident[0],
+        item_id=ident[1],
+        memory_type=entry.get("memory_type"),
+        confidence=entry.get("confidence"),
+        value=entry.get("value"),
+        status=entry.get("review_status") or "unknown",
+        origin=origin,
+    )
+    registry[ident] = unit
+    return unit
+
+
 def build_graph(
     trajectories: list[Trajectory],
     ops_by_traj: dict[str, list[MemoryOp]],
@@ -137,18 +161,12 @@ def build_graph(
                     continue
                 ident = (namespace_of(cand), item_key(cand))
                 if ident not in registry:
-                    registry[ident] = MemoryUnit(
-                        key=key,
-                        namespace=ident[0],
-                        item_id=ident[1],
-                        memory_type=cand.get("memory_type"),
-                        confidence=cand.get("confidence"),
-                        value=cand.get("value"),
-                        status=cand.get("review_status") or "unknown",
-                        created_status=cand.get("review_status"),
-                        created_op=op.id,
-                        created_traj=op.traj,
-                        created_step=op.step,
+                    unit = _register(registry, ident, cand, key, "observed")
+                    unit.created_status = cand.get("review_status")
+                    unit.created_op, unit.created_traj, unit.created_step = (
+                        op.id,
+                        op.traj,
+                        op.step,
                     )
                     edges.append(Edge("creates", op.id, ident[1], ident[0]))
                 else:
@@ -230,16 +248,7 @@ def build_graph(
                     # dict — ref_to_memory output): the memory predates the
                     # loaded trajectories — register it (origin not observed)
                     # and link.
-                    registry[ident] = MemoryUnit(
-                        key=key,
-                        namespace=ident[0],
-                        item_id=ident[1],
-                        memory_type=ref.get("memory_type"),
-                        confidence=ref.get("confidence"),
-                        value=ref.get("value"),
-                        status=ref.get("review_status") or "unknown",
-                        origin="not_observed",
-                    )
+                    _register(registry, ident, ref, key, "not_observed")
                     note(
                         "info",
                         f"{op.id}: deleted memory {key!r} has no observed creation in "
@@ -277,16 +286,7 @@ def build_graph(
                 continue
             seen.add(ident)
             if ident not in registry:
-                registry[ident] = MemoryUnit(
-                    key=key,
-                    namespace=ident[0],
-                    item_id=ident[1],
-                    memory_type=delivered.get("memory_type"),
-                    confidence=delivered.get("confidence"),
-                    value=delivered.get("value"),
-                    status="unknown",
-                    origin="not_observed",
-                )
+                _register(registry, ident, delivered, key, "not_observed")
                 note(
                     "info",
                     f"{op.id}: recalled memory {key!r} has no observed creation in the "
@@ -360,8 +360,6 @@ def load_trajectories(
     stream) do not re-read the files.
     """
     traj_dirs = discover_trajectories(paths)
-    if not traj_dirs:
-        raise SystemExit("error: no trajectory.jsonl found under the given paths")
     warnings: list[str] = []
     parsed = [(d, *parse_trajectory(d, warnings)) for d in traj_dirs]
     # Order lanes by started_at (run.json); without run.json, derive a

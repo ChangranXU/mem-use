@@ -237,6 +237,24 @@ def test_turnless_tool_end_with_empty_id_warns():
     assert any("unknown tool_call_id ''" in w for w in warnings)
 
 
+def test_turn_scoped_tool_events_with_corrupt_ids_warn():
+    """The recorder stamps every execution's tool_call_id, so a turn-scoped
+    start or end carrying a missing/corrupt one is corruption: it cannot key
+    the execution join, and the anomaly is reported like the other paths —
+    never dropped silently."""
+    b = TrajBuilder().agent_turn(with_task=True)
+    b._emit("tool_execution_start", proxy_source="MAIN", turn=b.turn,
+            tool_call_id=["not", "a", "string"], name="bash", args={})
+    b._emit("tool_execution_end", proxy_source="MAIN", turn=b.turn,
+            tool_call_id=None, name="bash", status="completed", result="?")
+    steps, warnings = make_steps(b)
+    assert [t.tool_call_id for t in steps[0].tools] == ["000001-x"]  # unaffected
+    assert any("tool_execution_start with a missing or corrupt tool_call_id" in w
+               for w in warnings)
+    assert any("tool_execution_end with a missing or corrupt tool_call_id" in w
+               for w in warnings)
+
+
 def test_turnless_tool_end_never_joins_another_lane():
     """Schema-v6 closes are lane-local: a turn-less end whose tool_call_id
     collides with a MEMORY-lane turn's execution must not resolve there (the
@@ -3676,6 +3694,26 @@ def test_resolve_config_override_validation():
     assert (cfg.max_attempts, cfg.timeout, cfg.max_tokens) == (2, 30.0, 1000)
 
 
+def test_resolve_config_rejects_a_malformed_base_url():
+    """A bracket-mangled BASE_URL paste makes urllib's request construction
+    raise ValueError (Invalid IPv6 URL) — a bad .env value, so it fails fast
+    with a targeted SystemExit naming the key (never the value), before any
+    paid judge call, instead of escaping mid-run as an uncaught traceback."""
+    base = {"API_KEY": "k", "MODEL": "m"}
+    with pytest.raises(SystemExit, match="BASE_URL"):
+        resolve_config({**base, "BASE_URL": "https://host[/path"})
+    with pytest.raises(SystemExit, match="BASE_URL"):
+        resolve_config({**base, "OPENAI_BASE_URL": "https://host]/path"})
+    # the message must not echo the value (config errors name keys, never values)
+    try:
+        resolve_config({**base, "BASE_URL": "https://host[/path"})
+    except SystemExit as e:
+        assert "host[" not in str(e)
+    # a well-formed URL passes, trailing slash normalized as before
+    cfg = resolve_config({**base, "BASE_URL": "https://host/path/"})
+    assert cfg.base_url == "https://host/path"
+
+
 def test_system_prompt_enum_literals_track_the_contract():
     """The prompt's enum lists are built from the same constants as
     VERDICT_SCHEMA and _valid_value: a renamed/added value moves schema,
@@ -4277,3 +4315,47 @@ def test_cli_missing_env_fails_fast_before_any_paid_call(monkeypatch, tmp_path):
         injudge_main.main([str(tmp_path / "runs"), "--json", str(tmp_path / "out.json"),
                            "--env", str(tmp_path / "missing.env")])
     assert calls == []
+
+
+def test_cli_malformed_base_url_fails_fast_before_any_paid_call(monkeypatch, tmp_path):
+    """A bracket-mangled BASE_URL is a bad .env value: a targeted SystemExit
+    naming the key, before any paid judge call — never a ValueError escaping
+    request construction mid-run as an uncaught traceback."""
+    a = TrajBuilder().agent_turn(with_task=True).recall(REF_A)
+    _write_run(tmp_path / "runs", "t1", a)
+    env = tmp_path / ".env"
+    env.write_text("BASE_URL=https://host[/path\nAPI_KEY=k\nMODEL=judge-m\n")
+    calls = []
+    monkeypatch.setattr("injudge.judge.urlopen", lambda *a, **k: calls.append(1))
+    with pytest.raises(SystemExit, match="BASE_URL"):
+        injudge_main.main([str(tmp_path / "runs"), "--json", str(tmp_path / "out.json"),
+                           "--env", str(env)])
+    assert calls == []
+
+
+def test_cli_judge_failure_keeps_the_attempt_warnings(monkeypatch, tmp_path):
+    """A span failing with JudgeError still drains the warnings its attempts
+    accumulated (tier degrades, masking notes, contract corrections): they
+    are diagnostics of the failure, never lost with the generic note."""
+    a = TrajBuilder().agent_turn(with_task=True).recall(REF_A)
+    _write_run(tmp_path / "runs", "t1", a)
+    calls = []
+
+    def _open(req, timeout=None):
+        calls.append(1)
+        if len(calls) == 1:
+            # the structured tier's format field is refused: a free degrade
+            # (with its warning), then the 401 fails the span outright
+            raise http_error(400, b"unknown field response_format")
+        raise http_error(401)
+
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
+    out = tmp_path / "report.json"
+    rc = injudge_main.main([str(tmp_path / "runs"),
+                            "--json", str(out), "--env", str(_env(tmp_path))])
+    assert rc == 2  # error verdicts present
+    artifact = json.loads(out.read_text())
+    assert artifact["operations"][0]["verdict"] == "error"
+    msgs = [v["msg"] for v in artifact["validation"]]
+    assert any("degrading to json" in m for m in msgs)
+    assert any("judge request failed" in m and "HTTP 401" in m for m in msgs)

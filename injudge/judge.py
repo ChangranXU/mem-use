@@ -342,6 +342,15 @@ def resolve_config(
             f"{', '.join(API_FORMATS)} (got {api!r})"
         )
     cfg = JudgeConfig(base_url=base_url.rstrip("/"), api_key=api_key, model=model, api=api)
+    try:
+        Request(_endpoint(cfg))
+    except ValueError as e:
+        # a bracket-mangled paste makes request construction raise (Invalid
+        # IPv6 URL & co.) mid-run otherwise — the same fail-fast rule every
+        # other bad .env value gets; the message names keys, never the value
+        raise SystemExit(
+            f"error: OPENAI_BASE_URL or BASE_URL is not a valid URL ({e})"
+        ) from None
     for k, v in _thinking_config(env).items():
         setattr(cfg, k, v)
     if (temperature := _float_config(env, "TEMPERATURE")) is not None:
@@ -454,26 +463,25 @@ def _top_level_objects(text: str) -> list[tuple[int, int]]:
     # int literal trips the int digit limit mid-scan — a refusal carrying
     # no error position, so a COMPLETE answer holding one scanned as cut
     # while a cut one scanned as finished (the truncation gate's two
-    # misreadings); skipping the conversion keeps both honest
+    # misreadings); skipping the conversion keeps both honest. With it,
+    # every ValueError the decoder raises is a JSONDecodeError carrying
+    # pos/msg (RecursionError is the only other failure, caught apart).
     decoder = json.JSONDecoder(parse_int=str)
     structural_pos: int | None = None  # last full-tail structural failure
     reprobes = 0  # full-tail re-proofs spent at structural_pos
     # Where the scan resumes after the candidate at `candidate` failed at
     # `failure_pos` within a region ending at `end` (the probe window or the
     # full text): past every brace the failure proves dead, never past one
-    # it leaves alive. None (a digit-limit refusal names no position) and a
-    # cut (the parser consumed the whole region: its error position IS the
-    # end) prove every later brace dead; a structural failure proves only
-    # THIS candidate dead, so the scan resumes at the next live brace
-    # before the offender — with one bound: full-tail failures repeating one
-    # position mark candidates inside the extent that died there (nested
-    # structure — never the answer themselves), and their interiors are
-    # re-probed only _STRUCTURAL_REPROBES times before the scan jumps to the
-    # error; unbounded re-probing would chain O(text) full-tail proofs on
-    # adversarially nested input.
-    def _skip_past(candidate: int, failure_pos: int | None, end: int) -> int:
-        if failure_pos is None:
-            return candidate + 1
+    # it leaves alive. A cut (the parser consumed the whole region: its
+    # error position IS the end) proves every later brace dead; a structural
+    # failure proves only THIS candidate dead, so the scan resumes at the
+    # next live brace before the offender — with one bound: full-tail
+    # failures repeating one position mark candidates inside the extent that
+    # died there (nested structure — never the answer themselves), and their
+    # interiors are re-probed only _STRUCTURAL_REPROBES times before the
+    # scan jumps to the error; unbounded re-probing would chain O(text)
+    # full-tail proofs on adversarially nested input.
+    def _skip_past(candidate: int, failure_pos: int, end: int) -> int:
         if failure_pos >= end:  # the parser ran out of text: a genuine cut
             return failure_pos
         nxt = text.find("{", candidate + 1, failure_pos)
@@ -493,10 +501,9 @@ def _top_level_objects(text: str) -> list[tuple[int, int]]:
         except RecursionError:
             break  # deeper than the parser's limit: never the answer — stop
         except ValueError as e:
-            pos = getattr(e, "pos", None)
-            if pos is None or (
-                pos < len(window) - _SCAN_TOKEN_TAIL
-                and getattr(e, "msg", "") != "Unterminated string starting at"
+            if (
+                e.pos < len(window) - _SCAN_TOKEN_TAIL
+                and e.msg != "Unterminated string starting at"
             ):
                 # genuine failure, decided clear of the cut: a JSON parse
                 # error depends only on the text up to its position — a
@@ -504,9 +511,7 @@ def _top_level_objects(text: str) -> list[tuple[int, int]]:
                 # (it errors within _SCAN_TOKEN_TAIL of the end, or names
                 # itself "Unterminated string"). pos is window-relative:
                 # make it absolute for _skip_past's brace search.
-                skip = _skip_past(
-                    i, None if pos is None else i + pos, i + len(window)
-                )
+                skip = _skip_past(i, i + e.pos, i + len(window))
                 continue
         else:
             spans.append((i, i + end))
@@ -520,15 +525,19 @@ def _top_level_objects(text: str) -> list[tuple[int, int]]:
         except RecursionError:
             break  # deeper than the parser's limit: never the answer — stop
         except ValueError as e:
-            if getattr(e, "msg", "") == "Unterminated string starting at":
-                # no unescaped quote exists past the string start (escape
-                # parity is a local property), so no candidate beyond it
-                # can parse — stop rather than re-scanning the tail per "{"
+            if e.msg == "Unterminated string starting at":
+                # the text ends inside a string: a genuine mid-answer cut.
+                # Everything between this candidate and the string start
+                # parsed as part of the candidate's own structure, so a
+                # complete object closing in there is a nested fragment of
+                # the value the cut killed — never the answer (the rule the
+                # truncation gate and the reasoning_content rescue share);
+                # and no candidate at or past the string start can parse at
+                # all (no unescaped quote exists past it — escape parity is
+                # a local property). Stop rather than re-scanning per "{".
                 break
-            pos = getattr(e, "pos", None)
-            if pos is None:
-                skip = _skip_past(i, None, len(text))
-            elif pos == structural_pos:
+            pos = e.pos
+            if pos == structural_pos:
                 # nested inside the extent that already died at this
                 # position: never the answer itself — but its interior may
                 # still close a COMPLETE object before the offender, so
@@ -1238,7 +1247,7 @@ def _error_verdict(
     masked_error = _mask_key(error, api_key)
     verdict = blank_verdict()
     verdict["error"] = masked_error
-    verdict["judge_raw"] = _masked_head(text or "", api_key, 2000)
+    verdict["judge_raw"] = _masked_head(text, api_key, 2000)
     warnings.append(f"{span.id}: {masked_error}")
     return verdict
 

@@ -148,10 +148,7 @@ def main(argv: list[str] | None = None) -> int:
         atomic_write(args.json_out, json.dumps(artifact, indent=1, ensure_ascii=False) + "\n")
 
     def tool_cfg() -> dict:
-        return {
-            "judge_model": cfg.model if cfg else None,
-            "dry_run": args.dry_run,
-        }
+        return {"judge_model": cfg.model if cfg else None}
 
     for t in trajs:
         run_id = t.run_id
@@ -255,17 +252,20 @@ def main(argv: list[str] | None = None) -> int:
                 verdict = _unjudged("dry run")
             else:
                 taken += 1
+                span_warnings: list[str] = []
                 try:
-                    span_warnings: list[str] = []
                     verdict = judge_span(span, steps, cfg, span_warnings, t.task)
-                    for w in span_warnings:
-                        validation.append({"level": "warn", "msg": w})
                 except JudgeError as e:
                     verdict = blank_verdict()
                     verdict["error"] = f"judge request failed: {e}"
                     validation.append(
                         {"level": "error", "msg": f"{span.id}: judge request failed: {e}"}
                     )
+                # drained on failure too: masking notes, confidence clamps and
+                # contract corrections from the failed attempts are diagnostics,
+                # never lost with the span's generic failure note
+                for w in span_warnings:
+                    validation.append({"level": "warn", "msg": w})
             verdict_by_span[span.id] = verdict
             operations.append(operation_record(span, verdict, span_costs[span.id]))
         injections.extend(injection_rollup(spans, ops_by_id, verdict_by_span, content_chars))
@@ -279,7 +279,7 @@ def main(argv: list[str] | None = None) -> int:
         printed = (
             f" ({taken} printed)" if taken != len(operations) else ""
         )
-        print(
+        print_safe(
             f"injudge --dry-run: {len(trajectories)} trajectories, "
             f"{sum(n_injections_by_traj.values())} injections, "
             f"{len(operations)} spans{printed} (no judge calls made)"

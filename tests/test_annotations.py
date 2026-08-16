@@ -1551,9 +1551,11 @@ def test_corrupt_seq_delivery_order_check_still_fires(tmp_path):
 
 def test_index_never_raises_on_a_delivery_without_seq():
     """The tool path fabricates positional synthetic seqs (load_events), but
-    a direct caller can hand the index a seq-less delivery: the delivery sort
-    must degrade (corrupt seqs sort last, stably), never raise — the
-    module's never-raises docstring covers direct callers too."""
+    a direct caller can hand the index a seq-less delivery: the index keeps
+    the stream's FILE order (a corrupt seq is noted, never re-sorted — a
+    trailing move would detach the delivery from its recording position),
+    and never raises — the module's never-raises docstring covers direct
+    callers too."""
     idx = build_annotation_index([
         {"seq": 1, "type": "memory_session", "annotation_id": "a-0",
          "payload": {"trace_session_id": "S"}},
@@ -1562,7 +1564,41 @@ def test_index_never_raises_on_a_delivery_without_seq():
         {"seq": 2, "type": "memory_delivery", "annotation_id": "a-2",
          "payload": {"trace_session_id": "S", "delivery_id": "d2"}},
     ])
-    assert [d["payload"]["delivery_id"] for d in idx.deliveries] == ["d2", "d1"]
+    assert [d["payload"]["delivery_id"] for d in idx.deliveries] == ["d1", "d2"]
+
+
+def test_deliveries_keep_file_order_under_a_regressed_seq():
+    """A hand-regressed (still-integer) seq is noted by load_events, never
+    re-sorted: the delivery list keeps recording order, so the recall
+    ordinals (R-numbers) follow the recording, not the forged seq — the
+    same file-order read the recorder's own retrieval index makes."""
+    v1 = {"version_id": "v1", "namespace": "ns"}
+    v2 = {"version_id": "v2", "namespace": "ns"}
+    idx = build_annotation_index([
+        *_structural_events(),
+        {"seq": 10, "type": "memory_search_start", "proxy_source": MEM,
+         "binding_status": "not_requested",
+         "payload": {"trace_session_id": "S", "operation_id": "op-1",
+                     "query": {}}},
+        {"seq": 11, "type": "memory_search_end", "proxy_source": MEM,
+         "binding_status": "no_call",
+         "payload": {"trace_session_id": "S", "operation_id": "op-1",
+                     "status": "completed",
+                     "returned": [{"ordinal": 0, "memory": v1},
+                                  {"ordinal": 1, "memory": v2}]}},
+        {"seq": 20, "type": "memory_delivery", "proxy_source": MAIN,  # forged: recorded first
+         "binding_status": "no_call",
+         "payload": {"trace_session_id": "S", "delivery_id": "d-first",
+                     "search_operation_id": "op-1", "status": "placed",
+                     "memories": [v1]}},
+        {"seq": 12, "type": "memory_delivery", "proxy_source": MAIN,  # regressed seq
+         "binding_status": "no_call",
+         "payload": {"trace_session_id": "S", "delivery_id": "d-second",
+                     "search_operation_id": "op-1", "status": "placed",
+                     "memories": [v2]}},
+    ])
+    assert [d["payload"]["delivery_id"] for d in idx.deliveries] == [
+        "d-first", "d-second"]
 
 
 def test_session_not_on_the_main_lane_is_a_problem():

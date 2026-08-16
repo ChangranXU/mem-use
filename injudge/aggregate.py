@@ -69,6 +69,13 @@ def _key_identities(op: dict) -> dict[str, list[tuple[str | None, str]]]:
     return by_key
 
 
+def _idents_of(identities: dict[str, list[tuple[str | None, str]]], key: str) -> list[tuple[str | None, str]]:
+    """The identities one judged key tallies under: the ones the op recorded
+    for it, else the bare (no-namespace, key) pair — an identity-less
+    delivery still tallies under its key."""
+    return identities.get(key) or [(None, key)]
+
+
 def _bucket_value(v: object) -> str:
     if v is None:
         return "null"
@@ -109,7 +116,7 @@ def _rubric_rollup(operations: list[dict]) -> dict:
             for s in RUBRIC_SIGNALS:
                 b = _bucket_value((signals.get(s) or {}).get("value"))
                 counts[s][b] = counts[s].get(b, 0) + 1
-            idents = identities.get(key) or [(None, key)]
+            idents = _idents_of(identities, key)
             for ident in idents:
                 key_of.setdefault(ident, key)
             if (signals.get("accuracy") or {}).get("value") == "contradicted":
@@ -208,7 +215,7 @@ def aggregate(operations: list[dict], n_injections: int, n_trajectories: int | N
                 out["confidence_buckets"][_BUCKETS[1]] += 1
             else:
                 out["confidence_buckets"][_BUCKETS[2]] += 1
-        if op.get("verdict") not in _VERDICTS or op.get("auto"):
+        if v not in _VERDICTS or op.get("auto"):
             continue  # error/unjudged/rule-judged spans: usage untrusted or placeholder
         identities = _key_identities(op)
         # identity -> the display key it rode in on (for the roll records)
@@ -219,7 +226,7 @@ def aggregate(operations: list[dict], n_injections: int, n_trajectories: int | N
             if item:
                 values[(namespace_of(m), item)] = m.get("value")
         for key, entry in (op.get("memory_usage") or {}).items():
-            for ident in identities.get(key) or [(None, key)]:
+            for ident in _idents_of(identities, key):
                 roll = usage_roll.get(ident)
                 if roll is None:
                     roll = usage_roll[ident] = {

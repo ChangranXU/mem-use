@@ -230,6 +230,13 @@ def build_step_stream(
         for s in starts_by_turn.get(turn, []):
             tid = _tid_of(s)
             if tid is None:
+                # the recorder stamps every execution's id: a missing/corrupt
+                # one is corruption — reported like every other anomaly here,
+                # never dropped silently
+                warnings.append(
+                    f"turn {turn}: tool_execution_start with a missing or corrupt "
+                    f"tool_call_id ({s.get('tool_call_id')!r}, seq {s.get('seq')})"
+                )
                 continue
             ex = slot(tid)
             if ex.seq_start is None:  # first start wins
@@ -250,6 +257,11 @@ def build_step_stream(
         for e2 in ends_by_turn.get(turn, []):
             tid = _tid_of(e2)
             if tid is None:
+                # same never-silent rule as the start path above
+                warnings.append(
+                    f"turn {turn}: tool_execution_end with a missing or corrupt "
+                    f"tool_call_id ({e2.get('tool_call_id')!r}, seq {e2.get('seq')})"
+                )
                 continue
             if tid not in execs:
                 warnings.append(
