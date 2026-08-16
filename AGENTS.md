@@ -78,6 +78,9 @@
   an ignored format field earns — unless the text is invalid JSON anyway
   (the refusal fires at the literal, before later garbage): then the
   invalid-JSON classification wins and the json tier degrades free;
+  pathological nesting past the parser's recursion limit is the same class
+  (a complete-but-too-deep answer's braces closed — no budget produces or
+  fixes it), so the truncation gate never reads it as a mid-way cut either;
   a truncated answer that still slips past the completeness check (a stray
   complete object inside it reads as a finished answer) exhausts the
   corrective budget and ends in an error naming both the violation and the

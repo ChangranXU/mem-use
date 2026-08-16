@@ -46,7 +46,10 @@ through the tier chain / corrective retry like any other violation; a cut
 holding a stray complete object still slips past the completeness check
 (a stray complete object inside it reads as a finished answer), burns the
 corrective budget, and ends in an error naming both the violation and the
-budget. A valid but
+budget. An answer only Python's parser limits refuse (a digit-limit
+literal, pathological nesting) reads as finished the same way — its braces
+closed, so no budget produced or fixes it — and takes the model-error
+path, never the budget verdict. A valid but
 schema-violating answer at the json tier is a model error (JSON mode never
 promised schema conformance) and takes the same-tier corrective retry: a
 same-tier retry never repeats a failed request blindly — it appends a
@@ -1600,7 +1603,7 @@ def judge_span(
                 # a full extra parse of the answer — spent only when the
                 # truncation signal makes it reachable
                 complete = _complete_json_present(text) if truncated else None
-                if truncated and complete is None:
+                if truncated and complete is None and error != _DEEP_NESTING_ERROR:
                     # budget exhaustion, not a format-tier property: the cut
                     # answer never became the contract, and a same-budget
                     # retry re-truncates (deterministically at temperature
@@ -1611,7 +1614,14 @@ def judge_span(
                     # this failure — the cut only removed trailing prose (or
                     # the shape is the model's own error), so it falls
                     # through to the tier chain / corrective retry below,
-                    # which changes the request instead of re-truncating.
+                    # which changes the request instead of re-truncating. A
+                    # pathologically nested answer reads as incomplete here
+                    # (both completeness parsers stop at the recursion limit)
+                    # even when its braces closed: like the digit-limit
+                    # refusal it is the model's own error — more tokens
+                    # cannot fix it — so it too falls through and keeps its
+                    # corrective retries, never the budget verdict with its
+                    # "increase max_tokens" misadvice.
                     return _error_verdict(
                         f"judge response truncated at the output budget "
                         f"(judge output {error}); increase max_tokens",

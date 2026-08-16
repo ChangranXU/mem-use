@@ -2182,6 +2182,29 @@ def test_truncation_gate_huge_int_answer_is_not_a_false_budget_cut(monkeypatch):
     assert "truncated at the output budget (judge output" not in verdict["error"]
 
 
+def test_truncation_gate_deep_nesting_answer_is_not_a_false_budget_cut(monkeypatch):
+    """A COMPLETE but pathologically nested answer carrying the truncation
+    signal reads as "no complete JSON value" (both completeness parsers stop
+    at the recursion limit) — but no budget produced or fixes 100k-deep
+    nesting: like the digit-limit refusal above it is the model's own error,
+    so the gate must not fire. The span keeps its corrective retries, and
+    the exhaustion error names the nesting, never the "increase max_tokens"
+    misadvice."""
+    deep = ('{"memories": [], "analysis": "", "evidence": [], "confidence": 0.5, "x": '
+            + "[" * 100000 + "]" * 100000 + "}")
+    payload = {"choices": [{"finish_reason": "length", "message": {"content": deep}}]}
+    record = []
+    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory(record, payload))
+    span, steps = _judge_input_fixture()
+    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m",
+                      output_format="json", max_attempts=2)
+    verdict = judge_span(span, steps, cfg, [])
+    assert verdict["verdict"] == "error"
+    assert "nests too deeply" in verdict["error"]
+    assert "increase max_tokens" not in verdict["error"]
+    assert len(record) == 2  # the corrective retry the budget gate would skip
+
+
 def test_strict_parse_digit_limit_is_distinct_from_invalid_json():
     """A >4300-digit integer literal is valid JSON (RFC 8259 sets no limit):
     Python's int() refusal is a model error with its own reason, never the
