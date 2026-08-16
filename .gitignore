@@ -19,5 +19,8 @@ venv/
 build/
 dist/
 
+# Editor directories
+.cursor/
+
 # OS files
 .DS_Store
