@@ -1,6 +1,6 @@
 # Introduction
 
-English | [简体中文](../zh-CN/README.md)
+English | [简体中文](https://app.gitbook.com/s/KRU5OA8cIFyIbu2vKoXm/)
 
 **mem-eval** analyzes schema-v6 gate trajectories (extension/traj-recorder)
 for memory-system quality. Two read-only tools share one parsing core:

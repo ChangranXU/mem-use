@@ -1,6 +1,6 @@
 # 简介
 
-[English](../en/README.md) | 简体中文
+[English](https://app.gitbook.com/s/j3HLdDCYckkSyWLMFhAg/) | 简体中文
 
 **mem-eval** 分析 schema-v6 gate 轨迹（extension/traj-recorder）以评估记忆
 系统质量。两个只读工具共享同一套解析核心：
