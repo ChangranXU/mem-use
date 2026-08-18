@@ -129,6 +129,7 @@ injudge/aggregate.py         # verdict counts/rates, per-memory usage roll-ups
 injudge/report.py            # injudge.report/v5 artifact + injudge.summary/v2 stats, stdout summary
 injudge/__main__.py          # CLI: python3 -m injudge
 prompts/                     # every LLM prompt, as files grouped by tool/purpose folder
+doc/                         # user docs, GitBook layout (LANGS.md + en/ + zh-CN/, each with SUMMARY.md)
 tests/conftest.py            # puts the checkout root on sys.path for pytest runs
 tests/annotated_fixtures.py  # shared schema-v6 synthetic-trajectory builder
 tests/test_*.py              # pytest suite (collected)
