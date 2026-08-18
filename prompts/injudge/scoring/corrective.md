@@ -1,0 +1,1 @@
+That answer is not valid per the output contract: judge output @error@. Answer again with ONE JSON object and nothing else, exactly in the declared shape — one memories array entry per delivered memory key, every signal as a value/note object whose value comes from its declared boolean or enum, and a numeric confidence.

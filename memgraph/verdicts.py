@@ -1,6 +1,6 @@
 """Merge injudge verdicts into the graph for rendering.
 
-`apply_verdicts` joins an `injudge.report/v4` artifact onto a
+`apply_verdicts` joins an `injudge.report/v5` artifact onto a
 loaded graph by (run_id, op seq) — robust to the two tools assigning different
 T-numbers when run on different path sets — and annotates each recall op in
 place:
@@ -11,9 +11,11 @@ place:
 - `span_verdict`: the span's verdict on every one of its injections, first
   or restated (the role-independent outcome, for coloring);
 - `verdict_detail` (every injection of an annotated span): confidence,
-  analysis, evidence, memory_usage, rubric, delivery_cost, auto, error —
-  the span's record, stamped on each of its ops so a loaded path set
-  missing the "first" injection still shows it; rendered in the op popover.
+  analysis, evidence, memory_usage, rubric, delivery_cost, auto, error,
+  input (the budget-gate regime record — full/scan path, gold marker,
+  over-budget marker — present on gate spans only) — the span's record,
+  stamped on each of its ops so a loaded path set missing the "first"
+  injection still shows it; rendered in the op popover.
 
 Unmatched lanes/ops are validation notes, never errors: the graph renders
 identically whether or not verdicts are present.
@@ -27,11 +29,11 @@ from pathlib import Path
 
 from memgraph.annotations import is_int
 
-_SCHEMA = "injudge.report/v4"
+_SCHEMA = "injudge.report/v5"
 
 
 def load_verdict_report(path: Path) -> dict:
-    """Read and sanity-check an injudge.report/v4 artifact."""
+    """Read and sanity-check an injudge.report/v5 artifact."""
     try:
         report = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError, RecursionError) as e:
@@ -268,6 +270,9 @@ def apply_verdicts(graph: dict, report: dict, source: str = "") -> None:
                 "delivery_cost": span.get("delivery_cost"),
                 "auto": span.get("auto"),
                 "error": span.get("error"),
+                # the budget-gate regime record (gate spans only; absent from
+                # rule-judged/unjudged spans, like the report's own record)
+                "input": span.get("input"),
             }
             n_annotated += 1
         unmatched = sorted(set(seq_map) - matched)

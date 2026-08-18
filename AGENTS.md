@@ -4,7 +4,7 @@
   memory-system quality. Two read-only tools share one parsing core:
   **memgraph** renders every memory operation and its relationships as a
   self-contained HTML/JSON graph; **injudge** scores each recall injection's
-  impact with an LLM rubric and emits the `injudge.report/v4` artifact
+  impact with an LLM rubric and emits the `injudge.report/v5` artifact
   (feedable back into memgraph via `--verdicts`). The methodology in one
   line: an injection is judged by its *subsequent influence* on the agent —
   never by the final task result.
@@ -116,15 +116,19 @@ memgraph/model.py            # Trajectory / MemoryOp / MemoryUnit / Edge datacla
 memgraph/parse_trajectory.py # trajectory.jsonl → ops (annotation-driven, turn table)
 memgraph/graph.py            # path discovery, cross-trajectory linking, validation
 memgraph/html.py             # self-contained HTML renderer (template + embedded graph JSON)
-memgraph/verdicts.py         # merge injudge.report/v4 verdicts onto recall ops
+memgraph/verdicts.py         # merge injudge.report/v5 verdicts onto recall ops
 memgraph/__main__.py         # CLI: python3 -m memgraph
 injudge/model.py             # AgentStep / ToolExec / InjectionSpan dataclasses
 injudge/steps.py             # agent-lane step stream + all-lane billed prompt tokens
 injudge/spans.py             # recall ops → injection spans (identical portable content)
-injudge/judge.py             # .env config, tiered urllib client, prompt, verdict parsing
+injudge/judge.py             # .env config, tiered urllib client, budget gate, verdict parsing
+injudge/scan.py              # overflow path: chunk knobs, evidence extraction, scan assembly
+injudge/gold.py              # golden-answer / correctness sidecars (harness-report + plain shapes)
+injudge/prompts.py           # loads prompt files from prompts/ (never inline prompts in code)
 injudge/aggregate.py         # verdict counts/rates, per-memory usage roll-ups
-injudge/report.py            # injudge.report/v4 artifact, markdown, stdout summary
+injudge/report.py            # injudge.report/v5 artifact + injudge.summary/v2 stats, stdout summary
 injudge/__main__.py          # CLI: python3 -m injudge
+prompts/                     # every LLM prompt, as files grouped by tool/purpose folder
 tests/conftest.py            # puts the checkout root on sys.path for pytest runs
 tests/annotated_fixtures.py  # shared schema-v6 synthetic-trajectory builder
 tests/test_*.py              # pytest suite (collected)
@@ -138,25 +142,30 @@ Judge endpoint configuration is the checkout's `.env` (never commit it; see
 
 # Build, test, and development commands
 
-- `uv venv .venv && uv pip install pytest` — create the checkout-local test
-  environment once (runs are stdlib-only; only the tests need pytest).
+- `uv venv .venv && uv pip install pytest tiktoken tqdm` — create the
+  checkout-local test environment once (runtime is stdlib plus tiktoken and
+  tqdm, so the suite needs pytest + those two).
 - `.venv/bin/python -m pytest tests -q` — run the full suite from the
   checkout root, under any directory name (tests/conftest.py puts the
   checkout root on sys.path; memgraph/ and injudge/ are top-level packages).
 - `python3 -m memgraph <paths> -o memgraph.html --json memgraph.json` —
-  build the graph, from the checkout root (`--verdicts injudge-report.json`
+  build the graph, from the checkout root (`--verdicts output/injudge-report.json`
   merges verdicts first).
-- `python3 -m injudge <paths> --json injudge-report.json -o report.md` —
-  judge spans, from the checkout root; `--dry-run` prints the judge input
-  with no .env read, no network, no files written.
+- `python3 -m injudge <paths> -o output/` — judge spans, from the checkout
+  root (writes injudge-report.json + summary.json; `--html` adds
+  memgraph-verdicts.html); `--dry-run` prints the judge input
+  (gold blocks included), reading only the budget/chunk knobs from a
+  readable .env (never credentials), no judge calls, no files written.
 
 # Style guide
 
 1. Target Python 3.11 or higher. Use modern typing: `str | None`, built-in
    generics, `from __future__ import annotations` at the top of every module
    (the `test_*.py` suite excepted).
-2. Stdlib only at runtime (urllib for the judge client, no SDK). Do not add
-   dependencies; the test environment carries pytest alone.
+2. Stdlib plus tiktoken (the o200k_base budget estimate) and tqdm (the CLI
+   progress bars) at runtime — urllib for the judge client, no SDK. Do not
+   add dependencies; the test environment carries pytest, tiktoken, and
+   tqdm alone.
 3. Use `pathlib` instead of `os.path`; artifacts are written via
    `atomic_write` so a crash never leaves a truncated file.
 4. Data containers are plain dataclasses with `to_dict()` for the JSON
@@ -218,9 +227,31 @@ These are load-bearing; never weaken them:
   markers by each marker's own `on_memory_lane` flag, computed at parse time
   against the final lane set) are still part of the JSON contract — the HTML
   embeds the same dict by design; do not prune them from one consumer only.
-- injudge writes `injudge.report/v4` (`{tool, generated_at, trajectories,
+- injudge writes `injudge.report/v5` (`{tool, generated_at, trajectories,
   operations, injections, aggregates, validation}`), rewritten after every
-  trajectory so a crash keeps completed work. memgraph joins it by
+  trajectory so a crash keeps completed work. Each operation that hit the
+  input budget gate carries an `input` record (`{"path": "full"}` or
+  `{"path": "scan", "chunks", "none_chunks", "evidence_tokens"}`, plus the
+  `"gold"` regime marker and the `"over_budget"` send-as-is marker when they
+  apply); rule-judged auto-neutral spans and unjudged spans omit it. A span
+  whose judging failed UNEXPECTEDLY (a non-JudgeError — a bug, never an
+  endpoint failure) keeps a re-derived `{"path", "gold"?}` record without
+  the scan counters — they die with the exception — so the regime tallies
+  never lose the span.
+  `aggregates.overall` counts the regimes (`input_paths`, `gold_scored`,
+  `over_budget`).
+  The companion `summary.json` (`injudge.summary/v2`) is the final
+  statistics set of the run: counts/rates, rubric distributions, cost,
+  confidence, and slim per-memory usage tallies — per trajectory (`instance_id`
+  / `model` / `adapter` when recorded) with a narrative-free span index
+  (verdict / confidence / usage labels). Empty rate/headline/rubric/
+  confidence/cost shells are omitted when a trajectory had no judged spans.
+  Identities sharing one display key carry a `key#<item-or-namespace>`
+  suffix (8-char prefix, full base on a prefix collision) so the tallies
+  never conflate memories the report tells apart. Narrative and
+  process detail (rubric notes, analysis, judge_raw, validation, recorded
+  memory text) stays in the report artifact alone.
+  memgraph joins it by
   `(run_id, op seq)`; unmatched entries in either direction are validation
   notes, never errors, and an ambiguous join key — a run_id shared by
   several loaded trajectories, or one `(run_id, seq)` claimed by several
@@ -258,6 +289,18 @@ Use these component names in parentheses for `fix`, `feat`, `enh`, and `ref` com
 
 # Rules
 
+- Every LLM prompt lives as a file under `prompts/`, grouped by tool and
+  purpose folder (`prompts/injudge/signals/`, `scoring/`, `extraction/`) and
+  loaded through `injudge/prompts.py` — never inline a prompt string in
+  code, and put new prompts under `prompts/` too. Shared text (the rubric
+  signal definitions, the answer contract) is factored into shared files and
+  assembled with `@slot@` placeholders so copies cannot drift; enum literals
+  stay `@accuracy@`-style tokens filled from the contract constants. What the
+  files hold is the instruction prose (frames, guidance, notes, closings,
+  corrective notes); the short structural text the code stamps around it —
+  section labels, span/chunk metadata lines, the evidence-block step-range
+  headers — is code-owned (it is sized by the token reserves, never shared
+  between prompts), not a prompt.
 - Do not preserve backward compatibility. Remove obsolete paths instead of adding compatibility layers, fallbacks, or migrations.
 - Choose the simplest implementation that fully meets the current requirements. Avoid speculative abstractions, configuration, and indirection.
 - Grow the system in layers. Start from the smallest version that works end to end, and add each new capability on top of a product that already works. Never trade a working product for unfinished complexity.

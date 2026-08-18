@@ -34,6 +34,7 @@ from injudge.judge import (
     _build_request,
     _complete_json_present,
     _error_verdict,
+    _memoize_tier,
     _render_steps,
     _strict_parse,
     _top_level_objects,
@@ -47,10 +48,13 @@ from injudge.judge import (
 from injudge.model import AgentStep, InjectionSpan, ToolExec
 from injudge.report import (
     _policy_line,
+    _rubric_line,
+    _slim_aggregate,
+    _slim_usage_rollup,
     build_artifact,
+    build_summary,
     operation_record,
     print_summary,
-    render_markdown,
 )
 from injudge.spans import content_fingerprint, group_spans
 from injudge.steps import build_step_stream, prompt_tokens_total
@@ -153,6 +157,29 @@ def test_step_stream_open_execution_kept():
     b = TrajBuilder().agent_turn(with_task=True, result=None)
     steps, _ = make_steps(b)
     assert steps[0].tools[0].result is None and steps[0].tools[0].status is None
+
+
+def test_structured_tool_result_spelled_as_json():
+    """A structured tool output records a JSON value rather than text: the
+    stream spells it back as JSON (ToolExec's str|None contract — the scan
+    path's anchor text joins these fields), and a corrupt non-string tool
+    name is dropped, never joined raw."""
+    b = TrajBuilder()
+    b._emit("message_end", proxy_source="MAIN", role="user", msg=1, content=TASK)
+    b.turn += 1
+    b._emit("turn_start", turn=b.turn, call_id="x")
+    b._emit("message_end", proxy_source="MAIN", role="assistant", msg=2, turn=b.turn,
+            content="", tool_calls=[{"id": "c1", "name": "bash", "args": {"command": "ls"}}])
+    b._emit("tool_execution_start", proxy_source="MAIN", turn=b.turn,
+            tool_call_id="c1", name={"bad": "name"}, args={"command": "ls"})
+    b._emit("tool_execution_end", proxy_source="MAIN", turn=b.turn, msg=3,
+            tool_call_id="c1", status="completed", result={"files": ["x.py"], "ok": True})
+    b._emit("turn_end", turn=b.turn, status="completed")
+    steps, warnings = make_steps(b)
+    assert steps[0].tools[0].result == '{"files": ["x.py"], "ok": true}'
+    # the corrupt start name is dropped; the classifying message's copy fills it
+    assert steps[0].tools[0].name == "bash"
+    assert warnings == []
 
 
 def test_turnless_tool_end_attributed_by_id():
@@ -733,7 +760,7 @@ class _FakeSpan:
 
 
 def _signals(rel=True, acc="uncontradicted", nov="novel", inf="none", pe=None):
-    """v4 rubric entry: bool for relevance, enums elsewhere."""
+    """A rubric entry: bool for relevance, enums elsewhere."""
     return {
         "relevance": {"value": rel, "note": ""},
         "accuracy": {"value": acc, "note": ""},
@@ -1141,6 +1168,60 @@ def test_aggregate_zero_operations():
     assert agg["cost"]["approx_tokens_total"] == 0
 
 
+def test_aggregate_over_budget_sends_count_in_the_regime_tallies():
+    """A span sent as-is past the input budget carries the over_budget marker
+    on its per-operation input record; the overall regime tallies must
+    surface the count too — a run that sent N spans over-budget as-is is not
+    indistinguishable from one that never overran."""
+    ops = [
+        {**_op("T1:S1", "neutral", 0.9),
+         "input": {"path": "scan", "chunks": 2, "none_chunks": 0,
+                   "evidence_tokens": 10, "over_budget": True}},
+        {**_op("T1:S2", "positive", 0.9, {"k": {"usage": "used", "evidence": ""}}),
+         "input": {"path": "full"}},
+        {**_op("T1:S3", "error"),
+         "input": {"path": "scan", "gold": True, "over_budget": True}},
+        _op("T1:S4", "unjudged"),  # no gate record: counts nowhere
+    ]
+    agg = aggregate(ops, n_injections=4, n_trajectories=1)
+    assert agg["input_paths"] == {"full": 1, "scan": 2}
+    assert agg["gold_scored"] == 1
+    assert agg["over_budget"] == 2
+    # the summary projection passes the regime tallies through
+    assert _slim_aggregate(agg)["over_budget"] == 2
+
+
+def test_aggregate_cost_share_survives_an_unrepresentable_quotient():
+    """Hand-edited delivery costs (a negative chars next to a >308-digit one)
+    can make the wasted-token share's quotient overflow the double range:
+    the exact totals stay recorded and the derived share degrades to None —
+    a corrupt artifact must never abort the aggregation (the rule __main__
+    and policy_rollup give their token-share divides)."""
+    big = 10**400
+    ops = [
+        _op("T1:S1", "positive", 0.9,
+            cost={"content_chars_total": 0, "approx_tokens_total": big + 1}),
+        _op("T1:S2", "negative", 0.9,
+            cost={"content_chars_total": 0, "approx_tokens_total": -big}),
+    ]
+    agg = aggregate(ops, 2)
+    assert agg["headline"]["wasted_token_share"] is None
+    assert agg["headline"]["judged_spans"] == 2
+    # the exact int totals stay recorded, never float-converted
+    assert agg["cost"]["approx_tokens_total"] == 1
+    assert agg["cost"]["approx_tokens_by_verdict"]["positive"] == big + 1
+
+
+def test_load_prompt_missing_file_fails_fast():
+    """A missing prompt file is a broken checkout — a missing runtime input
+    that fails fast with a targeted SystemExit (the rule tqdm/tiktoken get),
+    never a raw FileNotFoundError traceback at import time."""
+    from injudge.prompts import load_prompt
+
+    with pytest.raises(SystemExit, match="cannot read the prompt file"):
+        load_prompt("injudge/no-such-prompt")
+
+
 def test_aggregate_memory_value_drift():
     ops = [
         _op("T1:S1", "neutral", 0.9, {"k": {"usage": "ignored", "evidence": ""}},
@@ -1151,6 +1232,201 @@ def test_aggregate_memory_value_drift():
     (roll,) = aggregate(ops, 2)["memory_usage"]
     assert roll["first_value"] == "v1" and roll["last_value"] == "v2"
     assert roll["tallies"]["used"] == 1 and roll["tallies"]["ignored"] == 1
+
+
+def _assert_stats_only(obj):
+    """Walk a summary value: judging-narrative field names must not appear
+    as keys. The usage label `noted` is a statistic, not a rubric `note`."""
+    if isinstance(obj, dict):
+        for forbidden in ("note", "evidence", "analysis", "judge_raw",
+                          "payload_summary", "first_value", "last_value"):
+            assert forbidden not in obj
+        for v in obj.values():
+            _assert_stats_only(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            _assert_stats_only(v)
+
+
+def test_summary_v2_is_statistics_only():
+    """The summary is the final statistics set, not a second copy of the
+    judging narrative: no notes, no recorded memory text, no namespace
+    hashes, no validation log, no empty triage placeholders; the duplicated
+    span rates stay out of headline; a value drift earns a one-line marker;
+    two identities sharing a key get a short item_id suffix."""
+    ops = [
+        _op("T1:S1", "positive", 0.9, {"k": {"usage": "used", "evidence": "dup"}},
+            memories=[{"key": "k", "value": "v1", "item_id": "aaaaaaaaaaaa"},
+                      {"key": "k", "value": "w", "item_id": "bbbbbbbbbbbb"}],
+            rubric={"k": _signals(inf="acted_on", pe="improved")},
+            cost={"content_chars_total": 8, "approx_tokens_total": 2}),
+        # `noted` must not trip a substring check for rubric `note`
+        _op("T1:S2", "neutral", 0.4, {"k": {"usage": "noted", "evidence": "dup2"}},
+            memories=[{"key": "k", "value": "v2", "item_id": "aaaaaaaaaaaa"}],
+            rubric={"k": _signals(rel=False, nov="redundant")},
+            cost={"content_chars_total": 8, "approx_tokens_total": 2}),
+    ]
+    ops[0]["n_injections"] = 2
+    ops[0]["steps"] = [1, 3]
+    ops[1]["n_injections"] = 2
+    ops[1]["steps"] = [4, 5]
+    artifact = build_artifact(
+        {},
+        [{"id": "T1", "run_id": "r", "instance_id": "inst",
+          "model": "m", "adapter": "cure@0.1.0"}],
+        ops, [], {"T1": 4},
+        [{"level": "warn", "msg": "process note"}],
+    )
+    summary = build_summary(artifact)
+    assert summary["tool"]["schema"] == "injudge.summary/v2"
+    assert "validation" not in summary
+    _assert_stats_only(summary)
+    blob = json.dumps(summary)
+    assert "v1" not in blob and '"v2"' not in blob  # no recorded memory text
+    ov = summary["overall"]
+    assert set(ov["headline"]) == {"judged_spans", "wasted_token_share"}
+    assert ov["low_confidence"] == ["T1:S2"]
+    # memory usage: bare tallies keyed by display key, drift marked, the two
+    # identities sharing key "k" disambiguated with a short item_id suffix
+    usage = ov["memory_usage"]
+    keys = {u["key"] for u in usage}
+    assert keys == {"k#aaaaaaaa", "k#bbbbbbbb"}
+    drift = {u["key"]: u.get("value_drift") for u in usage}
+    assert drift == {"k#aaaaaaaa": True, "k#bbbbbbbb": None}
+    for u in usage:
+        assert "namespace" not in u and "spans" not in u and "first_value" not in u
+    t1 = summary["trajectories"][0]
+    assert t1["instance_id"] == "inst" and t1["model"] == "m"
+    assert t1["adapter"] == "cure@0.1.0"
+    # span index: labels only; `noted` is a usage statistic
+    (s1,) = [s for s in t1["spans"] if s["operation_id"] == "T1:S1"]
+    assert s1 == {"operation_id": "T1:S1", "verdict": "positive",
+                  "confidence": 0.9, "steps": [1, 3], "n_injections": 2,
+                  "usage": {"k": "used"}}
+    (s2,) = [s for s in t1["spans"] if s["operation_id"] == "T1:S2"]
+    assert s2["usage"] == {"k": "noted"}
+    # the full aggregate keeps its narrative/identity detail in the report
+    op1 = artifact["operations"][0]
+    assert op1["memory_usage"]["k"]["evidence"] == "dup"
+    assert artifact["validation"]
+
+
+def test_summary_omits_empty_stat_shells():
+    """A trajectory with no judged spans keeps the verdict tally and cost,
+    and drops the all-null rates / headline / rubric / confidence shells.
+    Failed spans omit null confidence and empty usage."""
+    op = _op("T1:S1", "error", None, {},
+             cost={"content_chars_total": 40, "approx_tokens_total": 10})
+    op["n_injections"] = 3
+    op["steps"] = [1, 5]
+    artifact = build_artifact(
+        {},
+        [{"id": "T1", "run_id": "r", "instance_id": "i",
+          "model": "m", "adapter": "cure@0.1.0"}],
+        [op], [], {"T1": 3}, [],
+    )
+    summary = build_summary(artifact)
+    t = summary["trajectories"][0]
+    assert t["error"] == 1 and t["n_spans"] == 1 and t["n_injections"] == 3
+    assert t["model"] == "m" and t["adapter"] == "cure@0.1.0"
+    for shell in ("rates", "headline", "rubric", "confidence", "memory_usage"):
+        assert shell not in t
+    assert t["cost"]["approx_tokens_total"] == 10
+    assert t["spans"] == [{
+        "operation_id": "T1:S1", "verdict": "error",
+        "steps": [1, 5], "n_injections": 3,
+    }]
+    ov = summary["overall"]
+    for shell in ("rates", "headline", "rubric", "confidence"):
+        assert shell not in ov
+
+
+def test_summary_display_keys_never_conflate_shared_id_prefixes():
+    """Two identities sharing a key AND the 8-char item_id prefix would
+    collapse to one display key under the bare-prefix rule — the summary
+    would conflate two memories the report tells apart (it keeps the full
+    ids). Exactly the colliding identities fall back to the full id; an
+    8-char-unique suffix stays short."""
+    rolls = [
+        {"key": "k", "item_id": "aaaaaaaa0001", "tallies": {"used": 1}},
+        {"key": "k", "item_id": "aaaaaaaa0002", "tallies": {"ignored": 2}},
+        {"key": "k", "item_id": "bbbbbbbb0001", "tallies": {"used": 1}},
+        {"key": "solo", "item_id": "cccccccc0001", "tallies": {"used": 3}},
+    ]
+    keys = [e["key"] for e in _slim_usage_rollup(rolls)]
+    assert keys == ["k#aaaaaaaa0001", "k#aaaaaaaa0002", "k#bbbbbbbb", "solo"]
+
+
+def test_summary_display_keys_use_namespace_when_the_id_echoes_the_key():
+    """No item_id recorded: item_key falls back to the display key, so two
+    namespaces' same-keyed items carry identical id halves — an id-cut
+    suffix would render both as the same "k#k", conflating two identities
+    the report keeps apart. The namespace, the identity's other half, cuts
+    the suffix instead; a namespace-less entry keeps the bare key."""
+    rolls = [
+        {"key": "k", "item_id": "k", "namespace": "aaaaaaaa0001", "tallies": {"used": 1}},
+        {"key": "k", "item_id": "k", "namespace": "bbbbbbbb0002", "tallies": {"used": 1}},
+        {"key": "k", "item_id": "k", "namespace": None, "tallies": {"ignored": 1}},
+        {"key": "k", "item_id": "realid000001", "namespace": "cccccccc", "tallies": {"used": 1}},
+    ]
+    keys = [e["key"] for e in _slim_usage_rollup(rolls)]
+    assert keys == ["k#aaaaaaaa", "k#bbbbbbbb", "k", "k#realid00"]
+
+
+def test_summary_display_keys_use_namespace_when_namespaces_share_an_item_id():
+    """Two stores CAN record the same item id under one key (item ids are
+    store-local): an id-cut suffix would render both as the same "k#id",
+    conflating two identities the report keeps apart. The shared id half
+    cannot speak, so the namespace cuts the suffix instead; a third entry
+    with its own id keeps the short id suffix."""
+    rolls = [
+        {"key": "k", "item_id": "item-1", "namespace": "aaaaaaaa0001", "tallies": {"used": 1}},
+        {"key": "k", "item_id": "item-1", "namespace": "bbbbbbbb0002", "tallies": {"ignored": 2}},
+        {"key": "k", "item_id": "item-9", "namespace": "aaaaaaaa0001", "tallies": {"used": 1}},
+    ]
+    keys = [e["key"] for e in _slim_usage_rollup(rolls)]
+    assert keys == ["k#aaaaaaaa", "k#bbbbbbbb", "k#item-9"]
+
+
+def test_summary_display_keys_survive_a_recut_collision():
+    """The namespace re-cut is not collision-free: one namespace carrying two
+    items that EACH share their item id with other namespaces' items re-cuts
+    both onto its own string, and a re-cut namespace base can spell another
+    entry's unre-cut item id. Identical final bases for distinct identities
+    escalate to the full item@namespace pair (never prefix-cut), so the
+    summary never conflates memories the report tells apart."""
+    rolls = [
+        {"key": "k", "item_id": "a", "namespace": "n1", "tallies": {"used": 1}},
+        {"key": "k", "item_id": "a", "namespace": "n2", "tallies": {"used": 1}},
+        {"key": "k", "item_id": "b", "namespace": "n1", "tallies": {"ignored": 1}},
+        {"key": "k", "item_id": "b", "namespace": "n3", "tallies": {"used": 1}},
+        # a no-namespace item whose id spells entry 2's re-cut namespace base
+        {"key": "k", "item_id": "n2", "namespace": None, "tallies": {"used": 1}},
+    ]
+    keys = [e["key"] for e in _slim_usage_rollup(rolls)]
+    assert keys == ["k#a@n1", "k#a@n2", "k#b@n1", "k#n3", "k#n2"]
+    assert len(set(keys)) == len(keys)
+
+
+def test_summary_display_keys_escalation_rechecks_the_surviving_bases():
+    """The escalation creates NEW strings, and one can spell a surviving
+    entry's base: an item id literally containing "@namespace" equals the
+    full pair another entry escalated to. The fixpoint re-check earns that
+    entry its own compound escalation instead of conflating the two."""
+    rolls = [
+        {"key": "k", "item_id": "a", "namespace": "n1", "tallies": {"used": 1}},
+        {"key": "k", "item_id": "a", "namespace": "n2", "tallies": {"used": 1}},
+        {"key": "k", "item_id": "b", "namespace": "n1", "tallies": {"ignored": 1}},
+        {"key": "k", "item_id": "b", "namespace": "n3", "tallies": {"used": 1}},
+        # an item id spelling the compound entry 1 escalates to ("a@n1")
+        {"key": "k", "item_id": "a@n1", "namespace": "n9", "tallies": {"used": 1}},
+    ]
+    keys = [e["key"] for e in _slim_usage_rollup(rolls)]
+    # entry 2's "n2" base never collides here, so it keeps the short suffix;
+    # the last entry escalates to its own compound "a@n1@n9"
+    assert keys == ["k#a@n1", "k#n2", "k#b@n1", "k#n3", "k#a@n1@n9"]
+    assert len(set(keys)) == len(keys)
+
 
 
 def test_aggregate_multi_namespace_delivery_tallies_each_identity():
@@ -1198,6 +1474,24 @@ def test_aggregate_last_value_is_the_literal_latest_value():
     ]
     (roll,) = aggregate(ops, 2)["memory_usage"]
     assert roll["first_value"] == "v1" and roll["last_value"] is None
+
+
+def test_summary_value_drift_needs_two_recorded_values():
+    """An unrecorded end is not a content change: a re-delivery recording no
+    value (redacted content) must not flag value_drift in the summary — the
+    marker means the RECORDED content changed, so both compared ends must be
+    recorded values. The report's raw first/last stay the literal record."""
+    ops = [
+        _op("T1:S1", "neutral", 0.9, {"k": {"usage": "ignored", "evidence": ""}},
+            memories=[{"key": "k", "value": "v1"}]),
+        _op("T1:S2", "neutral", 0.9, {"k": {"usage": "ignored", "evidence": ""}},
+            memories=[{"key": "k", "value": None}]),
+    ]
+    artifact = build_artifact({}, [{"id": "T1", "run_id": "r"}], ops, [], {"T1": 2}, [])
+    (roll,) = artifact["aggregates"]["overall"]["memory_usage"]
+    assert roll["first_value"] == "v1" and roll["last_value"] is None
+    (usage,) = build_summary(artifact)["overall"]["memory_usage"]
+    assert usage["key"] == "k" and "value_drift" not in usage
 
 
 def test_aggregate_usage_rollup_excludes_auto_neutral_spans():
@@ -1304,9 +1598,9 @@ def test_rubric_key_lists_carry_the_namespace():
 
 
 def test_rubric_line_surfaces_the_novelty_distribution(capsys):
-    """The one-line rubric summary (stdout and markdown share it) carries the
-    three-tier novelty distribution — the rubric's headline signal — not only
-    the flattened relevant/accurate/influential rates."""
+    """The one-line rubric summary carries the three-tier novelty
+    distribution — the rubric's headline signal — not only the flattened
+    relevant/accurate/influential rates."""
     ops = [
         {**_op("T1:S1", "neutral", 0.9,
                rubric={"ka": _signals(nov="novel"), "kb": _signals(nov="redundant")}),
@@ -1318,7 +1612,7 @@ def test_rubric_line_surfaces_the_novelty_distribution(capsys):
     print_summary(artifact)
     line = "novelty: novel 33%, confirming 33%, redundant 33%"
     assert line in capsys.readouterr().out
-    assert line in render_markdown(artifact)
+    assert line in _rubric_line(artifact["aggregates"]["overall"]["rubric"])
 
 
 def test_aggregate_confidence_excludes_auto_spans():
@@ -1343,13 +1637,21 @@ def test_rubric_rollup_excludes_auto_neutral_placeholders(capsys):
     op = operation_record(span, verdict,
                           {"deliveries": 1, "content_chars_total": 0,
                            "approx_tokens_total": 0})
+    # no agent turn ever classified: [None, None] is not a step range —
+    # the field is omitted, never emitted as nulls
+    assert "steps" not in op
     artifact = build_artifact({}, [{"id": "T1", "run_id": "r"}], [op], [], {"T1": 1}, [])
+    assert "steps" not in build_summary(artifact)["trajectories"][0]["spans"][0]
+    # the placeholder "unclear" usage is a rule-judged marker, not a
+    # statistic: the summary's span index omits it like the usage rollup does
+    # (a label no tally could ever corroborate)
+    assert "usage" not in build_summary(artifact)["trajectories"][0]["spans"][0]
     rub = artifact["aggregates"]["overall"]["rubric"]
     assert rub["deliveries"] == 0  # placeholder rubric is not a judged delivery
     assert all(v is None for v in rub["rates"].values())
     assert print_summary(artifact) == 0
     assert "rubric:" not in capsys.readouterr().out
-    assert "rubric over" not in render_markdown(artifact)
+    assert _rubric_line(rub) is None
 
     # a judged span's all-null rubric entry is a coverage-gap placeholder
     # (the judge never returned that key — the contract forbids null signals
@@ -1359,10 +1661,11 @@ def test_rubric_rollup_excludes_auto_neutral_placeholders(capsys):
                                                                 nov=None, inf=None)}),
            "payload_summary": "1 injection"}
     artifact2 = build_artifact({}, [{"id": "T1", "run_id": "r"}], [op2], [], {"T1": 1}, [])
-    assert artifact2["aggregates"]["overall"]["rubric"]["deliveries"] == 0
+    rub2 = artifact2["aggregates"]["overall"]["rubric"]
+    assert rub2["deliveries"] == 0
     assert print_summary(artifact2) == 0
     assert "rubric:" not in capsys.readouterr().out
-    assert "rubric over" not in render_markdown(artifact2)
+    assert _rubric_line(rub2) is None
 
 
 def test_aggregate_headline_metrics():
@@ -1439,6 +1742,84 @@ def test_policy_rollup_share_ignores_usage_less_trajectories():
     assert pol["est_injected_tokens_billed"] == 500  # the share's numerator matches its denominator's scope
     assert pol["prompt_tokens_total"] == 10000
     assert pol["injected_token_share"] == round(500 / 10000, 4)
+
+
+def test_policy_rollup_tolerates_corrupt_huge_literals():
+    """A hand-edited >308-digit chars/usage literal (valid JSON, parses under
+    the interpreter's digit limit) reaches the rollup as an
+    arbitrary-precision int: the share's division and the cross-trajectory
+    sum float-convert it and raise OverflowError — degrade the derived share
+    to None, keep the exact totals, never crash (the corrupt-input rule)."""
+    huge = 10**400
+    pol = policy_rollup([
+        {"id": "T1", "n_spans": 1,
+         "policy": {"n_steps": 1, "n_injections": 1, "n_searches": 1,
+                    "est_injected_tokens": huge, "prompt_tokens_total": 1000}},
+    ])
+    assert pol["est_injected_tokens"] == huge
+    assert pol["prompt_tokens_total"] == 1000
+    assert pol["injected_token_share"] is None
+    # a huge-int trajectory total summing with a float one keeps the exact
+    # int side (the dropped float part is below its precision)
+    pol = policy_rollup([
+        {"id": "T1", "n_spans": 1,
+         "policy": {"n_steps": 1, "n_injections": 1, "n_searches": 1,
+                    "est_injected_tokens": 4, "prompt_tokens_total": 1.5}},
+        {"id": "T2", "n_spans": 1,
+         "policy": {"n_steps": 1, "n_injections": 1, "n_searches": 1,
+                    "est_injected_tokens": 4, "prompt_tokens_total": huge}},
+    ])
+    assert pol["prompt_tokens_total"] == huge
+    # the same mix on the injected-token side (a direct caller's float —
+    # the CLI's est is int-only): the est sums degrade like the prompt sum
+    pol = policy_rollup([
+        {"id": "T1", "n_spans": 1,
+         "policy": {"n_steps": 1, "n_injections": 1, "n_searches": 1,
+                    "est_injected_tokens": 4.5, "prompt_tokens_total": 1000}},
+        {"id": "T2", "n_spans": 1,
+         "policy": {"n_steps": 1, "n_injections": 1, "n_searches": 1,
+                    "est_injected_tokens": huge, "prompt_tokens_total": 1000}},
+    ])
+    assert pol["est_injected_tokens"] == huge
+    assert pol["est_injected_tokens_billed"] == huge
+
+
+def test_policy_rollup_notes_the_cross_trajectory_overflow_drop():
+    """The per-trajectory mixed-overflow warning fires only on a
+    WITHIN-trajectory int/float mix: an all-int total past the float range
+    summing with another trajectory's float total drops the float part at the
+    ROLLUP level — noted there like every other silent-by-default
+    correction."""
+    huge = 10**400  # an all-int trajectory total: no within-trajectory mix
+    validation: list[dict] = []
+    pol = policy_rollup(
+        [
+            {"id": "T1", "n_spans": 1,
+             "policy": {"n_steps": 1, "n_injections": 1, "n_searches": 1,
+                        "est_injected_tokens": 4, "prompt_tokens_total": 1.5}},
+            {"id": "T2", "n_spans": 1,
+             "policy": {"n_steps": 1, "n_injections": 1, "n_searches": 1,
+                        "est_injected_tokens": 4, "prompt_tokens_total": huge}},
+        ],
+        validation,
+    )
+    assert pol["prompt_tokens_total"] == huge  # the exact int side kept
+    assert [v["level"] for v in validation] == ["warn"]
+    assert "may undercount" in validation[0]["msg"]
+    # the per-flush rebuild re-runs the rollup on the same list: the note
+    # must not duplicate per rewrite
+    policy_rollup(
+        [
+            {"id": "T1", "n_spans": 1,
+             "policy": {"n_steps": 1, "n_injections": 1, "n_searches": 1,
+                        "est_injected_tokens": 4, "prompt_tokens_total": 1.5}},
+            {"id": "T2", "n_spans": 1,
+             "policy": {"n_steps": 1, "n_injections": 1, "n_searches": 1,
+                        "est_injected_tokens": 4, "prompt_tokens_total": huge}},
+        ],
+        validation,
+    )
+    assert [v["level"] for v in validation] == ["warn"]
 
 
 def test_policy_line_names_the_billed_scope_when_it_differs():
@@ -1834,6 +2215,31 @@ def test_tier_degrades_on_400_then_memoized(monkeypatch):
     assert [b.get("response_format", {}).get("type") for b in record] == ["json_object"]
 
 
+def test_learned_tier_memo_folds_degrade_only():
+    """The run's learned-tier memo records the weakest tier ever proven to
+    work and never moves back to a stronger one: a parallel walker that read
+    the memo before a sibling's fold (or got a lucky conforming draw through
+    a format-ignoring proxy) must not make later calls re-pay a free reject
+    per call, nor may completion order park the run at a weaker tier than
+    proven — the degrade-only fold ignores both directions of flap."""
+    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
+    assert cfg.learned_tier == "structured"
+    _memoize_tier(cfg, "structured")  # the same tier is a no-op
+    assert cfg.learned_tier == "structured"
+    _memoize_tier(cfg, "prompt")  # a weaker tier proven: the memo degrades
+    assert cfg.learned_tier == "prompt"
+    # a stale snapshot or lucky draw at a stronger tier never moves it back
+    _memoize_tier(cfg, "json")
+    _memoize_tier(cfg, "structured")
+    assert cfg.learned_tier == "prompt"
+    # the comparison rides the declared API's own chain (anthropic has no json tier)
+    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", api="anthropic")
+    _memoize_tier(cfg, "prompt")
+    assert cfg.learned_tier == "prompt"
+    _memoize_tier(cfg, "structured")
+    assert cfg.learned_tier == "prompt"
+
+
 def test_tier_independent_400_fails_at_the_format_less_tier(monkeypatch):
     """A 400 repeating unchanged up to the FINAL (format-less) tier is no
     format refusal — a tier-independent config fault (e.g. max_tokens over
@@ -1935,7 +2341,7 @@ def test_echoed_key_in_a_200_answer_never_reaches_judge_raw(monkeypatch):
 def test_echoed_key_in_a_conforming_verdict_never_reaches_the_artifact(monkeypatch):
     """A 200 verdict is endpoint output too: the key echoed into its
     analysis, evidence claims, or per-signal notes would land verbatim in
-    injudge.report/v4 — mask it in every copied field, not just judge_raw."""
+    injudge.report/v5 — mask it in every copied field, not just judge_raw."""
     key = "sk-secret+key"
     obj = json.loads(GOOD)
     obj["analysis"] = f"the agent saw {key} in the injection"
@@ -3714,6 +4120,22 @@ def test_resolve_config_rejects_a_malformed_base_url():
     assert cfg.base_url == "https://host/path"
 
 
+def test_missing_tiktoken_fails_fast_with_a_targeted_message(monkeypatch):
+    """A missing tiktoken install is a missing runtime input like any other:
+    count_tokens fails fast with a targeted SystemExit (the first count
+    happens before any paid judge call), never a raw ModuleNotFoundError
+    traceback mid-run."""
+    import sys
+
+    import injudge.judge as judge_mod
+
+    monkeypatch.setattr(judge_mod, "_ENCODING", None)
+    # None in sys.modules makes "import tiktoken" raise ImportError
+    monkeypatch.setitem(sys.modules, "tiktoken", None)
+    with pytest.raises(SystemExit, match="tiktoken"):
+        judge_mod.count_tokens("x")
+
+
 def test_system_prompt_enum_literals_track_the_contract():
     """The prompt's enum lists are built from the same constants as
     VERDICT_SCHEMA and _valid_value: a renamed/added value moves schema,
@@ -3789,34 +4211,39 @@ def test_load_env_strips_inline_comments(tmp_path):
     assert env["API_KEY"] == "sk-1"
 
 
-def test_cli_report_path_into_a_directory_fails_fast(monkeypatch, tmp_path):
-    """A --json path that is an existing directory aborts before any paid
-    judge call — the incremental flush would otherwise crash mid-run with an
-    uncaught IsADirectoryError and lose the completed judging."""
+def test_cli_output_folder_is_a_file_fails_fast(monkeypatch, tmp_path):
+    """An -o path that is an existing FILE aborts before any paid judge
+    call — the per-trajectory flush would otherwise crash mid-run and lose
+    the completed judging."""
     b = TrajBuilder().agent_turn(with_task=True).recall(REF_A)
     _write_run(tmp_path / "runs", "t1", b)
     monkeypatch.setattr("injudge.judge.urlopen",
                         fake_urlopen_factory([], fail=AssertionError("network!")))
-    outdir = tmp_path / "injudge-report.json"
-    outdir.mkdir()
-    with pytest.raises(SystemExit, match="is a directory"):
+    outfile = tmp_path / "occupied"
+    outfile.write_text("x")
+    with pytest.raises(SystemExit, match="cannot create output folder"):
         injudge_main.main([str(tmp_path / "runs"),
-                           "--json", str(outdir), "--env", str(_env(tmp_path))])
+                           "-o", str(outfile), "--env", str(_env(tmp_path))])
 
 
-def test_cli_report_path_into_a_missing_parent_fails_fast(monkeypatch, tmp_path):
-    """A --json path whose parent directory does not exist (or is read-only)
-    aborts before any paid judge call — the incremental flush would otherwise
-    crash mid-run and lose the completed judging."""
+def test_cli_unwritable_output_folder_fails_fast(monkeypatch, tmp_path):
+    """An unwritable output folder aborts before any paid judge call — the
+    per-trajectory flush would otherwise crash mid-run and lose the
+    completed judging."""
     b = TrajBuilder().agent_turn(with_task=True).recall(REF_A)
     _write_run(tmp_path / "runs", "t1", b)
     monkeypatch.setattr("injudge.judge.urlopen",
                         fake_urlopen_factory([], fail=AssertionError("network!")))
-    out = tmp_path / "missing" / "injudge-report.json"
-    with pytest.raises(SystemExit, match="cannot write report to"):
-        injudge_main.main([str(tmp_path / "runs"),
-                           "--json", str(out), "--env", str(_env(tmp_path))])
-    assert not out.exists() and not out.with_name(out.name + ".tmp").exists()
+    parent = tmp_path / "readonly"
+    parent.mkdir()
+    parent.chmod(0o555)
+    try:
+        with pytest.raises(SystemExit, match="cannot create output folder"):
+            injudge_main.main([str(tmp_path / "runs"),
+                               "-o", str(parent / "out"), "--env", str(_env(tmp_path))])
+    finally:
+        parent.chmod(0o755)
+    assert not (parent / "out").exists()
 
 
 def test_cli_surrogate_content_still_writes_the_artifact(monkeypatch, tmp_path):
@@ -3842,13 +4269,14 @@ def test_cli_surrogate_content_still_writes_the_artifact(monkeypatch, tmp_path):
     b = TrajBuilder().agent_turn(with_task=True).recall(ref=ref)
     _write_run(tmp_path / "runs", "t1", b)
     monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory([]))
-    out, md = tmp_path / "report.json", tmp_path / "report.md"
+    out = tmp_path / "out"
     rc = injudge_main.main([str(tmp_path / "runs"),
-                            "--json", str(out), "-o", str(md), "--env", str(_env(tmp_path))])
+                            "-o", str(out), "--env", str(_env(tmp_path))])
     assert rc == 0
-    artifact = json.loads(out.read_text(encoding="utf-8"))
+    artifact = json.loads((out / "injudge-report.json").read_text(encoding="utf-8"))
     assert artifact["operations"][0]["memories"][0]["value"] == text
-    assert md.exists()
+    summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
+    assert summary["trajectories"][0]["spans"][0]["usage"] == {"key_a": "used"}
 
 
 def test_cli_end_to_end_mocked_judge(monkeypatch, tmp_path):
@@ -3860,12 +4288,12 @@ def test_cli_end_to_end_mocked_judge(monkeypatch, tmp_path):
     _write_run(tmp_path / "runs", "20260101-010000.000Z-run-b", b)
     record = []
     monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory(record))
-    out, md = tmp_path / "report.json", tmp_path / "report.md"
+    out = tmp_path / "out"
     rc = injudge_main.main([str(tmp_path / "runs"),
-                            "--json", str(out), "-o", str(md), "--env", str(_env(tmp_path))])
+                            "-o", str(out), "--env", str(_env(tmp_path))])
     assert rc == 0
-    artifact = json.loads(out.read_text())
-    assert artifact["tool"]["schema"] == "injudge.report/v4"
+    artifact = json.loads((out / "injudge-report.json").read_text())
+    assert artifact["tool"]["schema"] == "injudge.report/v5"
     assert artifact["tool"]["judge_model"] == "judge-m"
     assert len(artifact["operations"]) == 1
     op = artifact["operations"][0]
@@ -3903,10 +4331,35 @@ def test_cli_end_to_end_mocked_judge(monkeypatch, tmp_path):
     assert overall["policy"]["prompt_tokens_total"] is None
     assert any("zero recall injections" in v["msg"] for v in artifact["validation"])
     assert len(record) == 1  # one judge call for one span
-    md_text = md.read_text()
-    assert "positive" in md_text and "R✓" in md_text and "I◑" in md_text
-    assert "delivery cost" in md_text and "headline" in md_text
-    assert "delivery policy" in md_text
+    # the summary artifact: the statistics-only distillation (v2)
+    summary = json.loads((out / "summary.json").read_text())
+    assert summary["tool"]["schema"] == "injudge.summary/v2"
+    assert "validation" not in summary  # the process log stays in the report
+    _assert_stats_only(summary)
+    ov = summary["overall"]
+    assert ov["positive"] == 1 and ov["rates"]["positive"] == 1.0
+    assert ov["headline"] == {"judged_spans": 1, "wasted_token_share": 0.0}
+    assert ov["input_paths"] == {"full": 1, "scan": 0} and ov["gold_scored"] == 0
+    assert ov["rubric"]["rates"]["influence"] == 1.0 and ov["rubric"]["deliveries"] == 1
+    # empty triage lists are omitted, not written as placeholders
+    assert "low_confidence" not in ov and "inaccurate_keys" not in ov["rubric"]
+    t1 = summary["trajectories"][0]
+    assert t1["instance_id"] == "pydata__xarray-2905"
+    assert t1["model"] == "test-model" and t1["adapter"] == "cure@0.1.0"
+    assert t1["n_spans"] == 1 and t1["policy"]["n_searches"] == 3
+    # the span index: labels, never narrative
+    assert t1["spans"] == [{
+        "operation_id": "T1:S1", "verdict": "positive", "confidence": 0.8,
+        "steps": [2, 4], "n_injections": 3,
+        "usage": {"key_a": "used"},
+    }]
+    t2 = summary["trajectories"][1]
+    assert t2["spans"] == []  # zero-injection run
+    assert t2["n_injections"] == 0 and t2["n_spans"] == 0
+    for shell in ("rates", "headline", "rubric", "confidence", "cost"):
+        assert shell not in t2
+    # no verdicts HTML by default
+    assert not (out / "memgraph-verdicts.html").exists()
 
 
 def test_cli_zero_injection_trajectory(monkeypatch, tmp_path):
@@ -3914,11 +4367,11 @@ def test_cli_zero_injection_trajectory(monkeypatch, tmp_path):
     _write_run(tmp_path / "runs", "t1", b)
     monkeypatch.setattr("injudge.judge.urlopen",
                         fake_urlopen_factory([], fail=AssertionError("network!")))
-    out = tmp_path / "report.json"
+    out = tmp_path / "out"
     rc = injudge_main.main([str(tmp_path / "runs"),
-                            "--json", str(out), "--env", str(_env(tmp_path))])
+                            "-o", str(out), "--env", str(_env(tmp_path))])
     assert rc == 0
-    artifact = json.loads(out.read_text())
+    artifact = json.loads((out / "injudge-report.json").read_text())
     assert artifact["operations"] == []
     assert artifact["aggregates"]["overall"]["rates"] == {
         "positive": None, "negative": None, "neutral": None}
@@ -3931,11 +4384,11 @@ def test_cli_notes_unsized_placement_content(monkeypatch, tmp_path):
     b = TrajBuilder().agent_turn(with_task=True).recall(REF_A, content=None)
     _write_run(tmp_path / "runs", "t1", b)
     monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory([]))
-    out = tmp_path / "report.json"
+    out = tmp_path / "out"
     rc = injudge_main.main([str(tmp_path / "runs"),
-                            "--json", str(out), "--env", str(_env(tmp_path))])
+                            "-o", str(out), "--env", str(_env(tmp_path))])
     assert rc == 0
-    artifact = json.loads(out.read_text())
+    artifact = json.loads((out / "injudge-report.json").read_text())
     assert artifact["operations"][0]["delivery_cost"]["content_chars_total"] == 0
     assert any(
         v["level"] == "warn" and "no placement content size" in v["msg"]
@@ -3954,11 +4407,11 @@ def test_cli_prompt_tokens_ignore_bool_turn_usage(monkeypatch, tmp_path):
     _write_run(tmp_path / "runs", "t1", b)
     monkeypatch.setattr("injudge.judge.urlopen",
                         fake_urlopen_factory([], fail=AssertionError("network!")))
-    out = tmp_path / "report.json"
+    out = tmp_path / "out"
     rc = injudge_main.main([str(tmp_path / "runs"),
-                            "--json", str(out), "--env", str(_env(tmp_path))])
+                            "-o", str(out), "--env", str(_env(tmp_path))])
     assert rc == 0
-    pol = json.loads(out.read_text())["trajectories"][0]["policy"]
+    pol = json.loads((out / "injudge-report.json").read_text())["trajectories"][0]["policy"]
     assert pol["prompt_tokens_total"] == 100
 
 
@@ -3976,11 +4429,11 @@ def test_cli_prompt_tokens_cover_every_lane(monkeypatch, tmp_path):
     _write_run(tmp_path / "runs", "t1", b)
     monkeypatch.setattr("injudge.judge.urlopen",
                         fake_urlopen_factory([], fail=AssertionError("network!")))
-    out = tmp_path / "report.json"
+    out = tmp_path / "out"
     rc = injudge_main.main([str(tmp_path / "runs"),
-                            "--json", str(out), "--env", str(_env(tmp_path))])
+                            "-o", str(out), "--env", str(_env(tmp_path))])
     assert rc == 0
-    pol = json.loads(out.read_text())["trajectories"][0]["policy"]
+    pol = json.loads((out / "injudge-report.json").read_text())["trajectories"][0]["policy"]
     assert pol["prompt_tokens_total"] == 140
 
 
@@ -4002,11 +4455,11 @@ def test_cli_prompt_tokens_retraction_and_recovery(monkeypatch, tmp_path):
     _write_run(tmp_path / "runs", "t1", b)
     monkeypatch.setattr("injudge.judge.urlopen",
                         fake_urlopen_factory([], fail=AssertionError("network!")))
-    out = tmp_path / "report.json"
+    out = tmp_path / "out"
     rc = injudge_main.main([str(tmp_path / "runs"),
-                            "--json", str(out), "--env", str(_env(tmp_path))])
+                            "-o", str(out), "--env", str(_env(tmp_path))])
     assert rc == 0
-    pol = json.loads(out.read_text())["trajectories"][0]["policy"]
+    pol = json.loads((out / "injudge-report.json").read_text())["trajectories"][0]["policy"]
     assert pol["prompt_tokens_total"] == 140  # 100 counted once + 40 recovered
 
 
@@ -4028,11 +4481,11 @@ def test_cli_prompt_tokens_corrupt_msg_or_source_never_crash(monkeypatch, tmp_pa
     _write_run(tmp_path / "runs", "t1", b)
     monkeypatch.setattr("injudge.judge.urlopen",
                         fake_urlopen_factory([], fail=AssertionError("network!")))
-    out = tmp_path / "report.json"
+    out = tmp_path / "out"
     rc = injudge_main.main([str(tmp_path / "runs"),
-                            "--json", str(out), "--env", str(_env(tmp_path))])
+                            "-o", str(out), "--env", str(_env(tmp_path))])
     assert rc == 0
-    pol = json.loads(out.read_text())["trajectories"][0]["policy"]
+    pol = json.loads((out / "injudge-report.json").read_text())["trajectories"][0]["policy"]
     assert pol["prompt_tokens_total"] == 100
 
 
@@ -4049,11 +4502,11 @@ def test_cli_prompt_tokens_dropped_usage_records_warn(monkeypatch, tmp_path):
     _write_run(tmp_path / "runs", "t1", b)
     monkeypatch.setattr("injudge.judge.urlopen",
                         fake_urlopen_factory([], fail=AssertionError("network!")))
-    out = tmp_path / "report.json"
+    out = tmp_path / "out"
     rc = injudge_main.main([str(tmp_path / "runs"),
-                            "--json", str(out), "--env", str(_env(tmp_path))])
+                            "-o", str(out), "--env", str(_env(tmp_path))])
     assert rc == 0
-    artifact = json.loads(out.read_text())
+    artifact = json.loads((out / "injudge-report.json").read_text())
     assert artifact["trajectories"][0]["policy"]["prompt_tokens_total"] == 100
     assert any(
         v["level"] == "warn" and "2 usage record(s)" in v["msg"]
@@ -4131,6 +4584,114 @@ def test_prompt_tokens_corrupt_retraction_warns_as_overcount():
     assert not any("usage record(s)" in w for w in warnings)
 
 
+def test_prompt_tokens_total_non_finite_usage_counts_zero():
+    """A 1e999 usage literal IS valid JSON (RFC 8259 sets no limit) and parses
+    to inf; NaN/Infinity spellings parse too. None has a finite billing
+    meaning, and summing one would write the non-JSON spellings into the
+    artifacts — they count 0 like any other corrupt usage shape, with the
+    exclusion warned about like every other (the total undercounts)."""
+    events = [
+        {"type": "message_end", "role": "assistant", "proxy_source": "MAIN",
+         "msg": 2, "turn": 1, "usage": {"prompt_tokens": 40}},
+        {"type": "message_end", "role": "assistant", "proxy_source": "MAIN",
+         "msg": 9, "turn": 2, "usage": {"prompt_tokens": 1e999}},  # valid JSON, reads as inf
+        {"type": "message_end", "role": "assistant", "proxy_source": "MAIN",
+         "msg": 10, "turn": 3, "usage": {"prompt_tokens": float("nan")}},
+    ]
+    warnings = []
+    assert prompt_tokens_total(events, warnings) == 40
+    assert len(warnings) == 1
+    assert "2 usage record(s) carry a non-finite prompt_tokens value" in warnings[0]
+
+
+def test_prompt_tokens_total_finite_float_overflow_stays_finite():
+    """Two finite float usage records (1e308 each — valid JSON, each passing
+    the per-record finiteness check) overflow the double range MID-SUM: a
+    float total would write the RFC-8259-invalid spelling `Infinity` into the
+    artifacts and silently zero the injected-token share. A double that large
+    is an exact integer, so the sum switches to int arithmetic instead."""
+    events = [
+        {"type": "message_end", "role": "assistant", "proxy_source": "MAIN",
+         "msg": 2, "turn": 1, "usage": {"prompt_tokens": 1e308}},
+        {"type": "message_end", "role": "assistant", "proxy_source": "MAIN",
+         "msg": 9, "turn": 2, "usage": {"prompt_tokens": 1e308}},
+    ]
+    total = prompt_tokens_total(events, [])
+    assert total == 2 * int(1e308)
+    assert "Infinity" not in json.dumps({"prompt_tokens_total": total})
+
+
+def test_policy_rollup_finite_float_totals_stay_finite():
+    """The same mid-sum overflow at the cross-trajectory rollup: two
+    trajectories whose own float totals each stayed finite sum past the
+    double range here — the rollup keeps the exact integer, never Infinity."""
+    pol = policy_rollup([
+        {"id": "T1", "n_spans": 1,
+         "policy": {"n_steps": 1, "n_injections": 1, "n_searches": 1,
+                    "est_injected_tokens": 4, "prompt_tokens_total": 1e308}},
+        {"id": "T2", "n_spans": 1,
+         "policy": {"n_steps": 1, "n_injections": 1, "n_searches": 1,
+                    "est_injected_tokens": 4, "prompt_tokens_total": 1e308}},
+    ])
+    assert pol["prompt_tokens_total"] == 2 * int(1e308)
+    assert "Infinity" not in json.dumps(pol)
+
+
+def test_prompt_tokens_total_huge_int_usage_never_crashes():
+    """A >308-digit integer literal is valid JSON and parses under the
+    interpreter's digit limit, but math.isfinite float-converts it and raises
+    OverflowError — the finiteness check applies to floats only, so the
+    corrupt-but-valid usage bills as-is instead of taking the run down."""
+    huge = 10**400
+    events = [
+        {"type": "message_end", "role": "assistant", "proxy_source": "MAIN",
+         "msg": 2, "turn": 1, "usage": {"prompt_tokens": 40}},
+        {"type": "message_end", "role": "assistant", "proxy_source": "MAIN",
+         "msg": 9, "turn": 2, "usage": {"prompt_tokens": huge}},
+    ]
+    assert prompt_tokens_total(events, []) == 40 + huge
+
+
+def test_prompt_tokens_total_mixed_huge_int_and_float_never_crashes():
+    """The huge-int record bills as-is (the test above), but summing it with
+    a FLOAT record float-converts it and raises OverflowError: keep the exact
+    int side — the dropped float part is below its precision — and warn like
+    every other correction, never take the run down."""
+    huge = 10**400
+    events = [
+        {"type": "message_end", "role": "assistant", "proxy_source": "MAIN",
+         "msg": 2, "turn": 1, "usage": {"prompt_tokens": 1.5}},
+        {"type": "message_end", "role": "assistant", "proxy_source": "MAIN",
+         "msg": 9, "turn": 2, "usage": {"prompt_tokens": huge}},
+    ]
+    warnings = []
+    assert prompt_tokens_total(events, warnings) == huge
+    assert any("past the float range" in w for w in warnings)
+
+
+def test_prompt_tokens_total_corrupt_token_values_warn():
+    """A present-but-corrupt prompt_tokens (a JSON true, a string, a list)
+    bills 0 like every other corrupt shape — and the exclusion is warned
+    about like every other one (never silent: the total undercounts
+    otherwise); a record carrying no usage at all is the normal silent 0."""
+    events = [
+        {"type": "message_end", "role": "assistant", "proxy_source": "MAIN",
+         "msg": 2, "turn": 1, "usage": {"prompt_tokens": True}},
+        {"type": "message_end", "role": "assistant", "proxy_source": "MAIN",
+         "msg": 3, "turn": 2, "usage": {"prompt_tokens": "5000"}},
+        {"type": "message_end", "role": "assistant", "proxy_source": "MAIN",
+         "msg": 4, "turn": 3, "usage": {"prompt_tokens": [5]}},
+        {"type": "message_end", "role": "assistant", "proxy_source": "MAIN",
+         "msg": 5, "turn": 4, "usage": {"prompt_tokens": 40}},
+        {"type": "message_end", "role": "assistant", "proxy_source": "MAIN",
+         "msg": 6, "turn": 5},  # no usage recorded: the normal case, no note
+    ]
+    warnings = []
+    assert prompt_tokens_total(events, warnings) == 40
+    (w,) = [w for w in warnings if "corrupt non-numeric" in w]
+    assert w.startswith("3 usage record(s)")
+
+
 def test_prompt_tokens_corrupt_seq_retraction_annuls_its_own_record(tmp_path):
     """A retraction whose SEQ was hand-edited away keeps its file position
     under a synthetic seq (load_events), so it still annuls the record it
@@ -4203,12 +4764,12 @@ def test_cli_judge_error_exit_2_partial_artifact(monkeypatch, tmp_path):
         return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
 
     monkeypatch.setattr("injudge.judge.urlopen", flaky)
-    out = tmp_path / "report.json"
+    out = tmp_path / "out"
     rc = injudge_main.main([str(tmp_path / "runs"),
-                            "--json", str(out), "--env", str(_env(tmp_path)),
+                            "-o", str(out), "--env", str(_env(tmp_path)),
                             "--max-attempts", "1"])
     assert rc == 2
-    artifact = json.loads(out.read_text())
+    artifact = json.loads((out / "injudge-report.json").read_text())
     assert [o["verdict"] for o in artifact["operations"]] == ["positive", "error"]
     assert artifact["aggregates"]["overall"]["error"] == 1
 
@@ -4241,6 +4802,67 @@ def test_cli_tolerates_corrupt_usage_fields(tmp_path):
     assert rc == 0
 
 
+def test_cli_corrupt_huge_chars_literal_degrades_the_share(monkeypatch, tmp_path):
+    """A hand-edited >308-digit placement chars literal (valid JSON) makes the
+    injected-token share's division raise OverflowError at the float
+    conversion — before the guard this aborted the whole run, the crash class
+    the usage-record hardening in steps.py was written to exclude. The exact
+    totals stay recorded, the derived share degrades to None with a
+    validation note (per trajectory and in the overall rollup)."""
+    a = TrajBuilder().agent_turn(with_task=True).recall(REF_A)
+    huge = 10**400
+    for e in a.events:
+        if e["type"] == "memory_delivery":
+            e["payload"]["placement"]["content"]["chars"] = huge
+        if e["type"] == "message_end" and e.get("role") == "assistant" and e.get("turn"):
+            e["usage"] = {"prompt_tokens": 1000}
+    _write_run(tmp_path / "runs", "t1", a)
+    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory([]))
+    out = tmp_path / "out"
+    rc = injudge_main.main([str(tmp_path / "runs"),
+                            "-o", str(out), "--env", str(_env(tmp_path))])
+    assert rc == 0
+    artifact = json.loads((out / "injudge-report.json").read_text())
+    pol = artifact["trajectories"][0]["policy"]
+    assert pol["est_injected_tokens"] == huge // 4  # the exact total stays
+    assert pol["prompt_tokens_total"] == 2000  # two billed agent-lane records
+    assert pol["injected_token_share"] is None
+    overall = artifact["aggregates"]["overall"]["policy"]
+    assert overall["est_injected_tokens"] == huge // 4
+    assert overall["injected_token_share"] is None
+    msgs = [v["msg"] for v in artifact["validation"]]
+    assert any("injected-token share is unrepresentable" in m for m in msgs)
+
+
+def test_cli_tiny_float_usage_overflows_the_share_to_inf(monkeypatch, tmp_path):
+    """The float-division twin of the huge-chars case: a hand-edited
+    near-zero prompt_tokens literal (1e-308 — finite, valid JSON, passes the
+    usage-record finiteness filter) makes the injected-token share's IEEE
+    division overflow to inf WITHOUT raising (float division never raises),
+    so the OverflowError guard alone cannot catch it. An inf share would
+    write the RFC-8259-invalid `Infinity` spelling into the artifacts and
+    skip the degrade warning — the share must degrade to None with the
+    validation note, exactly like the raising case."""
+    a = TrajBuilder().agent_turn(with_task=True).recall(REF_A)
+    for e in a.events:
+        if e["type"] == "message_end" and e.get("role") == "assistant" and e.get("turn"):
+            e["usage"] = {"prompt_tokens": 1e-308}
+    _write_run(tmp_path / "runs", "t1", a)
+    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory([]))
+    out = tmp_path / "out"
+    rc = injudge_main.main([str(tmp_path / "runs"),
+                            "-o", str(out), "--env", str(_env(tmp_path))])
+    assert rc == 0
+    artifact = json.loads((out / "injudge-report.json").read_text())
+    pol = artifact["trajectories"][0]["policy"]
+    assert pol["prompt_tokens_total"] == 2e-308  # the exact total stays
+    assert pol["injected_token_share"] is None
+    assert artifact["aggregates"]["overall"]["policy"]["injected_token_share"] is None
+    msgs = [v["msg"] for v in artifact["validation"]]
+    assert any("injected-token share is unrepresentable" in m for m in msgs)
+    assert "Infinity" not in json.dumps(artifact)
+
+
 def test_cli_dry_run_honors_limit(monkeypatch, tmp_path, capsys):
     """--limit caps the dry run too: only the first N spans' judge inputs are
     printed (the README's `--dry-run --limit 3` inspection workflow), and
@@ -4260,13 +4882,15 @@ def test_cli_dry_run_honors_limit(monkeypatch, tmp_path, capsys):
     assert "2 spans (1 printed)" in out
 
 
-def test_cli_negative_limit_fails_fast(tmp_path):
-    """A negative --limit judges nothing and would silently write an
-    all-unjudged artifact — the same fail-fast rule the .env knobs get."""
+def test_cli_non_positive_limit_fails_fast(tmp_path):
+    """A non-positive --limit judges nothing and would silently write an
+    all-unjudged artifact — the same fail-fast rule the .env knobs get
+    (the free inspection workflow is --dry-run)."""
     a = TrajBuilder().agent_turn(with_task=True).recall(REF_A)
     _write_run(tmp_path / "runs", "t1", a)
-    with pytest.raises(SystemExit, match="--limit"):
-        injudge_main.main([str(tmp_path / "runs"), "--dry-run", "--limit", "-1"])
+    for bad in ("0", "-1"):
+        with pytest.raises(SystemExit, match="--limit"):
+            injudge_main.main([str(tmp_path / "runs"), "--dry-run", "--limit", bad])
 
 
 def test_cli_limit_marks_unjudged(monkeypatch, tmp_path):
@@ -4276,11 +4900,11 @@ def test_cli_limit_marks_unjudged(monkeypatch, tmp_path):
     _write_run(tmp_path / "runs", "t1", a)
     record = []
     monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory(record))
-    out = tmp_path / "report.json"
+    out = tmp_path / "out"
     rc = injudge_main.main([str(tmp_path / "runs"),
-                            "--json", str(out), "--env", str(_env(tmp_path)), "--limit", "1"])
+                            "-o", str(out), "--env", str(_env(tmp_path)), "--limit", "1"])
     assert rc == 0
-    artifact = json.loads(out.read_text())
+    artifact = json.loads((out / "injudge-report.json").read_text())
     assert [o["verdict"] for o in artifact["operations"]] == ["positive", "unjudged"]
     assert artifact["aggregates"]["overall"]["unjudged"] == 1
     assert artifact["aggregates"]["overall"]["rates"]["positive"] == 1.0
@@ -4296,10 +4920,10 @@ def test_cli_default_env_is_checkout_env(monkeypatch, tmp_path):
     monkeypatch.setattr(injudge_main, "_DEFAULT_ENV", env)
     record = []
     monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory(record))
-    out = tmp_path / "report.json"
-    rc = injudge_main.main([str(tmp_path / "runs"), "--json", str(out)])
+    out = tmp_path / "out"
+    rc = injudge_main.main([str(tmp_path / "runs"), "-o", str(out)])
     assert rc == 0
-    assert json.loads(out.read_text())["tool"]["judge_model"] == "judge-m"
+    assert json.loads((out / "injudge-report.json").read_text())["tool"]["judge_model"] == "judge-m"
     assert len(record) == 1
 
 
@@ -4312,7 +4936,7 @@ def test_cli_missing_env_fails_fast_before_any_paid_call(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr("injudge.judge.urlopen", lambda *a, **k: calls.append(1))
     with pytest.raises(SystemExit, match="no .env file"):
-        injudge_main.main([str(tmp_path / "runs"), "--json", str(tmp_path / "out.json"),
+        injudge_main.main([str(tmp_path / "runs"), "-o", str(tmp_path / "out"),
                            "--env", str(tmp_path / "missing.env")])
     assert calls == []
 
@@ -4328,7 +4952,7 @@ def test_cli_malformed_base_url_fails_fast_before_any_paid_call(monkeypatch, tmp
     calls = []
     monkeypatch.setattr("injudge.judge.urlopen", lambda *a, **k: calls.append(1))
     with pytest.raises(SystemExit, match="BASE_URL"):
-        injudge_main.main([str(tmp_path / "runs"), "--json", str(tmp_path / "out.json"),
+        injudge_main.main([str(tmp_path / "runs"), "-o", str(tmp_path / "out"),
                            "--env", str(env)])
     assert calls == []
 
@@ -4336,7 +4960,9 @@ def test_cli_malformed_base_url_fails_fast_before_any_paid_call(monkeypatch, tmp
 def test_cli_judge_failure_keeps_the_attempt_warnings(monkeypatch, tmp_path):
     """A span failing with JudgeError still drains the warnings its attempts
     accumulated (tier degrades, masking notes, contract corrections): they
-    are diagnostics of the failure, never lost with the generic note."""
+    are diagnostics of the failure, never lost with the generic note. And the
+    span DID hit the budget gate, so the blank error verdict keeps the gate's
+    input record — the regime tallies never undercount a failed gate span."""
     a = TrajBuilder().agent_turn(with_task=True).recall(REF_A)
     _write_run(tmp_path / "runs", "t1", a)
     calls = []
@@ -4350,12 +4976,15 @@ def test_cli_judge_failure_keeps_the_attempt_warnings(monkeypatch, tmp_path):
         raise http_error(401)
 
     monkeypatch.setattr("injudge.judge.urlopen", _open)
-    out = tmp_path / "report.json"
+    out = tmp_path / "out"
     rc = injudge_main.main([str(tmp_path / "runs"),
-                            "--json", str(out), "--env", str(_env(tmp_path))])
+                            "-o", str(out), "--env", str(_env(tmp_path))])
     assert rc == 2  # error verdicts present
-    artifact = json.loads(out.read_text())
+    artifact = json.loads((out / "injudge-report.json").read_text())
     assert artifact["operations"][0]["verdict"] == "error"
+    assert artifact["operations"][0]["input"] == {"path": "full"}
+    overall = artifact["aggregates"]["overall"]
+    assert overall["input_paths"] == {"full": 1, "scan": 0}
     msgs = [v["msg"] for v in artifact["validation"]]
     assert any("degrading to json" in m for m in msgs)
     assert any("judge request failed" in m and "HTTP 401" in m for m in msgs)

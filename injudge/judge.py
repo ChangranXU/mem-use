@@ -1,13 +1,24 @@
-"""LLM judge: endpoint config, API-format clients, prompt, rubric parsing.
+"""LLM judge: endpoint config, API-format clients, prompts, rubric parsing.
 
-The judge endpoint is configured from the checkout's `.env` (stdlib only —
-urllib, no SDK). The API format is declared, not detected: `API` is one of
+The judge endpoint is configured from the checkout's `.env` (urllib, no
+SDK). The API format is declared, not detected: `API` is one of
 `openai-chat` (the default), `responses`, or `anthropic`. The judge input
 is the trajectory's recorded task statement (when the run carries one),
-the COMPLETE agent step stream of one trajectory, plus the injection
+the agent step stream of one trajectory, plus the injection
 span to evaluate; the judge scores EVERY delivered memory on a
 five-signal rubric (relevance / accuracy / novelty / influence /
-positive_effect), followed by a short analysis. The span verdict is NOT
+positive_effect), followed by a short analysis.
+
+The input ROUTES on a budget gate (judge_span): the verbatim candidate —
+the scoring system prompt plus the final scoring user — is measured with
+count_tokens (tiktoken o200k_base) against JUDGE_INPUT_TOKENS. When it
+fits, the COMPLETE step stream goes in one scoring call; when it
+overflows, injudge.scan reads the trajectory in chunks (evidence
+extraction only, never truncation) and the same scoring
+call reads the assembled evidence pack. A golden-answer body attached to
+the scoring call switches it to GOLD_SYSTEM_PROMPT (relevance and
+positive_effect's direction judged against the gold); a recorded
+correctness attaches as corroboration only. The span verdict is NOT
 asked of the LLM — it is derived in code from the rubric (the verdict
 rests on subsequent influence, never on the final task result):
 
@@ -24,19 +35,21 @@ enforced — constrained decoding (structured) → JSON mode (json) → the
 prompt alone (prompt). The attempt loop walks the chain on a format-field
 rejection (400/422) or on out-of-contract output that proves the field was
 ignored — both are free tier discoveries — memoizing the first tier that
-produces a conforming answer; a 400/422 repeating unchanged at the final
-(format-less) tier is tier-independent (a config fault or the span's own
-content, never a format refusal) and fails the span — the repeat is only
+produces a conforming answer (the fold is degrade-only, so a parallel
+worker's stale memo read never moves it back to a stronger tier); a
+400/422 repeating unchanged at the final (format-less) tier is
+tier-independent (a config fault or the span's own content, never a
+format refusal) and fails the span — the repeat is only
 judged there because a gateway rejecting every format field with one
 generic error body repeats it across the FORMAT tiers too, and only the
 format-less tier tells that from a tier-independent fault — as does any
 other non-429 4xx (auth, unknown URL, payload too large); with
 OUTPUT_FORMAT pinned there is no chain to walk, so a 400/422 fails the
 span the same way (recorded per span, the run continues) rather than
-aborting the run. A
-response cut at the output-token budget MID-ANSWER (no complete JSON value
-in it) is a budget property of that answer, never proof of an ignored
-format field: it becomes an error verdict naming the truncation with the
+aborting the run. A response cut at the output-token budget MID-ANSWER
+(no complete JSON value in it) is a budget property of that answer, never
+proof of an ignored format field: it becomes an error verdict naming the
+truncation with the
 partial text kept — no free degrade (one span's budget must not memoize
 the weakest tier for the run), and no same-budget retry, which would
 deterministically re-truncate. A complete-but-out-of-contract answer
@@ -49,12 +62,12 @@ corrective budget, and ends in an error naming both the violation and the
 budget. An answer only Python's parser limits refuse (a digit-limit
 literal, pathological nesting) reads as finished the same way — its braces
 closed, so no budget produced or fixes it — and takes the model-error
-path, never the budget verdict. A valid but
-schema-violating answer at the json tier is a model error (JSON mode never
-promised schema conformance) and takes the same-tier corrective retry: a
-same-tier retry never repeats a failed request blindly — it appends a
-corrective note — with one deliberate exception: an empty-content answer
-that finished normally (a server-side quirk) gets a fresh draw of the
+path, never the budget verdict. A valid but schema-violating answer at
+the json tier is a model error (JSON mode never promised schema
+conformance) and takes the same-tier corrective retry: a same-tier retry
+never repeats a failed request blindly — it appends a corrective note —
+with one deliberate exception: an empty-content answer that finished
+normally (a server-side quirk) gets a fresh draw of the
 identical request after a backoff (a truncated one takes the budget rule
 above), and on openai-chat a complete verdict drafted into
 `reasoning_content` is recovered instead. Parsing is strict: anything out
@@ -69,21 +82,40 @@ import http.client
 import json
 import math
 import re
+import threading
 import time
 from collections import Counter
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
+from functools import lru_cache
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 from urllib.error import HTTPError
 from urllib.parse import quote, quote_plus
 from urllib.request import Request, urlopen  # module-level: tests monkeypatch urlopen
 
 from injudge.model import AgentStep, InjectionSpan, step_range
+from injudge.prompts import load_prompt
 from memgraph.annotations import is_int
+
+if TYPE_CHECKING:
+    # annotation only — injudge.scan imports this module at runtime, never the
+    # other way round (judge_span's scan-path import stays lazy)
+    from injudge.scan import ScanConfig
 
 
 class JudgeError(Exception):
-    """Endpoint/transport failure for one span (caller records, continues)."""
+    """Endpoint/transport failure for one span (caller records, continues).
+
+    `input` carries the budget-gate record of the span whose scoring call
+    failed (stamped by judge_span/scan_span before re-raising), so the
+    caller's blank error verdict keeps it in the input_paths/gold_scored
+    tallies; None while no gate span's record was stamped."""
+
+    def __init__(self, message: str):
+        super().__init__(message)
+        self.input: dict | None = None
 
 
 def load_env(path: Path) -> dict[str, str]:
@@ -123,6 +155,10 @@ API_FORMATS = ("openai-chat", "responses", "anthropic")
 EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 
 OUTPUT_FORMATS = ("structured", "json", "prompt")  # OUTPUT_FORMAT pin values
+# The fan-out cap JUDGE_PARALLEL and SCAN_PARALLEL share: both open that many
+# concurrent calls to the endpoint pool, so the limit is named once here —
+# two literals would drift (the .env.example documents one cap for both).
+MAX_PARALLEL = 32
 # Conformance tiers per declared API, all enforcing the same canonical
 # contract (VERDICT_SCHEMA): constrained decoding first, then plain JSON
 # mode (the anthropic Messages API has none), then the prompt alone.
@@ -138,6 +174,33 @@ def _next_tier(api: str, tier: str) -> str | None:
     chain = _TIER_CHAIN[api]
     nxt = chain.index(tier) + 1
     return chain[nxt] if nxt < len(chain) else None
+
+
+# The fold's check-and-write under JUDGE_PARALLEL / SCAN_PARALLEL is one
+# critical section (see _memoize_tier); held for a nanosecond comparison,
+# once per answered call, so one module-level lock serves every config.
+_TIER_LOCK = threading.Lock()
+
+
+def _memoize_tier(cfg: JudgeConfig, tier: str) -> None:
+    """Fold a tier that produced a conforming answer into the run's
+    learned-tier memo — degrade-only. A format rejection or an output-side
+    ignore is an endpoint property, so the memo records the weakest tier ever
+    proven needed; a later conforming answer at a STRONGER tier (a parallel
+    worker that read the memo before a sibling's fold, or a lucky draw
+    through a format-ignoring proxy) never moves it back: re-proving would
+    re-pay a free reject per call, and an absolute last-writer-wins fold
+    would let completion order flap the memo in either direction (stuck at a
+    weaker tier than proven, or re-trying a tier proven ignored). A serial
+    walk already degrades monotonically (it starts at the memo and only
+    moves weaker); the lock makes the parallel fold's check-and-write one
+    critical section — without it two workers' interleaved reads could land
+    the memo on a STRONGER tier than the weakest proven, the very regression
+    the degrade-only rule exists to prevent."""
+    chain = _TIER_CHAIN[cfg.api]
+    with _TIER_LOCK:
+        if chain.index(tier) > chain.index(cfg.learned_tier):
+            cfg.learned_tier = tier
 
 
 # ------------------------------------------------------------- the contract
@@ -217,17 +280,8 @@ class JudgeConfig:
 
 def _thinking_config(env: dict[str, str]) -> dict:
     """THINKING / THINKING_EFFORT / THINKING_BUDGET from the .env, validated."""
-    thinking = (env.get("THINKING") or "").strip().lower() or None
-    if thinking is not None and thinking not in ("enabled", "disabled"):
-        raise SystemExit(
-            f"error: THINKING must be enabled or disabled (got {thinking!r})"
-        )
-    effort = (env.get("THINKING_EFFORT") or "").strip().lower() or None
-    if effort is not None and effort not in EFFORTS:
-        raise SystemExit(
-            f"error: THINKING_EFFORT must be one of "
-            f"{', '.join(EFFORTS)} (got {effort!r})"
-        )
+    thinking = _enum_config(env, "THINKING", ("enabled", "disabled"))
+    effort = _enum_config(env, "THINKING_EFFORT", EFFORTS)
     budget: int | None = None
     raw_budget = (env.get("THINKING_BUDGET") or "").strip()
     if raw_budget:
@@ -257,44 +311,101 @@ def _float_config(env: dict[str, str], key: str) -> float | None:
     return value
 
 
-def _int_config(env: dict[str, str], key: str) -> int | None:
-    """An optional positive int from the .env (e.g. MAX_ATTEMPTS); None when unset."""
+def _int_config(env: dict[str, str], key: str, minimum: int = 1) -> int | None:
+    """An optional int >= minimum from the .env (e.g. MAX_ATTEMPTS); None when unset."""
     raw = (env.get(key) or "").strip()
     if not raw:
         return None
     try:
         value = int(raw)
     except ValueError:
-        raise SystemExit(f"error: {key} must be a positive integer (got {raw!r})") from None
-    if value < 1:
-        raise SystemExit(f"error: {key} must be a positive integer (got {raw!r})")
+        value = minimum - 1
+    if value < minimum:
+        word = "positive" if minimum == 1 else "non-negative"
+        raise SystemExit(f"error: {key} must be a {word} integer (got {raw!r})")
     return value
 
 
-def _check_thinking_budget(cfg: JudgeConfig) -> None:
-    """Anthropic extended thinking needs THINKING_BUDGET below the max-tokens cap."""
+def _enum_config(env: dict[str, str], key: str, allowed: tuple[str, ...]) -> str | None:
+    """An optional lowercase enum from the .env (e.g. API); None when unset.
+    An illegal value fails fast naming the key (an enum literal is no
+    credential, so the bad value is shown — unlike a key or a URL)."""
+    raw = (env.get(key) or "").strip().lower()
+    if not raw:
+        return None
+    if raw not in allowed:
+        raise SystemExit(
+            f"error: {key} in the .env file must be one of "
+            f"{', '.join(allowed)} (got {raw!r})"
+        )
+    return raw
+
+
+def _check_latin1_key(api_key: str, keys: str) -> None:
+    """The key rides an HTTP header (http.client encodes latin-1), so a
+    non-latin-1 value — a mangled paste — can never be sent: fail fast
+    naming the env `keys`, never the value, instead of burning the attempt
+    budget on a request-build error mislabeled as an unparseable body."""
+    try:
+        api_key.encode("latin-1")
+    except UnicodeEncodeError:
+        raise SystemExit(
+            f"error: {keys} must be latin-1-encodable "
+            "(it is sent as an HTTP header value)"
+        ) from None
+
+
+def _check_base_url(cfg: JudgeConfig, keys: str) -> None:
+    """A base URL request construction rejects (a bracket-mangled paste —
+    Invalid IPv6 URL & co.) must fail fast like every other bad .env value,
+    not raise mid-run; the message names the env `keys`, never the value."""
+    try:
+        Request(_endpoint(cfg))
+    except ValueError as e:
+        raise SystemExit(f"error: {keys} is not a valid URL ({e})") from None
+
+
+def _check_thinking_budget(cfg: JudgeConfig, key_prefix: str = "") -> None:
+    """Anthropic extended thinking needs THINKING_BUDGET below the max-tokens
+    cap. `key_prefix` is the env-key prefix ("" for the scoring keys, "SCAN_"
+    for the extraction overrides) so the error names the key the operator
+    must fix."""
     if cfg.api != "anthropic" or cfg.thinking != "enabled":
         return
     if cfg.thinking_budget is None:
         raise SystemExit(
-            "error: API=anthropic with THINKING=enabled needs THINKING_BUDGET "
-            "(the messages API requires thinking.budget_tokens)"
+            f"error: {key_prefix}API=anthropic with {key_prefix}THINKING=enabled needs "
+            f"{key_prefix}THINKING_BUDGET (the messages API requires thinking.budget_tokens)"
         )
     if cfg.thinking_budget >= cfg.max_tokens:
         raise SystemExit(
-            f"error: THINKING_BUDGET ({cfg.thinking_budget}) must be smaller than "
+            f"error: {key_prefix}THINKING_BUDGET ({cfg.thinking_budget}) must be smaller than "
             f"the max-tokens budget ({cfg.max_tokens})"
         )
 
 
-def _check_output_format(api: str, output_format: str | None) -> None:
+def _check_output_format(
+    api: str, output_format: str | None, key_prefix: str = "", inherited: bool = False
+) -> None:
     """A pinned OUTPUT_FORMAT must be a tier the declared API actually has
-    (anthropic has no plain JSON mode)."""
-    if output_format is not None and output_format not in _TIER_CHAIN[api]:
+    (anthropic has no plain JSON mode). `key_prefix` prefixes the key names
+    like in _check_thinking_budget. `inherited` marks a pin the operator
+    never wrote for this config (the scan extraction config inherits the
+    scoring OUTPUT_FORMAT): the error names the key actually carrying the
+    value and the override that fixes it, never a {key_prefix}OUTPUT_FORMAT
+    nobody set."""
+    if output_format is None or output_format in _TIER_CHAIN[api]:
+        return
+    if inherited:
         raise SystemExit(
-            f"error: OUTPUT_FORMAT={output_format!r} is not available for "
-            f"API={api} (tier chain: {' -> '.join(_TIER_CHAIN[api])})"
+            f"error: the inherited OUTPUT_FORMAT={output_format!r} is not available "
+            f"for {key_prefix}API={api} (tier chain: {' -> '.join(_TIER_CHAIN[api])}) — "
+            f"set {key_prefix}OUTPUT_FORMAT to pin a tier the extraction endpoint has"
         )
+    raise SystemExit(
+        f"error: {key_prefix}OUTPUT_FORMAT={output_format!r} is not available for "
+        f"{key_prefix}API={api} (tier chain: {' -> '.join(_TIER_CHAIN[api])})"
+    )
 
 
 def resolve_config(
@@ -324,46 +435,17 @@ def resolve_config(
             f"error: judge endpoint not configured: missing {', '.join(missing)}; "
             f"keys present in the .env file: {present}"
         )
-    try:
-        api_key.encode("latin-1")
-    except UnicodeEncodeError:
-        # the key rides an HTTP header (http.client encodes latin-1), so a
-        # non-latin-1 value — a mangled paste — can never be sent: fail fast
-        # naming the key, never its value, instead of burning the attempt
-        # budget on a request-build error mislabeled as an unparseable body
-        raise SystemExit(
-            "error: OPENAI_API_KEY or API_KEY must be latin-1-encodable "
-            "(it is sent as an HTTP header value)"
-        ) from None
-    api = (env.get("API") or "openai-chat").strip().lower()
-    if api not in API_FORMATS:
-        raise SystemExit(
-            f"error: API in the .env file must be one of "
-            f"{', '.join(API_FORMATS)} (got {api!r})"
-        )
+    _check_latin1_key(api_key, "OPENAI_API_KEY or API_KEY")
+    api = _enum_config(env, "API", API_FORMATS) or "openai-chat"
     cfg = JudgeConfig(base_url=base_url.rstrip("/"), api_key=api_key, model=model, api=api)
-    try:
-        Request(_endpoint(cfg))
-    except ValueError as e:
-        # a bracket-mangled paste makes request construction raise (Invalid
-        # IPv6 URL & co.) mid-run otherwise — the same fail-fast rule every
-        # other bad .env value gets; the message names keys, never the value
-        raise SystemExit(
-            f"error: OPENAI_BASE_URL or BASE_URL is not a valid URL ({e})"
-        ) from None
+    _check_base_url(cfg, "OPENAI_BASE_URL or BASE_URL")
     for k, v in _thinking_config(env).items():
         setattr(cfg, k, v)
     if (temperature := _float_config(env, "TEMPERATURE")) is not None:
         cfg.temperature = temperature
     if (env_max_attempts := _int_config(env, "MAX_ATTEMPTS")) is not None:
         cfg.max_attempts = env_max_attempts
-    output_format = (env.get("OUTPUT_FORMAT") or "").strip().lower() or None
-    if output_format is not None and output_format not in OUTPUT_FORMATS:
-        raise SystemExit(
-            f"error: OUTPUT_FORMAT in the .env file must be one of "
-            f"{', '.join(OUTPUT_FORMATS)} (got {output_format!r})"
-        )
-    cfg.output_format = output_format
+    cfg.output_format = _enum_config(env, "OUTPUT_FORMAT", OUTPUT_FORMATS)
     if timeout is not None:
         cfg.timeout = timeout
     if max_attempts is not None:
@@ -598,7 +680,7 @@ def _complete_json_present(text: str) -> str | None:
     prose, or a stray object before a genuine cut); None — neither holds,
     the only reading consistent with a strict-parse failure caused by a
     mid-answer budget cut. That distinction is what the truncation gate in
-    judge_span needs: a completed answer's contract violation is what the
+    _contract_call needs: a completed answer's contract violation is what the
     tier chain / corrective retry addresses, and "increase max_tokens"
     cannot help it."""
     try:
@@ -662,7 +744,8 @@ def _apply_thinking(cfg: JudgeConfig, body: dict) -> None:
             body["output_config"] = {"effort": cfg.thinking_effort}
 
 
-def _apply_output_format(cfg: JudgeConfig, body: dict, tier: str) -> None:
+def _apply_output_format(cfg: JudgeConfig, body: dict, tier: str,
+                         schema: dict = VERDICT_SCHEMA, name: str = "injudge_verdict") -> None:
     """The tier's provider-native format field (the prompt tier sends none).
 
     openai-chat: `response_format` json_schema strict (DeepSeek 400s this —
@@ -675,16 +758,15 @@ def _apply_output_format(cfg: JudgeConfig, body: dict, tier: str) -> None:
         if cfg.api == "openai-chat":
             body["response_format"] = {
                 "type": "json_schema",
-                "json_schema": {
-                    "name": "injudge_verdict", "strict": True, "schema": VERDICT_SCHEMA},
+                "json_schema": {"name": name, "strict": True, "schema": schema},
             }
         elif cfg.api == "responses":
             body["text"] = {"format": {
-                "type": "json_schema", "name": "injudge_verdict",
-                "strict": True, "schema": VERDICT_SCHEMA}}
+                "type": "json_schema", "name": name,
+                "strict": True, "schema": schema}}
         else:  # anthropic
             body.setdefault("output_config", {})["format"] = {
-                "type": "json_schema", "schema": VERDICT_SCHEMA}
+                "type": "json_schema", "schema": schema}
     elif tier == "json":
         if cfg.api == "openai-chat":
             body["response_format"] = {"type": "json_object"}
@@ -694,7 +776,8 @@ def _apply_output_format(cfg: JudgeConfig, body: dict, tier: str) -> None:
     # prompt tier: no format field — the prompt alone carries the contract
 
 
-def _build_request(cfg: JudgeConfig, messages: list[dict], tier: str) -> Request:
+def _build_request(cfg: JudgeConfig, messages: list[dict], tier: str,
+                   schema: dict = VERDICT_SCHEMA, name: str = "injudge_verdict") -> Request:
     """One judge request in the declared API format at the given conformance
     tier. `messages` is the system+user pair, plus the invalid answer and
     corrective note on retries; non-chat formats split the system part out
@@ -743,7 +826,7 @@ def _build_request(cfg: JudgeConfig, messages: list[dict], tier: str) -> Request
         }
         headers = auth
     _apply_thinking(cfg, body)
-    _apply_output_format(cfg, body, tier)
+    _apply_output_format(cfg, body, tier, schema, name)
     return Request(
         _endpoint(cfg), data=json.dumps(body).encode("utf-8"), headers=headers, method="POST"
     )
@@ -805,10 +888,10 @@ def _truncated(cfg: JudgeConfig, payload: dict) -> bool:
     endpoint ignored the tier's format field — misreading it as one would
     degrade the tier for free over a condition no degrade can fix, and a
     prompt-tier success would then memoize the weakest tier for the rest of
-    the run. judge_span's gate applies that rule only when the answer never
-    completed (no complete JSON value in it); a complete-but-out-of-contract
-    answer carrying the signal routes through the tier chain / corrective
-    retry instead.
+    the run. The _contract_call gate applies that rule only when the answer
+    never completed (no complete JSON value in it); a complete-but-out-of-
+    contract answer carrying the signal routes through the tier chain /
+    corrective retry instead.
     """
     if not isinstance(payload, dict):
         return False
@@ -823,111 +906,6 @@ def _truncated(cfg: JudgeConfig, payload: dict) -> bool:
     return reason in ("length", "max_tokens")
 
 
-SYSTEM_PROMPT = """You are an audit judge for a memory system integrated into a coding agent.
-You evaluate RECALL INJECTIONS: transient user messages the memory system
-spliced into the agent's context, each delivering "approved memories"
-(key/value facts). Injections are grouped into SPANS: maximal runs of
-consecutive injections with identical delivered content. You judge one span.
-
-Your input is the exact TASK STATEMENT the agent worked on (present only
-when the run recorded one), the COMPLETE agent step stream of the
-trajectory — every
-completed agent turn with its assistant reasoning/content and tool
-executions — plus the span to evaluate. Steps before the span's first
-step are the pre-injection context (what the agent had done and planned
-when the injection arrived); steps from the span's first step onward are
-where the span's footprint, if any, appears.
-
-Score EVERY delivered memory on this rubric — five signals, judged only
-from the task statement and the step stream:
-
-1. relevance (true|false) — is the memory topically related to the task
-   (the recorded statement above; when absent, reconstruct the task from
-   the pre-injection steps) and to the agent's current subgoal at the
-   injection point? Use the steps before the span's first step.
-2. accuracy (@accuracy@) — is the
-   memory content factually correct given the codebase state observable in
-   the step stream (tool results, file contents, test outcomes)?
-   corroborated = directly confirmed by observable evidence; contradicted =
-   observable evidence refutes it; uncontradicted = neither (plausible,
-   nothing refutes it). Do not guess beyond what is observable.
-3. novelty (@novelty@) — what did the agent already
-   have when the injection arrived? Judge the memory's substance in the
-   steps before the span's first step, by how the agent had articulated it:
-   - confirming: the agent had articulated the substance as OPEN — a
-     suspicion, hypothesis, hesitation, or an unverified assumption — and
-     the memory settles it. Expressed doubt wins over ambient evidence:
-     still-unsure means confirming even if the answer was technically
-     observable earlier;
-   - redundant: the substance was already ESTABLISHED with no open doubt —
-     the agent stated it as fact, had decided or applied it, or tool
-     results had already shown it. The delivery was redundant/late;
-   - novel: the substance never appeared in the pre-injection steps.
-   The note must cite the pre-injection step the tier rests on. Judge from
-   the agent's steps only.
-4. influence (@influence@) — the memory's
-   footprint in the agent's SUBSEQUENT behavior (steps from the span's
-   first step onward):
-   - referenced: the agent mentioned or quoted it, but its actions did not
-     change because of it;
-   - acted_on: a later command, edit, or test was shaped by the memory
-     (the action would likely have differed without it). A SKIPPED step
-     also qualifies, but only with an observable anchor: the agent had
-     announced the intent before the injection and then dropped it, or it
-     explicitly credited the memory with making the step unnecessary;
-   - decisive: the agent explicitly credited the memory with changing its
-     course, or the course change is unmistakable from the step stream;
-   - none: no observable footprint at all. A skip merely inferred from an
-     action's absence is none — absence alone is never evidence.
-   A mention is not proof of influence: the agent may have known or found
-   the fact on its own (check novelty and the pre-injection steps).
-5. positive_effect (@positive_effect@) — only when
-   influence is acted_on or decisive: did the memory improve the work
-   (correct choice sooner, saved effort, avoided error)? Saved effort
-   needs the observable anchor from influence (announced intent or
-   explicit credit, cited in the note) plus the step's absence afterward —
-   and a skip that saves nothing (the fact was already established before
-   the injection, novelty redundant) is no_effect, not improved.
-   no_effect = it shaped behavior without improving it — that counts
-   AGAINST the memory system (context and attention spent for nothing).
-   harmed = it led the agent astray (wrong location, false lead, reverted
-   correct work). null when influence is none or referenced.
-
-Rules (binding):
-- Judge each memory independently. Each note is one sentence, citing step
-  and seq numbers from the step stream where applicable.
-- The final task result, when discernible from the step stream, is
-  corroboration only: it may raise or lower confidence, it can never
-  decide a signal by itself. A correct final patch can contain harmful
-  injections the agent happened to survive; a failed task can contain
-  good injections the agent failed to exploit.
-- Do not grade the agent's coding ability. Judge only the injection's
-  contribution.
-
-Answer with ONE JSON object and nothing else:
-{
-  "memories": [
-    {
-      "key": "<memory key>",
-      "relevance":       {"value": true|false, "note": "<one sentence>"},
-      "accuracy":        {"value": @accuracy@,
-                          "note": "<one sentence>"},
-      "novelty":         {"value": @novelty@,
-                          "note": "<one sentence citing the pre-injection step>"},
-      "influence":       {"value": @influence@,
-                          "note": "<one sentence>"},
-      "positive_effect": {"value": @positive_effect@,
-                          "note": "<one sentence>"}
-    }
-  ],
-  "analysis": "<2-4 sentences synthesizing the span's footprint>",
-  "evidence": [{"claim": "<what happened>", "steps": [<int>...],
-                "seqs": [<int>...]}...],
-  "confidence": <number 0.0-1.0>
-}
-memories must contain exactly one entry per delivered memory key."""
-
-
 def _quoted_or(values: tuple[str, ...]) -> str:
     """One prompt enum list: "a"|"b"|"c"."""
     return "|".join(f'"{v}"' for v in values)
@@ -937,14 +915,132 @@ def _quoted_or(values: tuple[str, ...]) -> str:
 # and _valid_value: a renamed/added value moves schema, validation, and
 # prompt together — a stale literal would fail verdicts with an invisible
 # cause (the model is instructed to emit values the contract rejects).
-for _token, _literals in (
-    ("@accuracy@", _quoted_or(_ACCURACY)),
-    ("@novelty@", _quoted_or(_NOVELTY)),
-    ("@influence@", _quoted_or(_INFLUENCE)),
-    ("@positive_effect@", _quoted_or(_POS_EFFECT) + "|null"),
-):
-    SYSTEM_PROMPT = SYSTEM_PROMPT.replace(_token, _literals)
-del _token, _literals
+def _substitute_enums(text: str) -> str:
+    """Fill the `@accuracy@`-style enum tokens from the contract constants."""
+    for token, literals in (
+        ("@accuracy@", _quoted_or(_ACCURACY)),
+        ("@novelty@", _quoted_or(_NOVELTY)),
+        ("@influence@", _quoted_or(_INFLUENCE)),
+        ("@positive_effect@", _quoted_or(_POS_EFFECT) + "|null"),
+    ):
+        text = text.replace(token, literals)
+    return text
+
+
+def _fill_signals(text: str, regime: str) -> str:
+    """Fill the five @signal_*@ slots from the signal files: relevance and
+    positive_effect have per-regime variants (the gold regime judges them
+    against the golden answer), the rest are shared by both regimes
+    verbatim — a forked copy that could drift is not allowed."""
+    for slot in _SIGNALS:
+        variant = f"_{regime}" if slot in ("relevance", "positive_effect") else ""
+        text = text.replace(f"@signal_{slot}@", load_prompt(f"injudge/signals/{slot}{variant}"))
+    return text
+
+
+def _scoring_prompt(regime: str) -> str:
+    """Assemble a scoring system prompt from the prompt files: ONE shared
+    frame filled with the shared input description and signal definitions.
+    The two regimes — "plain" and "gold" — differ only in the frame's two
+    regime slots (the gold-answer note and the judged-from clause), the
+    relevance / positive_effect guidance (judged against the golden-answer
+    text in the gold regime), and one extra binding rule — the frame itself
+    exists once, so the copies can never drift."""
+    gold = regime == "gold"
+    text = load_prompt("injudge/scoring/system")
+    rules = load_prompt("injudge/scoring/rules")
+    if gold:
+        rules += "\n" + load_prompt("injudge/scoring/rules_gold_extra")
+    note = load_prompt("injudge/scoring/gold_note") if gold else ""
+    text = text.replace("@gold_note@", f"\n\n{note}" if note else "")
+    text = text.replace(
+        "@score_inputs@", load_prompt(f"injudge/scoring/score_inputs_{regime}")
+    )
+    text = text.replace("@preamble@", load_prompt("injudge/scoring/preamble"))
+    text = text.replace("@rules@", rules)
+    text = text.replace("@answer_contract@", load_prompt("injudge/scoring/answer_contract"))
+    text = text.replace("@input_description@", load_prompt("injudge/scoring/input"))
+    return _fill_signals(text, regime)
+
+
+# The judge system prompts, one per rubric regime. GOLD_SYSTEM_PROMPT is used
+# for a scoring call carrying a golden-answer body; both share the same five
+# signals, enums, and VERDICT_SCHEMA — only the guidance differs.
+SYSTEM_PROMPT = _substitute_enums(_scoring_prompt("plain"))
+GOLD_SYSTEM_PROMPT = _substitute_enums(_scoring_prompt("gold"))
+
+# The scoring user's closing instruction: the fit path (_user_shell) and the
+# scan path (injudge.scan's assembly) share it — one file, so the two send
+# sites can never drift apart.
+SCORING_CLOSING = load_prompt("injudge/scoring/closing")
+
+# The header note introducing the delivered memories on a SCORING input: the
+# fit path (_user_shell) and the scan path (injudge.scan's scan_header) send
+# the same invitation — one file, one module-level load, never two copies.
+# The extraction chunks' own note lives in injudge.scan.
+MEMORIES_NOTE = load_prompt("injudge/scoring/memories_note")
+
+# The gold attachments' frames (the @golden@ / @correctness@ slots take the
+# recorded bodies) — instruction prose lives in the prompt files like every
+# other LLM-facing string.
+_GOLDEN_BLOCK = load_prompt("injudge/scoring/golden_block")
+_CORRECTNESS_BLOCK = load_prompt("injudge/scoring/correctness_block")
+
+# The corrective retry note's frame (the @error@ slot takes the contract
+# violation) — one module-level load like every other prompt file here,
+# never a re-read per corrective retry.
+_CORRECTIVE_NOTE = load_prompt("injudge/scoring/corrective")
+
+
+def _scoring_system(gold: GoldInput) -> str:
+    """The scoring call's system prompt: the gold regime's frame when a
+    golden-answer body attaches, else the plain one. Every gate/send site
+    derives it here so the regime choice can never drift between them."""
+    return GOLD_SYSTEM_PROMPT if gold.golden else SYSTEM_PROMPT
+
+# lazy: importing this module never fetches tiktoken's BPE ranks. A
+# concurrent first count may build the encoding twice — the assignment is
+# atomic and the objects equivalent, so the race costs one duplicate init.
+_ENCODING = None
+
+
+def count_tokens(text: str) -> int:
+    """Estimated token count for budget decisions (tiktoken `o200k_base`).
+
+    The ONE ruler for the budget gate, chunking, and evidence measurement —
+    they never use two. The judge model's real tokenizer may differ: this is
+    a routing estimate, not exact billing (the JUDGE_INPUT_TOKENS default
+    converts the old character tier at the cookbook rule of 1 token ≈ 4
+    characters). Special-token spellings in trajectory text (<|endoftext|>
+    & co.) are ordinary text here, never parse errors."""
+    global _ENCODING
+    if _ENCODING is None:
+        try:
+            import tiktoken
+        except ImportError as e:
+            # a missing install is a missing runtime input: fail fast with a
+            # targeted message (the first count happens before any paid
+            # judge call), never a raw ModuleNotFoundError mid-run
+            raise SystemExit(
+                "error: the tiktoken package is required (uv pip install tiktoken)"
+            ) from e
+        _ENCODING = tiktoken.get_encoding("o200k_base")
+    return len(_ENCODING.encode(text, disallowed_special=()))
+
+
+@dataclass
+class GoldInput:
+    """Optional attachments to the final scoring call (never sent to extraction).
+
+    `golden` is a golden-answer body (the reference solution): attaching one
+    switches that call to GOLD_SYSTEM_PROMPT. `correctness` is the recorded
+    outcome — {"resolved": bool} plus an optional 0–1 "score" — corroboration
+    only: it attaches as the TASK CORRECTNESS block under whichever system
+    prompt the call uses and never selects the prompt by itself.
+    """
+
+    golden: str | None = None
+    correctness: dict[str, Any] | None = None
 
 
 def _memory_line(m: dict) -> str:
@@ -963,40 +1059,102 @@ def _cmd_of(args: dict | str) -> str:
     return json.dumps(args or {}, ensure_ascii=False)
 
 
+def _render_step(st: AgentStep) -> str:
+    """One step's rendered block — the unit _render_steps joins."""
+    seq_end = st.seq_end if st.seq_end is not None else "?"  # truncated mid-turn
+    lines = [f"[step {st.step}, turn {st.turn}, seqs {st.seq_start}–{seq_end}]"]
+    if st.reasoning:
+        lines.append(f"reasoning: {st.reasoning}")
+    if st.content:
+        lines.append(f"content: {st.content}")
+    for t in st.tools:
+        lines.append(f"command: {t.name} — {_cmd_of(t.args)}")
+        if t.result is not None:
+            lines.append(f"result ({t.status or '?'}): {t.result}")
+        elif t.status is not None:
+            # the execution closed without a result (no_result/interrupted)
+            # — the recorded close says why; "never observed" would claim
+            # the run lost the outcome, which it did not
+            lines.append(f"result ({t.status}): (none recorded)")
+        else:
+            lines.append("result: (never observed)")
+    return "\n".join(lines)
+
+
 def _render_steps(steps: list[AgentStep]) -> str:
     """The complete step stream, verbatim — no windows, no caps."""
-    out = []
-    for st in steps:
-        seq_end = st.seq_end if st.seq_end is not None else "?"  # truncated mid-turn
-        out.append(f"[step {st.step}, turn {st.turn}, seqs {st.seq_start}–{seq_end}]")
-        if st.reasoning:
-            out.append(f"reasoning: {st.reasoning}")
-        if st.content:
-            out.append(f"content: {st.content}")
-        for t in st.tools:
-            out.append(f"command: {t.name} — {_cmd_of(t.args)}")
-            if t.result is not None:
-                out.append(f"result ({t.status or '?'}): {t.result}")
-            elif t.status is not None:
-                # the execution closed without a result (no_result/interrupted)
-                # — the recorded close says why; "never observed" would claim
-                # the run lost the outcome, which it did not
-                out.append(f"result ({t.status}): (none recorded)")
-            else:
-                out.append("result: (never observed)")
-    return "\n".join(out) or "(none)"
+    return "\n".join(_render_step(st) for st in steps) or "(none)"
 
 
-def render_user(span: InjectionSpan, steps: list[AgentStep], task: str | None = None) -> str:
-    """The judge input: the recorded task (when present), the span to
-    evaluate, plus the whole step stream."""
-    consumed = step_range(span.step_first, span.step_last)
+@dataclass(frozen=True)
+class _StreamRender:
+    """One steps list's rendered stream and its token count, memoized (the
+    _StepsMemo below) so a trajectory's spans — all sharing the one steps
+    list — never re-render and re-encode the identical stream per span (the
+    budget gate and the fit-path user read it). The scan chunker's per-step
+    counts ride their own memos (injudge.scan), so the fit path never pays
+    per-step encodes only the overflow path reads."""
+
+    text: str  # _render_steps output
+    tokens: int  # count_tokens(text)
+
+
+class _StepsMemo:
+    """A one-entry memo over a steps list, keyed by the list's identity.
+
+    One entry is enough: a trajectory's spans are judged together (the
+    JUDGE_PARALLEL pool shares the steps list) before the next trajectory's
+    stream is built. The list itself rides the entry tuple and identity is
+    compared, so an id() recycled after garbage collection can never alias a
+    stale entry. The first miss computes under the lock (double-checked):
+    without it every pool worker misses the empty memo on the opening batch
+    and independently re-renders and re-encodes the identical stream."""
+
+    def __init__(self, compute: Callable[[list[AgentStep]], Any]) -> None:
+        self._compute = compute
+        self._entry: tuple[list[AgentStep], Any] | None = None
+        self._lock = threading.Lock()
+
+    def __call__(self, steps: list[AgentStep]) -> Any:
+        entry = self._entry
+        if entry is not None and entry[0] is steps:
+            return entry[1]
+        with self._lock:
+            entry = self._entry
+            if entry is not None and entry[0] is steps:
+                return entry[1]
+            value = self._compute(steps)
+            self._entry = (steps, value)
+            return value
+
+
+def _render_stream(steps: list[AgentStep]) -> _StreamRender:
+    """The whole stream's render plus its token count (one pass, one encode)."""
+    text = _render_steps(steps)
+    return _StreamRender(text=text, tokens=count_tokens(text))
+
+
+# the memoized whole-stream render the budget gate and the fit-path user read
+_stream_render = _StepsMemo(_render_stream)
+
+
+def _render_span_header(span: InjectionSpan, task: str | None, memories_note: str) -> str:
+    """The task + span + delivered-memories header every judge-bound input
+    carries (the scoring call and a scan chunk's extraction call alike — a
+    chunk's input is never a bare trajectory slice)."""
+    # a step-less span (no agent turn ever classified — the direct-call fit
+    # path; the CLI rule-judges it auto-neutral) names no step range
+    consumed = (
+        f"agent {step_range(span.step_first, span.step_last)}"
+        if span.step_first is not None
+        else "no agent step (no agent turn classified in the run)"
+    )
     parts = []
     if task:
         parts.append(f"TASK STATEMENT (the exact task the run recorded):\n{task}\n")
     parts.append(
         f"SPAN TO EVALUATE {span.id} — {span.n_injections} identical injection(s), "
-        f"consumed at agent {consumed} (seqs {span.seq_first}–{span.seq_last})."
+        f"consumed at {consumed} (seqs {span.seq_first}–{span.seq_last})."
     )
     if span.step_gaps:
         parts.append(f"NOTE: the memory was NOT delivered at steps {span.step_gaps}.")
@@ -1004,17 +1162,72 @@ def render_user(span: InjectionSpan, steps: list[AgentStep], task: str | None = 
         parts.append(f"New memories vs the previous span: {span.new_keys}.")
     if span.removed_keys:
         parts.append(f"Removed vs the previous span: {span.removed_keys}.")
-    parts.append("Memories delivered (score each one on the rubric):")
+    parts.append(memories_note)
     parts.extend(_memory_line(m) for m in span.memories)
-    parts += [
-        "",
-        f"COMPLETE AGENT STEP STREAM ({len(steps)} steps; the span's footprint, "
-        f"if any, appears at steps >= {span.step_first})",
-        _render_steps(steps),
-        "",
-        "Return the JSON rubric object now.",
-    ]
     return "\n".join(parts)
+
+
+def _gold_blocks(gold: GoldInput | None) -> str:
+    """The GOLDEN ANSWER / TASK CORRECTNESS attachments, placed after the
+    step stream or evidence pack; "" when neither is present. They never
+    appear in the extraction prompts."""
+    if gold is None:
+        return ""
+    parts = []
+    if gold.golden:
+        parts.append(_GOLDEN_BLOCK.replace("@golden@", gold.golden))
+    if gold.correctness:
+        block = _CORRECTNESS_BLOCK.replace(
+            "@correctness@",
+            "resolved" if gold.correctness.get("resolved") else "unresolved",
+        )
+        score = gold.correctness.get("score")
+        if isinstance(score, (int, float)) and not isinstance(score, bool):
+            try:
+                block += f"\nscore: {score:g}"
+            except OverflowError:
+                # an int past the float range overflows the :g conversion
+                # (the sidecar's range check keeps one out; only a hand-built
+                # record reaches this) — show the plain digits, never crash
+                block += f"\nscore: {score}"
+        parts.append(block)
+    return "\n\n".join(parts)
+
+
+def _user_shell(
+    span: InjectionSpan, steps: list[AgentStep], task: str | None, gold: GoldInput | None
+) -> tuple[str, str]:
+    """The span-specific shell around the step stream: everything before it
+    (task + span header, the stream label) and after it (the gold
+    attachments, the closing instruction). render_user joins shell and
+    memoized stream into the judge input; the budget gate sums their token
+    counts instead of re-encoding the whole stream per span."""
+    footprint = (
+        f"the span's footprint, if any, appears at steps >= {span.step_first}"
+        if span.step_first is not None
+        else "the span carries no attributed step (no agent turn classified)"
+    )
+    head = (
+        _render_span_header(span, task, MEMORIES_NOTE)
+        + f"\n\nCOMPLETE AGENT STEP STREAM ({len(steps)} steps; {footprint})\n"
+    )
+    blocks = _gold_blocks(gold)
+    tail = "\n\n" + (blocks + "\n\n" if blocks else "") + SCORING_CLOSING
+    return head, tail
+
+
+def render_user(
+    span: InjectionSpan,
+    steps: list[AgentStep],
+    task: str | None = None,
+    *,
+    gold: GoldInput | None = None,
+) -> str:
+    """The judge input: the recorded task (when present), the span to
+    evaluate, plus the whole step stream — and, at the end, any golden
+    answer / correctness attachments."""
+    head, tail = _user_shell(span, steps, task, gold)
+    return head + _stream_render(steps).text + tail
 
 
 # ---------------------------------------------------------------- parsing
@@ -1042,7 +1255,7 @@ class _NonJSONConstant(ValueError):
 # JSON the parser's recursion limit rejects — schema-illegal nesting, so
 # proof of an ignored field at the structured tier, a model error at the
 # others). Constants, not literals at the use sites, so the producer in
-# _strict_parse and the consumer in judge_span cannot drift apart.
+# _strict_parse and the consumer in _contract_call cannot drift apart.
 _DIGIT_LIMIT_ERROR = "carries an integer literal past the digit limit"
 _NOT_JSON_ERROR = "is not valid JSON"
 _DEEP_NESTING_ERROR = "nests too deeply to parse"
@@ -1061,19 +1274,10 @@ def _reject_constant(value: str) -> None:
     raise _NonJSONConstant(f"non-JSON constant {value!r}")
 
 
-def _strict_parse(text: str) -> tuple[dict | None, str | None]:
-    """json.loads plus the VERDICT_SCHEMA shape, checked in code — the
-    prompt tier's share of conformance enforcement (the constrained tiers
-    get it from the API). (obj, None) on conformance; (None, error) with a
-    retryable out-of-contract reason otherwise.
-
-    Strict means no recovery: no fence/embedded extraction, no
-    synonym/bool/string coercions. The enforced shape is the required
-    subset — the memories array structure, the rubric values, and
-    confidence; extra properties pass (only the constrained tiers reject
-    them). Display-only fields (notes, analysis, evidence) are not
-    shape-checked here.
-    """
+def _json_parse(text: str) -> tuple[object, str | None]:
+    """json.loads with the three out-of-contract classifications every
+    consumer (the verdict's _strict_parse, the extraction's _parse_extraction)
+    classifies by: (obj, None) on a parse, (None, reason) otherwise."""
     try:
         # parse_constant rejects NaN/Infinity, which json.loads would
         # otherwise accept though neither is valid JSON — an answer carrying
@@ -1108,6 +1312,25 @@ def _strict_parse(text: str) -> tuple[dict | None, str | None]:
         except ValueError:
             return None, _NOT_JSON_ERROR
         return None, _DIGIT_LIMIT_ERROR
+    return obj, None
+
+
+def _strict_parse(text: str) -> tuple[dict | None, str | None]:
+    """json.loads plus the VERDICT_SCHEMA shape, checked in code — the
+    prompt tier's share of conformance enforcement (the constrained tiers
+    get it from the API). (obj, None) on conformance; (None, error) with a
+    retryable out-of-contract reason otherwise.
+
+    Strict means no recovery: no fence/embedded extraction, no
+    synonym/bool/string coercions. The enforced shape is the required
+    subset — the memories array structure, the rubric values, and
+    confidence; extra properties pass (only the constrained tiers reject
+    them). Display-only fields (notes, analysis, evidence) are not
+    shape-checked here.
+    """
+    obj, error = _json_parse(text)
+    if error is not None:
+        return None, error
     if not isinstance(obj, dict):
         return None, "is not a JSON object"
     memories = obj.get("memories")
@@ -1231,6 +1454,7 @@ def blank_verdict() -> dict:
         "evidence": [],
         "auto": None,
         "error": None,
+        "input": None,  # the budget-gate record; gate spans only
     }
 
 
@@ -1377,13 +1601,7 @@ def _corrective_note(error: str) -> str:
     """What a retry at the final (or pinned) tier adds to the request: the
     contract violation, so the retry differs from the failed attempt even
     at temperature 0."""
-    return (
-        f"That answer is not valid per the output contract: judge output {error}. "
-        "Answer again with ONE JSON object and nothing else, exactly in the "
-        "declared shape — one memories array entry per delivered memory key, "
-        "every signal as a value/note object whose value comes from its "
-        "declared boolean or enum, and a numeric confidence."
-    )
+    return _CORRECTIVE_NOTE.replace("@error@", error)
 
 
 def _retry_after(e: HTTPError) -> float | None:
@@ -1455,6 +1673,16 @@ def _mask_key(text: str, api_key: str) -> str:
     return text
 
 
+def _mask_keys(text: str, keys: Iterable[str]) -> str:
+    """_mask_key over several configured keys, LONGER key first: a shorter
+    key sitting inside the longer one would break its full spelling and
+    leave the longer key's prefix unmasked — the one ordering every
+    two-key mask (scoring + extraction) must share."""
+    for key in sorted(keys, key=len, reverse=True):
+        text = _mask_key(text, key)
+    return text
+
+
 def _masked_head(text: str, api_key: str, cap: int) -> str:
     """The capped, masked form of a kept endpoint dump. The mask runs over
     the WHOLE text and the cap is taken after: masking shrinks each
@@ -1464,14 +1692,195 @@ def _masked_head(text: str, api_key: str, cap: int) -> str:
     return _mask_key(text, api_key)[:cap]
 
 
+@lru_cache(maxsize=None)
+def _system_tokens(system: str) -> int:
+    """The system prompt's token count, encoded once per prompt: the budget
+    gate re-measures the verbatim candidate per span, but the prompt is one
+    of the two run-invariant regime frames (SYSTEM_PROMPT /
+    GOLD_SYSTEM_PROMPT) — the same memo discipline _stream_render gives the
+    step stream."""
+    return count_tokens(system)
+
+
+def _gate_tokens(
+    system: str, span: InjectionSpan, steps: list[AgentStep], task: str | None, gold: GoldInput
+) -> int:
+    """The budget gate's measurement of the verbatim candidate: the system
+    prompt plus the user's per-part counts (the span-specific shell and the
+    memoized stream's count), summed. BPE is not additive across the
+    head/stream/tail seams, so counting the JOINED user can disagree with
+    this sum near JUDGE_INPUT_TOKENS — the --dry-run overflow preview shares
+    this measurement instead of re-encoding the assembled user."""
+    stream = _stream_render(steps)
+    head, tail = _user_shell(span, steps, task, gold)
+    return (
+        _system_tokens(system) + count_tokens(head) + stream.tokens + count_tokens(tail)
+    )
+
+
+def _gate_over_budget(
+    system: str,
+    span: InjectionSpan,
+    steps: list[AgentStep],
+    task: str | None,
+    gold: GoldInput,
+    input_tokens: int,
+) -> bool:
+    """The budget gate's routing decision, shared by judge_span and the
+    CLI's unexpected-failure record (whose re-derived regime must match the
+    routing a survived exception would have taken) so the two can never
+    desync. A step-less span never scans: with no injection point in the
+    step stream, the scan's pre/post split and seam neighborhood have
+    nothing to bracket."""
+    return (
+        span.step_first is not None
+        and _gate_tokens(system, span, steps, task, gold) > input_tokens
+    )
+
+
+def _input_record(path: str, gold: GoldInput) -> dict:
+    """The budget-gate record's constant part: the path taken plus the
+    gold-regime marker when it applies. The scan path adds its chunk
+    counters at assembly; an unexpectedly failed span keeps this re-derived
+    shape alone (the counters die with the exception)."""
+    return {"path": path, **({"gold": True} if gold.golden else {})}
+
+
 def judge_span(
     span: InjectionSpan,
     steps: list[AgentStep],
     cfg: JudgeConfig,
     warnings: list[str],
     task: str | None = None,
+    *,
+    gold: GoldInput | None = None,
+    scan: ScanConfig | None = None,
 ) -> dict:
-    """Judge one span through the conformance tier chain.
+    """Judge one span: route by the input budget, then score.
+
+    The budget gate measures the verbatim candidate — the scoring system
+    prompt (GOLD_SYSTEM_PROMPT when a golden-answer body is attached, else
+    SYSTEM_PROMPT) plus the final scoring user (gold blocks included) —
+    against the JUDGE_INPUT_TOKENS knob the scan config carries (_gate_tokens;
+    a routing estimate like every count here, never exact billing).
+    Fits → one full-text scoring call. Overflows → injudge.scan reads the
+    whole trajectory in chunks (evidence extraction only) and assembles an
+    evidence pack for the SAME scoring call — never truncated to fit. A span
+    with no attributed step (no agent turn classified — a memory-only or
+    pre-first-response recording) always takes the fit path: with no
+    injection point in the step stream, the scan's pre/post split and seam
+    neighborhood have nothing to bracket (the CLI rule-judges such spans
+    auto-neutral before judge_span ever runs; the fit path is what a direct
+    caller gets). The path taken is recorded on the verdict's `input` for
+    the operation record — and when the scoring call fails outright, the
+    record rides the raised JudgeError so the caller's error verdict keeps
+    it. With no scan config the gate is bypassed and the full-text call runs
+    as before (the unit-test entry point).
+    """
+    gold = gold or GoldInput()
+    system = _scoring_system(gold)
+    if (
+        scan is not None
+        and _gate_over_budget(system, span, steps, task, gold, scan.input_tokens)
+    ):
+        # lazy import: injudge.scan builds on this module's client machinery
+        from injudge.scan import scan_span
+
+        return scan_span(span, steps, cfg, scan, gold, warnings, task, system)
+    user = render_user(span, steps, task, gold=gold)
+    record = _input_record("full", gold) if scan is not None else None
+    try:
+        verdict = _scoring_call(system, user, span, cfg, warnings)
+    except JudgeError as e:
+        # a gate span keeps its input record even when the scoring call never
+        # produced a verdict: it rides the exception so the caller's blank
+        # error verdict can stamp it (the scan path does the same in
+        # scan_span) — otherwise the run's input_paths/gold_scored undercount
+        e.input = record
+        raise
+    if record is not None:
+        verdict["input"] = record
+    return verdict
+
+
+@dataclass(frozen=True)
+class _CallContract:
+    """The vocabulary one contract-enforcing call walks the tier chain with:
+    the output schema and request name the constrained tiers send, the
+    code-side conformance check, the corrective note a budget-consuming retry
+    appends, and the message spellings — the extraction walk (injudge.scan)
+    names its SCAN_* knobs where the scoring walk names the scoring ones.
+    The POLICY — the tier chain, the free degrades, the truncation gate, the
+    attempt budget — lives once in _contract_call."""
+
+    schema: dict[str, Any]
+    name: str
+    parse: Callable[[str], tuple[Any, str | None]]  # (object, None) | (None, retryable reason)
+    corrective: Callable[[str], str]
+    label: str  # "judge" | "extraction": the failure messages' subject
+    pin_env: str  # OUTPUT_FORMAT | SCAN_OUTPUT_FORMAT
+    budget_hint: str  # "increase max_tokens" | "increase SCAN_MAX_TOKENS"
+
+
+class _CallFailed(Exception):
+    """The walk's non-success exit; the caller translates it into its own
+    failure record (an error verdict, an ExtractError, a JudgeError).
+
+    kind "request" — the endpoint never produced a usable answer (transport
+    exhaustion, or a request-level rejection: a pinned-tier 400/422, a
+    tier-independent rejection, another non-429 4xx). kind "answer" — the
+    budget went to answers that failed the contract (`text` keeps the last
+    one; `cut` marks it also carrying the truncation signal) or to one cut
+    at the output budget mid-way."""
+
+    def __init__(self, kind: str, message: str, text: str = "", cut: bool = False):
+        super().__init__(message)
+        self.kind = kind
+        self.text = text
+        self.cut = cut
+
+
+def _failure_message(e: _CallFailed, contract: _CallContract) -> str:
+    """The walk failure's message, with the output budget named when the
+    recorded answer also carried the truncation signal: it slipped a stray
+    complete object past the truncation gate, so the corrective budget went
+    to answers that re-truncated, and the bare violation alone would never
+    point at the budget knob. The one spelling the scoring walk
+    (_VERDICT_CALL) and the extraction walk (injudge.scan's
+    _EXTRACTION_CALL) share."""
+    msg = str(e)
+    if e.cut:
+        msg += (
+            "; the answer was also cut at the output-token budget — "
+            f"{contract.budget_hint}"
+        )
+    return msg
+
+
+_VERDICT_CALL = _CallContract(
+    schema=VERDICT_SCHEMA,
+    name="injudge_verdict",
+    parse=_strict_parse,
+    corrective=_corrective_note,
+    label="judge",
+    pin_env="OUTPUT_FORMAT",
+    budget_hint="increase max_tokens",
+)
+
+
+def _contract_call(
+    cfg: JudgeConfig,
+    messages: list[dict],
+    contract: _CallContract,
+    warnings: list[str],
+    where: str,
+    open_fn: Callable[..., Any],
+) -> tuple[Any, str]:
+    """One call enforcing its contract through the conformance tier chain:
+    (parsed contract object, raw answer text) on success, _CallFailed
+    otherwise. The scoring call and a scan chunk's extraction call share
+    this walk — same tier chain, same rejection/truncation/corrective-retry
+    rules; only the contract vocabulary differs.
 
     Auto mode walks structured → json → prompt (anthropic: structured →
     prompt). A 400/422 rejects the REQUEST as a format-tier refusal (free —
@@ -1479,7 +1888,7 @@ def judge_span(
     attempt budget — unless the identical NON-EMPTY rejection repeats at the
     FINAL (format-less) tier: unchanged with no format field left to refuse,
     it is tier-independent (a config fault like an over-limit max_tokens, or
-    the span's own content), never a format refusal, and fails the span on
+    the input's own content), never a format refusal, and fails the call on
     the endpoint's message. The repeat is judged only there: a gateway
     rejecting every format field with one generic error body repeats it
     across the FORMAT tiers too, and an early fail-fast would strand the
@@ -1487,10 +1896,12 @@ def judge_span(
     not an unchanged rejection — it never triggers the fail-fast (a gateway
     dropping per-tier error text still gets the full walk). Any other
     non-429 4xx (auth, unknown URL, payload too large) is an endpoint/config
-    fault, not a format problem, and fails the span immediately.
+    fault, not a format problem, and fails the call immediately. With the
+    output format pinned there is no chain to walk, so a 400/422 fails the
+    call naming the pin.
     Out-of-contract OUTPUT that proves the endpoint
-    ignored the format field — any violation _strict_parse checks at the
-    structured tier (an out-of-range confidence is not among them: the
+    ignored the format field — any violation the contract's parse checks at
+    the structured tier (an out-of-range confidence is not among them: the
     schema's 0–1 bound is a semantic correction clamped in code, not a
     parsed violation; the int digit-limit refusal is not among them
     either: a >4300-digit literal is valid, schema-legal JSON), invalid
@@ -1502,33 +1913,54 @@ def judge_span(
     invalid JSON — the refusal fires at the literal before later garbage),
     are model errors and take the corrective retry
     instead.
+    A response cut at the output-token budget MID-ANSWER (no complete JSON
+    value in it) is a budget property of that answer, never proof of an
+    ignored format field: the call fails ("answer") naming the truncation —
+    no free degrade (one call's budget must not memoize the weakest tier for
+    the run), and no same-budget retry, which would deterministically
+    re-truncate. A complete-but-out-of-contract answer carrying the
+    truncation signal is not that failure — the cut only removed trailing
+    prose (or the shape is the model's own error) — so it routes through the
+    tier chain / corrective retry like any other violation; a pathologically
+    nested answer reads as incomplete (both completeness parsers stop at the
+    recursion limit) even when its braces closed: like the digit-limit
+    refusal it is the model's own error — more tokens cannot fix it — so it
+    too keeps its corrective retries, never the budget failure with its
+    misdirecting hint.
     The learned-tier memo records only a tier that produced a conforming
-    answer, so later spans start at a tier proven to work. At the final
-    tier (or with OUTPUT_FORMAT pinned) a retry must change the request —
-    the invalid answer plus a corrective note is appended. Transport
-    failures, empty-content draws, and budget-consuming out-of-contract
-    answers consume max_attempts; discovering the working tier (a
-    request-level format rejection or an ignored format field) is free.
-    Budget exhausted after invalid output → error verdict with judge_raw,
-    its error naming that answer's own contract violation (a later transport
-    failure never misattributes the cause); pure transport exhaustion raises
-    JudgeError for the caller to record.
+    answer, so later calls start at a tier proven to work — a rescued
+    reasoning_content draft never passed through the format channel, so its
+    conformance memoizes nothing — and it folds degrade-only
+    (_memoize_tier), so a parallel worker's stale snapshot or a lucky draw
+    through a format-ignoring proxy never moves it back to a stronger tier.
+    At the final tier (or with the format
+    pinned) a retry must change the request — the invalid answer plus a
+    corrective note is appended. Transport failures, empty-content draws (a
+    server-side quirk worth a fresh draw of the identical request), and
+    budget-consuming out-of-contract answers consume max_attempts;
+    discovering the working tier (a request-level format rejection or an
+    ignored format field) is free. Budget exhausted after invalid output
+    fails "answer", its message naming that answer's own contract violation
+    (a later transport failure never misattributes the cause); pure
+    transport exhaustion fails "request".
+
+    `where` labels the warnings (the span id; a scan chunk passes its own
+    location); `open_fn` is the caller module's own module-level urlopen —
+    each module keeps its symbol so tests stub the two endpoints
+    independently.
     """
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": render_user(span, steps, task)},
-    ]
     tier = cfg.output_format or cfg.learned_tier
     tries = 0
+    last_error = "no answer"
     last_text = ""  # latest out-of-contract answer; transport failures never erase it
     last_text_error = ""  # that answer's own contract violation (assigned with last_text)
     last_truncated = False  # ... and whether that answer carried the truncation signal
     rejection: bytes | None = None  # raw body of the last 400/422; any answered request resets it
     while True:
-        req = _build_request(cfg, messages, tier)
+        req = _build_request(cfg, messages, tier, schema=contract.schema, name=contract.name)
         pause: float | None = None
         try:
-            with urlopen(req, timeout=cfg.timeout) as resp:
+            with open_fn(req, timeout=cfg.timeout) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
         except HTTPError as e:
             raw = b""
@@ -1548,54 +1980,51 @@ def judge_span(
                 # request-level rejection: the endpoint refuses this tier's
                 # format field — degrade for free, no attempt consumed
                 if cfg.output_format is not None:
-                    # A pinned tier cannot degrade, so the rejection fails
-                    # the span like any other endpoint fault — recorded per
-                    # span, the run continues. Aborting the run instead would
-                    # lose the current trajectory's already-paid verdicts
-                    # (the artifact flushes per trajectory), and a mid-run
-                    # 400/422 can be span-specific (a payload too large), not
-                    # a config fault. The message names the pin, not the
-                    # cause: the prompt tier sends no format field at all,
-                    # and a format tier's first 400/422 may be an unrelated
-                    # config fault (unknown model, over-limit max_tokens).
-                    raise JudgeError(
-                        f"the judge endpoint rejected the request with "
-                        f"OUTPUT_FORMAT={cfg.output_format!r} pinned "
-                        f"(HTTP {e.code}: {detail}) — fix the .env or drop the pin"
+                    # A pinned tier cannot degrade, so the rejection fails the
+                    # call like any other endpoint fault. The message names
+                    # the pin, not the cause: the prompt tier sends no format
+                    # field at all, and a format tier's first 400/422 may be
+                    # an unrelated config fault (unknown model, over-limit
+                    # max_tokens).
+                    raise _CallFailed(
+                        "request",
+                        f"the {contract.label} endpoint rejected the request with "
+                        f"{contract.pin_env}={cfg.output_format!r} pinned "
+                        f"(HTTP {e.code}: {detail}) — fix the .env or drop the pin",
                     ) from e
                 nxt = _next_tier(cfg.api, tier)
                 if nxt is None:
                     # The final tier sends NO format field, so the identical
                     # NON-EMPTY rejection repeating here is tier-independent
                     # — a config fault (an over-limit max_tokens, an
-                    # unsupported thinking field) or the span's own content,
-                    # not a format refusal a degrade could fix: fail the span
-                    # on the endpoint's message. Only the final tier can make
-                    # that call: a gateway rejecting every format field with
-                    # ONE generic error body repeats it across the format
-                    # tiers too, and failing fast on the first repeat would
-                    # strand the walk before the tier that answers. The
-                    # comparison runs on the FULL raw body: two distinct
-                    # rejections sharing a long envelope prefix (only a
-                    # trailing field differs) are not "the identical
-                    # rejection". An EMPTY body is silence, not an unchanged
-                    # rejection: a gateway that drops per-tier error text
-                    # still gets the full walk.
+                    # unsupported thinking field) or the input's own content,
+                    # not a format refusal a degrade could fix: fail on the
+                    # endpoint's message. Only the final tier can make that
+                    # call: a gateway rejecting every format field with ONE
+                    # generic error body repeats it across the format tiers
+                    # too, and failing fast on the first repeat would strand
+                    # the walk before the tier that answers. The comparison
+                    # runs on the FULL raw body: two distinct rejections
+                    # sharing a long envelope prefix (only a trailing field
+                    # differs) are not "the identical rejection". An EMPTY
+                    # body is silence, not an unchanged rejection: a gateway
+                    # that drops per-tier error text still gets the full walk.
                     if rejection is not None and raw and raw == rejection:
-                        raise JudgeError(
+                        raise _CallFailed(
+                            "request",
                             f"HTTP {e.code} unchanged across conformance tiers "
-                            f"(tier-independent, not a format refusal): {detail}"
+                            f"(tier-independent, not a format refusal): {detail}",
                         ) from e
-                    raise JudgeError(f"HTTP {e.code}: {detail}") from e
+                    raise _CallFailed("request", f"HTTP {e.code}: {detail}") from e
                 warnings.append(
-                    f"{span.id}: tier {tier} rejected (HTTP {e.code}); degrading to {nxt}")
+                    f"{where}: tier {tier} rejected (HTTP {e.code}); degrading to {nxt}")
                 rejection = raw
                 tier = nxt
                 continue
             else:
                 # 401/403/404/413 & co. are config faults, not format-tier
                 # rejections — fail fast instead of walking the chain
-                raise JudgeError(f"HTTP {e.code}: {detail}") from e
+                raise _CallFailed("request", f"HTTP {e.code}: {detail}") from e
         except (OSError, http.client.HTTPException) as e:
             # URLError/TimeoutError are OSError subclasses; HTTPException
             # (IncompleteRead, BadStatusLine, ...) is not — a truncated or
@@ -1625,26 +2054,32 @@ def judge_span(
             text = _extract_text(cfg, payload)
             rescued = False  # answer recovered from reasoning_content
             if text is None and cfg.api == "openai-chat":
+                # the reasoning-model quirk (the whole answer drafted into
+                # reasoning_content with empty content) is recovered by
+                # reading the draft back instead of burning a retry
                 text = _reasoning_fallback_text(payload)
                 if text is not None:
                     rescued = True
                     warnings.append(
-                        f"{span.id}: judge answer read from reasoning_content "
+                        f"{where}: {contract.label} answer read from reasoning_content "
                         "(content was empty)"
                     )
             if text is not None:
-                obj, error = _strict_parse(text)
+                obj, error = contract.parse(text)
                 if obj is not None:
                     # the tier produced a conforming answer — only now is it
                     # proven to work, so only now is the run memo updated (a
                     # degrade alone proves nothing about the weaker tier). A
                     # rescued reasoning_content draft never passed through the
                     # format channel, so its conformance proves nothing either
-                    # — the same rule the degrade path below applies.
+                    # — the same rule the degrade path below applies. The fold
+                    # is degrade-only: a concurrent walker that read the memo
+                    # before a sibling's fold can land here at a stronger tier
+                    # than the memo already moved past.
                     if not rescued:
-                        cfg.learned_tier = tier
-                    return _assemble_verdict(obj, text, span, warnings, cfg.api_key)
-                last_error = f"judge output {error}"
+                        _memoize_tier(cfg, tier)
+                    return obj, text
+                last_error = f"{contract.label} output {error}"
                 truncated = _truncated(cfg, payload)
                 # a full extra parse of the answer — spent only when the
                 # truncation signal makes it reachable
@@ -1653,25 +2088,14 @@ def judge_span(
                     # budget exhaustion, not a format-tier property: the cut
                     # answer never became the contract, and a same-budget
                     # retry re-truncates (deterministically at temperature
-                    # 0). Record the honest failure — never a free degrade
-                    # that misreads truncation as an ignored format field
-                    # (and memoizes the weakest tier off one span's budget).
-                    # A COMPLETE answer carrying the truncation signal is not
-                    # this failure — the cut only removed trailing prose (or
-                    # the shape is the model's own error), so it falls
-                    # through to the tier chain / corrective retry below,
-                    # which changes the request instead of re-truncating. A
-                    # pathologically nested answer reads as incomplete here
-                    # (both completeness parsers stop at the recursion limit)
-                    # even when its braces closed: like the digit-limit
-                    # refusal it is the model's own error — more tokens
-                    # cannot fix it — so it too falls through and keeps its
-                    # corrective retries, never the budget verdict with its
-                    # "increase max_tokens" misadvice.
-                    return _error_verdict(
-                        f"judge response truncated at the output budget "
-                        f"(judge output {error}); increase max_tokens",
-                        text, span, warnings, cfg.api_key,
+                    # 0). Fail naming the budget — never a free degrade that
+                    # misreads truncation as an ignored format field (and
+                    # memoizes the weakest tier off one call's budget).
+                    raise _CallFailed(
+                        "answer",
+                        f"{contract.label} response truncated at the output budget "
+                        f"({contract.label} output {error}); {contract.budget_hint}",
+                        text,
                     )
                 nxt = None if cfg.output_format else _next_tier(cfg.api, tier)
                 # Free tier discovery from the output side — the endpoint
@@ -1679,17 +2103,17 @@ def judge_span(
                 # tier any contract violation proves it (strict json_schema
                 # guarantees the whole contract) except the digit-limit
                 # refusal: an int literal past Python's limit is valid JSON
-                # and inside the contract's unbounded integer fields (evidence
-                # steps/seqs), so a strict endpoint can legitimately produce
-                # one — a model error at this tier too, never proof the field
-                # was ignored (the same classification the json tier's rule
-                # below gives it). At the json tier only invalid JSON proves
-                # it: JSON mode guarantees valid JSON, never schema
-                # conformance, so a valid-but-wrong-shape answer is a model
-                # error, not an endpoint property — degrading would only
-                # weaken enforcement for no reason. A rescued
-                # reasoning_content draft never passed through the format
-                # channel at all, so its violation proves nothing either.
+                # and inside the contract's unbounded integer fields, so a
+                # strict endpoint can legitimately produce one — a model error
+                # at this tier too, never proof the field was ignored (the
+                # same classification the json tier's rule gives it). At the
+                # json tier only invalid JSON proves it: JSON mode guarantees
+                # valid JSON, never schema conformance, so a valid-but-
+                # wrong-shape answer is a model error, not an endpoint
+                # property — degrading would only weaken enforcement for no
+                # reason. A rescued reasoning_content draft never passed
+                # through the format channel at all, so its violation proves
+                # nothing either.
                 if (
                     nxt is not None
                     and not rescued
@@ -1699,10 +2123,10 @@ def judge_span(
                     )
                 ):
                     # the violation text interpolates endpoint-provided values
-                    # (memory keys, signal values) — mask it before it reaches
-                    # the validation notes, like every other echo path
+                    # — mask it before it reaches the validation notes, like
+                    # every other echo path
                     warnings.append(
-                        f"{span.id}: tier {tier} output out of contract "
+                        f"{where}: tier {tier} output out of contract "
                         f"({_mask_key(error, cfg.api_key)}); a proxy "
                         f"likely ignored the format field — degrading to {nxt}"
                     )
@@ -1711,8 +2135,8 @@ def judge_span(
                 # pinned/final tier, or a violation that is the model's own:
                 # the retry must change the request — the invalid answer plus
                 # a corrective note is appended. Only these budget-consuming
-                # violations seed the error record: a free tier discovery is
-                # not this span's failure, and attributing it later would
+                # violations seed the failure record: a free tier discovery is
+                # not this call's failure, and attributing it later would
                 # misreport a working tier's transport exhaustion.
                 last_text = text
                 last_text_error = last_error
@@ -1720,12 +2144,12 @@ def judge_span(
                 # gate above (a stray object in it read as finished, so the
                 # cut may have eaten the real answer's tail). A whole-text
                 # answer FINISHED — its truncation signal cut nothing that
-                # mattered (or is spurious), so the exhaustion path below
+                # mattered (or is spurious), so the exhaustion failure below
                 # must not claim more tokens could fix a wrong shape.
                 last_truncated = truncated and complete == "embedded"
                 messages = messages + [
                     {"role": "assistant", "content": text},
-                    {"role": "user", "content": _corrective_note(error)},
+                    {"role": "user", "content": contract.corrective(error)},
                 ]
                 # an out-of-contract generation consumed the budget; the
                 # corrective retry needs no backoff
@@ -1737,13 +2161,13 @@ def judge_span(
                 # Truncation with no content at all — a reasoning model burned
                 # the whole budget before writing the answer. The same budget
                 # rule as a truncated partial: a fresh draw of the identical
-                # request re-truncates deterministically, so record the honest
-                # failure instead of retrying.
-                return _error_verdict(
-                    "judge response truncated at the output budget with no "
-                    "message content (the budget went to reasoning); "
-                    "increase max_tokens",
-                    "", span, warnings, cfg.api_key,
+                # request re-truncates deterministically, so fail instead of
+                # retrying.
+                raise _CallFailed(
+                    "answer",
+                    f"{contract.label} response truncated at the output budget with "
+                    f"no message content (the budget went to reasoning); "
+                    f"{contract.budget_hint}",
                 )
             # empty content with a normal finish is a server-side quirk —
             # worth a fresh draw of the identical request at the same tier
@@ -1757,17 +2181,44 @@ def judge_span(
             break
         time.sleep(pause if pause is not None else (1 if tries == 1 else 4))
     if last_text:
-        if last_truncated:
-            # the recorded answer was cut at the output budget yet slipped
-            # past the completeness gate (a stray complete object in it read
-            # as a finished answer): the retries re-truncated, so name the
-            # budget — the bare violation alone would never point at it
-            last_text_error += (
-                "; the answer was also cut at the output-token budget — "
-                "increase max_tokens"
+        raise _CallFailed("answer", last_text_error, last_text, cut=last_truncated)
+    raise _CallFailed("request", last_error)
+
+
+def _scoring_call(
+    system: str,
+    user: str,
+    span: InjectionSpan,
+    cfg: JudgeConfig,
+    warnings: list[str],
+) -> dict:
+    """Score one prepared (system, user) judge input through the shared
+    contract walk (VERDICT_SCHEMA), then assemble the verdict.
+
+    The walk's failure kinds map to the scoring failure records: a
+    request-level failure raises JudgeError for the caller to record; an
+    answer-level failure becomes an error verdict with the raw text kept —
+    budget exhausted after invalid output names that answer's own contract
+    violation (a later transport failure never misattributes the cause), and
+    a recorded answer that also carried the truncation signal gets the
+    budget named too (it slipped past the completeness gate — a stray
+    complete object in it read as a finished answer — so the corrective
+    retries re-truncated, and the bare violation alone would never point at
+    the budget). It is NEVER silently coerced to neutral.
+    """
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+    try:
+        obj, text = _contract_call(cfg, messages, _VERDICT_CALL, warnings, span.id, urlopen)
+    except _CallFailed as e:
+        if e.kind == "answer":
+            return _error_verdict(
+                _failure_message(e, _VERDICT_CALL), e.text, span, warnings, cfg.api_key
             )
-        return _error_verdict(last_text_error, last_text, span, warnings, cfg.api_key)
-    raise JudgeError(last_error)
+        raise JudgeError(str(e)) from e
+    return _assemble_verdict(obj, text, span, warnings, cfg.api_key)
 
 
 def auto_verdict_no_subsequent_turn(span: InjectionSpan) -> dict:

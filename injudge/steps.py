@@ -49,6 +49,10 @@ recovered.
 
 from __future__ import annotations
 
+import json
+import math
+from collections.abc import Iterable
+
 from injudge.model import AgentStep, ToolExec
 from memgraph.annotations import is_int, message_text
 from memgraph.parse_trajectory import agent_turns, classifying_messages, list_field
@@ -68,6 +72,14 @@ def _tid_of(e: dict) -> str | None:
     would crash a dict lookup) is no id at all."""
     tid = e.get("tool_call_id")
     return tid if isinstance(tid, str) and tid else None
+
+
+def _name_of(e: dict) -> str | None:
+    """The event's tool name when it is display text; a corrupt non-string
+    shape is no name at all (an unguarded one would crash the anchor text's
+    string join downstream — the never-raises rule)."""
+    n = e.get("name")
+    return n if isinstance(n, str) and n else None
 
 
 def _lane_key_of(e: dict) -> tuple[str | None, str] | None:
@@ -238,7 +250,7 @@ def build_step_stream(
             ex = slot(tid)
             if ex.seq_start is None:  # first start wins
                 ex.seq_start = s["seq"]
-                ex.name = s.get("name") or ex.name
+                ex.name = _name_of(s) or ex.name
                 ex.args = s.get("args") or ex.args
         for tc in _tool_calls_of(msg):
             if not isinstance(tc, dict):
@@ -248,7 +260,7 @@ def build_step_stream(
                 continue
             ex = slot(tid)
             if not ex.name:
-                ex.name = tc.get("name")
+                ex.name = _name_of(tc)
             if not ex.args and tc.get("args"):
                 ex.args = tc["args"]
         for e2 in ends_by_turn.get(turn, []):
@@ -275,10 +287,19 @@ def build_step_stream(
                 # order, and consumers prefer the completed close
                 continue
             ex.seq_end = e2["seq"]
-            ex.result = e2.get("result")
+            result = e2.get("result")
+            # a structured tool output records a JSON value, not text: spell
+            # it back as JSON (the same spelling _cmd_of gives non-string
+            # args) so ToolExec.result's str|None contract holds — the scan
+            # path's anchor text joins these fields as strings
+            ex.result = (
+                result
+                if result is None or isinstance(result, str)
+                else json.dumps(result, ensure_ascii=False)
+            )
             ex.status = e2.get("status")
             if not ex.name:
-                ex.name = e2.get("name")
+                ex.name = _name_of(e2)
         # A start without an end is expected at the trajectory's last step
         # (the run ends before the tool result returns) — only noteworthy
         # when the run continued past it.
@@ -314,15 +335,57 @@ def _usage_key(e: dict) -> tuple[str | None, int] | None:
     return (src, msg)
 
 
-def _prompt_tokens(event: dict) -> float:
-    """Billed prompt tokens of one message_end event; 0 on any corrupt shape
-    (a hand-edited artifact must degrade, never crash the policy accounting)."""
-    usage = event.get("usage")
-    tokens = usage.get("prompt_tokens") if isinstance(usage, dict) else None
-    return tokens if isinstance(tokens, (int, float)) and not isinstance(tokens, bool) else 0
+def _mixed_sum(values: Iterable[int | float]) -> tuple[int | float, bool]:
+    """A token-total sum over possibly hand-edited records (every one finite
+    and JSON-valid — the per-record reads filter NaN/Infinity spellings to
+    0), keeping the artifacts free of the RFC-8259-invalid `Infinity`
+    spelling:
+
+    - a finite float past 2**53 has no fractional part, so it adds as its
+      exact integer: two such records would otherwise overflow the double
+      range mid-sum (each alone passed the finiteness check), leaking
+      `Infinity` into the artifacts and silently zeroing the derived
+      injected-token share;
+    - an arbitrary-precision int past the float range cannot add to a float
+      (OverflowError) — keep the exact int side (the dropped float part is
+      below its precision) and report the mix.
+    """
+    total: int | float = 0
+    mixed = False
+    for v in values:
+        if isinstance(v, float) and abs(v) >= 2**53:
+            v = int(v)  # exact: a double this large has no fractional part
+        try:
+            total += v
+        except OverflowError:
+            if isinstance(v, int):
+                total = v
+            mixed = True
+    return total, mixed
 
 
-def prompt_tokens_total(events: list[dict], warnings: list[str]) -> float:
+def _token_share(part: int | float, whole: int | float) -> float | None:
+    """A derived share of recorded token totals, rounded like every rate
+    here; None when `whole` is 0 or the quotient is unrepresentable — a
+    hand-edited recorded size past the float range (a >308-digit literal,
+    valid JSON) raises OverflowError on the int conversion, and a finite
+    hand-edited divisor near zero overflows the IEEE division SILENTLY
+    (1e16 / 1e-308 is inf, never an exception) — either spelling would write
+    the RFC-8259-invalid `Infinity` into the artifacts. The exact totals stay
+    recorded; the derived share degrades, never raises — the one rule the
+    headline's wasted-token share and both injected-token shares divide by."""
+    if not whole:
+        return None
+    try:
+        share = round(part / whole, 4)
+    except OverflowError:
+        return None
+    # the float-division overflow returns inf instead of raising, so the
+    # except above never sees it — the quotient itself must be checked
+    return share if math.isfinite(share) else None
+
+
+def prompt_tokens_total(events: list[dict], warnings: list[str]) -> int | float:
     """The run's real billed prompt budget: every live usage record, every
     lane. The memory lane's extraction calls are real spend of running the
     memory system — excluding them would understate the budget and overstate
@@ -354,6 +417,8 @@ def prompt_tokens_total(events: list[dict], warnings: list[str]) -> float:
     dropped_records = 0
     dropped_retractions = 0
     unmatched_retractions = 0
+    nonfinite = 0  # records whose prompt_tokens is a NaN/Infinity spelling or a 1e999 literal
+    corrupt_tokens = 0  # records whose prompt_tokens is present but not a number
     for e in events:
         usage_record = e.get("type") == "message_end" and e.get("role") == "assistant"
         if not usage_record and e.get("type") != "message_retracted":
@@ -376,18 +441,58 @@ def prompt_tokens_total(events: list[dict], warnings: list[str]) -> float:
             else:
                 unmatched_retractions += 1
             last[key] = "message_retracted"
-    total = 0
+    values: list[int | float] = []
     for stack in live.values():
         for e in stack:
             t = e.get("turn")
             if t is not None and not is_int(t):
                 dropped_records += 1
                 continue
-            total += _prompt_tokens(e)
+            usage = e.get("usage")
+            tokens = usage.get("prompt_tokens") if isinstance(usage, dict) else None
+            # one classification decides the tally AND the counted value —
+            # two spellings of it would drift apart. Every corrupt shape
+            # bills 0 (a hand-edited artifact must degrade, never crash the
+            # policy accounting) and is warned about below, never silent:
+            # the total undercounts otherwise.
+            if isinstance(tokens, bool) or not isinstance(tokens, (int, float)):
+                # a present-but-corrupt prompt_tokens (a JSON true, a string,
+                # a list); an absent one is the normal no-usage record
+                if tokens is not None:
+                    corrupt_tokens += 1
+                tokens = 0
+            elif isinstance(tokens, float) and not math.isfinite(tokens):
+                # a NaN/Infinity spelling or a 1e999 literal (valid JSON,
+                # reads as inf) has no finite billing meaning — and summing
+                # one would write the non-JSON spellings into the artifacts.
+                # The finiteness check reaches floats only (the corrupt
+                # branch above took everything else): an int is
+                # arbitrary-precision (always finite), and math.isfinite
+                # float-converts it — a >308-digit literal (valid JSON,
+                # parses under the digit limit) would raise OverflowError and
+                # take the run down. The summation (_mixed_sum) guards the
+                # conversions that remain: such an int summing with a float
+                # record, and two finite floats overflowing the double range.
+                nonfinite += 1
+                tokens = 0
+            values.append(tokens)
+    total, mixed_overflow = _mixed_sum(values)
     if dropped_records:
         warnings.append(
             f"{dropped_records} usage record(s) carry a corrupt key/turn shape; "
             "excluded, so the prompt-token total undercounts"
+        )
+    if nonfinite:
+        warnings.append(
+            f"{nonfinite} usage record(s) carry a non-finite prompt_tokens value "
+            "(no finite billing meaning); counted 0, so the prompt-token total "
+            "undercounts"
+        )
+    if corrupt_tokens:
+        warnings.append(
+            f"{corrupt_tokens} usage record(s) carry a corrupt non-numeric "
+            "prompt_tokens value; counted 0, so the prompt-token total "
+            "undercounts"
         )
     if dropped_retractions:
         warnings.append(
@@ -400,5 +505,11 @@ def prompt_tokens_total(events: list[dict], warnings: list[str]) -> float:
             f"{unmatched_retractions} message_retracted event(s) matched no live "
             "usage record (out-of-order or duplicate); the prompt-token total "
             "may overcount"
+        )
+    if mixed_overflow:
+        warnings.append(
+            "an integer usage record past the float range cannot sum with float "
+            "records; the float part counts 0, so the prompt-token total may "
+            "undercount"
         )
     return total

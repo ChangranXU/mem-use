@@ -694,7 +694,12 @@ function showOp(opId){
         // understatement separately). A missing deliveries count renders "?",
         // never an empty blank.
         const dcTxt=typeof dc.approx_tokens_total==="number"?`<span class="meta">delivered ${esc(dc.deliveries==null?"?":dc.deliveries)}× ≈${esc(dc.approx_tokens_total.toLocaleString())} tokens</span>`:"";
-        h+=`<div class="mrow"><div><span class="chip" style="color:${VD_COLOR[v]||"var(--muted)"}">${esc(v)}</span>${d.confidence!=null?`<span class="meta">conf ${esc(d.confidence)}</span>`:""}<span class="meta">${esc(x.verdict_span)}</span>${d.auto?`<span class="meta">auto: ${esc(d.auto)}</span>`:""}${dcTxt}</div>`;
+        // the budget-gate regime record (injudge v5): which evidence regime
+        // judged the span — the path is artifact text, escaped like every
+        // datum; the markers only select static suffixes
+        const inp=d.input||{};
+        const inpTxt=inp.path?`<span class="meta">input: ${esc(inp.path)}${inp.gold?" · gold":""}${inp.over_budget?" · over budget":""}</span>`:"";
+        h+=`<div class="mrow"><div><span class="chip" style="color:${VD_COLOR[v]||"var(--muted)"}">${esc(v)}</span>${d.confidence!=null?`<span class="meta">conf ${esc(d.confidence)}</span>`:""}<span class="meta">${esc(x.verdict_span)}</span>${d.auto?`<span class="meta">auto: ${esc(d.auto)}</span>`:""}${dcTxt}${inpTxt}</div>`;
         if(d.error) h+=`<div class="flagbox">judge error: ${esc(d.error)}</div>`;
         if(d.analysis) h+=`<div class="vline" style="white-space:normal">${esc(d.analysis)}</div>`;
         if(d.rubric&&Object.keys(d.rubric).length){

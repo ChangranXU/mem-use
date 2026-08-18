@@ -36,6 +36,7 @@ The counting rules:
 from __future__ import annotations
 
 from injudge.judge import RUBRIC_SIGNALS
+from injudge.steps import _mixed_sum, _token_share
 from memgraph.annotations import item_key, namespace_of
 
 _VERDICTS = ("positive", "negative", "neutral")
@@ -199,6 +200,19 @@ def aggregate(operations: list[dict], n_injections: int, n_trajectories: int | N
     }
     if n_trajectories is not None:
         out["n_trajectories"] = n_trajectories
+        # the two evidence regimes (full-text vs scanned input) and the two
+        # rubric regimes (gold vs plain), counted over gate spans only —
+        # visible before anyone compares memory systems off the aggregate;
+        # the over-budget sends count too: a span sent as-is past the input
+        # budget is its own evidence regime, and the per-operation marker is
+        # invisible without the tally
+        gate = [o["input"] for o in operations if o.get("input")]
+        out["input_paths"] = {
+            "full": sum(1 for i in gate if i.get("path") == "full"),
+            "scan": sum(1 for i in gate if i.get("path") == "scan"),
+        }
+        out["gold_scored"] = sum(1 for i in gate if i.get("gold"))
+        out["over_budget"] = sum(1 for i in gate if i.get("over_budget"))
     counts = dict.fromkeys(_COUNTED, 0)
     conf_sums: dict[str, list[float]] = {v: [] for v in _VERDICTS}
     usage_roll: dict[tuple[str | None, str], dict] = {}
@@ -262,22 +276,41 @@ def aggregate(operations: list[dict], n_injections: int, n_trajectories: int | N
         "judged_spans": denom,
         "positive_span_rate": out["rates"]["positive"],
         "negative_span_rate": out["rates"]["negative"],
-        "wasted_token_share": round(wasted / judged_tok, 4) if judged_tok else None,
+        "wasted_token_share": _token_share(wasted, judged_tok),
     }
     return out
 
 
-def policy_rollup(trajectories: list[dict]) -> dict:
-    """Overall delivery-policy metrics from per-trajectory records."""
+def policy_rollup(trajectories: list[dict], validation: list[dict] | None = None) -> dict:
+    """Overall delivery-policy metrics from per-trajectory records.
+    `validation` collects the mixed-overflow note (the artifact path passes
+    its log; a direct caller without one gets the same degraded totals)."""
     blocks = [t.get("policy") or {} for t in trajectories]
     n_inj = sum(b.get("n_injections") or 0 for b in blocks)
     n_steps = sum(b.get("n_steps") or 0 for b in blocks)
     n_spans = sum(t.get("n_spans") or 0 for t in trajectories)
-    est = sum(b.get("est_injected_tokens") or 0 for b in blocks)
+    est, est_mixed = _mixed_sum(b.get("est_injected_tokens") or 0 for b in blocks)
     billed = [b for b in blocks if b.get("prompt_tokens_total")]
-    est_billed = sum(b.get("est_injected_tokens") or 0 for b in billed)
-    prompt = sum(b["prompt_tokens_total"] for b in billed)
+    est_billed, est_billed_mixed = _mixed_sum(
+        b.get("est_injected_tokens") or 0 for b in billed
+    )
+    prompt, prompt_mixed = _mixed_sum(b["prompt_tokens_total"] for b in billed)
+    if (est_mixed or est_billed_mixed or prompt_mixed) and validation is not None:
+        # the per-trajectory mixed-overflow warning only fires on a
+        # WITHIN-trajectory mix, so an all-int total reaching this
+        # cross-trajectory mix would drop the float part silently: note it
+        # here like every other silent-by-default correction
+        msg = (
+            "a trajectory token total past the float range cannot sum with "
+            "float totals; the float part counts 0, so an overall token "
+            "total may undercount"
+        )
+        # build_artifact re-runs the rollup on every incremental flush against
+        # the SAME validation list: the note must not duplicate per rewrite
+        if not any(v.get("msg") == msg for v in validation):
+            validation.append({"level": "warn", "msg": msg})
     n_searches = sum(b.get("n_searches") or 0 for b in blocks)
+    share = _token_share(est_billed, prompt)
     return {
         "n_injections": n_inj,
         "n_steps": n_steps,
@@ -290,7 +323,7 @@ def policy_rollup(trajectories: list[dict]) -> dict:
         # instead of implying est == share x prompt
         "est_injected_tokens_billed": est_billed if billed else None,
         "prompt_tokens_total": prompt or None,
-        "injected_token_share": round(est_billed / prompt, 4) if prompt else None,
+        "injected_token_share": share,
         # annotation-mode total (None when no trajectory recorded searches)
         "n_searches": n_searches or None,
     }

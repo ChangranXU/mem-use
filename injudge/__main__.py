@@ -4,40 +4,74 @@ Judge recall injections in gate trajectories: group identical injections
 into spans, then score every delivered memory on a five-signal rubric
 (relevance / accuracy / novelty / influence / positive_effect). The judge
 input is the recorded task statement (when the run carries one), the
-complete agent step stream, plus the span to evaluate. The
-span verdict is derived in code from the rubric — never asked of the LLM,
-never read off the final task result.
+agent step stream, plus the span to evaluate — the full stream when it fits
+the judge input budget (JUDGE_INPUT_TOKENS), otherwise an evidence pack
+assembled from a chunked scan of the whole trajectory (never truncated).
+The span verdict is derived in code from the rubric — never asked of the
+LLM, never read off the final task result.
 
-One LLM judge call per span. --dry-run prints the judge input (task, span +
-whole step stream) without any network access.
+One scoring call per span (plus chunked evidence-extraction calls when the
+input overflows the budget). Outputs land in the -o/--output folder
+(default output/): injudge-report.json (the runtime report) and
+summary.json (the rubric statistics), plus memgraph-verdicts.html with
+--html. --dry-run prints the judge input (task, span +
+whole step stream, any gold attachments) without any network access; when
+the input overflows the budget it also prints the would-be chunk counts.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from util import atomic_write, check_writable, print_safe
+try:
+    from tqdm import tqdm
+except ImportError as e:
+    # importing this module needs tqdm even for a --dry-run that never draws
+    # a bar: a missing runtime dep fails fast with a targeted message, never
+    # a raw ModuleNotFoundError traceback
+    raise SystemExit(
+        "error: the tqdm package is required (uv pip install tqdm)"
+    ) from e
+
+from util import atomic_write, check_writable, print_safe, print_validation
+from injudge.gold import load_sidecar
 from injudge.judge import (
+    MAX_PARALLEL,
+    GoldInput,
     JudgeError,
+    _gate_over_budget,
+    _gate_tokens,
+    _input_record,
+    _int_config,
+    _mask_keys,
+    _scoring_system,
     auto_verdict_no_subsequent_turn,
     blank_verdict,
+    count_tokens,
     judge_span,
     load_env,
     render_user,
     resolve_config,
 )
+from injudge.model import InjectionSpan
 from injudge.report import (
     build_artifact,
+    build_summary,
     injection_rollup,
     operation_record,
     print_summary,
-    render_markdown,
 )
+from injudge.scan import ScanConfig, _chunks, resolve_scan, scan_knobs
 from injudge.spans import group_spans
-from injudge.steps import build_step_stream, prompt_tokens_total
+from injudge.steps import _token_share, build_step_stream, prompt_tokens_total
 from memgraph.graph import build_graph, load_trajectories
+from memgraph.html import render_html
+from memgraph.verdicts import apply_verdicts
 
 
 def _unjudged(reason: str) -> dict:
@@ -51,6 +85,73 @@ def _unjudged(reason: str) -> dict:
 
 # The judge endpoint config lives next to the package, not in the cwd.
 _DEFAULT_ENV = Path(__file__).resolve().parents[1] / ".env"
+
+
+class _Progress:
+    """Running evaluation progress on stderr, rendered with tqdm: a
+    trajectories bar plus a per-trajectory spans bar on a TTY, and one
+    checkpoint line per completed trajectory when piped (bars disabled).
+    Kept off stdout — the dry-run print and the final summary live there —
+    and off entirely in dry runs."""
+
+    def __init__(self, total_trajs: int, enabled: bool = True):
+        self._enabled = enabled
+        self._total_trajs = total_trajs
+        # decided here, not delegated to tqdm: the bars only make sense on an
+        # interactive terminal — a piped run gets the checkpoint lines
+        # (finish_trajectory), never an inert bar each span update locks into
+        self._tty = sys.stderr.isatty()
+        # mininterval=0 renders every update (spans move at LLM-call pace —
+        # seconds, not frames)
+        self._traj_bar = (
+            tqdm(total=total_trajs, desc="trajectories", unit="traj", mininterval=0)
+            if enabled and self._tty
+            else None
+        )
+        self._span_bar: tqdm | None = None
+        self._span_lock = threading.Lock()
+        self._traj = ""
+        self._n_spans = 0
+        self._done_trajs = 0
+
+    def start_trajectory(self, name: str, n_spans: int) -> None:
+        self._traj = name
+        self._n_spans = n_spans
+        if self._traj_bar is not None:
+            self._span_bar = tqdm(
+                total=n_spans, desc=name, unit="span", position=1,
+                leave=False, mininterval=0,
+            )
+
+    def advance_span(self) -> None:
+        # called from JUDGE_PARALLEL pool workers: tqdm's update() adds to the
+        # bar's counter without a lock (only the display refresh is locked),
+        # so concurrent updates could lose an increment
+        bar = self._span_bar
+        if bar is not None:
+            with self._span_lock:
+                bar.update(1)
+
+    def finish_trajectory(self) -> None:
+        self._done_trajs += 1
+        if self._span_bar is not None:
+            self._span_bar.close()
+            self._span_bar = None
+        if self._traj_bar is not None:
+            self._traj_bar.update(1)
+        # the bars are off when piped — one checkpoint line instead; the span
+        # total is the trajectory's span count (finish runs once per
+        # trajectory, so a done/total fraction would always read 1)
+        if self._enabled and not self._tty:
+            print_safe(
+                f"[{self._done_trajs}/{self._total_trajs} traj] {self._traj}: "
+                f"{self._n_spans} spans done",
+                err=True,
+            )
+
+    def close(self) -> None:
+        if self._traj_bar is not None:
+            self._traj_bar.close()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -89,45 +190,145 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--dry-run",
         action="store_true",
-        help="print the judge input per span; no .env read, no judge calls, no files written",
+        help="print the judge input per span (gold blocks included), plus an "
+        "INPUT OVERFLOW note with the would-be chunk counts when it exceeds "
+        "the budget; reads only the budget/chunk knobs from .env (never "
+        "credentials), no judge calls, no files written",
+    )
+    ap.add_argument(
+        "--golden",
+        type=Path,
+        default=None,
+        help="golden answer file (reference solution): its body is attached to "
+        "every scoring call and switches it to the gold rubric; overrides a "
+        "trajectory's golden.txt/golden.md sidecar",
+    )
+    ap.add_argument(
+        "--correctness",
+        choices=("resolved", "unresolved"),
+        default=None,
+        help="recorded task outcome attached to every scoring call "
+        "(corroboration only — it never selects the gold rubric); overrides a "
+        "trajectory's correctness.json sidecar",
     )
     ap.add_argument("--limit", type=int, default=None,
                     help="judge at most N spans with the LLM (rest: unjudged); "
                     "also caps --dry-run to printing the first N spans' judge "
                     "inputs (rule-judged auto-neutral spans always verdict — "
                     "they cost no judge call)")
-    ap.add_argument("--json", dest="json_out", type=Path, default=Path("injudge-report.json"),
-                    help="JSON artifact path (default: injudge-report.json)")
-    ap.add_argument("-o", "--output", type=Path, default=None, help="optional markdown report path")
+    ap.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        default=Path("output"),
+        help="output folder for the artifacts (default: output/) — always "
+        "injudge-report.json (the runtime report) and summary.json (the "
+        "rubric statistics); memgraph-verdicts.html with --html",
+    )
+    ap.add_argument(
+        "--html",
+        action="store_true",
+        help="also write memgraph-verdicts.html into the output folder: the "
+        "memgraph visualization with recall nodes colored by their span's "
+        "verdict (default off)",
+    )
     args = ap.parse_args(argv)
-    # the same fail-fast rule the .env knobs get: a negative --limit would
-    # silently judge nothing and leave an all-unjudged artifact behind
-    if args.limit is not None and args.limit < 0:
-        raise SystemExit("error: --limit must be a non-negative integer")
+    # the same fail-fast rule the .env knobs get: a non-positive --limit
+    # silently judges nothing and leaves an all-unjudged artifact behind
+    # (the free inspection workflow is --dry-run)
+    if args.limit is not None and args.limit < 1:
+        raise SystemExit("error: --limit must be a positive integer")
 
     trajs, ops_by_traj, events_by_traj, load_warnings = load_trajectories(args.paths)
     # memgraph's linking pass doubles as the input-validation layer
-    validation: list[dict] = list(build_graph(trajs, ops_by_traj, load_warnings)["validation"])
+    graph = build_graph(trajs, ops_by_traj, load_warnings)
+    validation: list[dict] = list(graph["validation"])
+
+    # CLI-given gold/correctness apply to every loaded trajectory; a
+    # trajectory's sidecar files fill whichever the CLI did not give
+    cli_golden: str | None = None
+    if args.golden is not None:
+        try:
+            cli_golden = args.golden.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            raise SystemExit(
+                f"error: cannot read the golden answer file {args.golden}: {e}"
+            ) from e
+        if not cli_golden.strip():
+            raise SystemExit(f"error: golden answer file {args.golden} is empty")
+    cli_correctness = {"resolved": args.correctness == "resolved"} if args.correctness else None
+    if (cli_golden is not None or cli_correctness is not None) and len(trajs) > 1:
+        # one instance's gold silently stamped on another's spans is the
+        # footgun this warning exists for — the run continues
+        validation.append(
+            {
+                "level": "warn",
+                "msg": f"--golden/--correctness given with {len(trajs)} trajectories "
+                "loaded: the same gold/correctness applies to every trajectory",
+            }
+        )
 
     cfg = None
+    scan_cfg: ScanConfig | None = None
+    judge_parallel = 1  # JUDGE_PARALLEL: spans of one trajectory judged in parallel
+    report_path = args.output / "injudge-report.json"
+    summary_path = args.output / "summary.json"
+    html_path = args.output / "memgraph-verdicts.html"
+    env_path = args.env or _DEFAULT_ENV
     if not args.dry_run:
-        # fail fast on unwritable report paths, before any paid judge call:
-        # flush() rewrites the artifact after every trajectory, so an output
-        # that cannot be written would abort the run mid-way and lose the
-        # completed judging.
-        for out_path in (args.json_out, args.output):
-            if out_path is not None:
-                check_writable(out_path)
-        env_path = args.env or _DEFAULT_ENV
+        # fail fast on an unwritable output folder, before any paid judge
+        # call: flush() rewrites the report artifact after every trajectory,
+        # so an output that cannot be written would abort the run mid-way
+        # and lose the completed judging.
+        try:
+            args.output.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            raise SystemExit(
+                f"error: cannot create output folder {args.output}: {e}"
+            ) from e
+        if not args.output.is_dir():
+            raise SystemExit(f"error: output path {args.output} is not a directory")
+        out_paths = [report_path, summary_path] + ([html_path] if args.html else [])
+        for out_path in out_paths:
+            check_writable(out_path)
         if not env_path.is_file():
             raise SystemExit(f"error: no .env file at {env_path} (or use --dry-run)")
+        env = load_env(env_path)
         cfg = resolve_config(
-            load_env(env_path),
+            env,
             args.judge_model,
             timeout=args.timeout,
             max_attempts=args.max_attempts,
             max_tokens=args.judge_max_tokens,
         )
+        scan_cfg = resolve_scan(env, cfg)
+        judge_parallel = _int_config(env, "JUDGE_PARALLEL") or 1
+        if judge_parallel > MAX_PARALLEL:
+            raise SystemExit(f"error: JUDGE_PARALLEL must be at most {MAX_PARALLEL}")
+    else:
+        # the dry run needs only the budget/chunk knobs for the overflow
+        # preview: read them from a READABLE .env (an illegal value fails fast
+        # naming the key, exactly as resolve_config would); a missing or
+        # unreadable one leaves the baked defaults — credentials are never
+        # required
+        env: dict[str, str] = {}
+        if env_path.is_file():
+            try:
+                env = load_env(env_path)
+            except SystemExit as e:
+                # load_env raises only for an unreadable/undecodable file:
+                # treat it like a missing one (its message names the cause)
+                print_safe(f"warning: {e}; the dry run uses the default "
+                           "budget/chunk knobs", err=True)
+        scan_cfg = ScanConfig(extraction=None, **scan_knobs(env))
+
+    # Probe the tokenizer once on the main thread, before the trajectory
+    # loop: with JUDGE_PARALLEL > 1 the first count would otherwise fire on a
+    # pool worker, where count_tokens' missing-tiktoken SystemExit (a
+    # BaseException the per-span handler cannot catch) surfaces only after
+    # the pool drains — the fail-fast belongs here, before any paid judge
+    # call
+    count_tokens("")
 
     trajectories: list[dict] = []
     operations: list[dict] = []
@@ -137,19 +338,22 @@ def main(argv: list[str] | None = None) -> int:
     artifact: dict = {}
 
     def flush() -> None:
-        """Rewrite the JSON artifact after every trajectory so a crash keeps
-        completed work; keeps `artifact` current for the final report."""
+        """Rewrite the report artifact after every trajectory so a crash keeps
+        completed work (the contract's incremental artifact; summary.json is
+        the FINAL statistics set, written once after the loop); keeps
+        `artifact` current for the final report."""
         nonlocal artifact
         if args.dry_run:
             return
         artifact = build_artifact(
             tool_cfg(), trajectories, operations, injections, n_injections_by_traj, validation
         )
-        atomic_write(args.json_out, json.dumps(artifact, indent=1, ensure_ascii=False) + "\n")
+        atomic_write(report_path, json.dumps(artifact, indent=1, ensure_ascii=False) + "\n")
 
     def tool_cfg() -> dict:
         return {"judge_model": cfg.model if cfg else None}
 
+    progress = _Progress(len(trajs), enabled=not args.dry_run)
     for t in trajs:
         run_id = t.run_id
         lanes = t.memory_lanes
@@ -162,6 +366,7 @@ def main(argv: list[str] | None = None) -> int:
         recall_ops = [op for op in ops if op.kind == "recall"]
         ops_by_id = {op.id: op for op in recall_ops}
         spans = group_spans(recall_ops, t.id)
+        progress.start_trajectory(t.instance_id or run_id, len(spans))
         n_injections_by_traj[t.id] = len(recall_ops)
         # delivery cost per span: the exact placement content size recorded
         # on each op, summed over the span (chars/4: documented estimate)
@@ -200,6 +405,21 @@ def main(argv: list[str] | None = None) -> int:
             validation.append({"level": "warn", "msg": f"{run_id}: {w}"})
         # same per-span rounding the cost rollup uses: one artifact, one total
         est_injected_tokens = sum(c["approx_tokens_total"] for c in span_costs.values())
+        # the share degrades to None when the recorded sizes make it
+        # unrepresentable (_token_share: a hand-edited >308-digit chars
+        # literal, valid JSON, overflows the division) — the exact totals
+        # stay recorded, and the drop is warned about like every other
+        # silent-by-default correction, never aborting the run
+        share = _token_share(est_injected_tokens, prompt_total)
+        if prompt_total and share is None:
+            validation.append(
+                {
+                    "level": "warn",
+                    "msg": f"{run_id}: recorded content size past the float range; "
+                           "the injected-token share is unrepresentable (the exact "
+                           "totals stay recorded)",
+                }
+            )
         policy = {
             "n_steps": t.n_steps,
             "n_injections": len(recall_ops),
@@ -216,11 +436,7 @@ def main(argv: list[str] | None = None) -> int:
             ),
             "est_injected_tokens": est_injected_tokens,
             "prompt_tokens_total": prompt_total or None,
-            "injected_token_share": (
-                round(est_injected_tokens / prompt_total, 4)
-                if prompt_total
-                else None
-            ),
+            "injected_token_share": share,
         }
         trajectories.append(
             {
@@ -237,39 +453,142 @@ def main(argv: list[str] | None = None) -> int:
             }
         )
 
+        # golden-answer / correctness attachments (final scoring call only):
+        # the CLI values win; the trajectory's own sidecar files fill the rest
+        sidecar = load_sidecar(
+            Path(t.path),
+            t.instance_id,
+            lambda msg: validation.append({"level": "warn", "msg": f"{run_id}: {msg}"}),
+        )
+        gold = GoldInput(
+            golden=cli_golden if cli_golden is not None else sidecar.golden,
+            correctness=(
+                cli_correctness if cli_correctness is not None else sidecar.correctness
+            ),
+        )
+
         verdict_by_span: dict[str, dict] = {}
-        for span in spans:
+        # per-span routing is decided serially — rule-judged auto-neutral,
+        # --limit-cutoff and dry-run spans are instant and order-fixed; only
+        # the judge_span calls (each independent: its own input, its own
+        # scoring call) go to the pool when JUDGE_PARALLEL > 1
+        judged: list[tuple[int, InjectionSpan]] = []
+        verdicts: dict[int, dict] = {}
+        for i, span in enumerate(spans):
             if span.step_first is None:
-                verdict = auto_verdict_no_subsequent_turn(span)
+                verdicts[i] = auto_verdict_no_subsequent_turn(span)
+                progress.advance_span()
             elif args.limit is not None and taken >= args.limit:
-                verdict = _unjudged("beyond --limit")
+                verdicts[i] = _unjudged("beyond --limit")
+                progress.advance_span()
             elif args.dry_run:
                 taken += 1
                 # the judge input embeds recorded memory values: print it
                 # surrogate-safe like the artifacts (a \ud800 value in a
                 # delivered memory must not abort the dry run)
-                print_safe(render_user(span, steps, t.task))
-                verdict = _unjudged("dry run")
+                user = render_user(span, steps, t.task, gold=gold)
+                print_safe(user)
+                system = _scoring_system(gold)
+                # the gate's own measurement: BPE is not additive across the
+                # head/stream/tail seams, so counting the joined user could
+                # disagree with the live routing near the budget threshold
+                tokens = _gate_tokens(system, span, steps, t.task, gold)
+                if tokens > scan_cfg.input_tokens:
+                    chunks = _chunks(steps, span, scan_cfg, t.task)
+                    n_pre = sum(1 for c in chunks if c.side == "pre")
+                    print_safe(
+                        f"INPUT OVERFLOW for {span.id}: ≈{tokens} tokens > "
+                        f"JUDGE_INPUT_TOKENS={scan_cfg.input_tokens} — a real run "
+                        f"would scan {n_pre} pre + {len(chunks) - n_pre} post chunks "
+                        "and assemble an evidence pack (extraction only runs live; "
+                        "above is the verbatim full-text input)"
+                    )
+                verdicts[i] = _unjudged("dry run")
+                progress.advance_span()
             else:
                 taken += 1
-                span_warnings: list[str] = []
+                judged.append((i, span))
+
+        def _judge(item: tuple[int, InjectionSpan]) -> tuple[int, dict, list[str], str | None]:
+            """One span's judging on a pool worker. The shared scoring cfg's
+            learned_tier memo folds degrade-only across span workers
+            (_memoize_tier), so completion order cannot flap it back to a
+            tier a sibling proved ignored; the scan path's extraction config
+            copies stay per-worker."""
+            i, span = item
+            span_warnings: list[str] = []
+            error_note = None
+            try:
+                verdict = judge_span(
+                    span, steps, cfg, span_warnings, t.task, gold=gold, scan=scan_cfg
+                )
+            except JudgeError as e:
+                verdict = blank_verdict()
+                verdict["error"] = f"judge request failed: {e}"
+                # a gate span's input record rides the exception (stamped by
+                # judge_span/scan_span): the failed operation still counts in
+                # the input_paths/gold_scored regime tallies
+                verdict["input"] = e.input
+                error_note = f"{span.id}: judge request failed: {e}"
+            except Exception as e:
+                # anything else is a bug or an unguarded corrupt shape: it
+                # must still degrade to one span's error verdict — one bad
+                # span never takes the run down with every un-flushed
+                # trajectory. Unlike a JudgeError's, this text is not masked
+                # upstream, so mask it here (it can interpolate endpoint
+                # output), capped like every other text kept in the artifact;
+                # the exception class stays for debugging.
+                # both keys mask over the WHOLE text before the cap is taken:
+                # capping first would let a key straddling the cut survive as
+                # an unmasked prefix (the _masked_head rule, with two keys)
+                masked = _mask_keys(
+                    f"{type(e).__name__}: {e}",
+                    (cfg.api_key, scan_cfg.extraction.api_key),
+                )[:2000]
+                verdict = blank_verdict()
+                verdict["error"] = f"judging failed unexpectedly: {masked}"
+                error_note = f"{span.id}: judging failed unexpectedly: {masked}"
                 try:
-                    verdict = judge_span(span, steps, cfg, span_warnings, t.task)
-                except JudgeError as e:
-                    verdict = blank_verdict()
-                    verdict["error"] = f"judge request failed: {e}"
-                    validation.append(
-                        {"level": "error", "msg": f"{span.id}: judge request failed: {e}"}
+                    # the same regime record the JudgeError path keeps (the
+                    # comment above it), re-derived through judge_span's own
+                    # routing/record helpers so the two can never desync: the
+                    # gate is deterministic, so re-deriving it cannot
+                    # misreport the path — a scan span's chunk counters die
+                    # with the exception. The handler itself must never raise.
+                    over = _gate_over_budget(
+                        _scoring_system(gold), span, steps, t.task, gold,
+                        scan_cfg.input_tokens,
                     )
-                # drained on failure too: masking notes, confidence clamps and
-                # contract corrections from the failed attempts are diagnostics,
-                # never lost with the span's generic failure note
+                    verdict["input"] = _input_record("scan" if over else "full", gold)
+                except Exception:
+                    pass
+            progress.advance_span()
+            return i, verdict, span_warnings, error_note
+
+        if judged:
+            if judge_parallel <= 1 or len(judged) <= 1:
+                outcomes = [_judge(item) for item in judged]
+            else:
+                with ThreadPoolExecutor(max_workers=judge_parallel) as pool:
+                    outcomes = list(pool.map(_judge, judged))
+            for i, verdict, span_warnings, error_note in outcomes:
+                # drained on the main thread, in span order — deterministic
+                # validation; a failed span's attempt diagnostics (masking
+                # notes, confidence clamps, contract corrections) are never
+                # lost with its generic failure note
+                if error_note is not None:
+                    validation.append({"level": "error", "msg": error_note})
                 for w in span_warnings:
                     validation.append({"level": "warn", "msg": w})
-            verdict_by_span[span.id] = verdict
-            operations.append(operation_record(span, verdict, span_costs[span.id]))
+                verdicts[i] = verdict
+
+        for i, span in enumerate(spans):
+            verdict_by_span[span.id] = verdicts[i]
+            operations.append(operation_record(span, verdicts[i], span_costs[span.id]))
         injections.extend(injection_rollup(spans, ops_by_id, verdict_by_span, content_chars))
         flush()  # incremental: completed trajectories survive a crash
+        progress.finish_trajectory()
+    progress.close()
 
     if args.dry_run:
         # the span count describes the workload found; only the spans a
@@ -286,12 +605,32 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
-    if args.output:
-        atomic_write(args.output, render_markdown(artifact))
+    # the final statistics set, projected from the final report in one pass
+    # (per-trajectory rewrites would re-walk every operation per trajectory)
+    atomic_write(
+        summary_path,
+        json.dumps(build_summary(artifact), indent=1, ensure_ascii=False) + "\n",
+    )
+    if args.html:
+        # the memgraph visualization with the verdicts merged onto the graph
+        # built at load time — the graph and verdict content of a
+        # `python3 -m memgraph --verdicts` render
+        n_before = len(graph["validation"])
+        apply_verdicts(graph, artifact, str(report_path))
+        merge_notes = graph["validation"][n_before:]
+        print_validation(merge_notes)
+        # the run's diagnostics (step attribution, per-span tier degrades and
+        # masking notes, chunk failures) accumulated in `validation` — the
+        # graph's own list only ever held the load-time prefix it was copied
+        # from; the HTML embeds graph["validation"], so hand it the full log
+        # or the render cannot explain its own error verdicts
+        graph["validation"] = validation + merge_notes
+        atomic_write(html_path, render_html(graph))
     n_error = print_summary(artifact)
-    print_safe(f"wrote {args.json_out}")
-    if args.output:
-        print_safe(f"wrote {args.output}")
+    print_safe(f"wrote {report_path}")
+    print_safe(f"wrote {summary_path}")
+    if args.html:
+        print_safe(f"wrote {html_path}")
     return 2 if n_error else 0
 
 
