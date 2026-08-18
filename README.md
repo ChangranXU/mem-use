@@ -42,8 +42,9 @@ injudge groups repeated identical injections into **spans**, has the judge
 model score every delivered memory on five signals (relevance, accuracy,
 novelty, influence, positive effect), and derives each span's verdict in
 code: any misused memory ⇒ **negative**, else any used ⇒ **positive**, else
-**neutral**. Long trajectories go through a chunked evidence scan — input is
-never truncated to fit the budget.
+**neutral**. The mapping, worked examples, and aggregate formulas are in
+[Verdict derivation](doc/en/verdict-derivation.md). Long trajectories go
+through a chunked evidence scan; input is never truncated to fit the budget.
 
 ## Input contract
 
@@ -60,6 +61,7 @@ layout) — start at the [English book](doc/en/README.md) or the
 
 - [Input contract](doc/en/input-contract.md) — what a trajectory must contain
 - [memgraph guide](doc/en/memgraph.md) · [injudge guide](doc/en/injudge.md)
+- [Verdict derivation](doc/en/verdict-derivation.md) — how usage labels, span verdicts, and rates are computed
 - [Configuration reference](doc/en/configuration.md) — every `.env` key and CLI flag
 - [Artifacts](doc/en/artifacts.md) — the report and `summary.json` formats
 - [Development](doc/en/development.md) — layout, tests, style rules

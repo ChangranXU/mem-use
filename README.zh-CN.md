@@ -37,7 +37,8 @@ python3 -m memgraph <paths> --verdicts output/injudge-report.json -o memgraph-ve
 injudge 把内容相同的重复注入归并为**区间（span）**，让评审模型对每条投递
 记忆打五个信号（relevance、accuracy、novelty、influence、positive
 effect），再由代码推导区间判定：任一记忆被误用 ⇒ **negative**，否则任一
-被采纳 ⇒ **positive**，否则 **neutral**。长轨迹走分块证据扫描——输入绝不
+被采纳 ⇒ **positive**，否则 **neutral**。映射、示例与汇总公式见
+[判定推导](doc/zh-CN/verdict-derivation.md)。长轨迹走分块证据扫描；输入不
 为凑预算而截断。
 
 ## 输入约定
@@ -53,6 +54,7 @@ effect），再由代码推导区间判定：任一记忆被误用 ⇒ **negativ
 
 - [输入约定](doc/zh-CN/input-contract.md)——轨迹需要包含什么
 - [memgraph 指南](doc/zh-CN/memgraph.md) · [injudge 指南](doc/zh-CN/injudge.md)
+- [判定推导](doc/zh-CN/verdict-derivation.md)——使用标签、区间判定与比率如何计算
 - [配置参考](doc/zh-CN/configuration.md)——全部 `.env` 键与 CLI 参数
 - [产物](doc/zh-CN/artifacts.md)——report 与 `summary.json` 格式
 - [开发](doc/zh-CN/development.md)——目录结构、测试、风格规则
