@@ -8,9 +8,9 @@ icon: wrench
 ## Tests
 
 ```bash
-uv venv .venv && uv pip install pytest tiktoken tqdm   # once, inside the checkout
-.venv/bin/python -m pytest tests -q                    # full suite
-.venv/bin/python -m pytest tests/test_injudge.py -q    # one file
+uv sync                                # once, inside the checkout
+uv run pytest tests -q                 # full suite
+uv run pytest tests/test_injudge.py -q # one file
 ```
 
 The suite does not use the network: the judge and extraction clients are stubbed. Fixtures are synthetic schema-v6 trajectories built by `tests/annotated_fixtures.py`.

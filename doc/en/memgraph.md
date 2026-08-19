@@ -6,7 +6,7 @@ icon: share-nodes
 # memgraph
 
 ```bash
-python3 -m memgraph <paths> -o memgraph.html --json memgraph.json
+uv run -m memgraph <paths> -o memgraph.html --json memgraph.json
 ```
 
 memgraph extracts every memory operation from the annotations and renders how memories are created, updated, deleted, and recalled. For each memory it answers two questions: which `(trajectory, step)` created it, and which `(trajectory, step)` later recalled it. Load several runs together to see cross-trajectory reuse.

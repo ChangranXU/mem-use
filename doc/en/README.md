@@ -19,17 +19,17 @@ One principle runs through both tools: a recall injection is judged by its **sub
 ## Quickstart
 
 ```bash
-# once, inside the checkout (pytest is for the test suite)
-uv venv .venv && uv pip install pytest tiktoken tqdm
+# once, inside the checkout (the dev group adds pytest for the test suite)
+uv sync
 
 # 1 — visualize every memory operation
-python3 -m memgraph runs/ -o memgraph.html --json memgraph.json
+uv run -m memgraph runs/ -o memgraph.html --json memgraph.json
 
 # 2 — judge recall injections (copy .env.example to .env and fill it in first)
-python3 -m injudge runs/ -o output/
+uv run -m injudge runs/ -o output/
 
 # 3 — overlay the verdicts onto the graph
-python3 -m memgraph runs/ -o memgraph-verdicts.html --verdicts output/injudge-report.json
+uv run -m memgraph runs/ -o memgraph-verdicts.html --verdicts output/injudge-report.json
 ```
 
 A path may be a trajectory directory, a `trajectory.jsonl` file, or a root directory scanned recursively — see [Input contract](input-contract.md#input-paths).

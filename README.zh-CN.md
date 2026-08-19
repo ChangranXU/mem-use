@@ -12,21 +12,23 @@
 
 ## 快速开始
 
-需要 Python 3.11+。memgraph 只用标准库；injudge 另需 `tiktoken` 与 `tqdm`。
+需要 Python 3.11+ 与 [uv](https://docs.astral.sh/uv/)。依赖声明在
+`pyproject.toml`——memgraph 只用标准库，injudge 另需 `tiktoken` 与
+`tqdm`——由 `uv sync` 建立 checkout 内的本地环境。
 
 ```bash
-pip install tiktoken tqdm
+uv sync    # 首次，在 checkout 内执行——按 pyproject.toml + uv.lock 创建 .venv
 
 # 1. 可视化记忆操作——离线，不调用评审
-python3 -m memgraph <paths> -o memgraph.html --json memgraph.json
+uv run -m memgraph <paths> -o memgraph.html --json memgraph.json
 
 # 2. 评审召回注入——会产生 LLM 调用，先配置评审端点
 cp .env.example .env                       # 填写评审端点凭据
-python3 -m injudge <paths> --dry-run --limit 3   # 先预览评审输入
-python3 -m injudge <paths>                 # 输出 output/injudge-report.json 与 summary.json
+uv run -m injudge <paths> --dry-run --limit 3   # 先预览评审输入
+uv run -m injudge <paths>                  # 输出 output/injudge-report.json 与 summary.json
 
 # 3. 把判定结果叠加到图上（或用 injudge --html 一并产出）
-python3 -m memgraph <paths> --verdicts output/injudge-report.json -o memgraph-verdicts.html
+uv run -m memgraph <paths> --verdicts output/injudge-report.json -o memgraph-verdicts.html
 ```
 
 每个 `<path>` 可以是轨迹目录（含 `trajectory.jsonl`）、`trajectory.jsonl`
@@ -62,8 +64,8 @@ effect），再由代码推导区间判定：任一记忆被误用 ⇒ **negativ
 ## 测试
 
 ```bash
-uv venv .venv && uv pip install pytest tiktoken tqdm   # 首次，在 checkout 内执行
-.venv/bin/python -m pytest tests -q
+uv sync               # 首次，在 checkout 内执行
+uv run pytest tests -q
 ```
 
 测试不走网络——评审与提取客户端都打桩。

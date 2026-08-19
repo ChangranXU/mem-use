@@ -6,12 +6,12 @@ icon: gavel
 # injudge
 
 ```bash
-python3 -m injudge <paths>    # 写出 output/injudge-report.json 与 output/summary.json
+uv run -m injudge <paths>    # 写出 output/injudge-report.json 与 output/summary.json
 
 # 按区间打印评审输入（含 gold 块），全程不访问网络。超预算的区间会附上
 # INPUT OVERFLOW 说明与预计分块数。只读 .env 中的预算/分块键——不读凭证、
 # 不发起调用、不写文件：
-python3 -m injudge <paths> --dry-run --limit 3
+uv run -m injudge <paths> --dry-run --limit 3
 ```
 
 injudge 根据召回注入在后续 agent 回合中的足迹，将其判为 **positive**、**negative** 或 **neutral**。

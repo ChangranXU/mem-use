@@ -8,9 +8,9 @@ icon: wrench
 ## 测试
 
 ```bash
-uv venv .venv && uv pip install pytest tiktoken tqdm   # 首次，在 checkout 内执行
-.venv/bin/python -m pytest tests -q                    # 全部测试
-.venv/bin/python -m pytest tests/test_injudge.py -q    # 单个文件
+uv sync                                # 首次，在 checkout 内执行
+uv run pytest tests -q                 # 全部测试
+uv run pytest tests/test_injudge.py -q # 单个文件
 ```
 
 测试套件不走网络：评审与提取客户端都打桩。夹具由 `tests/annotated_fixtures.py` 合成 schema-v6 轨迹。

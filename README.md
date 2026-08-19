@@ -15,22 +15,23 @@ read-only tools consume schema-v6 gate trajectories (extension/traj-recorder):
 
 ## Quick start
 
-Python 3.11+. memgraph is stdlib-only; injudge additionally needs
-`tiktoken` and `tqdm`.
+Python 3.11+ and [uv](https://docs.astral.sh/uv/). Dependencies are declared
+in `pyproject.toml` — memgraph is stdlib-only, injudge adds `tiktoken` and
+`tqdm` — and `uv sync` builds the checkout-local env.
 
 ```bash
-pip install tiktoken tqdm
+uv sync    # once, inside the checkout — creates .venv from pyproject.toml + uv.lock
 
 # 1. Visualize memory operations — offline, no judge calls
-python3 -m memgraph <paths> -o memgraph.html --json memgraph.json
+uv run -m memgraph <paths> -o memgraph.html --json memgraph.json
 
 # 2. Judge recall injections — makes LLM calls, so configure the endpoint first
 cp .env.example .env                       # judge endpoint credentials
-python3 -m injudge <paths> --dry-run --limit 3   # preview the judge input
-python3 -m injudge <paths>                 # writes output/injudge-report.json + summary.json
+uv run -m injudge <paths> --dry-run --limit 3   # preview the judge input
+uv run -m injudge <paths>                  # writes output/injudge-report.json + summary.json
 
 # 3. Overlay the verdicts on the graph (or rerun injudge with --html)
-python3 -m memgraph <paths> --verdicts output/injudge-report.json -o memgraph-verdicts.html
+uv run -m memgraph <paths> --verdicts output/injudge-report.json -o memgraph-verdicts.html
 ```
 
 Each `<path>` is a trajectory dir (containing `trajectory.jsonl`), a
@@ -69,8 +70,8 @@ layout) — start at the [English book](doc/en/README.md) or the
 ## Tests
 
 ```bash
-uv venv .venv && uv pip install pytest tiktoken tqdm   # once, inside the checkout
-.venv/bin/python -m pytest tests -q
+uv sync               # once, inside the checkout
+uv run pytest tests -q
 ```
 
 No network — the judge and extraction clients are stubbed.

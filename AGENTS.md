@@ -110,6 +110,8 @@
 The project is structured as:
 
 ```bash
+pyproject.toml + uv.lock     # uv project env: runtime deps (tiktoken, tqdm), dev group (pytest),
+                             # data group (data/utils build stack, never imported by the tools)
 util.py                      # shared helpers: atomic_write (crash-safe artifact writes), tmp_sibling, utf8_safe, check_writable, print_safe, print_validation
 memgraph/annotations.py      # schema-v6 memory-annotation index + MemoryRef mapping
 memgraph/model.py            # Trajectory / MemoryOp / MemoryUnit / Edge dataclasses
@@ -143,16 +145,16 @@ Judge endpoint configuration is the checkout's `.env` (never commit it; see
 
 # Build, test, and development commands
 
-- `uv venv .venv && uv pip install pytest tiktoken tqdm` — create the
-  checkout-local test environment once (runtime is stdlib plus tiktoken and
-  tqdm, so the suite needs pytest + those two).
-- `.venv/bin/python -m pytest tests -q` — run the full suite from the
+- `uv sync` — create the checkout-local env once (`.venv`, resolved from
+  `pyproject.toml` + `uv.lock`; runtime is stdlib plus tiktoken and tqdm,
+  the dev group adds pytest, the data group the data-build stack).
+- `uv run pytest tests -q` — run the full suite from the
   checkout root, under any directory name (tests/conftest.py puts the
   checkout root on sys.path; memgraph/ and injudge/ are top-level packages).
-- `python3 -m memgraph <paths> -o memgraph.html --json memgraph.json` —
+- `uv run -m memgraph <paths> -o memgraph.html --json memgraph.json` —
   build the graph, from the checkout root (`--verdicts output/injudge-report.json`
   merges verdicts first).
-- `python3 -m injudge <paths> -o output/` — judge spans, from the checkout
+- `uv run -m injudge <paths> -o output/` — judge spans, from the checkout
   root (writes injudge-report.json + summary.json; `--html` adds
   memgraph-verdicts.html); `--dry-run` prints the judge input
   (gold blocks included), reading only the budget/chunk knobs from a
@@ -165,8 +167,9 @@ Judge endpoint configuration is the checkout's `.env` (never commit it; see
    (the `test_*.py` suite excepted).
 2. Stdlib plus tiktoken (the o200k_base budget estimate) and tqdm (the CLI
    progress bars) at runtime — urllib for the judge client, no SDK. Do not
-   add dependencies; the test environment carries pytest, tiktoken, and
-   tqdm alone.
+   add dependencies; the locked env carries pytest (dev group) and, for the
+   data build alone, pandas/numpy/pyarrow/huggingface_hub (`data` group —
+   never imported by the tools or tests).
 3. Use `pathlib` instead of `os.path`; artifacts are written via
    `atomic_write` so a crash never leaves a truncated file.
 4. Data containers are plain dataclasses with `to_dict()` for the JSON

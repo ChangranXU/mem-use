@@ -19,17 +19,17 @@ icon: book-open
 ## 快速开始
 
 ```bash
-# 首次，在 checkout 内执行（pytest 供测试套件使用）
-uv venv .venv && uv pip install pytest tiktoken tqdm
+# 首次，在 checkout 内执行（dev 组为测试套件提供 pytest）
+uv sync
 
 # 1 —— 可视化全部记忆操作
-python3 -m memgraph runs/ -o memgraph.html --json memgraph.json
+uv run -m memgraph runs/ -o memgraph.html --json memgraph.json
 
 # 2 —— 评审召回注入（先把 .env.example 复制为 .env 并填写）
-python3 -m injudge runs/ -o output/
+uv run -m injudge runs/ -o output/
 
 # 3 —— 把判定叠加回图
-python3 -m memgraph runs/ -o memgraph-verdicts.html --verdicts output/injudge-report.json
+uv run -m memgraph runs/ -o memgraph-verdicts.html --verdicts output/injudge-report.json
 ```
 
 路径可以是轨迹目录、`trajectory.jsonl` 文件，或递归扫描的根目录——见[输入约定](input-contract.md#输入路径)。

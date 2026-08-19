@@ -6,13 +6,13 @@ icon: gavel
 # injudge
 
 ```bash
-python3 -m injudge <paths>    # writes output/injudge-report.json + output/summary.json
+uv run -m injudge <paths>    # writes output/injudge-report.json + output/summary.json
 
 # Print the judge input per span (gold blocks included) with no network access.
 # Overflowing spans add an INPUT OVERFLOW note with the would-be chunk counts.
 # Only the budget/chunk knobs are read from .env — never credentials, no judge
 # calls, no files written:
-python3 -m injudge <paths> --dry-run --limit 3
+uv run -m injudge <paths> --dry-run --limit 3
 ```
 
 injudge classifies each recall injection as **positive**, **negative**, or **neutral** from its footprint in the agent turns that follow.

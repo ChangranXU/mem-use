@@ -6,7 +6,7 @@ icon: share-nodes
 # memgraph
 
 ```bash
-python3 -m memgraph <paths> -o memgraph.html --json memgraph.json
+uv run -m memgraph <paths> -o memgraph.html --json memgraph.json
 ```
 
 memgraph 从注解中提取每个记忆操作，渲染记忆如何被创建、更新、删除与召回。对每条记忆回答两个问题：由哪个 `(轨迹, 步骤)` 创建，随后被哪个 `(轨迹, 步骤)` 召回。多条运行一起加载时可以看到跨轨迹复用。
