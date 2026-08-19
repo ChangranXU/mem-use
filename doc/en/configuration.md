@@ -5,7 +5,7 @@ icon: sliders
 
 # Configuration
 
-injudge's judge endpoint is configured via `.env` (copy `.env.example`; that file has the full comments). Every key is read and validated.
+Only injudge is configured, via a `.env` file (memgraph takes CLI flags alone). Copy `.env.example` — it carries the full comments — and fill it in; every key is read and validated, there are no dead knobs.
 
 ## Endpoint
 
@@ -30,7 +30,7 @@ injudge's judge endpoint is configured via `.env` (copy `.env.example`; that fil
 
 ## Scan (overflow path)
 
-These knobs apply when the verbatim scoring input exceeds `JUDGE_INPUT_TOKENS`. Extraction runs on a **copy** of the scoring config so a tier learned during extraction cannot leak onto scoring.
+These knobs apply when the verbatim scoring input exceeds `JUDGE_INPUT_TOKENS`. Extraction runs on a **copy** of the scoring config, so a tier learned during extraction cannot leak onto scoring.
 
 | Key | Default | Purpose |
 |---|---|---|

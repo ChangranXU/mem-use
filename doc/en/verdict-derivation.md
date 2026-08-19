@@ -1,13 +1,11 @@
 ---
-description: "How injudge derives usage labels, span verdicts, and summary rates from the LLM rubric in code."
+description: "The five-signal rubric the LLM scores, and how injudge derives usage labels and span verdicts from it in code."
 icon: code-branch
 ---
 
-# Verdict derivation
+# Rubric and verdict derivation
 
-The LLM scores five signals per delivered memory. It does not choose a span verdict. injudge derives usage labels, footprint reasons, the span verdict, and every aggregate that depends on them in code (`injudge/judge.py`, `injudge/aggregate.py`).
-
-This page is the mapping. Signal definitions live in [injudge](injudge.md#rubric-signals).
+The LLM scores five signals per delivered memory. It never chooses a span verdict. injudge derives the usage labels, footprint reasons, and span verdict in code (`injudge/judge.py`); how those labels are counted into rates and tallies is in [Artifacts](artifacts.md#how-the-numbers-are-derived).
 
 ```mermaid
 flowchart TD
@@ -21,6 +19,22 @@ flowchart TD
     usage -->|ignored| reason
     usage --> verdict --> agg
 ```
+
+## Rubric signals
+
+Each delivered memory is scored independently. Notes cite step and seq numbers from the stream.
+
+| Signal | Type | Question |
+|---|---|---|
+| `relevance` | bool | Is the memory topically related to the task and to the agent's current subgoal at the injection point? Judged from the steps before the span's first step. |
+| `accuracy` | enum | `corroborated` (observable evidence it is right) / `uncontradicted` (no evidence either way) / `contradicted` (observable evidence it is wrong). |
+| `novelty` | enum | `novel` (substance never appeared pre-injection) / `confirming` (settles an open doubt the agent had articulated) / `redundant` (already established, no open doubt). |
+| `influence` | enum | `none` / `referenced` (mentioned only) / `acted_on` (shaped a later command, edit, or test) / `decisive` (explicitly credited with a pivot). Footprint is subsequent behavior, from the span's first step onward. |
+| `positive_effect` | enum or null | `improved` / `no_effect` / `harmed`. Non-null only when influence is `acted_on` or `decisive`. |
+
+`positive_effect = no_effect` counts against the memory system: context and attention were spent without improving the work. A skip inferred only from an action's absence is `influence = none`; absence alone is not evidence.
+
+The final task result, when discernible, may raise or lower confidence. It cannot decide a signal by itself.
 
 ## Division of labor
 
@@ -38,7 +52,7 @@ flowchart TD
 `_assemble_verdict` turns a shape-valid judge object into the internal record. Semantic checks that a JSON schema cannot express happen here:
 
 1. **One entry per key.** Several versions of one key in a single delivery collapse to one rubric row (warned). Memories with no key are excluded from the rubric and from usage; their delivery cost still counts.
-2. **Coverage.** A span key absent from the judge array gets nulled signals and a warning. Zero coverage of the span's keyed memories is an immediate `error` verdict — a model-quality signal, not a derived neutral. Unknown keys in the judge array are dropped.
+2. **Coverage.** A span key absent from the judge array gets nulled signals and a warning. Zero coverage of the span's keyed memories is an immediate `error` verdict — a model-quality signal, not a derived neutral. Unknown keys in the judge array are dropped. A span that delivers no keyed memories at all is not an error: it derives neutral with a warning, since there is nothing to score.
 3. **Pairing.** `positive_effect` applies only when `influence` is `acted_on` or `decisive`. A missing effect in that case leaves usage `unclear` (warned). An effect set while influence is `none` or `referenced` is coerced to `null` (warned).
 4. **Usage, reason, verdict.** `_derive_usage` labels each memory; `_footprint_reason` runs only for `ignored`; `derive_verdict` reads the usage labels. Confidence is clamped to `[0, 1]`.
 
@@ -114,36 +128,4 @@ Each row is one span. Memories not listed are absent.
 | `--limit` cutoff or `--dry-run` | `unjudged` | none | Count only. Not a rate denominator. |
 | Coverage gap, contract failure, or exhausted attempts | `error` | attempted | Count only. Raw text kept. Not coerced to neutral. |
 
-## From labels to aggregates
-
-`injudge/aggregate.py` rolls operation records into per-trajectory and overall blocks. The same functions feed both `injudge-report.json` and `summary.json`.
-
-**Verdict rates.** Denominator is judged spans: `positive + negative + neutral`. Auto-neutral spans are in that denominator. `error` and `unjudged` are counts. Restated re-injections never appear in rates; they already rolled into their span.
-
-$$
-\mathrm{rates}[v] = \frac{\mathrm{count}[v]}{\mathrm{positive} + \mathrm{negative} + \mathrm{neutral}}
-$$
-
-**Rubric rates.** Population is judge-scored deliveries (`span × key`) on LLM-judged spans only (auto-neutral excluded). An all-null coverage-gap row is skipped. Null signal values do not enter a rate's denominator.
-
-| Rate | Numerator | Denominator |
-|---|---|---|
-| `relevance` | `true` | `true` + `false` |
-| `accuracy` | `corroborated` + `uncontradicted` | those + `contradicted` |
-| `novelty` | `novel` + `confirming` | those + `redundant` |
-| `influence` | `referenced` + `acted_on` + `decisive` | those + `none` |
-| `positive_effect` | `improved` | `improved` + `no_effect` + `harmed` |
-
-`positive_effect` is rated only over deliveries that have an effect judgment. That is the contract: the signal is null unless influence is acted-on.
-
-**Triage lists.** `inaccurate_keys` collects identities whose `accuracy` was `contradicted`. `irrelevant_keys` collects identities whose `relevance` was `false`. Each entry carries the span ids that produced it. A key delivered under several `(namespace, item)` identities in one op is tallied under each of them.
-
-**Per-memory usage.** Tallies merge by `(namespace, item)` over LLM-judged spans only. A joint judgment on a multi-item delivery counts under each identity. `value_drift` is true when both the first and last *recorded* values exist and differ; a redacted (unrecorded) end is not drift.
-
-**Cost.** Each span's `approx_tokens_total` (`content_chars_total // 4`, restated deliveries included) is charged to its verdict class. Headline `wasted_token_share` is `(negative + neutral tokens) / judged-class tokens`. Error and unjudged tokens are counted in `cost` and excluded from that denominator.
-
-**Confidence.** Means and buckets (`[0, 0.5)`, `[0.5, 0.8)`, `[0.8, 1.0]`) cover LLM-judged spans only. Confidence never weights counts. Spans with confidence `< 0.5` are listed in `low_confidence`.
-
-**Input regimes** (`overall` only) count gated spans that carry an `input` record: `input_paths.full` / `scan`, `gold_scored`, `over_budget`. Auto-neutral and unjudged spans omit `input`, so they do not appear in those tallies.
-
-Field-level documentation of the written artifacts is in [Artifacts](artifacts.md).
+How these labels become the rates, costs, and tallies in `summary.json` is documented in [Artifacts](artifacts.md#how-the-numbers-are-derived).

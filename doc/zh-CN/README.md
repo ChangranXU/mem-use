@@ -5,14 +5,34 @@ icon: book-open
 
 # 简介
 
-[English](https://app.gitbook.com/s/j3HLdDCYckkSyWLMFhAg/) | 简体中文
+**mem-eval** 度量 agent 记忆系统的实际效果。它的输入是 traj-recorder 录制的 schema-v6 `trajectory.jsonl` 轨迹——每个记忆动作（创建、检索、投递）都以显式的 `memory_*` 注解事件记录在案；输出是全部记忆操作的可视化图，以及每次召回注入的 LLM 评审判定。
 
-**mem-eval** 基于 traj-recorder 录制的 schema-v6 gate 轨迹，评估记忆系统质量。两个只读工具共享同一套解析核心：
+记忆动作绝不从提示词、角色名或标签约定中推断。没有注解的轨迹是合法输入，运行得到零个记忆操作。
 
-- **memgraph** 把每次记忆操作及其关系渲染成自包含的 HTML 图（可选 JSON）。
-- **injudge** 按五信号评分规则为每次召回注入打分，写出 `injudge.report/v5` 产物。用 `--verdicts` 把该报告叠回图上。
+两个只读工具共享同一套解析核心：
 
-评价单元是召回注入对 agent 的**后续影响**。最终任务结果可以佐证判断，但不能单独决定判断。
+- **memgraph** 把每次记忆操作及其关系渲染成自包含的 HTML 图（可选 JSON 产物）。
+- **injudge** 按五信号评分规则为每次召回注入打分，写出 `injudge.report/v5` 产物；用 `--verdicts` 可将其叠加回图上。
+
+贯穿两个工具的一条原则：召回注入以其对 agent 的**后续影响**来评判。最终任务结果可以佐证判断，但绝不单独决定判断。
+
+## 快速开始
+
+```bash
+# 首次，在 checkout 内执行（pytest 供测试套件使用）
+uv venv .venv && uv pip install pytest tiktoken tqdm
+
+# 1 —— 可视化全部记忆操作
+python3 -m memgraph runs/ -o memgraph.html --json memgraph.json
+
+# 2 —— 评审召回注入（先把 .env.example 复制为 .env 并填写）
+python3 -m injudge runs/ -o output/
+
+# 3 —— 把判定叠加回图
+python3 -m memgraph runs/ -o memgraph-verdicts.html --verdicts output/injudge-report.json
+```
+
+路径可以是轨迹目录、`trajectory.jsonl` 文件，或递归扫描的根目录——见[输入约定](input-contract.md#输入路径)。
 
 ## 工作流
 
@@ -32,13 +52,13 @@ injudge 把内容相同的重复注入归并为**区间（span）**，由 LLM �
 {% step %}
 ## 叠加
 
-判定报告回灌进图。每个召回节点按其区间判定着色。
+判定报告回灌进图，每个召回节点按其区间的判定着色。
 {% endstep %}
 {% endstepper %}
 
 ## 方法论
 
-LLM 从不直接给出区间判定。它为每条投递记忆打五个信号（`relevance`、`accuracy`、`novelty`、`influence`、`positive_effect`）。injudge 再由这些信号推导使用标签与区间判定。映射关系、损害优先规则，以及汇总指标的计算公式，见 [判定推导](verdict-derivation.md)。
+LLM 从不直接给出区间判定。它为每条投递记忆打五个信号——`relevance`、`accuracy`、`novelty`、`influence`、`positive_effect`——injudge 再在代码中由这些信号推导使用标签与区间判定。信号定义、损害优先规则与映射关系见[评分规则与判定推导](verdict-derivation.md)；标签如何计入统计见[产物](artifacts.md#数字如何推导)。
 
 {% hint style="info" %}
 最终补丁正确，仍可能包含 agent 碰巧扛过去的有害注入；任务失败，仍可能包含 agent 未能利用的有用注入。injudge 评的是注入的足迹，不是 agent 的编码能力。
@@ -57,7 +77,7 @@ LLM 从不直接给出区间判定。它为每条投递记忆打五个信号（`
   <tbody>
     <tr>
       <td><strong>输入约定</strong></td>
-      <td>注解事件、记忆身份，以及损坏输入的处理方式。</td>
+      <td>注解事件、记忆身份、agent 步骤与损坏输入处理。</td>
       <td><a href="input-contract.md">input-contract</a></td>
     </tr>
     <tr>
@@ -67,13 +87,23 @@ LLM 从不直接给出区间判定。它为每条投递记忆打五个信号（`
     </tr>
     <tr>
       <td><strong>injudge</strong></td>
-      <td>区间、评分输入、golden answer 与评审客户端。</td>
+      <td>区间、产物、三阶段评审流程与 golden answer。</td>
       <td><a href="injudge.md">injudge</a></td>
     </tr>
     <tr>
-      <td><strong>判定推导</strong></td>
-      <td>使用标签、区间判定与汇总比率如何在代码中计算。</td>
+      <td><strong>评分输入</strong></td>
+      <td>预算门：逐字全文，或分块证据扫描。</td>
+      <td><a href="scoring-input.md">scoring-input</a></td>
+    </tr>
+    <tr>
+      <td><strong>评分规则与判定推导</strong></td>
+      <td>LLM 所打的五个信号；代码推导的使用标签与判定。</td>
       <td><a href="verdict-derivation.md">verdict-derivation</a></td>
+    </tr>
+    <tr>
+      <td><strong>评审客户端</strong></td>
+      <td>合规层级、重试、失败处理与凭证。</td>
+      <td><a href="judge-client.md">judge-client</a></td>
     </tr>
     <tr>
       <td><strong>配置</strong></td>

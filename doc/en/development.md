@@ -9,10 +9,11 @@ icon: wrench
 
 ```bash
 uv venv .venv && uv pip install pytest tiktoken tqdm   # once, inside the checkout
-.venv/bin/python -m pytest tests -q
+.venv/bin/python -m pytest tests -q                    # full suite
+.venv/bin/python -m pytest tests/test_injudge.py -q    # one file
 ```
 
-The suite does not use the network. The judge and extraction clients are stubbed. Fixtures are synthetic schema-v6 trajectories built by `tests/annotated_fixtures.py`.
+The suite does not use the network: the judge and extraction clients are stubbed. Fixtures are synthetic schema-v6 trajectories built by `tests/annotated_fixtures.py`.
 
 ## Project layout
 
@@ -27,4 +28,4 @@ The suite does not use the network. The judge and extraction clients are stubbed
 
 ## Contributing
 
-Working conventions — style guide, commit-message format, artifact contracts — live in `AGENTS.md` at the repository root.
+Working conventions — style guide, commit-message format, artifact contracts — live in `AGENTS.md` at the repository root. Run the suite before opening a PR.

@@ -12,7 +12,9 @@
 ## 评审
 
 * [injudge](injudge.md)
-  * [判定推导](verdict-derivation.md)
+  * [评分输入](scoring-input.md)
+  * [评分规则与判定推导](verdict-derivation.md)
+  * [评审客户端](judge-client.md)
 
 ## 参考
 

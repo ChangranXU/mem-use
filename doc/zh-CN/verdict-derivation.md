@@ -1,13 +1,11 @@
 ---
-description: "injudge 如何在代码中从 LLM 评分信号推导使用标签、区间判定与汇总比率。"
+description: "LLM 所打分的五信号评分规则，以及 injudge 如何在代码中推导使用标签与区间判定。"
 icon: code-branch
 ---
 
-# 判定推导
+# 评分规则与判定推导
 
-LLM 为每条投递记忆打五个信号，不选择区间判定。injudge 在代码中推导使用标签、足迹原因、区间判定，以及依赖它们的全部汇总指标（`injudge/judge.py`、`injudge/aggregate.py`）。
-
-本页是映射说明。信号定义见 [injudge](injudge.md#评分信号)。
+LLM 为每条投递记忆打五个信号，但从不选择区间判定。injudge 在代码中推导使用标签、足迹原因与区间判定（`injudge/judge.py`）；这些标签如何计入比率与汇总，见[产物](artifacts.md#数字如何推导)。
 
 ```mermaid
 flowchart TD
@@ -21,6 +19,22 @@ flowchart TD
     usage -->|ignored| reason
     usage --> verdict --> agg
 ```
+
+## 评分信号
+
+每条投递记忆独立打分。note 引用步骤流中的 step 与 seq。
+
+| 信号 | 类型 | 问题 |
+|---|---|---|
+| `relevance` | bool | 注入点上，记忆是否与任务及 agent 当前子目标主题相关？依据区间首步之前的步骤判断。 |
+| `accuracy` | enum | `corroborated`（有可观察证据为真）/ `uncontradicted`（无从判断）/ `contradicted`（有可观察证据为假）。 |
+| `novelty` | enum | `novel`（注入前从未出现）/ `confirming`（敲定 agent 明确表达过的疑点）/ `redundant`（早已确立，无疑点）。 |
+| `influence` | enum | `none` / `referenced`（仅被提及）/ `acted_on`（影响了后续命令、编辑或测试）/ `decisive`（被明确归功的转向）。足迹是后续行为，从区间首步起算。 |
+| `positive_effect` | enum 或 null | `improved` / `no_effect` / `harmed`。仅当 influence 为 `acted_on` 或 `decisive` 时非空。 |
+
+`positive_effect = no_effect` 对记忆系统不利：上下文与注意力被占用，工作并未改善。仅从某动作缺失推断出的跳过，记为 `influence = none`；缺失本身不是证据。
+
+最终任务结果若可辨认，可以抬高或压低置信度，但不能单独决定任何信号。
 
 ## 分工
 
@@ -38,7 +52,7 @@ flowchart TD
 `_assemble_verdict` 把形状合法的评审对象变成内部记录。JSON schema 表达不了的语义检查在这里完成：
 
 1. **每个 key 一条。** 同一次投递中同一 key 的多个版本折叠成一行评分（记警告）。没有 key 的记忆不进评分与使用记录；其投递成本仍计入。
-2. **覆盖。** 评审数组中缺失的区间 key 会得到全空信号并记警告。区间内带 key 的记忆一条都未被覆盖时，立即记 `error` 判定——这是模型质量信号，不是推导出的 neutral。评审数组中的未知 key 会被丢弃。
+2. **覆盖。** 评审数组中缺失的区间 key 会得到全空信号并记警告。区间内带 key 的记忆一条都未被覆盖时，立即记 `error` 判定——这是模型质量信号，不是推导出的 neutral。评审数组中的未知 key 会被丢弃。完全不含 key 记忆的区间不是错误：记警告并推导为 neutral，因为没有可打分对象。
 3. **配对。** `positive_effect` 仅在 `influence` 为 `acted_on` 或 `decisive` 时适用。该情况下缺少 effect 会使 usage 为 `unclear`（记警告）。influence 为 `none` 或 `referenced` 时仍给出的 effect 会被强制改为 `null`（记警告）。
 4. **使用、原因、判定。** `_derive_usage` 为每条记忆打标签；`_footprint_reason` 只对 `ignored` 运行；`derive_verdict` 读取使用标签。置信度被夹到 `[0, 1]`。
 
@@ -114,36 +128,4 @@ return "neutral"
 | `--limit` 截断或 `--dry-run` | `unjudged` | 无 | 只计数。不是比率分母。 |
 | 覆盖缺口、契约失败或尝试耗尽 | `error` | 已尝试 | 只计数。保留原始文本。不会被改写成 neutral。 |
 
-## 从标签到汇总
-
-`injudge/aggregate.py` 把操作记录滚成按轨迹与整体两套块。`injudge-report.json` 与 `summary.json` 共用这些函数。
-
-**判定率。** 分母是已评判区间：`positive + negative + neutral`。规则判定的 auto-neutral 区间在该分母中。`error` 与 `unjudged` 只计数。重述的重复注入不出现在比率中；它们已经并入所属区间。
-
-$$
-\mathrm{rates}[v] = \frac{\mathrm{count}[v]}{\mathrm{positive} + \mathrm{negative} + \mathrm{neutral}}
-$$
-
-**评分比率。** 总体是 LLM 已评判区间上的已打分投递（`区间 × key`），不含 auto-neutral。全空的覆盖缺口行会被跳过。为 null 的信号值不进入该比率的分母。
-
-| 比率 | 分子 | 分母 |
-|---|---|---|
-| `relevance` | `true` | `true` + `false` |
-| `accuracy` | `corroborated` + `uncontradicted` | 上述 + `contradicted` |
-| `novelty` | `novel` + `confirming` | 上述 + `redundant` |
-| `influence` | `referenced` + `acted_on` + `decisive` | 上述 + `none` |
-| `positive_effect` | `improved` | `improved` + `no_effect` + `harmed` |
-
-`positive_effect` 只在有 effect 判断的投递上计算。这是契约：除非 influence 为 acted-on，该信号为 null。
-
-**排查清单。** `inaccurate_keys` 收集 `accuracy` 为 `contradicted` 的身份；`irrelevant_keys` 收集 `relevance` 为 `false` 的身份。每条带上产生它的区间 id。同一次操作中一个 key 对应多个 `(namespace, item)` 身份时，每个身份都会入账。
-
-**逐记忆使用。** 只在 LLM 已评判区间上按 `(namespace, item)` 合并。对多 item 投递的联合判断会在每个身份下计数。当首尾两个*已录制* value 都存在且不同时，`value_drift` 为 true；redact（未录制）的末端不是 drift。
-
-**成本。** 每个区间的 `approx_tokens_total`（`content_chars_total // 4`，含重述投递）计入其判定类别。headline 的 `wasted_token_share` 为 `(negative + neutral 的 token) / 已评判类别的 token`。error 与 unjudged 的 token 计入 `cost`，但不进该分母。
-
-**置信度。** 均值与分桶（`[0, 0.5)`、`[0.5, 0.8)`、`[0.8, 1.0]`）只覆盖 LLM 已评判区间。置信度从不加权计数。置信度 `< 0.5` 的区间列入 `low_confidence`。
-
-**输入路径**（仅 `overall`）统计带 `input` 记录的预算门区间：`input_paths.full` / `scan`、`gold_scored`、`over_budget`。auto-neutral 与 unjudged 区间没有 `input`，因此不出现在这些计数中。
-
-写出产物的字段级说明见 [产物](artifacts.md)。
+这些标签如何计入 `summary.json` 的比率、成本与汇总，见[产物](artifacts.md#数字如何推导)。

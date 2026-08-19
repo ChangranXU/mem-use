@@ -9,10 +9,11 @@ icon: wrench
 
 ```bash
 uv venv .venv && uv pip install pytest tiktoken tqdm   # 首次，在 checkout 内执行
-.venv/bin/python -m pytest tests -q
+.venv/bin/python -m pytest tests -q                    # 全部测试
+.venv/bin/python -m pytest tests/test_injudge.py -q    # 单个文件
 ```
 
-测试套件不走网络。评审与提取客户端都打桩。夹具由 `tests/annotated_fixtures.py` 合成 schema-v6 轨迹。
+测试套件不走网络：评审与提取客户端都打桩。夹具由 `tests/annotated_fixtures.py` 合成 schema-v6 轨迹。
 
 ## 项目结构
 
@@ -27,4 +28,4 @@ uv venv .venv && uv pip install pytest tiktoken tqdm   # 首次，在 checkout �
 
 ## 贡献约定
 
-工作约定——代码风格、commit message 格式、产物契约——见仓库根目录的 `AGENTS.md`。
+工作约定——代码风格、commit message 格式、产物契约——见仓库根目录的 `AGENTS.md`。开 PR 前先跑一遍测试套件。
