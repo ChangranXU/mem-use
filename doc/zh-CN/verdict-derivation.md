@@ -5,7 +5,11 @@ icon: code-branch
 
 # 评分规则与判定推导
 
-LLM 为每条投递记忆打五个信号，但从不选择区间判定。injudge 在代码中推导使用标签、足迹原因与区间判定（`injudge/judge.py`）；这些标签如何计入比率与汇总，见[产物](artifacts.md#数字如何推导)。
+{% hint style="info" %}
+LLM 为每条投递记忆打五个信号，但从不选择区间判定。injudge 在代码中推导使用标签、足迹原因与区间判定（`injudge/judge.py`）。
+{% endhint %}
+
+这些标签如何计入比率与汇总，见[产物](artifacts.md#数字如何推导)。
 
 ```mermaid
 flowchart TD
@@ -32,7 +36,9 @@ flowchart TD
 | `influence` | enum | `none` / `referenced`（仅被提及）/ `acted_on`（影响了后续命令、编辑或测试）/ `decisive`（被明确归功的转向）。足迹是后续行为，从区间首步起算。 |
 | `positive_effect` | enum 或 null | `improved` / `no_effect` / `harmed`。仅当 influence 为 `acted_on` 或 `decisive` 时非空。 |
 
+{% hint style="warning" %}
 `positive_effect = no_effect` 对记忆系统不利：上下文与注意力被占用，工作并未改善。仅从某动作缺失推断出的跳过，记为 `influence = none`；缺失本身不是证据。
+{% endhint %}
 
 最终任务结果若可辨认，可以抬高或压低置信度，但不能单独决定任何信号。
 

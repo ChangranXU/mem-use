@@ -704,6 +704,31 @@ def test_fallback_keeps_distinct_unprefixed_memory_lane(tmp_path):
     assert not any("share" in w for w in warnings)
 
 
+def test_side_lane_turns_count_as_neither_agent_nor_memory_steps(tmp_path):
+    """A lane bound as neither main nor memory (an unbound query-rewrite lane
+    carrying raw model traffic and no memory events) must not create phantom
+    agent steps: its turns count as neither agent steps nor memory turns, the
+    lane is listed in the warnings, and the truncation accounting stays
+    balanced."""
+    b = AnnotatedBuilder()  # the usual MAIN/EXTRACT binds
+    b.agent_turn(with_task=True)
+    b.side_turn()  # QUERY: unbound, no memory events
+    b.agent_turn()
+    b.memory_turn()
+    b.generate(extraction_step="2")
+    traj, _ops, warnings = parse(b, tmp_path)
+    assert traj.n_steps == 2  # the two MAIN turns only — the QUERY turn is no agent step
+    assert traj.side_lanes == {"QUERY"}
+    assert any("side lane(s) 'QUERY'" in w for w in warnings)
+    # 4 turn_starts = 2 agent + 1 memory + 1 side: no truncation note
+    assert not any("turn_starts but" in w for w in warnings)
+    steps = build_step_stream(b.events, traj.memory_lanes, [], side_lanes=traj.side_lanes)
+    assert [s.step for s in steps] == [1, 2]  # injudge/memgraph attribution parity
+    # without the side set the rewrite turn would be a phantom third agent step
+    naive = build_step_stream(b.events, traj.memory_lanes, [])
+    assert len(naive) == 3
+
+
 def test_delivery_recent_turn_fallback_is_chronological_under_pipelining(tmp_path):
     """Same-lane pipelining can record an older turn's classifying response
     after a younger one's (deferred recording): the most-recent-turn fallback

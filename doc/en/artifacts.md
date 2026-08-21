@@ -5,7 +5,9 @@ icon: box-archive
 
 # Artifacts
 
-injudge writes all artifacts to the output folder (`-o DIR`, default `output/`):
+{% hint style="info" %}
+injudge writes all artifacts to the output folder (`-o DIR`, default `output/`).
+{% endhint %}
 
 | File | Schema | Role |
 |---|---|---|
@@ -15,15 +17,15 @@ injudge writes all artifacts to the output folder (`-o DIR`, default `output/`):
 
 memgraph's `--json` artifact is `{tool, trajectories, ops, memories, edges, validation}` — the same dict embedded in the HTML. See [memgraph](memgraph.md#graph-model).
 
-## Report vs summary
+## Report vs Summary
 
-The report is the judging record. Each operation carries the rubric with notes, `analysis`, `evidence`, `judge_raw` on failures, delivery cost, the `input` regime on gated spans, and the validation log. A span's `operation_id` is the id to look up in this file.
+The **report** is the judging record. Each operation carries the rubric with notes, `analysis`, `evidence`, `judge_raw` on failures, delivery cost, the `input` regime on gated spans, and the validation log. A span's `operation_id` is the id to look up in this file.
 
-The summary is the numbers for reading and comparing memory systems. Judging narrative stays in the report.
+The **summary** is the numbers for reading and comparing memory systems. Judging narrative stays in the report.
 
 When several identities share one display key, summary `key` fields (triage lists and `memory_usage`) carry a `key#<item-or-namespace>` suffix — an 8-character prefix, or the full base when prefixes collide — so two memories never conflate. The report always keeps the full identity.
 
-## How the numbers are derived
+## How the Numbers Are Derived
 
 The mapping from rubric signals to usage labels and span verdicts is in [Rubric and verdict derivation](verdict-derivation.md). This section is the counting contract those labels feed; one set of functions (`injudge/aggregate.py`) produces both artifacts' numbers.
 
@@ -38,7 +40,7 @@ The mapping from rubric signals to usage labels and span verdicts is in [Rubric 
 
 Empty `rates` / `headline` / `rubric` / `confidence` shells are omitted when a block has no judged population. `cost` is omitted only when both of its totals are zero — an error-only run with injections still carries cost, charged to the `error` class.
 
-### Verdict rates
+### Verdict Rates
 
 The denominator is judged spans; restated re-injections never appear in rates, having already rolled into their span.
 
@@ -48,7 +50,7 @@ $$
 
 `headline.judged_spans` is that denominator. `headline.wasted_token_share` is the injected-token cost of neutral and negative spans as a share of judged spans' cost: budget spent on injections that did not help.
 
-### Rubric rates
+### Rubric Rates
 
 The population is judge-scored deliveries (`span × key`) on LLM-judged spans. An all-null coverage-gap row is skipped; null signal values never enter a denominator.
 
@@ -62,15 +64,15 @@ The population is judge-scored deliveries (`span × key`) on LLM-judged spans. A
 
 `positive_effect` is rated only over deliveries that have an effect judgment — the signal is null unless influence is acted-on. The signal enums in `rubric.counts` are those in the [rubric table](verdict-derivation.md#rubric-signals).
 
-### Triage lists
+### Triage Lists
 
 `inaccurate_keys` collects identities whose `accuracy` was `contradicted`; `irrelevant_keys` collects identities whose `relevance` was `false`. Each entry carries the span ids that produced it. A key delivered under several `(namespace, item)` identities in one op is tallied under each of them.
 
-### Per-memory usage
+### Per-Memory Usage
 
 Tallies merge by `(namespace, item)` over LLM-judged spans only. A joint judgment on a multi-item delivery counts under each identity. `value_drift` is true when both the first and last *recorded* values exist and differ; a redacted (unrecorded) end is not drift.
 
-### Delivery cost and policy
+### Delivery Cost and Policy
 
 Delivery cost is deterministic: each span's cost is the sum of the recorded placement sizes over all of its deliveries — restated ones included — under a `chars / 4` token estimate, charged to the span's verdict class. Redacted placements that record no size count as 0 tokens and produce a warning. Error and unjudged tokens are counted in `cost` but excluded from the `wasted_token_share` denominator.
 
@@ -80,11 +82,11 @@ Delivery policy measures how heavily the memory system injects, per trajectory a
 
 Means and buckets (`[0,0.5)`, `[0.5,0.8)`, `[0.8,1.0]`) cover LLM-judged spans only. Confidence never weights counts. Spans with confidence `< 0.5` are listed in `low_confidence`.
 
-### Input regimes
+### Input Regimes
 
 Overall only: gated spans carrying an `input` record are counted in `input_paths.full` / `scan`, `gold_scored`, and `over_budget`. Auto-neutral and unjudged spans omit `input`, so they do not appear in those tallies.
 
-## summary.json fields
+## summary.json Fields
 
 Top level: `tool.schema`, `generated_at`, `overall` (all trajectories combined), `trajectories` (per-trajectory blocks with the same statistics plus a span index). Each trajectory carries `instance_id` / `model` / `adapter` when recorded.
 
@@ -114,7 +116,7 @@ Per aggregate block (`overall` and each trajectory):
 | `low_confidence` | Span ids with confidence `< 0.5` (only when non-empty) |
 | `policy` | Delivery policy: `n_injections`, `n_steps`, `injection_density` (injections per agent step), `restated_ratio`, `est_injected_tokens`, `prompt_tokens_total` (billed usage), `injected_token_share`, `n_searches`. Overall also has `est_injected_tokens_billed` — the share's numerator when only some trajectories have usage records. |
 
-## Span index
+## Span Index
 
 Each trajectory's `spans` is a narrative-free index into the report:
 
@@ -126,7 +128,7 @@ Each trajectory's `spans` is a narrative-free index into the report:
 | `n_injections` | Deliveries in the span |
 | `usage` | Per-memory usage label (omitted when empty). Auto-neutral placeholder `unclear` is not projected here. |
 
-## Report-only fields
+## Report-Only Fields
 
 `injudge-report.json` additionally carries, per operation: `memories` (full recorded refs), rubric notes, `analysis`, `evidence`, `step_gaps`, `new_keys` / `removed_keys`, `auto`, `error`, `judge_raw`, and `input` on gated spans (`path`: `full` or `scan`, plus scan counters, `"gold"`, `"over_budget"` when they apply). A span whose judging failed unexpectedly keeps a re-derived `{path, gold?}` record without scan counters, so the regime tallies still include it.
 

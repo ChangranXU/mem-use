@@ -360,7 +360,7 @@ def main(argv: list[str] | None = None) -> int:
         ops = ops_by_traj[t.id]
         events = events_by_traj[t.id]
         step_warnings: list[str] = []
-        steps = build_step_stream(events, lanes, step_warnings)
+        steps = build_step_stream(events, lanes, step_warnings, side_lanes=t.side_lanes)
         for w in step_warnings:
             validation.append({"level": "warn", "msg": f"{run_id}: {w}"})
         recall_ops = [op for op in ops if op.kind == "recall"]

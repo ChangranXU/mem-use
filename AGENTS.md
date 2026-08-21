@@ -60,13 +60,19 @@
 - Step semantics are shared by both tools through one rule
   (`parse_trajectory.classifying_messages`, with the ordinal in
   `parse_trajectory.agent_turns`): agent step = ordinal of
-  completed non-memory-lane turns, 1-based; lanes come from `memory_role_bind`
+  completed non-memory-lane, non-side-lane turns, 1-based; lanes come from
+  `memory_role_bind`
   (falling back to the operation events' own lanes — minus the lanes the
   session/delivery events stamped, main-lane traffic by protocol — with a
   warning, when bindings are missing). A lane that is main traffic in ANY
   session — every session's main binding joins the guard's main side, never
   just the first binder's — is dropped from the memory set with a warning;
-  its turns count as agent steps. Anything attributing steps elsewhere must
+  its turns count as agent steps. A side lane (bound as neither main nor
+  memory, e.g. an unbound query-rewrite lane carrying raw model traffic and
+  no memory events) is derived as observed classifying lanes − memory lanes
+  − main-side whenever main-side evidence exists: its turns count as
+  NEITHER agent steps NOR memory turns, and each side lane is listed in
+  `validation`/warnings. Anything attributing steps elsewhere must
   reuse that rule, never re-derive it.
 - injudge's span verdict is derived in code from the rubric (any misused ⇒
   negative, else any used ⇒ positive, else neutral) — never asked of the LLM.

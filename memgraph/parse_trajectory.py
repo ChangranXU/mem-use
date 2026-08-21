@@ -21,8 +21,12 @@ names, or label conventions.
   the linked search's query and returned set, placement size, and the bound
   call that carried the injection.
 
-Step semantics: agent step = count of completed main-lane (non-memory) turns,
-1-based. A generation observed after agent turn N is attributed to step N —
+Step semantics: agent step = count of completed main-lane (non-memory,
+non-side) turns, 1-based. A side lane is one observed classifying turns but
+bound as neither main nor memory (e.g. an unbound query-rewrite lane): its
+turns count as neither agent steps nor memory turns, and each side lane is
+listed in the warnings. A generation observed after agent turn N is
+attributed to step N —
 so one observed before the first agent turn completes gets step 0 (N=0; the
 HTML draws it at the axis origin). A delivery is attributed to its bound
 call's turn (cross-checked against the adapter-declared `main_step` when both
@@ -183,16 +187,36 @@ def classifying_messages(events: list[dict]) -> dict[int, dict]:
     return classified
 
 
-def agent_turns(classified: dict[int, dict], memory_lanes: set[str | None]) -> list[int]:
+def agent_turns(
+    classified: dict[int, dict],
+    memory_lanes: set[str | None],
+    side_lanes: set[str | None] = frozenset(),
+) -> list[int]:
     """The agent-lane turns in turn order: classified turns whose classifying
-    message was not recorded on a memory lane. Agent step = 1-based position
-    in this list — the one ordinal rule memgraph's _TurnTable and injudge's
-    step stream share (never re-derived per consumer, so the two tools' step
-    numbering cannot drift apart)."""
+    message was recorded on neither a memory lane nor a side lane. Agent
+    step = 1-based position in this list — the one ordinal rule memgraph's
+    _TurnTable and injudge's step stream share (never re-derived per consumer,
+    so the two tools' step numbering cannot drift apart). A side lane is a
+    lane bound as neither main nor memory (e.g. a query-rewrite lane): its
+    turns are real model calls but count as NEITHER agent steps NOR memory
+    turns."""
     return sorted(
         t for t, e in classified.items()
-        if e.get("proxy_source") not in memory_lanes
+        if e.get("proxy_source") not in memory_lanes and e.get("proxy_source") not in side_lanes
     )
+
+
+def derive_side_lanes(
+    classified: dict[int, dict],
+    memory_lanes: set[str | None],
+    main_side: set[str | None],
+) -> set[str | None]:
+    """The side lanes: lanes that classify turns but are bound as neither
+    memory nor main — derived as observed classifying lanes − memory lanes −
+    main-side (main-side is implicit in the recording, so a positive test for
+    "side" does not exist; it is what remains)."""
+    observed = {e.get("proxy_source") for e in classified.values()}
+    return observed - set(memory_lanes) - set(main_side)
 
 
 class _TurnTable:
@@ -200,11 +224,12 @@ class _TurnTable:
 
     A turn is classified by the proxy_source of its FIRST turn-bearing
     assistant message_end (`classifying_messages`); a turn whose source is
-    a bound memory lane is a memory turn, anything else an agent turn.
+    a bound memory lane is a memory turn, a side-lane turn (an unbound lane
+    carrying no memory events) is neither, anything else an agent turn.
     Agent step = ordinal among agent turns in turn order.
     """
 
-    def __init__(self, events: list[dict], memory_lanes: set[str | None]):
+    def __init__(self, events: list[dict], memory_lanes: set[str | None], side_lanes: set[str | None] = frozenset()):
         self.turn_call: dict[int, str | None] = {}  # turn -> call_id (from turn_start)
         for e in events:
             if e.get("type") == "turn_start":
@@ -223,7 +248,11 @@ class _TurnTable:
             1 for e in classified_msgs.values()
             if e.get("proxy_source") in memory_lanes
         )
-        self.agent_turns: list[int] = agent_turns(classified_msgs, memory_lanes)
+        self.n_side_turns = sum(
+            1 for e in classified_msgs.values()
+            if e.get("proxy_source") in side_lanes
+        )
+        self.agent_turns: list[int] = agent_turns(classified_msgs, memory_lanes, side_lanes)
         self._classif_seq = {t: classified_msgs[t]["seq"] for t in self.agent_turns}
         self.step_of_turn = {t: i + 1 for i, t in enumerate(self.agent_turns)}
 
@@ -572,16 +601,16 @@ def parse_trajectory(
             f"{run_id}: annotated run without a memory role binding; classifying "
             f"memory turns by the operation events' own lanes {sorted(map(str, memory_lanes))}"
         )
-        # With no bindings the shared-lane guard cannot see the main lane
-        # from them — but the session and delivery events are main-lane
-        # traffic by protocol (the gate records both only there), so a lane
-        # they stamp must join the guard's main side: one operation event
-        # that drifted onto the main lane would otherwise mark every agent
-        # turn on it as a memory turn and collapse the step count to zero
-        for e in (*index.sessions.values(), *index.deliveries):
-            src = e.get("proxy_source")
-            if src is None or isinstance(src, str):  # a corrupt source names no lane
-                main_side.add(src)
+    # The session and delivery events are main-lane traffic by protocol (the
+    # gate records both only there), so a lane they stamp joins the main side
+    # — bound path included: one operation event that drifted onto the main
+    # lane would otherwise mark every agent turn on it as a memory turn and
+    # collapse the step count to zero. On the bound path this normally
+    # re-discovers the bound main lane.
+    for e in (*index.sessions.values(), *index.deliveries):
+        src = e.get("proxy_source")
+        if src is None or isinstance(src, str):  # a corrupt source names no lane
+            main_side.add(src)
     shared = memory_lanes & main_side
     if shared:
         # A lane that is main traffic in ANY session (or on the fallback's
@@ -595,6 +624,21 @@ def parse_trajectory(
         warnings.append(
             f"{run_id}: main and memory traffic share {names}; memory turns "
             "on it are indistinguishable — those turns count as agent steps"
+        )
+    # Side lanes: lanes classifying turns but bound as neither main nor
+    # memory (e.g. an unbound query-rewrite lane carrying raw model traffic
+    # and no memory events). Their turns count as neither agent steps nor
+    # memory turns — otherwise every rewrite call would be a phantom agent
+    # step, shifting the injection spans' step attribution. The derivation is
+    # gated on main-side evidence: without it (an unannotated run) there is
+    # no side-lane concept and every lane stays agent traffic.
+    side_lanes = derive_side_lanes(classifying_messages(events), memory_lanes, main_side) if main_side else set()
+    if side_lanes:
+        names = ", ".join("the unprefixed lane" if s is None else repr(s)
+                          for s in sorted(side_lanes, key=str))
+        warnings.append(
+            f"{run_id}: side lane(s) {names} bound as neither main nor memory; "
+            "their turns count as neither agent steps nor memory turns"
         )
     # the singular display lane always derives from the FINAL set — after
     # the shared-lane guard, on the bound path as much as the fallback one:
@@ -614,6 +658,8 @@ def parse_trajectory(
     # The memory lanes injudge's step stream classifies against — the same
     # set the turn table below uses, so attribution stays consistent.
     traj.memory_lanes = memory_lanes
+    # The side lanes likewise (neither-step lanes the step stream must skip).
+    traj.side_lanes = side_lanes
     first_session = next(iter(index.sessions.values()), None)
     if first_session is not None:
         payload = first_session["payload"]
@@ -662,7 +708,7 @@ def parse_trajectory(
                     "value is used"
                 )
 
-    table = _TurnTable(events, memory_lanes)
+    table = _TurnTable(events, memory_lanes, side_lanes)
     for e in events:
         if e.get("type") == "history_rewritten":
             src = e.get("proxy_source")
@@ -749,9 +795,10 @@ def parse_trajectory(
 
     ops.sort(key=lambda o: o.seq)
     traj.n_steps = table.n_agent_turns
-    if table.n_turns != table.n_agent_turns + table.n_mem_turns:
+    if table.n_turns != table.n_agent_turns + table.n_mem_turns + table.n_side_turns:
         warnings.append(
             f"{run_id}: {table.n_turns} turn_starts but {table.n_agent_turns} agent + "
-            f"{table.n_mem_turns} memory turns classified (truncated or missing responses?)"
+            f"{table.n_mem_turns} memory + {table.n_side_turns} side turns classified "
+            "(truncated or missing responses?)"
         )
     return traj, ops, events

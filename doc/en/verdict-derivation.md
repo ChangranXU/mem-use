@@ -3,9 +3,13 @@ description: "The five-signal rubric the LLM scores, and how injudge derives usa
 icon: code-branch
 ---
 
-# Rubric and verdict derivation
+# Rubric and Verdict Derivation
 
-The LLM scores five signals per delivered memory. It never chooses a span verdict. injudge derives the usage labels, footprint reasons, and span verdict in code (`injudge/judge.py`); how those labels are counted into rates and tallies is in [Artifacts](artifacts.md#how-the-numbers-are-derived).
+{% hint style="info" %}
+The LLM scores five signals per delivered memory. It never chooses a span verdict. injudge derives usage labels, footprint reasons, and the span verdict in code (`injudge/judge.py`).
+{% endhint %}
+
+How those labels are counted into rates and tallies is in [Artifacts](artifacts.md#how-the-numbers-are-derived).
 
 ```mermaid
 flowchart TD
@@ -20,7 +24,7 @@ flowchart TD
     usage --> verdict --> agg
 ```
 
-## Rubric signals
+## Rubric Signals
 
 Each delivered memory is scored independently. Notes cite step and seq numbers from the stream.
 
@@ -32,11 +36,13 @@ Each delivered memory is scored independently. Notes cite step and seq numbers f
 | `influence` | enum | `none` / `referenced` (mentioned only) / `acted_on` (shaped a later command, edit, or test) / `decisive` (explicitly credited with a pivot). Footprint is subsequent behavior, from the span's first step onward. |
 | `positive_effect` | enum or null | `improved` / `no_effect` / `harmed`. Non-null only when influence is `acted_on` or `decisive`. |
 
+{% hint style="warning" %}
 `positive_effect = no_effect` counts against the memory system: context and attention were spent without improving the work. A skip inferred only from an action's absence is `influence = none`; absence alone is not evidence.
+{% endhint %}
 
 The final task result, when discernible, may raise or lower confidence. It cannot decide a signal by itself.
 
-## Division of labor
+## Division of Labor
 
 | Produced by the LLM | Derived in code |
 |---|---|
@@ -58,7 +64,7 @@ The final task result, when discernible, may raise or lower confidence. It canno
 
 Display-only fields (`analysis`, evidence claims) are copied and credential-masked. A malformed evidence list is dropped with a warning; it does not fail the span.
 
-## Usage labels
+## Usage Labels
 
 `_derive_usage` reads `influence` and `positive_effect` after pairing:
 
@@ -73,7 +79,7 @@ Display-only fields (`analysis`, evidence claims) are copied and credential-mask
 
 The evidence string on a usage entry is the first non-empty note among `positive_effect`, `influence`, and `novelty`.
 
-## Footprint reasons
+## Footprint Reasons
 
 `_footprint_reason` runs only for `ignored` memories. Strict parsing guarantees `novelty` is an enum in that case (nulled coverage-gap entries derive `unclear`, not `ignored`).
 
@@ -86,7 +92,7 @@ The evidence string on a usage entry is the first non-empty note among `positive
 
 These reasons populate `rubric.no_footprint_reasons`. They do not change the span verdict: an ignored memory is already outside `used` / `misused`.
 
-## Span verdict
+## Span Verdict
 
 `derive_verdict` reads the derived usage labels. Harm dominates:
 
@@ -105,7 +111,7 @@ if "used" in usages:
 return "neutral"
 ```
 
-### Worked examples
+### Worked Examples
 
 Each row is one span. Memories not listed are absent.
 
@@ -120,7 +126,7 @@ Each row is one span. Memories not listed are absent.
 | A: `none`, `relevance=false` | A `ignored` (`irrelevant`) | **neutral** | No footprint. |
 | No subsequent agent turn (`auto`) | placeholder `unclear` | **neutral** | Rule-judged; no LLM call. See below. |
 
-## Rule-judged and failed spans
+## Rule-Judged and Failed Spans
 
 | Case | `verdict` | Judge call | Rubric / usage in aggregates |
 |---|---|---|---|

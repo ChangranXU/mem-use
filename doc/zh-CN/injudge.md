@@ -5,16 +5,17 @@ icon: gavel
 
 # injudge
 
+{% hint style="info" %}
+injudge 根据召回注入在后续 agent 回合中的足迹，将其判为 **positive**、**negative** 或 **neutral**。
+{% endhint %}
+
 ```bash
 uv run -m injudge <paths>    # 写出 output/injudge-report.json 与 output/summary.json
 
-# 按区间打印评审输入（含 gold 块），全程不访问网络。超预算的区间会附上
-# INPUT OVERFLOW 说明与预计分块数。只读 .env 中的预算/分块键——不读凭证、
-# 不发起调用、不写文件：
+# 预览模式：按区间打印评审输入（含 gold 块），全程不访问网络。
+# 只读 .env 中的预算/分块键——不读凭证、不发起调用、不写文件：
 uv run -m injudge <paths> --dry-run --limit 3
 ```
-
-injudge 根据召回注入在后续 agent 回合中的足迹，将其判为 **positive**、**negative** 或 **neutral**。
 
 进度经 tqdm 输出到 stderr：终端上是轨迹条加当前轨迹的区间条；管道输出时每完成一条轨迹打一行检查点。
 
@@ -51,7 +52,7 @@ injudge 根据召回注入在后续 agent 回合中的足迹，将其判为 **po
 
 调用本身的重试、层级与失败行为见[评审客户端](judge-client.md)。
 
-## Golden answer 与 correctness
+## Golden Answer 与 Correctness
 
 评分调用可携带两类可选附件。各自来自 `trajectory.jsonl` 旁的边车文件或命令行；命令行值覆盖同名边车字段。对多条已加载轨迹共用一个 CLI gold 会给出警告。
 

@@ -5,7 +5,9 @@ icon: sliders
 
 # 配置
 
+{% hint style="info" %}
 只有 injudge 需要配置，通过 `.env` 文件（memgraph 只用命令行参数）。复制 `.env.example`——完整注释见该文件——并填写；每个键都会被读取和校验，没有无效旋钮。
+{% endhint %}
 
 ## 端点
 

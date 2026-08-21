@@ -5,7 +5,9 @@ icon: sliders
 
 # Configuration
 
-Only injudge is configured, via a `.env` file (memgraph takes CLI flags alone). Copy `.env.example` — it carries the full comments — and fill it in; every key is read and validated, there are no dead knobs.
+{% hint style="info" %}
+Only injudge is configured, via a `.env` file (memgraph takes CLI flags alone). Copy `.env.example` — it carries full comments — and fill it in; every key is read and validated, there are no dead knobs.
+{% endhint %}
 
 ## Endpoint
 
@@ -21,14 +23,14 @@ Only injudge is configured, via a `.env` file (memgraph takes CLI flags alone). 
 | `THINKING_EFFORT` | unset | `none` … `max`, provider-native pass-through |
 | `THINKING_BUDGET` | — | Anthropic only. Required when `API=anthropic` and `THINKING=enabled`. Must be less than `--judge-max-tokens`. |
 
-## Scoring budget and parallelism
+## Scoring Budget and Parallelism
 
 | Key | Default | Purpose |
 |---|---|---|
 | `JUDGE_PARALLEL` | `1` | Spans of one trajectory judged in parallel (cap 32). In-flight calls can reach `JUDGE_PARALLEL × SCAN_PARALLEL`. |
 | `JUDGE_INPUT_TOKENS` | `50000` | Scoring-request token cap. Below it, one full-text call; above it, the chunked evidence scan. |
 
-## Scan (overflow path)
+## Scan (Overflow Path)
 
 These knobs apply when the verbatim scoring input exceeds `JUDGE_INPUT_TOKENS`. Extraction runs on a **copy** of the scoring config, so a tier learned during extraction cannot leak onto scoring.
 
@@ -43,7 +45,7 @@ These knobs apply when the verbatim scoring input exceeds `JUDGE_INPUT_TOKENS`. 
 | `SCAN_THINKING` | `disabled` | The one non-inherited override: extraction spends no reasoning budget unless re-enabled. |
 | `SCAN_MAX_TOKENS` · `SCAN_TEMPERATURE` · `SCAN_MAX_ATTEMPTS` · `SCAN_THINKING_EFFORT` · `SCAN_THINKING_BUDGET` · `SCAN_OUTPUT_FORMAT` | inherit | Remaining extraction overrides, mirroring the scoring keys. |
 
-## CLI flags
+## CLI Flags
 
 | Flag | Default | Purpose |
 |---|---|---|

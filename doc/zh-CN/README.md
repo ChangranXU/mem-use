@@ -5,21 +5,29 @@ icon: book-open
 
 # 简介
 
-**mem-eval** 度量 agent 记忆系统的实际效果。它的输入是 traj-recorder 录制的 schema-v6 `trajectory.jsonl` 轨迹——每个记忆动作（创建、检索、投递）都以显式的 `memory_*` 注解事件记录在案；输出是全部记忆操作的可视化图，以及每次召回注入的 LLM 评审判定。
+{% hint style="info" %}
+**mem-eval 是什么？** 一套只读分析工具，度量 agent 记忆系统的实际效果——可视化全部记忆操作，并以 LLM 评分规则为每次召回注入打分。
+{% endhint %}
+
+**mem-eval** 以 traj-recorder 录制的 schema-v6 `trajectory.jsonl` 轨迹为输入——其中每个记忆动作都作为显式的 `memory_*` 注解事件记录在案——将其转化为可操作的质量指标。
 
 记忆动作绝不从提示词、角色名或标签约定中推断。没有注解的轨迹是合法输入，运行得到零个记忆操作。
 
+## 工具
+
 两个只读工具共享同一套解析核心：
 
-- **memgraph** 把每次记忆操作及其关系渲染成自包含的 HTML 图（可选 JSON 产物）。
-- **injudge** 按五信号评分规则为每次召回注入打分，写出 `injudge.report/v5` 产物；用 `--verdicts` 可将其叠加回图上。
+| 工具 | 用途 |
+|---|---|
+| **memgraph** | 把每次记忆操作及其关系渲染成自包含的 HTML 图（可选 JSON 产物）。 |
+| **injudge** | 按五信号评分规则为每次召回注入打分，写出 `injudge.report/v5` 产物；用 `--verdicts` 可将其叠加回图上。 |
 
 贯穿两个工具的一条原则：召回注入以其对 agent 的**后续影响**来评判。最终任务结果可以佐证判断，但绝不单独决定判断。
 
 ## 快速开始
 
 ```bash
-# 首次，在 checkout 内执行（dev 组为测试套件提供 pytest）
+# 安装依赖（首次，在 checkout 内执行）
 uv sync
 
 # 1 —— 可视化全部记忆操作
@@ -32,25 +40,27 @@ uv run -m injudge runs/ -o output/
 uv run -m memgraph runs/ -o memgraph-verdicts.html --verdicts output/injudge-report.json
 ```
 
+{% hint style="tip" %}
 路径可以是轨迹目录、`trajectory.jsonl` 文件，或递归扫描的根目录——见[输入约定](input-contract.md#输入路径)。
+{% endhint %}
 
 ## 工作流
 
 {% stepper %}
 {% step %}
-## 可视化
+### 可视化
 
 memgraph 展示每条记忆由哪个 `(轨迹, 步骤)` 创建、随后被哪个 `(轨迹, 步骤)` 召回。多条运行一起加载时可以看到跨轨迹复用。
 {% endstep %}
 
 {% step %}
-## 评审
+### 评审
 
 injudge 把内容相同的重复注入归并为**区间（span）**，由 LLM 为每条投递记忆打分，再由代码推导区间判定。损害优先：任一误用即为 negative；否则任一采纳即为 positive；否则为 neutral。
 {% endstep %}
 
 {% step %}
-## 叠加
+### 叠加
 
 判定报告回灌进图，每个召回节点按其区间的判定着色。
 {% endstep %}
@@ -58,7 +68,9 @@ injudge 把内容相同的重复注入归并为**区间（span）**，由 LLM �
 
 ## 方法论
 
-LLM 从不直接给出区间判定。它为每条投递记忆打五个信号——`relevance`、`accuracy`、`novelty`、`influence`、`positive_effect`——injudge 再在代码中由这些信号推导使用标签与区间判定。信号定义、损害优先规则与映射关系见[评分规则与判定推导](verdict-derivation.md)；标签如何计入统计见[产物](artifacts.md#数字如何推导)。
+LLM 从不直接给出区间判定。它为每条投递记忆打五个信号——`relevance`、`accuracy`、`novelty`、`influence`、`positive_effect`——injudge 再在代码中由这些信号推导使用标签与区间判定。
+
+信号定义、损害优先规则与映射关系见[评分规则与判定推导](verdict-derivation.md)；标签如何计入统计见[产物](artifacts.md#数字如何推导)。
 
 {% hint style="info" %}
 最终补丁正确，仍可能包含 agent 碰巧扛过去的有害注入；任务失败，仍可能包含 agent 未能利用的有用注入。injudge 评的是注入的足迹，不是 agent 的编码能力。

@@ -5,7 +5,7 @@ icon: wrench
 
 # 开发
 
-## 测试
+## 运行测试
 
 ```bash
 uv sync                                # 首次，在 checkout 内执行
@@ -13,7 +13,9 @@ uv run pytest tests -q                 # 全部测试
 uv run pytest tests/test_injudge.py -q # 单个文件
 ```
 
+{% hint style="info" %}
 测试套件不走网络：评审与提取客户端都打桩。夹具由 `tests/annotated_fixtures.py` 合成 schema-v6 轨迹。
+{% endhint %}
 
 ## 项目结构
 
@@ -25,6 +27,7 @@ uv run pytest tests/test_injudge.py -q # 单个文件
 | `prompts/` | 所有 LLM 提示词文件，按工具与用途分目录（经 `injudge/prompts.py` 加载） |
 | `tests/` | pytest 测试套件与共享的 schema-v6 合成轨迹构造器 |
 | `doc/` | 本书（GitBook 布局：`LANGS.md` + `en/` + `zh-CN/`） |
+| `data/` | SWE-bench Verified 实例流与记忆系统评估分析边车 |
 
 ## 贡献约定
 

@@ -5,17 +5,19 @@ icon: share-nodes
 
 # memgraph
 
+{% hint style="info" %}
+memgraph extracts every memory operation from annotations and renders how memories are created, updated, deleted, and recalled — as a single self-contained HTML file that works offline.
+{% endhint %}
+
 ```bash
 uv run -m memgraph <paths> -o memgraph.html --json memgraph.json
 ```
 
-memgraph extracts every memory operation from the annotations and renders how memories are created, updated, deleted, and recalled. For each memory it answers two questions: which `(trajectory, step)` created it, and which `(trajectory, step)` later recalled it. Load several runs together to see cross-trajectory reuse.
+For each memory, memgraph answers two questions: which `(trajectory, step)` created it, and which `(trajectory, step)` later recalled it. Load several runs together to see cross-trajectory reuse.
 
-How memories are told apart is defined in [Memory identity](input-contract.md#memory-identity).
+How memories are told apart is defined in [Memory identity](input-contract.md#memory-identity). Trajectories with zero memory operations render as empty lanes — valid input.
 
-The HTML is a single self-contained file that works offline. Trajectories with zero memory operations render as empty lanes — valid input.
-
-## Graph model
+## Graph Model
 
 The JSON artifact — the same dict embedded in the HTML — is:
 
@@ -34,14 +36,14 @@ Two chronology notes — both valid input rather than errors:
 - A recalled memory with no observed creation in the loaded set is registered with `origin: "not_observed"` and drawn with a ghost creation marker. The store entry simply predates the loaded trajectories.
 - A recall whose timestamp (or, within one trajectory, seq) precedes the first observed creation is flagged `recalled_before_creation`. The edge is still drawn; the warning is recorded in `validation`.
 
-## HTML
+## HTML Features
 
-The page provides:
+The rendered page provides:
 
-- one lane per trajectory, ordered by `run.json` `started_at` when present;
-- creation → recall edges, plus lifecycle chains (updates and deletions);
-- a memory sidebar and per-operation popovers;
-- filters and zoom.
+- One lane per trajectory, ordered by `run.json` `started_at` when present
+- Creation → recall edges, plus lifecycle chains (updates and deletions)
+- A memory sidebar and per-operation popovers
+- Filters and zoom
 
 ## Options
 
@@ -51,7 +53,7 @@ The page provides:
 | `--json PATH` | Also write the machine-readable graph artifact |
 | `--verdicts PATH` | Merge an `injudge.report/v5` file before rendering |
 
-## Verdict overlay
+## Verdict Overlay
 
 `--verdicts` joins the report onto recall ops by `(run_id, op seq)`. Trajectory ids (`T1`, `T2`, …) are assigned per invocation, so the two tools may number them differently on different path sets; `run_id` is the stable join key.
 
@@ -64,6 +66,17 @@ Each recall op is annotated in place:
 | `verdict_span` | The injudge span id |
 | `verdict_detail` | Confidence, analysis, evidence, per-memory usage, rubric, delivery cost, input regime, `auto` / `error` markers |
 
-Recall nodes are colored by `span_verdict`: green positive, red negative, gray neutral, amber error. The header gains a verdict tally. Popovers show the judge's analysis, per-memory usage, and the span's input regime (`full` / `scan`, gold, over-budget).
+Recall nodes are colored by `span_verdict`:
 
+| Color | Verdict |
+|---|---|
+| Green | positive |
+| Red | negative |
+| Gray | neutral |
+| Amber | error |
+
+The header gains a verdict tally. Popovers show the judge's analysis, per-memory usage, and the span's input regime (`full` / `scan`, gold, over-budget).
+
+{% hint style="info" %}
 Unmatched or ambiguous joins are validation notes, never errors. An ambiguous key — a `run_id` shared by several loaded trajectories, or one `(run_id, seq)` claimed by several report injections or several recall ops — is skipped rather than cross-annotated. The graph still renders.
+{% endhint %}

@@ -3,13 +3,15 @@ description: "What a trajectory must contain, how memories are identified, and h
 icon: file-lines
 ---
 
-# Input contract
+# Input Contract
 
-Both tools read **schema-v6 gate trajectories**. The traj-recorder writes each memory-system action as an explicit `memory_*` annotation event; the tools consume those events and nothing else. Prompt text, role names, and label conventions are never parsed to reconstruct memory actions.
+{% hint style="info" %}
+Both tools read **schema-v6 gate trajectories**. Memory actions come exclusively from the recorder's `memory_*` annotation events — prompt text, role names, and label conventions are never parsed.
+{% endhint %}
 
 A trajectory without annotations is valid input: the run yields zero memory operations plus a validation note, not an error.
 
-## Annotation events
+## Annotation Events
 
 | Event family | Recorded action |
 |---|---|
@@ -19,9 +21,9 @@ A trajectory without annotations is valid input: the run yields zero memory oper
 | `memory_search_*` | Retrieval |
 | `memory_delivery` | Recall injection into the agent context |
 
-## Memory identity
+## Memory Identity
 
-Memories are told apart by the recorder's portable MemoryRef fields, never by adapter vocabulary.
+Memories are identified by the recorder's portable MemoryRef fields, never by adapter vocabulary.
 
 | Layer | Key | Used for |
 |---|---|---|
@@ -36,7 +38,7 @@ Adapter extensions (`extensions.cure`) contribute a **display** projection only:
 **Span fingerprint fallback.** A memory with no portable version identity (an `operation_local` version id over undigested content) fingerprints on the delivered `(namespace, key, value)` instead. Redacted content records no value, so distinct redacted bodies under one `(namespace, key)` share a span: nothing recorded can tell them apart.
 {% endhint %}
 
-## Agent steps
+## Agent Steps
 
 Operations are attributed to **agent steps**: the 1-based ordinal of a completed turn on the agent's own lane. Lanes come from `memory_role_bind`; turns on a memory lane — the memory system's own extractions and searches — are not agent steps.
 
@@ -47,7 +49,7 @@ Two edge cases:
 - An extraction observed before the first agent turn completes is step `0`.
 - A delivery that cannot be attributed to any agent turn has `step = None`. Its span has no subsequent behavior to judge and is rule-judged neutral (see [injudge](injudge.md#injection-spans)).
 
-## Input paths
+## Input Paths
 
 Each CLI path may be:
 
@@ -57,8 +59,12 @@ Each CLI path may be:
 
 The same directory under two spellings is loaded once. A path that matches nothing is a usage error, named explicitly — never a silent skip.
 
-## Corrupt input
+## Corrupt Input
 
-Corrupt data degrades; it never aborts the run. Malformed JSONL lines, corrupt seqs, unknown binding statuses, non-list payload fields, and broken session or operation links land in `validation` and warnings, and the run continues. Hand-edited artifacts degrade the same way; nothing raises.
+{% hint style="warning" %}
+Corrupt data degrades gracefully; it never aborts the run.
+{% endhint %}
+
+Malformed JSONL lines, corrupt seqs, unknown binding statuses, non-list payload fields, and broken session or operation links land in `validation` and warnings, and the run continues. Hand-edited artifacts degrade the same way; nothing raises.
 
 The event stream keeps file order. A missing seq gets a synthetic seq one past the highest seen so far, so retraction and order pairings stay attached to their targets. A genuinely non-increasing seq is noted, never re-sorted.

@@ -122,13 +122,18 @@ def _reasoning_of(msg: dict) -> str:
 
 
 def build_step_stream(
-    events: list[dict], memory_lanes: set[str | None], warnings: list[str]
+    events: list[dict],
+    memory_lanes: set[str | None],
+    warnings: list[str],
+    side_lanes: set[str | None] = frozenset(),
 ) -> list[AgentStep]:
     """One AgentStep per completed agent turn, in turn order.
 
     `memory_lanes` is the set of bound memory-lane proxy_sources (an empty
     set classifies every turn as an agent turn; None inside the set is the
-    unprefixed lane)."""
+    unprefixed lane). `side_lanes` is the derived set of lanes bound as
+    neither main nor memory (e.g. a query-rewrite lane): their turns are
+    real model calls but produce no agent steps."""
     turn_seq_start: dict[int, int] = {}
     turn_seq_end: dict[int, int] = {}
     classified = classifying_messages(events)  # turn -> classifying message_end
@@ -222,8 +227,9 @@ def build_step_stream(
 
     steps: list[AgentStep] = []
     # the shared ordinal rule (never re-derived): agent step = 1-based
-    # position among the agent-lane turns — a memory-LLM turn consumes none
-    turns = agent_turns(classified, memory_lanes)
+    # position among the agent-lane turns — a memory-LLM or side-lane turn
+    # consumes none
+    turns = agent_turns(classified, memory_lanes, side_lanes)
 
     for i, turn in enumerate(turns):
         msg = classified[turn]

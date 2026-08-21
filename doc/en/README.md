@@ -5,52 +5,62 @@ icon: book-open
 
 # Introduction
 
-**mem-eval** measures how well an agent's memory system works. Its input is what the gate's traj-recorder produced: schema-v6 `trajectory.jsonl` files in which every memory action — creation, search, delivery — is recorded as an explicit `memory_*` annotation event. Its output is a picture of every memory operation, plus an LLM-judged verdict for every recall injection.
+{% hint style="info" %}
+**What is mem-eval?** A read-only analysis toolkit that measures how well an agent's memory system works — visualizing every memory operation and scoring every recall injection with an LLM rubric.
+{% endhint %}
+
+**mem-eval** takes what the gate's traj-recorder produced — schema-v6 `trajectory.jsonl` files where every memory action is recorded as an explicit `memory_*` annotation event — and turns it into actionable quality metrics.
 
 Memory actions are never inferred from prompt text, role names, or label conventions. A trajectory without annotations is valid input and yields zero memory operations.
 
+## Tools
+
 Two read-only tools share one parsing core:
 
-- **memgraph** renders every memory operation and its relationships as a self-contained HTML graph, with an optional JSON artifact.
-- **injudge** scores each recall injection against a five-signal rubric and writes the `injudge.report/v5` artifact, which overlays onto the graph with `--verdicts`.
+| Tool | Purpose |
+|---|---|
+| **memgraph** | Renders every memory operation and its relationships as a self-contained HTML graph, with an optional JSON artifact. |
+| **injudge** | Scores each recall injection against a five-signal rubric and writes the `injudge.report/v5` artifact, which overlays onto the graph with `--verdicts`. |
 
-One principle runs through both tools: a recall injection is judged by its **subsequent influence** on the agent. The final task result may corroborate a judgment; it never decides one.
+One principle runs through both: a recall injection is judged by its **subsequent influence** on the agent. The final task result may corroborate a judgment; it never decides one.
 
-## Quickstart
+## Quick Start
 
 ```bash
-# once, inside the checkout (the dev group adds pytest for the test suite)
+# Install dependencies (once, inside the checkout)
 uv sync
 
-# 1 — visualize every memory operation
+# 1 — Visualize every memory operation
 uv run -m memgraph runs/ -o memgraph.html --json memgraph.json
 
-# 2 — judge recall injections (copy .env.example to .env and fill it in first)
+# 2 — Judge recall injections (copy .env.example → .env and fill it in first)
 uv run -m injudge runs/ -o output/
 
-# 3 — overlay the verdicts onto the graph
+# 3 — Overlay the verdicts onto the graph
 uv run -m memgraph runs/ -o memgraph-verdicts.html --verdicts output/injudge-report.json
 ```
 
+{% hint style="tip" %}
 A path may be a trajectory directory, a `trajectory.jsonl` file, or a root directory scanned recursively — see [Input contract](input-contract.md#input-paths).
+{% endhint %}
 
 ## Workflow
 
 {% stepper %}
 {% step %}
-## Visualize
+### Visualize
 
 memgraph shows which `(trajectory, step)` created each memory and which `(trajectory, step)` later recalled it. Load several runs together to see cross-trajectory reuse.
 {% endstep %}
 
 {% step %}
-## Judge
+### Judge
 
 injudge groups identical re-injections into **spans** and scores every delivered memory with an LLM. The span verdict is then derived in code. Harm dominates: any misused memory makes the span negative; otherwise any used memory makes it positive; otherwise it is neutral.
 {% endstep %}
 
 {% step %}
-## Overlay
+### Overlay
 
 The verdict report merges back into the graph, coloring each recall node by its span's verdict.
 {% endstep %}
@@ -58,7 +68,9 @@ The verdict report merges back into the graph, coloring each recall node by its 
 
 ## Methodology
 
-The LLM never emits a span verdict. It scores five signals per delivered memory — `relevance`, `accuracy`, `novelty`, `influence`, `positive_effect` — and injudge derives usage labels and the span verdict from those signals in code. The signals, the harm-dominates rule, and the mapping are documented in [Rubric and verdict derivation](verdict-derivation.md); how the labels are counted into statistics is in [Artifacts](artifacts.md#how-the-numbers-are-derived).
+The LLM never emits a span verdict. It scores five signals per delivered memory — `relevance`, `accuracy`, `novelty`, `influence`, `positive_effect` — and injudge derives usage labels and the span verdict from those signals in code.
+
+The signals, the harm-dominates rule, and the mapping are documented in [Rubric and verdict derivation](verdict-derivation.md); how the labels are counted into statistics is in [Artifacts](artifacts.md#how-the-numbers-are-derived).
 
 {% hint style="info" %}
 A correct final patch can still contain harmful injections the agent happened to survive. A failed task can still contain useful injections the agent failed to exploit. injudge scores the injection's footprint, not the agent's coding ability.

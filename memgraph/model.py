@@ -27,6 +27,9 @@ class Trajectory:
     memory_lane: str | None = None
     # all bound memory-lane proxy_sources (internal; None = the unprefixed lane)
     memory_lanes: set[str | None] = field(default_factory=set)
+    # lanes bound as neither main nor memory whose turns count as neither
+    # agent steps nor memory turns (internal, like memory_lanes)
+    side_lanes: set[str | None] = field(default_factory=set)
     adapter: str | None = None  # memory adapter name@version
     instance_id: str | None = None  # from memory_session
     # exact task statement from memory_session (internal: the judge input —

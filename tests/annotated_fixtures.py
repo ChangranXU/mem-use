@@ -145,6 +145,19 @@ class AnnotatedBuilder:
                           "role_call_index": 1}
         return self
 
+    def side_turn(self, lane="QUERY"):
+        """One turn on an unbound side lane (e.g. a query-rewrite lane): real
+        model traffic stamped with a lane no role bind claims, carrying no
+        memory events — it must classify as neither an agent step nor a
+        memory turn."""
+        self.turn += 1
+        call_id = f"{self.turn:06d}-q"
+        self._emit("turn_start", turn=self.turn, call_id=call_id, proxy_source=lane)
+        self._emit("message_end", proxy_source=lane, role="assistant",
+                   msg=2, turn=self.turn, content='{"query": "what now"}')
+        self._emit("turn_end", turn=self.turn, status="completed", proxy_source=lane)
+        return self
+
     def rewrite(self, src=MAIN, kept=5, dropped=1, replay_tool_ends=True):
         """A history_rewritten plus what may follow it turn-less on the agent
         lane: the gate's origin-history re-record of the response-side

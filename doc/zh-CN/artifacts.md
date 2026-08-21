@@ -5,7 +5,9 @@ icon: box-archive
 
 # 产物
 
-injudge 的全部产物写入输出目录（`-o DIR`，默认 `output/`）：
+{% hint style="info" %}
+injudge 的全部产物写入输出目录（`-o DIR`，默认 `output/`）。
+{% endhint %}
 
 | 文件 | Schema | 作用 |
 |---|---|---|
@@ -15,11 +17,11 @@ injudge 的全部产物写入输出目录（`-o DIR`，默认 `output/`）：
 
 memgraph 的 `--json` 产物是 `{tool, trajectories, ops, memories, edges, validation}`——与 HTML 内嵌的同一个 dict。见 [memgraph](memgraph.md#图模型)。
 
-## Report 与 summary
+## Report 与 Summary
 
-report 是评审记录。每个操作带有含 note 的评分、`analysis`、`evidence`、失败时的 `judge_raw`、投递成本、预算门区间上的 `input` 路径，以及 validation 日志。区间的 `operation_id` 就是在该文件中查找所用的 id。
+**report** 是评审记录。每个操作带有含 note 的评分、`analysis`、`evidence`、失败时的 `judge_raw`、投递成本、预算门区间上的 `input` 路径，以及 validation 日志。区间的 `operation_id` 就是在该文件中查找所用的 id。
 
-summary 是供阅读和比较记忆系统的数字。评判叙述只留在 report 中。
+**summary** 是供阅读和比较记忆系统的数字。评判叙述只留在 report 中。
 
 当多个身份共用同一显示键时，summary 的 `key` 字段（排查清单与 `memory_usage`）会带上 `key#<item 或 namespace>` 后缀——取 8 字符前缀，前缀冲突时取完整 base——两条记忆绝不会被并成一条。report 始终保留完整身份。
 
@@ -126,7 +128,7 @@ $$
 | `n_injections` | 区间内的投递数 |
 | `usage` | 逐记忆的使用标签（空时省略）。auto-neutral 的占位 `unclear` 不会投影到这里。 |
 
-## 仅 report 中的字段
+## 仅 Report 中的字段
 
 `injudge-report.json` 每个操作还带有：`memories`（完整已录制引用）、评分 note、`analysis`、`evidence`、`step_gaps`、`new_keys` / `removed_keys`、`auto`、`error`、`judge_raw`，以及预算门区间上的 `input`（`path` 为 `full` 或 `scan`，外加扫描计数，适用时还有 `"gold"`、`"over_budget"`）。评判意外失败的区间会保留不含扫描计数的再推导 `{path, gold?}` 记录，使路径计数仍包含该区间。
 

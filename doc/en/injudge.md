@@ -5,17 +5,18 @@ icon: gavel
 
 # injudge
 
+{% hint style="info" %}
+injudge classifies each recall injection as **positive**, **negative**, or **neutral** based on its footprint in the agent turns that follow.
+{% endhint %}
+
 ```bash
 uv run -m injudge <paths>    # writes output/injudge-report.json + output/summary.json
 
-# Print the judge input per span (gold blocks included) with no network access.
-# Overflowing spans add an INPUT OVERFLOW note with the would-be chunk counts.
-# Only the budget/chunk knobs are read from .env — never credentials, no judge
-# calls, no files written:
+# Preview mode: print the judge input per span (gold blocks included) with no
+# network access. Only the budget/chunk knobs are read from .env — never
+# credentials, no judge calls, no files written:
 uv run -m injudge <paths> --dry-run --limit 3
 ```
-
-injudge classifies each recall injection as **positive**, **negative**, or **neutral** from its footprint in the agent turns that follow.
 
 Progress renders on stderr with tqdm: a trajectories bar plus the current trajectory's span bar on a TTY, and one checkpoint line per finished trajectory when piped.
 
@@ -31,7 +32,7 @@ Each run writes into `-o DIR` (default `output/`):
 
 Delivery cost and delivery-policy metrics are computed deterministically from the recordings, not judged — see [Artifacts](artifacts.md#delivery-cost-and-policy). The full field reference lives there too.
 
-## Injection spans
+## Injection Spans
 
 Identical content is often re-injected, so the judged unit is the **injection span**: a maximal run of consecutive recall ops whose delivered set has the same portable identity.
 
@@ -42,7 +43,7 @@ Identical content is often re-injected, so the judged unit is the **injection sp
 
 Span construction, including the fingerprint fallback for undigested content, is specified in [Memory identity](input-contract.md#memory-identity).
 
-## How a span is judged
+## How a Span Is Judged
 
 Each span goes through three stages, each documented on its own page:
 
@@ -52,7 +53,7 @@ Each span goes through three stages, each documented on its own page:
 
 Retry, tier, and failure behavior of the calls themselves is in [Judge client](judge-client.md).
 
-## Golden answer and correctness
+## Golden Answer and Correctness
 
 The scoring call accepts two optional attachments. Each comes either from a sidecar next to `trajectory.jsonl` or from the CLI; CLI values override the same-named sidecar fields. One CLI gold over several loaded trajectories warns.
 

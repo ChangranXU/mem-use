@@ -5,17 +5,19 @@ icon: wrench
 
 # Development
 
-## Tests
+## Running Tests
 
 ```bash
 uv sync                                # once, inside the checkout
 uv run pytest tests -q                 # full suite
-uv run pytest tests/test_injudge.py -q # one file
+uv run pytest tests/test_injudge.py -q # single file
 ```
 
+{% hint style="info" %}
 The suite does not use the network: the judge and extraction clients are stubbed. Fixtures are synthetic schema-v6 trajectories built by `tests/annotated_fixtures.py`.
+{% endhint %}
 
-## Project layout
+## Project Layout
 
 | Path | Role |
 |---|---|
@@ -25,6 +27,7 @@ The suite does not use the network: the judge and extraction clients are stubbed
 | `prompts/` | Every LLM prompt as a file, grouped by tool and purpose (loaded via `injudge/prompts.py`) |
 | `tests/` | pytest suite and shared schema-v6 fixture builder |
 | `doc/` | This book (GitBook layout: `LANGS.md` + `en/` + `zh-CN/`) |
+| `data/` | SWE-bench Verified instance streams and analysis sidecars for memory-system evaluation |
 
 ## Contributing
 
