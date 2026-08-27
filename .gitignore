@@ -27,3 +27,17 @@ dist/
 
 # Eval outputs
 output/
+
+# Benchmark data artifacts — regenerable via data/utils/build_data.py, but
+# version-controlled: verify_data.py's frozen anchors pin these bytes, and
+# frozen counters over untracked artifacts are unenforceable. Secrets and
+# caches (.env, .DS_Store, __pycache__) stay ignored by the global rules.
+data/*
+!data/README.md
+!data/transfer-map.json
+!data/verified-metadata.json
+!data/instance-ids-*.txt
+!data/repo-neighbor-*
+!data/repo-interference
+!data/repo-core-*
+!data/utils
