@@ -76,10 +76,10 @@ Mean TF-IDF cosine between repos, in-group (pairs inside the group) vs out-of-gr
 
 | Group | Patch in | Patch out | Problem in | Problem out |
 |---|---|---|---|---|
-| neighbor-1 (sklearn/xarray/astropy) | 0.0350 | 0.0252 | 0.0571 | 0.0399 |
-| neighbor-2 (matplotlib/seaborn) | 0.0618 | 0.0237 | 0.0818 | 0.0395 |
-| neighbor-3 (django/flask/requests) | 0.0205 | 0.0260 | 0.0337 | 0.0342 |
-| neighbor-4 (pytest/pylint/sphinx) | 0.0422 | 0.0285 | 0.0452 | 0.0369 |
+| neighbor-1 (sklearn/xarray/astropy) | 0.0354 | 0.0253 | 0.0565 | 0.0397 |
+| neighbor-2 (matplotlib/seaborn) | 0.0620 | 0.0238 | 0.0809 | 0.0391 |
+| neighbor-3 (django/flask/requests) | 0.0204 | 0.0260 | 0.0337 | 0.0340 |
+| neighbor-4 (pytest/pylint/sphinx) | 0.0420 | 0.0286 | 0.0450 | 0.0367 |
 
 > **neighbor-3 is a hygiene control.** The web group shows no lexical signal in either space — django's ORM-heavy patches and issue text share little vocabulary with flask/requests. Its purpose is the group where **cross-repo recall should not fire**: recall of a django memory during a flask task is the hygiene signal, and low cross-repo recall rates inside neighbor-3 are not evidence of a memory-system failure. Its grouping rests on conceptual transfer (HTTP semantics, request/response handling), not lexical similarity.
 
@@ -98,14 +98,14 @@ Per-instance metadata keyed by `instance_id`, with: `repo`, `created_at`, `diffi
 Two maps:
 
 - **`streams`** — for each canonical stream, every ordered pair (a before b) in stream order — 32,050 pairs total.
-- **`run_orders`** — for each shipped run-order file (the 4 neighbor folders and the 3 interference streams), every ordered **cross-repo** pair of that run-order — 7,801 records total (neighbor-1 1,892; neighbor-2 68; neighbor-3 2,087; neighbor-4 1,466; interference 704 + 748 + 836). Same-repo pairs are never duplicated here: join them from the canonical entries via `(a, b)`. A same-repo pair belonging to both a neighbor folder and an interference stream repeats with entry-local positions — accepted for self-contained entries. Cores ship **no** entry: a core's pairs are a subset of its canonical stream's records, joinable via `(a, b)` with canonical positions.
+- **`run_orders`** — for each shipped run-order file (the 4 neighbor folders and the 3 interference streams), every ordered **cross-repo** pair of that run-order — 7,801 records total (neighbor-1 1,892; neighbor-2 68; neighbor-3 2,087; neighbor-4 1,466; interference 704 + 748 + 836). Same-repo pairs are never duplicated here: join them from the canonical entries via `(a, b)`. A cross-repo pair belonging to both a neighbor folder and an interference stream (astropy×scikit-learn, pytest×sphinx) repeats with entry-local positions — accepted for self-contained entries. Cores ship **no** entry: a core's pairs are a subset of its canonical stream's records, joinable via `(a, b)` with canonical positions.
 
 Pair-record fields (canonical records carry all of these; `run_orders` records carry the same scalar set with the cross-repo carve-outs below):
 
 - `a`, `b`, `pos_a`, `pos_b` — the pair and its 1-based positions. **Canonical positions are canonical-stream positions**: a same-repo pair's distance inside a fused run-order (other repos' tasks interleaved) is a *different quantity*, recoverable only from the run-order file, because same-repo pairs deliberately stay out of `run_orders` entries. In `run_orders` records, `pos_a`/`pos_b` are positions in that run-order.
 - `shared_files` / `shared_file_count` — modified-file paths extracted from gold patches (SWE-Bench-CL's method); conditional on non-empty.
 - `file_jaccard` — |shared|/|union|.
-- `patch_cosine` — TF-IDF cosine of gold patches (tokens = camelCase/snake-split identifiers ≥2 chars, terms in ≥3 docs, sublinear tf, natural-ln idf).
+- `patch_cosine` — TF-IDF cosine of gold patches (tokens = camelCase-split identifiers ≥2 chars; snake_case and all-caps runs kept whole, terms in ≥3 docs, sublinear tf, natural-ln idf).
 - `problem_cosine` — TF-IDF cosine of the two problem statements, used **verbatim** (code blocks and stack traces included — faithful to what the agent sees; no stripping). Same tokenization/terms/idf spec as `patch_cosine`, but a **separate matrix over the 500 statements** — idf never mixes with the patch corpus.
 - `problem_similar_threshold` — per-stream nearest-rank p75 of that stream's pair `problem_cosine` values (computed on the shipped 4 dp values, stored rounded to 4 dp). A pair is problem-similar iff `problem_cosine >= threshold`, both as shipped 4 dp values (the pinned comparison; boundary pairs at exactly the threshold are problem-similar). Omitted for a stream with no pairs (flask: 1 task, 0 pairs — the verifier asserts the omission).
 - `quadrant` — see the taxonomy below. Omitted on `run_orders` records (thresholds are per canonical stream; a cross-repo quadrant would collapse to trap/neutral anyway).
@@ -113,7 +113,7 @@ Pair-record fields (canonical records carry all of these; `run_orders` records c
 - `shared_symbols` — symbols from gold-patch hunk headers (`@@ ... @@ <def|class|function> name`) that both patches touch **in the same file**; conditional on non-empty.
 - `relation_strength` — strongest gold-evidence grade: `3` same symbol in a shared file > `2` shared gold file > `1` shared test file only > `0` unrelated.
 - `days_between` — `created_at(b) − created_at(a)` in days, rounded to 4 dp; `>= 0` everywhere (the chronology invariant).
-- `problem_margin` — `round(problem_cosine − problem_similar_threshold, 4)`, computed from the two shipped 4 dp values; `>= 0` iff problem-similar under the pinned rule (13 boundary trap pairs sit at exactly 0 in django alone). **Two caveats:** it is a *conditioning convenience* for cross-stream aggregation, never a delivery predictor; and it is *location-normalized only* — equal margins are not equal extremity across streams (+0.05 in django's compressed distribution is a different quantile than +0.05 in xarray's wide one). Within a single stream (e.g. as a peeling weight) the margin is fully meaningful. On `run_orders` records it is computed against that entry's own threshold.
+- `problem_margin` — `round(problem_cosine − problem_similar_threshold, 4)`, computed from the two shipped 4 dp values; `>= 0` iff problem-similar under the pinned rule (18 boundary trap pairs sit at exactly 0 in django alone). **Two caveats:** it is a *conditioning convenience* for cross-stream aggregation, never a delivery predictor; and it is *location-normalized only* — equal margins are not equal extremity across streams (+0.05 in django's compressed distribution is a different quantile than +0.05 in xarray's wide one). Within a single stream (e.g. as a peeling weight) the margin is fully meaningful. On `run_orders` records it is computed against that entry's own threshold.
 - `shared_problem_identifiers` / `shared_problem_identifier_count` — code identifiers appearing in both problem statements under pinned regex-only classes (below); sorted list conditional on non-empty, count always present (0 where the list is absent).
 
 `run_orders` records additionally pin the zero-relation carve-outs: `relation_strength: 0`, `shared_file_count: 0`, `file_jaccard: 0.0` explicitly, no `shared_files`/`shared_test_files`/`shared_symbols` — measured: zero shared gold-patch and test-patch paths on every neighbor combo and all three interference pairs in this data (the build computes the fields, the verifier asserts them empty; a collision fails the build). `shared_problem_identifiers` still appears when non-empty — problem statements from two repos can share identifiers; the extraction is repo-blind.
@@ -124,14 +124,14 @@ Per-stream summaries carry `tasks_with_earlier_file_overlap` (the SWE-Bench-CL s
 
 Pinned regex-only classes, applied in order (Python `re`; classes 3–4 scan the whole URL-stripped statement, backtick spans included):
 
-1. **Strip URLs** (`https?://\S+`) first — greedy, no trailing-punctuation trimming. Templated issues share support/doc URLs; 414 django trap pairs (6.6pp of traps) would otherwise be classified substantive on template URLs alone.
+1. **Strip URLs** (`https?://\S+`) first — greedy, no trailing-punctuation trimming. Templated issues share support/doc URLs; 403 django trap pairs (6.5pp of traps) would otherwise be classified substantive on template URLs alone.
 2. **Backtick spans** (`` `([^`]+)` ``), split on `[^A-Za-z0-9]+`, parts kept when **identifier-shaped**: ≥ 3 chars containing an underscore or a non-initial uppercase letter — the same shape predicate as class 4, so plain prose words never enter, quoted or not. A span whose whole content full-matches the slash-path regex emits via class 3 only, so path components like `core`/`tests` do not leak in as parts.
 3. **Dotted paths** (`[A-Za-z_]\w*(?:\.\w+)+`) and **slash paths** (`[\w.-]+(?:/[\w.-]+)+`) as whole identifiers.
 4. **Identifier-shaped `\w+` tokens** of ≥ 3 chars (`test_dataset`, `FAIL_TO_PASS`, `DataArray`, `camelCase`, `HTTP` in; plain lowercase and sentence-case words like `Python` out).
 
 All tokens are lowercased, deduplicated, and sorted before intersection and shipping — mirroring the live channel's normalization.
 
-**Measured role:** under this spec, **62% (django: 3,894/6,253) and 89% (sympy: 599/670) of trap pairs share zero code identifiers** — concentrated near threshold on average, though the zero-identifier band spans the full trap range (max cosine ≈ 0.43). The field therefore separates substantive overlap from template-floor overlap on roughly two-thirds of the trap axis's largest populations. **Conservative bias:** extraction errors fall toward "template-floor" — the safe direction for the trap split.
+**Measured role:** under this spec, **61% (django: 3,834/6,242) and 89% (sympy: 597/669) of trap pairs share zero code identifiers** — concentrated near threshold on average, though the zero-identifier band spans the full trap range (max cosine 0.4178 django / 0.4451 sympy). The field therefore separates substantive overlap from template-floor overlap on roughly two-thirds of the trap axis's largest populations. **Conservative bias:** extraction errors fall toward "template-floor" — the safe direction for the trap split.
 
 ## Quadrant Taxonomy (per canonical stream)
 
@@ -155,20 +155,20 @@ Two `neutral` cases are named so nobody re-derives them differently: problem-sim
 
 | Stream | pairs | threshold | opp | trap | deep | tasks w/ earlier opp | trap | deep |
 |---|---|---|---|---|---|---|---|---|
-| sympy | 2,775 | 0.0797 | 15 | 670 | 12 | 15 | 68 | 10 |
-| scikit-learn | 496 | 0.1751 | 2 | 122 | 2 | 2 | 24 | 2 |
-| xarray | 231 | 0.3954 | 6 | 51 | 20 | 5 | 12 | 13 |
-| astropy | 231 | 0.1578 | 4 | 54 | 0 | 3 | 16 | 0 |
-| matplotlib | 561 | 0.2304 | 7 | 122 | 11 | 6 | 26 | 9 |
-| seaborn | 1 | 0.0815 | 0 | 0 | 0 | 0 | 0 | 0 |
-| django | 26,565 | 0.0714 | 310 | 6,253 | 165 | 130 | 219 | 69 |
+| sympy | 2,775 | 0.0787 | 15 | 669 | 12 | 15 | 68 | 10 |
+| scikit-learn | 496 | 0.1772 | 2 | 122 | 2 | 2 | 25 | 2 |
+| xarray | 231 | 0.4081 | 5 | 52 | 21 | 4 | 12 | 13 |
+| astropy | 231 | 0.1562 | 4 | 54 | 0 | 3 | 16 | 0 |
+| matplotlib | 561 | 0.2313 | 7 | 121 | 11 | 6 | 27 | 9 |
+| seaborn | 1 | 0.0814 | 0 | 0 | 0 | 0 | 0 | 0 |
+| django | 26,565 | 0.0715 | 312 | 6,242 | 163 | 131 | 221 | 68 |
 | flask | 0 | — | — | — | — | 0 | 0 | 0 |
-| requests | 28 | 0.2059 | 4 | 2 | 2 | 4 | 2 | 2 |
-| pytest | 171 | 0.1742 | 6 | 37 | 4 | 4 | 14 | 4 |
-| pylint | 45 | 0.2036 | 1 | 10 | 1 | 1 | 6 | 1 |
-| sphinx | 946 | 0.1706 | 27 | 208 | 45 | 14 | 32 | 17 |
+| requests | 28 | 0.2038 | 4 | 2 | 2 | 4 | 2 | 2 |
+| pytest | 171 | 0.1776 | 5 | 37 | 5 | 4 | 14 | 4 |
+| pylint | 45 | 0.1886 | 1 | 10 | 1 | 1 | 6 | 1 |
+| sphinx | 946 | 0.1709 | 27 | 209 | 45 | 14 | 31 | 17 |
 
-The **trap axis carries a double-digit trap-task count in every eligible stream except pylint** (12 to 219; pylint has 6), while **opportunity is thin outside django/sympy/sphinx** (130/15/14 tasks) and **deep_transfer thin outside django/sphinx/xarray/sympy** (69/17/13/10 tasks) — each label's statistical weight is a documented property of the data, not folklore.
+The **trap axis carries a double-digit trap-task count in every eligible stream except pylint** (12 to 221; pylint has 6), while **opportunity is thin outside django/sympy/sphinx** (131/15/14 tasks) and **deep_transfer thin outside django/sphinx/xarray/sympy** (68/17/13/10 tasks) — each label's statistical weight is a documented property of the data, not folklore.
 
 **Degenerate streams:** flask (1 task, 0 pairs) ships no threshold and no labels — the verifier asserts the omission rather than computing a percentile of an empty distribution. seaborn (1 pair) ships its threshold but is degenerate by construction: the sole pair's cosine *is* the threshold, so it is problem-similar under the pinned `>=` — its `relation_strength` is 1 (shared test file only), so it lands `neutral` anyway.
 
@@ -180,35 +180,35 @@ Quadrant labels condition **temptation strength** (what ranks top for a problem-
 
 Content-level task deduplication was measured and settled as unnecessary:
 
-- **Within-repo:** no pair reaches `problem_cosine >= 0.8` (max 0.7683; also zero at 0.9/0.95), so no near-duplicate problem statements distort the per-stream thresholds or trap counts.
-- **Cross-repo:** max 0.3783 globally (matplotlib × seaborn — the small streams), 0.2133 on the default interference pairs, zero pairs `>= 0.6` anywhere in the 9×9 matrix.
+- **Within-repo:** no pair reaches `problem_cosine >= 0.8` (max 0.7703; also zero at 0.9/0.95), so no near-duplicate problem statements distort the per-stream thresholds or trap counts.
+- **Cross-repo:** max 0.3768 globally (matplotlib × seaborn — the small streams), 0.2138 on the default interference pairs, zero pairs `>= 0.6` anywhere in the 9×9 matrix.
 
-Honesty note: the screen is **lexical**, so a paraphrased duplicate could in principle sit under 0.8. The candidate set is pinned to **every** within-repo pair at `problem_cosine >= 0.60` — measured 20 pairs (11 at `>= 0.65`, 6 at `>= 0.70`). Template mass can only inflate similarity, never deflate it, so the `>= 0.8` screen errs in the safe direction. The dominant mechanism at the top of the list is per-repo GitHub issue-template boilerplate (the "Minimal Complete Verifiable Example"/support-links preamble shared by a repo's templated issues) supplying most of the shared token mass — the leading xarray/scikit-learn pairs are template artifacts over distinct underlying problems. If one pair proves a true duplicate, the dedup decision re-opens for that pair alone, never as a threshold change.
+Honesty note: the screen is **lexical**, so a paraphrased duplicate could in principle sit under 0.8. The candidate set is pinned to **every** within-repo pair at `problem_cosine >= 0.60` — measured 20 pairs (12 at `>= 0.65`, 7 at `>= 0.70`). Template mass can only inflate similarity, never deflate it, so the `>= 0.8` screen errs in the safe direction. The dominant mechanism at the top of the list is per-repo GitHub issue-template boilerplate (the "Minimal Complete Verifiable Example"/support-links preamble shared by a repo's templated issues) supplying most of the shared token mass — the leading xarray/scikit-learn pairs are template artifacts over distinct underlying problems. If one pair proves a true duplicate, the dedup decision re-opens for that pair alone, never as a threshold change.
 
 The pinned candidate list (every within-repo pair ≥ 0.60; rs = `relation_strength`, ids = shared problem identifiers):
 
 | cosine | pair | rs | ids |
 |---|---|---|---|
-| 0.7683 | `matplotlib-25311 → 25332` | 1 | 9 |
-| 0.7680 | `scikit-learn-9288 → 10844` | 0 | 24 |
-| 0.7388 | `pytest-7236 → 10081` | 3 | 12 |
-| 0.7200 | `xarray-6599 → 7393` | 0 | 16 |
-| 0.7178 | `xarray-3305 → 4687` | 0 | 18 |
-| 0.7070 | `xarray-4075 → 4687` | 0 | 19 |
-| 0.6844 | `xarray-4629 → 4687` | 0 | 16 |
-| 0.6841 | `xarray-7229 → 7393` | 0 | 14 |
-| 0.6703 | `matplotlib-13989 → 20676` | 0 | 3 |
-| 0.6696 | `xarray-6938 → 7393` | 0 | 15 |
-| 0.6580 | `xarray-3305 → 4075` | 0 | 17 |
-| 0.6486 | `scikit-learn-25931 → 26323` | 0 | 18 |
-| 0.6469 | `xarray-6938 → 7229` | 0 | 12 |
-| 0.6353 | `xarray-6599 → 7229` | 2 | 13 |
-| 0.6340 | `astropy-13033 → 13453` | 0 | 9 |
-| 0.6266 | `xarray-6599 → 6938` | 0 | 13 |
-| 0.6227 | `scikit-learn-25747 → 26323` | 0 | 11 |
-| 0.6206 | `astropy-13033 → 13579` | 0 | 9 |
-| 0.6055 | `matplotlib-20676 → 20859` | 0 | 6 |
-| 0.6046 | `xarray-4075 → 4094` | 0 | 17 |
+| 0.7703 | `scikit-learn-9288 → 10844` | 0 | 24 |
+| 0.7637 | `matplotlib-25311 → 25332` | 1 | 9 |
+| 0.7381 | `pytest-7236 → 10081` | 3 | 12 |
+| 0.7308 | `xarray-6599 → 7393` | 0 | 16 |
+| 0.7303 | `xarray-4075 → 4687` | 0 | 19 |
+| 0.7301 | `xarray-3305 → 4687` | 0 | 18 |
+| 0.7026 | `xarray-4629 → 4687` | 0 | 16 |
+| 0.6898 | `xarray-7229 → 7393` | 0 | 14 |
+| 0.6778 | `xarray-6938 → 7393` | 0 | 15 |
+| 0.6746 | `xarray-3305 → 4075` | 0 | 17 |
+| 0.6674 | `matplotlib-13989 → 20676` | 0 | 3 |
+| 0.6501 | `scikit-learn-25931 → 26323` | 0 | 18 |
+| 0.6476 | `xarray-6938 → 7229` | 0 | 12 |
+| 0.6437 | `xarray-6599 → 7229` | 2 | 13 |
+| 0.6358 | `xarray-6599 → 6938` | 0 | 13 |
+| 0.6324 | `astropy-13033 → 13579` | 0 | 9 |
+| 0.6273 | `astropy-13033 → 13453` | 0 | 9 |
+| 0.6230 | `scikit-learn-25747 → 26323` | 0 | 11 |
+| 0.6177 | `xarray-4075 → 4094` | 0 | 17 |
+| 0.6011 | `matplotlib-20676 → 20859` | 0 | 6 |
 
 ## `run-order.txt` — Fused Timelines
 
@@ -220,23 +220,23 @@ The verifier checks every run-order (neighbor and interference alike) is a **mem
 
 `repo-interference/<repoA>__<repoB>/run-order.txt` — exactly two repos per stream, **plain chronological merge** of the two canonical streams (the neighbor `run-order.txt` convention; no interleaving objective).
 
-**Design change:** the interference streams supersede the old patch-space `repo-gap-<n>/` adversarial reorderings (deleted). The old variant reordered one repo's stream to place lexically-similar file-disjoint tasks adjacent — impossible to keep under the no-inversion chronology invariant, and under a run-scope store retrieval exposure at task b is the whole earlier store anyway, so ordering only shaped recency. No score-maximizing interleave survived measurement either: within-repo chronological adjacency problem-cosine (0.16–0.30 for the candidate-pair repos) dwarfs the cross-repo means (0.05–0.06), so an adjacency-score DP hugs long same-repo runs and its optimum *avoids* crossings (measured under both the gap-constraint and plain-sum objectives; reproduction in `utils/review_measurements.py`). The adversarial knob is the **pair choice**, not the interleave.
+**Design change:** the interference streams supersede the old patch-space `repo-gap-<n>/` adversarial reorderings (deleted). The old variant reordered one repo's stream to place lexically-similar file-disjoint tasks adjacent — impossible to keep under the no-inversion chronology invariant, and under a run-scope store retrieval exposure at task b is the whole earlier store anyway, so ordering only shaped recency. No score-maximizing interleave survived measurement either: within-repo chronological adjacency problem-cosine (per-repo adjacency means 0.16–0.30 for the DP's candidate repos astropy/scikit-learn/xarray) dwarfs the cross-repo means (0.05–0.06), so an adjacency-score DP hugs long same-repo runs and its optimum *avoids* crossings (measured under both the gap-constraint and plain-sum objectives; reproduction in `utils/review_measurements.py`). The adversarial knob is the **pair choice**, not the interleave.
 
 **Pair choice — diversity default, not plain top-3.** From the measured 9×9 problem-cosine matrix:
 
 | Pair | Mean cross cosine | Merged len | Cross-adjacencies | Cross-exposed tasks | Neighbor groups |
 |---|---|---|---|---|---|
-| **astropy__scikit-learn** ✅ | 0.0588 | 54 | 23 | 52/54 | within 1 |
-| astropy__xarray | 0.0571 | 44 | 16 | 40/44 | within 1 |
-| xarray__scikit-learn | 0.0553 | 54 | 10 | 39/54 | within 1 |
-| astropy__matplotlib | 0.0519 | 56 | 31 | 52/56 | crosses 1×2 |
-| **matplotlib__xarray** ✅ | 0.0512 | 56 | 15 | 55/56 | crosses 2×1 |
-| scikit-learn__matplotlib | 0.0496 | 66 | 15 | 51/66 | crosses 2×1 |
-| pylint__sphinx | 0.0494 | 54 | 13 | 27/54 | within 4 |
-| matplotlib__sphinx (excluded: repo reuse) | 0.0451 | 78 | 18 | 76/78 | crosses 2×4 |
-| **pytest__sphinx** ✅ | 0.0416 | 63 | 19 | 56/63 | within 4 |
+| **astropy__scikit-learn** ✅ | 0.0584 | 54 | 23 | 52/54 | within 1 |
+| astropy__xarray | 0.0562 | 44 | 16 | 40/44 | within 1 |
+| scikit-learn__xarray | 0.0550 | 54 | 10 | 39/54 | within 1 |
+| **matplotlib__xarray** ✅ | 0.0519 | 56 | 15 | 55/56 | crosses 2×1 |
+| astropy__matplotlib | 0.0505 | 56 | 31 | 52/56 | crosses 1×2 |
+| pylint__sphinx | 0.0497 | 54 | 13 | 27/54 | within 4 |
+| matplotlib__scikit-learn | 0.0484 | 66 | 15 | 51/66 | crosses 2×1 |
+| matplotlib__sphinx (excluded: repo reuse) | 0.0457 | 78 | 18 | 76/78 | crosses 2×4 |
+| **pytest__sphinx** ✅ | 0.0415 | 63 | 19 | 56/63 | within 4 |
 
-The plain top-3 all sit inside repo-neighbor-1 and run each of its three repos twice; the default instead picks the matrix top (`astropy__scikit-learn`), the strongest no-repo-reuse cross-group pair (`matplotlib__xarray` — co-residency that exists in no neighbor folder), and the dev-tooling domain pair (`pytest__sphinx`): 6 distinct repos, no repo run twice, 173 instance-runs. The dev-tooling slot trades deliberately: `pylint__sphinx` carries mean 0.0494 but only **27/54** cross-exposed tasks (repo date ranges barely overlap — 777 days, so the merge is nearly a concatenation), whereas `pytest__sphinx` gives up 0.0078 mean cosine for **56/63** cross-exposed tasks (912 overlap days) — double the usable interference observations for 9 extra instance-runs. `matplotlib__sphinx` dominates `pytest__sphinx` on both mean and exposure but reuses matplotlib from pick 2, breaking the no-repo-reuse rule; sympy stays unpaired (its strongest cross pair trades at mean 0.0308, below every picked pair on both axes, over 107 runs); django is unpaired by cost.
+The plain top-3 all sit inside repo-neighbor-1 and run each of its three repos twice; the default instead picks the matrix top (`astropy__scikit-learn`), the strongest no-repo-reuse cross-group pair (`matplotlib__xarray` — co-residency that exists in no neighbor folder), and the dev-tooling domain pair (`pytest__sphinx`): 6 distinct repos, no repo run twice, 173 instance-runs. The dev-tooling slot trades deliberately: `pylint__sphinx` carries mean 0.0497 but only **27/54** cross-exposed tasks (repo date ranges barely overlap — 777 days, so the merge is nearly a concatenation), whereas `pytest__sphinx` gives up 0.0082 mean cosine for **56/63** cross-exposed tasks (912 overlap days) — double the usable interference observations for 9 extra instance-runs. `matplotlib__sphinx` dominates `pytest__sphinx` on both mean and exposure but reuses matplotlib from pick 2, breaking the no-repo-reuse rule; sympy stays unpaired (its strongest cross pair trades at mean 0.0357, below every picked pair on both axes, over 97 runs); django is unpaired by cost.
 
 Interference semantics: cross-repo interference is the **generalization axis** (transfer and interference of the systems' general/user-wide tiers — the systems under test scope part of their stores by repository), never a pooled retrieval-precision score; the architecture-neutral precision axis is the within-repo quadrant traps. Shipped records carry no system's scope vocabulary.
 
@@ -252,24 +252,24 @@ Per-entry counters (also in `transfer-map.json` `run_orders`): cross-exposed tas
 
 | Core | Stream | k | hard tasks | opp | trap | deep | t_trap |
 |---|---|---|---|---|---|---|---|
-| repo-core-1 | sympy (75) | 38 | 25 | 15 | 169 | 12 | 30 |
-| repo-core-trap-1 | sympy (75) | 49 | 35 | 9 | 379 | 3 | 45 |
+| repo-core-1 | sympy (75) | 38 | 25 | 15 | 165 | 12 | 29 |
+| repo-core-trap-1 | sympy (75) | 50 | 36 | 9 | 395 | 4 | 46 |
 | repo-core-2 | scikit-learn (32) | 16 | 11 | 2 | 17 | 2 | 10 |
-| repo-core-trap-2 | scikit-learn (32) | 29 | 18 | 2 | 117 | 2 | 22 |
-| repo-core-3 | xarray (22) | 11 | 10 | 5 | 9 | 16 | 5 |
-| repo-core-trap-3 | xarray (22) | 14 | 11 | 6 | 51 | 3 | 12 |
-| repo-core-4 | astropy (22) | 11 | 8 | 4 | 7 | 0 | 5 |
-| repo-core-trap-4 | astropy (22) | 18 | 15 | 1 | 52 | 0 | 16 |
+| repo-core-trap-2 | scikit-learn (32) | 27 | 16 | 2 | 118 | 1 | 23 |
+| repo-core-3 | xarray (22) | 11 | 10 | 4 | 9 | 17 | 5 |
+| repo-core-trap-3 | xarray (22) | 14 | 11 | 5 | 52 | 4 | 12 |
+| repo-core-4 | astropy (22) | 11 | 8 | 4 | 8 | 0 | 5 |
+| repo-core-trap-4 | astropy (22) | 19 | 16 | 3 | 53 | 0 | 16 |
 | repo-core-5 | matplotlib (34) | 17 | 8 | 5 | 13 | 10 | 6 |
-| repo-core-trap-5 | matplotlib (34) | 28 | 13 | 7 | 120 | 6 | 25 |
-| repo-core-7 | django (231) | 116 | 78 | 261 | 1,937 | 153 | 106 |
-| repo-core-trap-7 | django (231) | 182 | 111 | 253 | 5,216 | 107 | 175 |
-| repo-core-10 | pytest (19) | 10 | 5 | 4 | 14 | 4 | 8 |
-| repo-core-trap-10 | pytest (19) | 10 | 5 | 3 | 23 | 3 | 9 |
+| repo-core-trap-5 | matplotlib (34) | 29 | 14 | 7 | 120 | 7 | 26 |
+| repo-core-7 | django (231) | 116 | 78 | 261 | 1,922 | 153 | 106 |
+| repo-core-trap-7 | django (231) | 186 | 113 | 260 | 5,255 | 105 | 178 |
+| repo-core-10 | pytest (19) | 10 | 5 | 3 | 14 | 5 | 7 |
+| repo-core-trap-10 | pytest (19) | 10 | 5 | 2 | 24 | 4 | 9 |
 | repo-core-11 | pylint (10) | 5 | 4 | 1 | 3 | 1 | 2 |
 | repo-core-trap-11 | pylint (10) | 4 | 2 | 0 | 4 | 0 | 2 |
-| repo-core-12 | sphinx (44) | 22 | 11 | 25 | 41 | 39 | 11 |
-| repo-core-trap-12 | sphinx (44) | 33 | 16 | 21 | 178 | 21 | 29 |
+| repo-core-12 | sphinx (44) | 22 | 11 | 25 | 37 | 39 | 11 |
+| repo-core-trap-12 | sphinx (44) | 33 | 16 | 21 | 183 | 21 | 29 |
 
 "hard tasks" = difficulty in {`15 min - 1 hour`, `1-4 hours`, `>4 hours`}; t_trap = tasks with ≥ 1 earlier trap pair inside the core.
 

@@ -35,6 +35,7 @@ sympy__sympy-19954
 sympy__sympy-20428
 sympy__sympy-20438
 sympy__sympy-20590
+sympy__sympy-21379
 sympy__sympy-21596
 sympy__sympy-22456
 sympy__sympy-22714

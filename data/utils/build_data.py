@@ -114,9 +114,11 @@ def find_parquet(explicit):
     for repo_id in DATASET_IDS:
         org, name = repo_id.split("/")
         pattern = os.path.join(hub, f"datasets--{org}--{name}", "snapshots", "*", PARQUET_NAME)
-        hits = sorted(glob.glob(pattern))
+        hits = glob.glob(pattern)
         if hits:
-            return hits[-1]  # newest snapshot
+            # newest snapshot; the path tie-break keeps the pick deterministic
+            # when several snapshots share one mtime (glob order is not)
+            return max(hits, key=lambda p: (os.path.getmtime(p), p))
     try:
         from huggingface_hub import hf_hub_download
         return hf_hub_download(repo_id=DATASET_IDS[0], filename=PARQUET_NAME, repo_type="dataset")
@@ -155,9 +157,15 @@ def load_source(parquet_path):
 # --------------------------------------------------------------------------
 
 def tokenize(text):
-    # camelCase/snake identifier split; tokens are >=2 chars.
-    text = re.sub(r"(?<!^)(?=[A-Z])", " ", text or "")
-    return re.findall(r"[A-Za-z_][A-Za-z0-9_]{1,}", text.lower())
+    # camelCase identifier split; tokens are >=2 chars. Splitting before every
+    # uppercase (the old rule) shattered all-caps runs (HTTP, FAIL_TO_PASS)
+    # into sub-2-char fragments the length filter then dropped, so acronyms
+    # entered the identifier channel but never the TF-IDF channel. The two
+    # rules below keep all-caps runs whole and only break real case
+    # boundaries: acronym->word ([A-Z]+ before [A-Z][a-z]) and lower/digit->
+    # upper; snake_case never splits.
+    text = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", text or "")
+    return re.findall(r"[A-Za-z_][A-Za-z0-9_]{1,}", re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text).lower())
 
 
 def tfidf_matrix(texts):
@@ -351,8 +359,8 @@ def build_metadata(df, streams, out):
                 "difficulty": r.difficulty,
                 "base_commit": r.base_commit,
                 "version": r.version,
-                "patch": r.patch if r.patch else "",
-                "test_patch": r.test_patch if r.test_patch else "",
+                "patch": r.patch if isinstance(r.patch, str) else "",
+                "test_patch": r.test_patch if isinstance(r.test_patch, str) else "",
                 "FAIL_TO_PASS": r.f2p,
                 "PASS_TO_PASS": r.p2p,
                 "stream_file": stream["rel"],
@@ -381,6 +389,20 @@ def chronology_merge(ids, created):
     return sorted(ids, key=lambda i: (created[i], i))
 
 
+def cross_shape(ids, repo_of):
+    """(cross_adjacencies, tasks_with_earlier_cross_repo) of a run-order — the
+    exposure stats shipped in every run_orders entry. Both read repo
+    transitions alone; one spelling serves the build, the stats tables, and
+    the review aid (verify_data.py re-derives them independently on purpose)."""
+    xadj = sum(1 for x, y in zip(ids, ids[1:]) if repo_of[x] != repo_of[y])
+    seen_repos, xexp = set(), 0
+    for iid in ids:
+        if seen_repos - {repo_of[iid]}:
+            xexp += 1
+        seen_repos.add(repo_of[iid])
+    return xadj, xexp
+
+
 def expected_run_orders(streams):
     """rel path -> member stream list, for every run-order this pipeline
     ships (4 neighbor folders + the interference pairs)."""
@@ -397,8 +419,8 @@ def expected_run_orders(streams):
     return orders
 
 
-def build_run_orders(df, streams, out):
-    created = dict(zip(df["instance_id"], df["created_dt"]))
+def build_run_orders(maps, streams, out):
+    created = maps["created"]
     orders = {}
     for rel, members in sorted(expected_run_orders(streams).items()):
         merged = chronology_merge([i for s in members for i in s["ids"]], created)
@@ -414,7 +436,7 @@ def remove_stale_variants(out):
     # the regenerated variant dirs are removed first so a clean build never
     # leaves files from a previous shape behind.
     for name in sorted(os.listdir(out)):
-        if name.startswith(("repo-gap-", "repo-interference-", "repo-core-")) and os.path.isdir(os.path.join(out, name)):
+        if name.startswith(("repo-gap-", "repo-interference", "repo-core-")) and os.path.isdir(os.path.join(out, name)):
             shutil.rmtree(os.path.join(out, name))
             print(f"  removed stale {name}/")
 
@@ -432,7 +454,7 @@ TRANSFER_META = {
         "pos_b": "1-based position of b; same convention as pos_a",
         "shared_files": "modified-file paths (regex over 'diff --git a/... b/' in gold patches) shared by both tasks",
         "file_jaccard": "|shared| / |union| of modified-file sets",
-        "patch_cosine": "TF-IDF cosine of gold patches; tokens = camelCase/snake-split identifiers (>=2 chars), terms in >=3 docs, sublinear tf, natural-ln idf",
+        "patch_cosine": "TF-IDF cosine of gold patches; tokens = camelCase-split identifiers (>=2 chars; snake_case and all-caps runs kept whole), terms in >=3 docs, sublinear tf, natural-ln idf",
         "problem_cosine": "TF-IDF cosine of the two problem statements, used verbatim; same token/term/tf/idf spec as patch_cosine but a separate matrix over the 500 statements — idf never mixes with the patch corpus",
         "problem_similar_threshold": "nearest-rank p75 of the entry's pair problem_cosine values (computed on the shipped 4 dp values, stored rounded to 4 dp); omitted when the entry has no pairs. A pair is problem-similar iff problem_cosine >= threshold, both as shipped 4 dp values",
         "quadrant": "opportunity = problem-similar and relation_strength >= 2; trap = problem-similar and relation_strength == 0; deep_transfer = problem-dissimilar and relation_strength >= 2; neutral = everything else (test-file-only overlap never leaves neutral)",
@@ -523,8 +545,7 @@ def canonical_pair_records(stream, maps):
     return pairs, thr
 
 
-def build_transfer_map(df, streams, orders, out):
-    maps = derived_maps(df)
+def build_transfer_map(maps, streams, orders, out):
     repo_of, files_of, test_files_of = maps["repo_of"], maps["files_of"], maps["test_files_of"]
 
     tm_streams = {}
@@ -584,13 +605,7 @@ def build_transfer_map(df, streams, orders, out):
         if thr is not None:
             for c in cross:
                 c["problem_margin"] = round(c["problem_cosine"] - thr, 4)
-        xadj = sum(1 for x, y in zip(ids, ids[1:]) if repo_of[x] != repo_of[y])
-        seen_repos = set()
-        xexp = 0
-        for iid in ids:
-            if seen_repos - {repo_of[iid]}:
-                xexp += 1
-            seen_repos.add(repo_of[iid])
+        xadj, xexp = cross_shape(ids, repo_of)
         entry = {
             "members": [s["rel"] for s in sorted(members, key=lambda s: s["n"])],
             "repos": repos,
@@ -711,8 +726,8 @@ def sweep_sizes(n, extra=()):
     return sorted((k for k in cands if 3 <= k <= n), reverse=True)
 
 
-def build_cores(df, streams, pair_data, out, sweep=False):
-    difficulty = dict(zip(df["instance_id"], df["difficulty"]))
+def build_cores(maps, streams, pair_data, out, sweep=False):
+    difficulty = maps["difficulty"]
     built = {}
     for stream in streams:
         n = stream["n"]
@@ -774,8 +789,7 @@ def print_core_sweep(stream, pairs, objs, difficulty):
 # stats mode (README refresh aid; writes nothing)
 # --------------------------------------------------------------------------
 
-def print_stats(df, streams, pair_data):
-    maps = derived_maps(df)
+def print_stats(maps, streams, pair_data):
     row_of, prob_m, patch_m = maps["row_of"], maps["prob_m"], maps["patch_m"]
     repo_of, created = maps["repo_of"], maps["created"]
 
@@ -829,12 +843,7 @@ def print_stats(df, streams, pair_data):
     for (ra, A), (rb, B) in itertools.combinations(big, 2):
         sub = prob_m[[row_of[i] for i in A]] @ prob_m[[row_of[i] for i in B]].T
         merged = chronology_merge(A + B, created)
-        xadj = sum(1 for x, y in zip(merged, merged[1:]) if repo_of[x] != repo_of[y])
-        seen, xexp = set(), 0
-        for iid in merged:
-            if any(repo_of[s] != repo_of[iid] for s in seen):
-                xexp += 1
-            seen.add(iid)
+        xadj, xexp = cross_shape(merged, repo_of)
         lo = max(min(created[i] for i in A), min(created[i] for i in B))
         hi = min(max(created[i] for i in A), max(created[i] for i in B))
         name = "__".join(sorted([short_repo(ra), short_repo(rb)]))
@@ -890,12 +899,13 @@ def main():
 
     parquet = find_parquet(args.parquet)
     df = load_source(parquet)
+    maps = derived_maps(df)  # the TF-IDF matrices and per-instance maps: compute once
 
     if args.stats_only:
         streams = discover_streams(args.out)
-        pair_data = {s["rel"]: canonical_pair_records(s, derived_maps(df))[0] for s in streams}
+        pair_data = {s["rel"]: canonical_pair_records(s, maps)[0] for s in streams}
         print(f"source parquet: {parquet}")
-        print_stats(df, streams, pair_data)
+        print_stats(maps, streams, pair_data)
         return
 
     os.makedirs(args.out, exist_ok=True)
@@ -909,16 +919,16 @@ def main():
     print("stage 2: verified-metadata.json")
     build_metadata(df, streams, args.out)
     print("stage 3: run-order.txt (neighbor folders + interference streams)")
-    orders = build_run_orders(df, streams, args.out)
+    orders = build_run_orders(maps, streams, args.out)
     print("stage 4: transfer-map.json")
-    pair_data = build_transfer_map(df, streams, orders, args.out)
+    pair_data = build_transfer_map(maps, streams, orders, args.out)
     print("stage 5: dense cores")
-    build_cores(df, streams, pair_data, args.out, sweep=args.stats)
+    build_cores(maps, streams, pair_data, args.out, sweep=args.stats)
     print("stage 6: verification (verify_data.py)")
     from verify_data import verify  # deferred: verify_data imports this module's helpers back
-    verify(df, streams, args.out)
+    verify(maps, streams, args.out)
     if args.stats:
-        print_stats(df, streams, pair_data)
+        print_stats(maps, streams, pair_data)
     for name in ["verified-metadata.json", "transfer-map.json"]:
         print(f"  {name}: {os.path.getsize(os.path.join(args.out, name)) / 1e6:.1f} MB")
 

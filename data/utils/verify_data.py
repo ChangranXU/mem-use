@@ -10,8 +10,8 @@ Checks every invariant of the generated tree without writing anything:
   - transfer-map.json streams: n-choose-2 pairs per stream, the six hard-coded
     dependency counts that reproduce the published SWE-Bench-CL statistics
     (the external correctness anchor for the file-overlap graph), every pair
-    field reproducing from the parquet (problem_cosine, days_between,
-    relation evidence, problem identifiers), quadrant labels reproducing from
+    field reproducing from the parquet (patch_cosine, problem_cosine,
+    days_between, relation evidence, problem identifiers), quadrant labels reproducing from
     the stream threshold and relation_strength under the pinned >=-on-4 dp
     comparison, problem_margin sign/magnitude agreement, and the
     tasks_with_earlier_* counters agreeing with the labels
@@ -27,7 +27,9 @@ Checks every invariant of the generated tree without writing anything:
     (asserted against the parquet too — a collision fails the build),
     days_between >= 0, margins and identifiers reproducing
   - cores: subsequences of their canonical streams, chronology monotonic,
-    sizes/counters matching the frozen anchors
+    membership re-deriving from the pinned construction (greedy peel /
+    frontier on the verified transfer-map pairs), sizes/counters matching
+    the frozen anchors
   - no repo-gap-*/ dirs remain
 
 Run standalone after editing anything, or let build_data.py invoke it as its
@@ -45,7 +47,9 @@ import re
 import sys
 
 from build_data import (
+    CORE_FRACTION,
     DEFAULT_OUT,
+    MIN_CORE_STREAM,
     MIN_TRAP_CORE,
     TRAP_CANDIDATE,
     core_objectives,
@@ -53,9 +57,11 @@ from build_data import (
     discover_streams,
     expected_run_orders,
     find_parquet,
+    greedy_peel,
     incident_frontier,
     load_source,
     nearest_rank_p75,
+    peel_subset,
     quadrant_label,
 )
 
@@ -79,13 +85,13 @@ SMOKE_XARRAY = ["pydata__xarray-2905", "pydata__xarray-3095"]
 # anchoring"): every shipped run-order's cross-pair count, adjacency shape,
 # exposure counter and threshold; every core's size and dependency rates.
 EXPECTED_RUN_ORDERS = {
-    "repo-interference/astropy__scikit-learn/run-order.txt": {"cross_pairs": 704, "cross_adjacencies": 23, "cross_adjacency_share": 0.434, "tasks_with_earlier_cross_repo": 52, "problem_similar_threshold": 0.0803},
-    "repo-interference/matplotlib__xarray/run-order.txt": {"cross_pairs": 748, "cross_adjacencies": 15, "cross_adjacency_share": 0.2727, "tasks_with_earlier_cross_repo": 55, "problem_similar_threshold": 0.0676},
-    "repo-interference/pytest__sphinx/run-order.txt": {"cross_pairs": 836, "cross_adjacencies": 19, "cross_adjacency_share": 0.3065, "tasks_with_earlier_cross_repo": 56, "problem_similar_threshold": 0.0566},
-    "repo-neighbor-1/run-order.txt": {"cross_pairs": 1892, "cross_adjacencies": 41, "cross_adjacency_share": 0.5467, "tasks_with_earlier_cross_repo": 74, "problem_similar_threshold": 0.0781},
-    "repo-neighbor-2/run-order.txt": {"cross_pairs": 68, "cross_adjacencies": 4, "cross_adjacency_share": 0.1143, "tasks_with_earlier_cross_repo": 21, "problem_similar_threshold": 0.1014},
-    "repo-neighbor-3/run-order.txt": {"cross_pairs": 2087, "cross_adjacencies": 7, "cross_adjacency_share": 0.0293, "tasks_with_earlier_cross_repo": 234, "problem_similar_threshold": 0.0452},
-    "repo-neighbor-4/run-order.txt": {"cross_pairs": 1466, "cross_adjacencies": 31, "cross_adjacency_share": 0.4306, "tasks_with_earlier_cross_repo": 66, "problem_similar_threshold": 0.0591},
+    "repo-interference/astropy__scikit-learn/run-order.txt": {"cross_pairs": 704, "cross_adjacencies": 23, "cross_adjacency_share": 0.434, "tasks_with_earlier_cross_repo": 52, "problem_similar_threshold": 0.0817},
+    "repo-interference/matplotlib__xarray/run-order.txt": {"cross_pairs": 748, "cross_adjacencies": 15, "cross_adjacency_share": 0.2727, "tasks_with_earlier_cross_repo": 55, "problem_similar_threshold": 0.0693},
+    "repo-interference/pytest__sphinx/run-order.txt": {"cross_pairs": 836, "cross_adjacencies": 19, "cross_adjacency_share": 0.3065, "tasks_with_earlier_cross_repo": 56, "problem_similar_threshold": 0.0562},
+    "repo-neighbor-1/run-order.txt": {"cross_pairs": 1892, "cross_adjacencies": 41, "cross_adjacency_share": 0.5467, "tasks_with_earlier_cross_repo": 74, "problem_similar_threshold": 0.0775},
+    "repo-neighbor-2/run-order.txt": {"cross_pairs": 68, "cross_adjacencies": 4, "cross_adjacency_share": 0.1143, "tasks_with_earlier_cross_repo": 21, "problem_similar_threshold": 0.0998},
+    "repo-neighbor-3/run-order.txt": {"cross_pairs": 2087, "cross_adjacencies": 7, "cross_adjacency_share": 0.0293, "tasks_with_earlier_cross_repo": 234, "problem_similar_threshold": 0.0456},
+    "repo-neighbor-4/run-order.txt": {"cross_pairs": 1466, "cross_adjacencies": 31, "cross_adjacency_share": 0.4306, "tasks_with_earlier_cross_repo": 66, "problem_similar_threshold": 0.059},
 }
 
 EXPECTED_CORES = {
@@ -98,20 +104,19 @@ EXPECTED_CORES = {
     "repo-core-4": {"size": 11, "dep_file_rate": 0.2727, "dep_relation_rate": 0.2727},
     "repo-core-5": {"size": 17, "dep_file_rate": 0.5882, "dep_relation_rate": 0.7647},
     "repo-core-7": {"size": 116, "dep_file_rate": 0.8448, "dep_relation_rate": 0.8879},
-    "repo-core-trap-1": {"size": 49, "dep_file_rate": 0.2245, "dep_relation_rate": 0.2857},
+    "repo-core-trap-1": {"size": 50, "dep_file_rate": 0.24, "dep_relation_rate": 0.3},
     "repo-core-trap-10": {"size": 10, "dep_file_rate": 0.4, "dep_relation_rate": 0.5},
     "repo-core-trap-11": {"size": 4, "dep_file_rate": 0.0, "dep_relation_rate": 0.25},
     "repo-core-trap-12": {"size": 33, "dep_file_rate": 0.4545, "dep_relation_rate": 0.4545},
-    "repo-core-trap-2": {"size": 29, "dep_file_rate": 0.1379, "dep_relation_rate": 0.1724},
+    "repo-core-trap-2": {"size": 27, "dep_file_rate": 0.1111, "dep_relation_rate": 0.1481},
     "repo-core-trap-3": {"size": 14, "dep_file_rate": 0.4286, "dep_relation_rate": 0.4286},
-    "repo-core-trap-4": {"size": 18, "dep_file_rate": 0.0556, "dep_relation_rate": 0.0556},
-    "repo-core-trap-5": {"size": 28, "dep_file_rate": 0.3571, "dep_relation_rate": 0.5},
-    "repo-core-trap-7": {"size": 182, "dep_file_rate": 0.5714, "dep_relation_rate": 0.6374},
+    "repo-core-trap-4": {"size": 19, "dep_file_rate": 0.1053, "dep_relation_rate": 0.1053},
+    "repo-core-trap-5": {"size": 29, "dep_file_rate": 0.3793, "dep_relation_rate": 0.5172},
+    "repo-core-trap-7": {"size": 186, "dep_file_rate": 0.5753, "dep_relation_rate": 0.6452},
 }
 
 
-def verify(df, streams, out):
-    records = {r.instance_id: r for r in df.itertuples()}
+def verify(maps, streams, out):
     failures = []
 
     def check(ok, label):
@@ -119,14 +124,16 @@ def verify(df, streams, out):
         if not ok:
             failures.append(label)
 
-    maps = derived_maps(df)
     row_of, files_of, test_files_of = maps["row_of"], maps["files_of"], maps["test_files_of"]
     symbols_of, ident_of, created, repo_of = maps["symbols_of"], maps["ident_of"], maps["created"], maps["repo_of"]
-    prob_m = maps["prob_m"]
+    prob_m, patch_m = maps["prob_m"], maps["patch_m"]
     streams_by_rel = {s["rel"]: s for s in streams}
 
     def pcos(a, b):
         return round(float(prob_m[row_of[a]] @ prob_m[row_of[b]]), 4)
+
+    def pacos(a, b):
+        return round(float(patch_m[row_of[a]] @ patch_m[row_of[b]]), 4)
 
     # -- canonical streams --------------------------------------------------
     total = []
@@ -138,7 +145,7 @@ def verify(df, streams, out):
         ts = [created[i] for i in ids]
         check(all(x <= y for x, y in zip(ts, ts[1:])), f"{stream['rel']}: chronology monotonic")
     check(len(total) == 500 and len(set(total)) == 500, "canonical partition: 500 unique ids")
-    check(set(total) == set(records), "canonical partition equals the parquet's instance set")
+    check(set(total) == set(row_of), "canonical partition equals the parquet's instance set")
 
     xarray = open(os.path.join(out, "repo-neighbor-1/instance-ids-3.txt")).read().split()
     check(xarray[:2] == SMOKE_XARRAY, f"xarray stream starts with the AGENTS.md smoke slice {SMOKE_XARRAY}")
@@ -181,6 +188,7 @@ def verify(df, streams, out):
                 "pos_a": pos_of[a], "pos_b": pos_of[b],
                 "shared_file_count": len(exp_shared),
                 "file_jaccard": round(len(exp_shared) / len(files_of[a] | files_of[b]), 4) if (files_of[a] | files_of[b]) else 0.0,
+                "patch_cosine": pacos(a, b),
                 "problem_cosine": pcos(a, b),
                 "days_between": round((created[b] - created[a]).total_seconds() / 86400.0, 4),
                 "relation_strength": (3 if exp_sym else 2 if exp_shared else 1 if exp_test else 0),
@@ -231,7 +239,8 @@ def verify(df, streams, out):
         check(sorted(ids) == sorted(union) and len(set(ids)) == len(ids),
               f"{rel}: set-equal to the member streams' union")
         check(all(x <= y for x, y in zip(ts, ts[1:])), f"{rel}: globally chronological (no inversion)")
-        subseq_ok = all([i for i in ids if i in set(s["ids"])] == s["ids"] for s in members)
+        member_ids = [set(s["ids"]) for s in members]
+        subseq_ok = all([i for i in ids if i in ms] == s["ids"] for s, ms in zip(members, member_ids))
         check(subseq_ok, f"{rel}: member-subsequence merge (canonical order preserved per member repo)")
 
     check(not glob.glob(os.path.join(out, "repo-gap-*")), "no repo-gap-*/ dirs remain (superseded by interference streams)")
@@ -266,6 +275,8 @@ def verify(df, streams, out):
             exp_ident = sorted(ident_of[a] & ident_of[b])
             if repo_of[a] == repo_of[b] or pos_of.get(a, 10**9) >= pos_of.get(b, 0) or p["pos_a"] != pos_of[a] or p["pos_b"] != pos_of[b]:
                 bad.append(f"{a}->{b} repo/positions")
+            if p["patch_cosine"] != pacos(a, b):
+                bad.append(f"{a}->{b} patch_cosine")
             if p["problem_cosine"] != pcos(a, b):
                 bad.append(f"{a}->{b} problem_cosine")
             if p["days_between"] != round((created[b] - created[a]).total_seconds() / 86400.0, 4) or p["days_between"] < 0:
@@ -297,6 +308,22 @@ def verify(df, streams, out):
             check(got == anchor, f"run_orders {rel}: frozen anchor {anchor} (got {got})")
 
     # -- cores -----------------------------------------------------------------
+    # Membership re-derives from the pinned construction (greedy peel /
+    # frontier) on the transfer-map pairs verified above, so a hand-edit that
+    # preserves size and dependency rates still fails — only a deliberate
+    # rebuild can change a core's ids.
+    expected_cores = {}
+    for stream in streams:
+        if len(stream["ids"]) < MIN_CORE_STREAM:
+            continue
+        objs = core_objectives(tm["streams"][stream["rel"]]["pairs"])
+        k = math.ceil(len(stream["ids"]) * CORE_FRACTION)
+        expected_cores[f"repo-core-{stream['n']}"] = peel_subset(
+            stream["ids"], greedy_peel(stream["ids"], objs["strength"]), k)
+        trap = incident_frontier(stream["ids"], objs[TRAP_CANDIDATE])
+        if len(trap) >= MIN_TRAP_CORE:
+            expected_cores[f"repo-core-trap-{stream['n']}"] = trap
+
     core_dirs = sorted(d for d in glob.glob(os.path.join(out, "repo-core-*")) if os.path.isdir(d))
     seen_cores = set()
     for directory in core_dirs:
@@ -316,6 +343,7 @@ def verify(df, streams, out):
         check(cset <= set(stream["ids"]) and [i for i in stream["ids"] if i in cset] == core,
               f"{name}: subsequence of canonical stream {n}")
         check(all(x <= y for x, y in zip(ts, ts[1:])), f"{name}: chronology monotonic")
+        check(core == expected_cores.get(name), f"{name}: membership reproduces from the pinned construction")
         seen_cores.add(name)
 
         anchor = EXPECTED_CORES.get(name)
@@ -329,20 +357,8 @@ def verify(df, streams, out):
                    "dep_relation_rate": round(rel_dep / len(core), 4)}
             check(got == anchor, f"{name}: frozen anchor {anchor} (got {got})")
 
-    # cores match the pinned construction: every eligible stream has its
-    # strength core, and the trap core exists exactly when the frontier is
-    # large enough
-    expected_core_names = set()
-    for stream in streams:
-        if len(stream["ids"]) < 10:
-            continue
-        expected_core_names.add(f"repo-core-{stream['n']}")
-        pairs = tm["streams"][stream["rel"]]["pairs"]
-        edges = core_objectives(pairs)[TRAP_CANDIDATE]
-        if len(incident_frontier(stream["ids"], edges)) >= MIN_TRAP_CORE:
-            expected_core_names.add(f"repo-core-trap-{stream['n']}")
-    check(seen_cores == expected_core_names,
-          f"core dirs match the pinned construction (missing {sorted(expected_core_names - seen_cores)}, extra {sorted(seen_cores - expected_core_names)})")
+    check(seen_cores == set(expected_cores),
+          f"core dirs match the pinned construction (missing {sorted(set(expected_cores) - seen_cores)}, extra {sorted(seen_cores - set(expected_cores))})")
 
     if failures:
         print(f"\nverification FAILED ({len(failures)} checks)")
@@ -358,10 +374,10 @@ def main():
 
     parquet = find_parquet(args.parquet)
     print(f"source parquet: {parquet}")
-    df = load_source(parquet)
+    maps = derived_maps(load_source(parquet))
     streams = discover_streams(args.out)
     print(f"verifying {args.out}: {len(streams)} canonical streams")
-    verify(df, streams, args.out)
+    verify(maps, streams, args.out)
 
 
 if __name__ == "__main__":

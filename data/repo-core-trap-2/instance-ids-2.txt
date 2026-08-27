@@ -1,11 +1,9 @@
 scikit-learn__scikit-learn-9288
 scikit-learn__scikit-learn-10297
 scikit-learn__scikit-learn-10844
-scikit-learn__scikit-learn-10908
 scikit-learn__scikit-learn-11310
 scikit-learn__scikit-learn-11578
 scikit-learn__scikit-learn-12585
-scikit-learn__scikit-learn-12682
 scikit-learn__scikit-learn-13124
 scikit-learn__scikit-learn-13135
 scikit-learn__scikit-learn-13142

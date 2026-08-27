@@ -15,67 +15,39 @@ Prints tables only; writes nothing.
 """
 
 import itertools
-import json
-import math
-import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from functools import lru_cache
 
-import numpy as np
-
-from build_data import LAYOUT, find_parquet, load_source, patch_files, tfidf_matrix
-
-MIN_STREAM = 10
-
-
-def nearest_rank_p75(values):
-    s = sorted(values)
-    return s[math.ceil(0.75 * len(s)) - 1]
-
-
-def parse_symbols(patch):
-    """(file, symbol) pairs from hunk headers: @@ ... @@ <def|class> name."""
-    out = set()
-    current = None
-    for line in (patch or "").splitlines():
-        m = re.match(r"diff --git a/(.*?) b/", line)
-        if m:
-            current = m.group(1)
-            continue
-        m = re.match(r"@@ .* @@\s*(.*)$", line)
-        if m and current:
-            ctx = m.group(1)
-            sm = re.search(r"\b(?:def|class|function)\s+([A-Za-z_][A-Za-z0-9_]*)", ctx)
-            if sm:
-                out.add((current, sm.group(1)))
-    return out
+from build_data import (
+    LAYOUT,
+    MIN_CORE_STREAM,
+    chronology_merge,
+    cross_shape,
+    derived_maps,
+    find_parquet,
+    load_source,
+    nearest_rank_p75,
+    quadrant_label,
+    relation_grade,
+)
 
 
 def main():
     df = load_source(find_parquet(None))
+    maps = derived_maps(df)
+    row_of, prob = maps["row_of"], maps["prob_m"]
+    files_of, test_files_of, symbols_of = maps["files_of"], maps["test_files_of"], maps["symbols_of"]
+    created, repo_of = maps["created"], maps["repo_of"]
     ordered = df.sort_values(["repo", "created_dt", "pr"], kind="stable")
     by_repo = {repo: list(g["instance_id"]) for repo, g in ordered.groupby("repo", sort=False)}
-
-    row_of = {iid: k for k, iid in enumerate(df["instance_id"])}
-    prob = tfidf_matrix(df["problem_statement"].fillna(""))
-    files_of = dict(zip(df["instance_id"], df["files"]))
-    test_files_of = {iid: set(patch_files(p)) for iid, p in zip(df["instance_id"], df["test_patch"].fillna(""))}
-    symbols_of = {iid: parse_symbols(p) for iid, p in zip(df["instance_id"], df["patch"].fillna(""))}
-    created = dict(zip(df["instance_id"], df["created_dt"]))
-    repo_of = dict(zip(df["instance_id"], df["repo"]))
 
     def pcos(a, b):
         return round(float(prob[row_of[a]] @ prob[row_of[b]]), 4)
 
     def strength(a, b):
-        shared = files_of[a] & files_of[b]
-        if shared and (symbols_of[a] & symbols_of[b]):
-            return 3
-        if shared:
-            return 2
-        if test_files_of[a] & test_files_of[b]:
-            return 1
-        return 0
+        return relation_grade(bool(files_of[a] & files_of[b]),
+                              bool(test_files_of[a] & test_files_of[b]),
+                              bool(symbols_of[a] & symbols_of[b]))
 
     # -- 1. quadrant power table ------------------------------------------
     print("== per-stream quadrant power (wave-1 spec, pinned >= on 4 dp) ==")
@@ -94,14 +66,10 @@ def main():
             k = cosines.index(m)
             within_max = (m, pairs[k])
         thr = round(nearest_rank_p75(cosines), 4)
-        counts = {"opportunity": 0, "trap": 0, "deep_transfer": 0, "neutral": 0}
+        counts = Counter()
         earlier = defaultdict(set)
         for (a, b), c in zip(pairs, cosines):
-            sim = c >= thr
-            rs = strength(a, b)
-            q = ("opportunity" if sim and rs >= 2 else
-                 "trap" if sim and rs == 0 else
-                 "deep_transfer" if not sim and rs >= 2 else "neutral")
+            q = quadrant_label(c >= thr, strength(a, b))
             counts[q] += 1
             earlier[q].add(b)
         print(f"{repo:26s} {len(pairs):6d} {thr:7.4f} {counts['opportunity']:5d} {counts['trap']:6d} "
@@ -122,26 +90,19 @@ def main():
         print(f"  {c:.4f} rs={rs} {a} -> {b}")
 
     # -- 2/3/4. cross-repo matrix and interference-pair stats -------------
-    big = [(n, repo) for n, _, repo in LAYOUT if len(by_repo[repo]) >= MIN_STREAM]
+    big = [(n, repo) for n, _, repo in LAYOUT if len(by_repo[repo]) >= MIN_CORE_STREAM]
     print("\n== cross-repo pairs among >=10-task repos: mean/max cosine, merge shape ==")
     print(f"{'pair':34s} {'mean':>7s} {'max':>7s} {'len':>4s} {'xadj':>5s} {'xexp':>7s} {'overlap-days':>12s}")
     rows = []
     for (na, ra), (nb, rb) in itertools.combinations(big, 2):
         A, B = by_repo[ra], by_repo[rb]
         sub = prob[[row_of[i] for i in A]] @ prob[[row_of[i] for i in B]].T
-        merged = sorted(A + B, key=lambda i: (created[i], i))
-        xadj = sum(1 for x, y in zip(merged, merged[1:]) if repo_of[x] != repo_of[y])
-        seen = set()
-        xexp = 0
-        for iid in merged:
-            other = (set(A) if iid in B else set(B))
-            if seen & other:
-                xexp += 1
-            seen.add(iid)
+        merged = chronology_merge(A + B, created)
+        xadj, xexp = cross_shape(merged, repo_of)
         lo = max(min(created[i] for i in A), min(created[i] for i in B))
         hi = min(max(created[i] for i in A), max(created[i] for i in B))
         ov = (hi - lo).days
-        name = f"{ra.split('/')[1]}__{rb.split('/')[1]}"
+        name = "__".join(sorted([ra.split("/")[1], rb.split("/")[1]]))
         rows.append((float(sub.mean()), float(sub.max()), name, len(merged), xadj, xexp, ov))
     for mean, mx, name, ln, xadj, xexp, ov in sorted(rows, key=lambda r: -r[0]):
         print(f"{name:34s} {mean:7.4f} {mx:7.4f} {ln:4d} {xadj:5d} {xexp:4d}/{ln:<3d} {ov:6d}")
@@ -201,6 +162,14 @@ def score_max_dp(by_repo, prob, row_of, files_of, repo_of, created):
             return best
 
         best = rest(0, 0, -1)
+        name = "__".join(sorted([ra.split("/")[1], rb.split("/")[1]]))
+        obj = "dis" if disjoint else "sum"
+        if best == neg:
+            # no feasible interleave under the constraint (more consecutive
+            # file-sharing same-repo adjacencies than the partner stream can
+            # separate) — the path bookkeeping below has no optimal path to walk
+            print(f"{name:30s} {obj:>3s} {'-inf':>8s} {'infeas':>8s} {'-':>9s} {'-':>6s} {'-':>6s}")
+            return
 
         # forward prefix scores; a move is on an optimal path iff
         # prefix + edge + rest equals the optimum
@@ -285,11 +254,9 @@ def score_max_dp(by_repo, prob, row_of, files_of, repo_of, created):
             return sum(1 for x, y in zip(seq, seq[1:]) if repo_of[x] != repo_of[y])
 
         cat = max(seq_score(A + B), seq_score(B + A))
-        merged = sorted(A + B, key=lambda t: (created[t], t))
+        merged = chronology_merge(A + B, created)
         ends = [xadj_range(n, m, l) for l in (0, 1) if pre[n][m][l] > neg]
         gap = "infeas" if cat == neg else f"{best - cat:.4f}"
-        name = f"{ra.split('/')[1]}__{rb.split('/')[1]}"
-        obj = "dis" if disjoint else "sum"
         print(f"{name:30s} {obj:>3s} {best:8.4f} {gap:>8s} "
               f"{f'[{min(e[0] for e in ends)},{max(e[1] for e in ends)}]':>9s} "
               f"{xadj(greedy(0)):>2d}/{xadj(greedy(1)):>2d} {xadj(merged):6d}")

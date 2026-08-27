@@ -44,7 +44,7 @@ Chronology comes from the dataset's `created_at` column; it was cross-checked to
 
 ### Stage 0 — Stale variant cleanup
 
-`repo-gap-*/` dirs (the deleted patch-space adversarial reorderings) and any previously generated `repo-interference-*`/`repo-core-*` dirs are removed, so a clean build never leaves files of a previous shape behind.
+`repo-gap-*/` dirs (the deleted patch-space adversarial reorderings) and the previously generated `repo-interference/` tree and `repo-core-*` dirs are removed, so a clean build never leaves files of a previous shape behind.
 
 ### Stage 1 — Canonical Streams (`instance-ids-<n>.txt`)
 
@@ -68,7 +68,7 @@ Per-instance sidecar keyed by `instance_id`, carrying `repo`, `created_at`, `dif
 - `pos_a` / `pos_b` (canonical-stream positions), `a`, `b`
 - `shared_files` / `shared_file_count` — modified-file paths via SWE-Bench-CL's regex
 - `file_jaccard` — |shared| / |union|
-- `patch_cosine` — TF-IDF cosine (camelCase/snake-split identifiers ≥2 chars; terms in ≥3 docs; sublinear tf; natural-ln idf; L2-normalized; 4 dp)
+- `patch_cosine` — TF-IDF cosine (camelCase-split identifiers ≥2 chars, snake_case and all-caps runs kept whole; terms in ≥3 docs; sublinear tf; natural-ln idf; L2-normalized; 4 dp)
 - `problem_cosine` — same TF-IDF spec over the problem statements, a **separate matrix** (idf never mixes with the patch corpus)
 - `problem_similar_threshold` — nearest-rank p75 of the stream's pair `problem_cosine` (computed on the shipped 4 dp values); a pair is problem-similar iff `problem_cosine >= threshold` on the shipped values; omitted when the stream has no pairs (flask)
 - `quadrant` — opportunity / trap / deep_transfer / neutral from the exact mapping on (problem-similar, relation_strength); test-file-only overlap never leaves neutral
@@ -100,7 +100,7 @@ Eligibility: the nine streams with ≥ 10 tasks.
 - Transfer-map streams: n-choose-2 pairs; the six `EXPECTED_CL` counts; threshold reproduces from shipped pair cosines (flask omission asserted); every pair field reproduces from the parquet; quadrant labels reproduce from the shipped threshold + `relation_strength` under the pinned `>=`-on-4 dp comparison; `problem_margin` reproduces and its sign agrees with the label; `tasks_with_earlier_*` counters agree with the labels
 - Every run-order: set-equal to its member streams' union, globally chronological, member-subsequence merge (canonical order per member repo)
 - `run_orders` map: exactly the 7 shipped run-orders, never inside `streams`, no core entry; per entry the cross-pair count == Σ|A|·|B|, positions agree with the file, threshold/margins/counters reproduce, every record joins two different repos with the zero-relation fields and no shared paths (asserted against the parquet — a collision fails the build), `days_between >= 0`
-- Cores: subsequences of their canonical streams, chronology monotonic, dirs match the pinned construction, sizes/counters match the frozen `EXPECTED_CORES` anchors
+- Cores: subsequences of their canonical streams, chronology monotonic, membership re-derives from the pinned construction (greedy peel / frontier on the verified transfer-map pairs), dirs match, sizes/counters match the frozen `EXPECTED_CORES` anchors
 - No `repo-gap-*/` dirs remain
 - Frozen anchors: `EXPECTED_RUN_ORDERS` / `EXPECTED_CORES` pin every run-order's counters and every core's size + dependency rates
 

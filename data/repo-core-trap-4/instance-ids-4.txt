@@ -1,6 +1,7 @@
 astropy__astropy-7336
 astropy__astropy-7606
 astropy__astropy-7671
+astropy__astropy-8707
 astropy__astropy-13033
 astropy__astropy-13236
 astropy__astropy-13398
