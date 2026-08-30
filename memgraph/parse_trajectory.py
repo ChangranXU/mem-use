@@ -15,8 +15,10 @@ names, or label conventions.
   one of them never pulls the agent's lane into the memory set.
 - **Extract ops** come from generation operations (`memory_generate_start` /
   `memory_change` / `memory_generate_end`): produced MemoryRefs as
-  candidates, delete changes as deletions with exact refs, per-reason
-  rejection counts, trigger and status.
+  candidates — plus create/update change after-refs produced does not
+  already cover (a partial generation can leave the change series as the
+  only record of what landed) — delete changes as deletions with exact
+  refs, per-reason rejection counts, trigger and status.
 - **Recall ops** come from `memory_delivery` events: exact delivered refs,
   the linked search's query and returned set, placement size, and the bound
   call that carried the injection.
@@ -50,6 +52,8 @@ from memgraph.annotations import (
     build_annotation_index,
     content_chars,
     is_int,
+    item_key,
+    namespace_of,
     operation_extraction_step,
     operation_rejection_counts,
     ref_key,
@@ -62,8 +66,10 @@ from memgraph.model import MemoryOp, Trajectory
 _QUERY_CAP = 300  # recall-op query previews are informational; keep artifacts lean
 
 # memory_change actions whose before-refs leave the active store — the graph's
-# deletions. create/update after-refs need no change-side reading: they flow
-# through the end event's produced refs.
+# deletions. create/update after-refs ARE read (into the extract op's
+# candidates, deduplicated against the end event's produced refs — see
+# _extract_op_from_generation): a partial generation can end produced: []
+# with rows landed, leaving the change series as the only record of them.
 _REMOVAL_ACTIONS = frozenset({"delete", "archive", "expire"})
 
 
@@ -354,10 +360,11 @@ def list_field(holder: dict[str, Any], key: str) -> list[Any]:
     """A list field of a recorded payload; [] when absent or a corrupt
     non-list — a truthy scalar on a hand-edited artifact must degrade, never
     crash the parse (the never-raises rule). The schema-v6 payload list
-    fields the tools iterate (memories/before/produced/returned/error_codes)
-    get their non-list corruption reported in build_annotation_index, so this
-    empty-list degrade is never the only trace. Shared with injudge's step
-    stream, which applies the same guard to a message's tool_calls."""
+    fields the tools iterate (memories / before / after / produced /
+    returned / error_codes) get their non-list corruption reported in
+    build_annotation_index, so this empty-list degrade is never the only
+    trace. Shared with injudge's step stream, which applies the same guard
+    to a message's tool_calls."""
     value = holder.get(key)
     return value if isinstance(value, list) else []
 
@@ -390,10 +397,13 @@ def _extract_op_from_generation(
         turn=_bound_turn(table, end.get("terminal_call_ref")) if end else None,
     )
     op.trigger = operation.start["payload"].get("trigger")
-    # Removal changes are recorded state effects — they survive a missing end
+    # Change events are recorded state effects — they survive a missing end
     # event (an already-flagged structural violation), like every other
-    # recorded datum: never lose them with the op's completion record
+    # recorded datum: never lose them with the op's completion record.
+    # Removal before-refs graph as deletions; create/update after-refs are
+    # collected for the candidate merge below.
     unmodeled: set[str] = set()
+    afters: list[dict] = []  # create/update after-refs, mapped, recording order
     for change in operation.changes:
         cp = change["payload"]
         action = cp.get("action")
@@ -403,7 +413,9 @@ def _extract_op_from_generation(
         if isinstance(action, str) and action in _REMOVAL_ACTIONS:
             for ref in list_field(cp, "before"):
                 op.deletions.append({"target": ref_key(ref), "ref": ref_to_memory(ref)})
-        elif action not in ("create", "update", "noop"):
+        elif action in ("create", "update"):
+            afters.extend(ref_to_memory(ref) for ref in list_field(cp, "after"))
+        elif action != "noop":
             # merge/split/restore/unknown carry before/after state effects the
             # graph does not model — noted, never silently dropped
             unmodeled.add(str(action))
@@ -413,20 +425,36 @@ def _extract_op_from_generation(
             f"action(s) {', '.join(sorted(unmodeled))}; their before/after refs "
             "are not graphed"
         )
+    produced: list[dict] = []
     if end is None:
         op.flagged = "missing memory_generate_end event"
-        return op
-    payload = end["payload"]
-    op.status = payload.get("status")
-    op.declared_step = operation_extraction_step(operation)
-    for ref in list_field(payload, "produced"):
-        op.candidates.append(ref_to_memory(ref))
-    op.rejection_counts = operation_rejection_counts(operation)
-    if op.status and op.status != "completed":
-        codes = list_field(payload, "error_codes")
-        op.flagged = f"generation status {op.status!r}" + (
-            f" (error_codes: {', '.join(map(str, codes))})" if codes else ""
-        )
+    else:
+        payload = end["payload"]
+        op.status = payload.get("status")
+        op.declared_step = operation_extraction_step(operation)
+        produced = [ref_to_memory(ref) for ref in list_field(payload, "produced")]
+        op.rejection_counts = operation_rejection_counts(operation)
+        if op.status and op.status != "completed":
+            codes = list_field(payload, "error_codes")
+            op.flagged = f"generation status {op.status!r}" + (
+                f" (error_codes: {', '.join(map(str, codes))})" if codes else ""
+            )
+    op.candidates.extend(produced)
+    # A create/update change's after-refs record the same landed state the
+    # end event's produced refs do, so they are candidates wherever produced
+    # does not already cover the item — on the success path both carry the
+    # same rows and merging blind would double every candidate, while a
+    # partial generation (e.g. a timed-out add that persisted server-side,
+    # ended produced: []) leaves the change series as the ONLY record of
+    # what landed. Dedupe on the registry's item-level identity (namespace,
+    # item_key); a ref carrying no item identity is never deduped — it
+    # cannot collide legitimately, and the graph already notes and skips
+    # keyless candidates.
+    covered = {(namespace_of(entry), item_key(entry)) for entry in produced}
+    for entry in afters:
+        ident = (namespace_of(entry), item_key(entry))
+        if ident[1] is None or ident not in covered:
+            op.candidates.append(entry)
     return op
 
 

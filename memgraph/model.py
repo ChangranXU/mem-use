@@ -63,10 +63,13 @@ class MemoryOp:
 
     kind == "extract": one memory generation (extraction decision), built
         from the operation's memory_generate_end / memory_change events —
-        `candidates` from the produced MemoryRefs, `deletions` from delete
-        changes (exact before-refs attached as `ref`), `rejection_counts`
-        from the end event's adapter extension, `status`/`trigger` from the
-        operation record; `flagged` is set for failed/incomplete generations.
+        `candidates` from the produced MemoryRefs plus any create/update
+        change after-refs produced does not cover (a partial generation's
+        change series can be the only record of what landed), `deletions`
+        from delete changes (exact before-refs attached as `ref`),
+        `rejection_counts` from the end event's adapter extension,
+        `status`/`trigger` from the operation record; `flagged` is set for
+        failed/incomplete generations.
     kind == "recall": one delivered memory injection (a memory_delivery
         event) — `memories` from its MemoryRefs, `query`/`matched` from the
         linked search operation, `content_chars`/`binding_status` from the

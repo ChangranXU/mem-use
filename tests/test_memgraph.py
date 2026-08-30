@@ -61,6 +61,98 @@ def test_failed_generation_flagged(tmp_path):
     assert "failed" in ops[0].flagged and "Timeout" in ops[0].flagged
 
 
+def test_partial_generation_recovers_candidates_from_change_afters(tmp_path):
+    """The timed-out-add recovery shape: the generation ends produced: []
+    (status partial) and the landed rows exist ONLY as create-change after
+    refs — they are the op's candidates, and the op keeps its partial flag
+    (the recovery graphs the creation edges; it does not declare the op
+    clean)."""
+    landed = cure_ref("landed_k", "persisted server-side", item_id="item-landed")
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.memory_turn()
+    b.generate(status="partial", extraction_step="1",
+               changes=[("create", [], [landed])])
+    _, ops, _ = parse(b, tmp_path)
+    assert [c["key"] for c in ops[0].candidates] == ["landed_k"]
+    assert ops[0].candidates[0]["item_id"] == "item-landed"
+    assert ops[0].flagged == "generation status 'partial'"
+
+
+def test_partial_generation_candidate_graphs_as_observed_creation(tmp_path):
+    """A memory recovered from a partial generation's change after-refs has
+    an observed creation: a later delivery anchors a recalls edge at the
+    extract op's creates edge, never an 'origin not observed' note — while
+    the flagged extraction still surfaces in validation."""
+    landed = cure_ref("landed_k", "persisted server-side", item_id="item-landed")
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.memory_turn()
+    b.generate(status="partial", extraction_step="1",
+               changes=[("create", [], [landed])])
+    b.recall(ref=landed)  # search + agent turn + bound delivery of it
+    b.write(tmp_path / "t1", run_id="t1")
+    graph = load_and_build([tmp_path])
+    (mem,) = graph["memories"]
+    assert mem["origin"] == "observed"
+    assert mem["created"]["op"].endswith("E1")
+    assert sorted(e["kind"] for e in graph["edges"]) == ["creates", "recalls"]
+    msgs = [v["msg"] for v in graph["validation"]]
+    assert not any("origin not observed" in m for m in msgs)
+    assert any("generation status 'partial'" in m for m in msgs)
+
+
+def test_change_afters_fill_only_candidates_produced_missed(tmp_path):
+    """Produced wins on the success path: a change after-ref whose item
+    produced already lists adds nothing (no double-count, no double creates
+    edge), while one naming an item produced missed is recovered."""
+    listed = cure_ref("listed_k", "v1", item_id="item-listed")
+    missed = cure_ref("missed_k", "v2", item_id="item-missed")
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.memory_turn()
+    b.generate(produced=[listed], extraction_step="1",
+               changes=[("create", [], [listed]), ("create", [], [missed])])
+    _, ops, warnings = parse(b, tmp_path)
+    assert [c["key"] for c in ops[0].candidates] == ["listed_k", "missed_k"]
+    assert warnings == []
+    graph = load_and_build([tmp_path])
+    assert [e["kind"] for e in graph["edges"]] == ["creates", "creates"]
+
+
+def test_removal_and_noop_changes_unaffected_by_after_merge(tmp_path):
+    """Removal before-refs still graph as deletions (never candidates) and
+    noop stays silent — the after-ref merge changes nothing for them."""
+    old = cure_ref("old_k", "old value", item_id="item-old")
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.memory_turn()
+    b.generate(extraction_step="1",
+               changes=[("delete", [old], []), ("noop", [], [])])
+    _, ops, warnings = parse(b, tmp_path)
+    assert ops[0].candidates == []
+    assert [d["target"] for d in ops[0].deletions] == ["old_k"]
+    assert warnings == []
+    graph = load_and_build([tmp_path])
+    assert [e["kind"] for e in graph["edges"]] == ["deletes"]
+
+
+def test_corrupt_change_after_degrades_never_crashes(tmp_path):
+    """A hand-edited change after must degrade, never raise: a non-list
+    after is reported by the annotation index and reads as no after-refs;
+    an unhashable raw ref (a list) maps to the null entry and never reaches
+    the identity set lookups."""
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.memory_turn()
+    b.generate(extraction_step="1", changes=[("create", [], [])])
+    b.memory_turn()
+    b.generate(extraction_step="1", changes=[("create", [], [])])
+    changes = [e for e in b.events if e["type"] == "memory_change"]
+    changes[0]["payload"]["after"] = {"not": "a list"}
+    changes[1]["payload"]["after"] = [["not", "a", "ref"]]
+    _, ops, warnings = parse(b, tmp_path)
+    assert ops[0].candidates == []
+    assert any("after is not a list" in w for w in warnings)
+    assert len(ops[1].candidates) == 1
+    assert ops[1].candidates[0]["key"] is None
+
+
 def test_recall_step_from_bound_call(tmp_path):
     b = TrajBuilder().agent_turn(with_task=True).agent_turn()
     b.recall()  # search + agent turn + bound delivery

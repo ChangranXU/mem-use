@@ -321,6 +321,7 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
                 seen_annotation_ids.add(annotation_id)
             operation.changes.append(event)
             _check_payload_list(event, "before", index.problems)
+            _check_payload_list(event, "after", index.problems)
         else:
             expected_end = (
                 "memory_generate_end" if operation.kind == "generation"
