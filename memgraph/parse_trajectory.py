@@ -64,6 +64,9 @@ from memgraph.annotations import (
 from memgraph.model import MemoryOp, Trajectory
 
 _QUERY_CAP = 300  # recall-op query previews are informational; keep artifacts lean
+# the framing excerpt of a delivered block (the opening the agent actually
+# saw) shown to the judge — informational like the query preview
+_PLACEMENT_HEAD_CAP = 160
 
 # The bridge's memory-action contract is add/update/delete (memory-bridge
 # AGENTS.md): a delete change's before-refs leave the active store and graph
@@ -473,6 +476,7 @@ def _recall_op_from_delivery(
     """One recall op from a memory_delivery annotation event."""
     payload = event["payload"]
     placement = payload.get("placement")
+    placement = placement if isinstance(placement, dict) else None
     op = MemoryOp(
         id=op_id,
         kind="recall",
@@ -483,9 +487,7 @@ def _recall_op_from_delivery(
         turn=_bound_turn(table, event.get("terminal_call_ref")),
         status=payload.get("status"),
         binding_status=event.get("binding_status"),
-        content_chars=content_chars(
-            placement.get("content") if isinstance(placement, dict) else None
-        ),
+        content_chars=content_chars(placement.get("content") if placement else None),
     )
     for ref in list_field(payload, "memories"):
         op.memories.append(ref_to_memory(ref))
@@ -496,6 +498,21 @@ def _recall_op_from_delivery(
     # session bindings — the same per-session resolver the session task uses
     # (no bindings resolves nothing)
     locator_lanes = index.binds.get(payload.get("trace_session_id"), {})
+    if placement is not None:
+        # how the injection was presented (injudge's span header): the
+        # protocol's placement kind plus a capped excerpt of the delivered
+        # block's opening, resolved like the query below — a redacted/locator
+        # placement records no content here, so no excerpt
+        kind = placement.get("kind")
+        if isinstance(kind, str) and kind:
+            op.placement_kind = kind
+        head = resolved_content_text(
+            placement.get("content"), events, locator_lanes, slots
+        )
+        if head:
+            op.placement_head = head[:_PLACEMENT_HEAD_CAP] + (
+                "…" if len(head) > _PLACEMENT_HEAD_CAP else ""
+            )
     if search is not None and search.kind == "search":
         # the same resolution rule as the session task: inline text, or a
         # trajectory_message locator against this event stream — the

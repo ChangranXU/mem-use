@@ -9,6 +9,8 @@ icon: align-left
 One scoring call per span. The request carries the recorded task statement (when present), the span, and the agent step stream — every completed agent turn with its reasoning, content, and tool results.
 {% endhint %}
 
+The span header tells the judge the span's position among the trajectory's spans, the search query that produced the injection, and how the injection was presented when recorded (the placement kind plus a capped excerpt of the delivered block's opening; a redacted placement records no content). The span's judged footprint window runs from its first step to the next span's first step — a content change supersedes, so a memory delivered in two spans is never credited in both.
+
 Routing is decided by `JUDGE_INPUT_TOKENS`, measured with tiktoken `o200k_base` over the scoring system prompt plus the scoring user:
 
 ```mermaid
@@ -43,6 +45,7 @@ The stream is never truncated to fit. Instead:
 
 ### Guardrails
 
+- A full-text send the endpoint rejects as too long (413, or a signed length/context-window 400/422 — the tiktoken estimate can undercount for the real judge tokenizer) falls back to this scan path once instead of erroring the span, marked `length_fallback` on the operation's `input` record and noted in warnings.
 - Over-cap evidence and an over-budget assembled user each get one LLM summary pass; a still-over result keeps the original text. An evidence overrun is noted in warnings; an over-budget assembly is sent as-is and marked `over_budget` on the operation's `input` record.
 - A chunk with no usable record fails that span with an `error` verdict naming the chunk. There is no silent coverage gap.
 - Extraction runs on a copy of the scoring config with the `SCAN_*` overrides, so a tier degradation learned during extraction never leaks onto scoring.

@@ -685,8 +685,8 @@ def test_deletion_scopes_to_the_target_store(tmp_path):
     b.write(tmp_path / "t1", run_id="t1")
     graph = load_and_build([tmp_path])
     by_ns = {m["namespace"]: m for m in graph["memories"]}
-    assert by_ns["ns-a"]["deleted_by"] is None  # untouched
-    assert by_ns["ns-b"]["deleted_by"] is not None
+    assert by_ns["ns-a"]["deleted"] is False and by_ns["ns-a"]["deletions"] == []  # untouched
+    assert by_ns["ns-b"]["deleted"] is True
     assert by_ns["ns-b"]["origin"] == "not_observed"
 
 
@@ -711,13 +711,14 @@ def test_deletion_of_observed_and_unobserved_memory(tmp_path):
     deletes = [e for e in graph["edges"] if e["kind"] == "deletes"]
     assert sorted(e["memory"] for e in deletes) == ["item-dtype_fix", "item-old_k"]
     by_key = {m["key"]: m for m in graph["memories"]}
-    assert by_key["dtype_fix"]["deleted_by"]["op"].endswith("E2")
+    assert by_key["dtype_fix"]["deletions"][0]["op"].endswith("E2")
     assert by_key["old_k"]["origin"] == "not_observed"  # exact ref, registered
 
 
 def test_delete_then_recreate_marks_memory_alive(tmp_path):
-    """A candidate re-creating a deleted key revives it: deleted_by clears
-    (the deletes edge keeps the deletion in the record), with an info note."""
+    """A candidate re-creating a deleted key revives it: the terminal state
+    clears and `revived` marks the revival, while the deletion stays in the
+    history (the deletes edge keeps the same record), with an info note."""
     cand = cure_ref("k", "v1", store_id=1)
     b = TrajBuilder().agent_turn(with_task=True)
     b.memory_turn()
@@ -730,7 +731,10 @@ def test_delete_then_recreate_marks_memory_alive(tmp_path):
     b.write(tmp_path / "t1", run_id="t1")
     graph = load_and_build([tmp_path])
     (mem,) = graph["memories"]
-    assert mem["deleted_by"] is None  # alive again
+    assert mem["deleted"] is False and mem["revived"] is True  # alive again
+    # the deletion history survives the revival — memories[] and edges[]
+    # tell the same lifecycle
+    assert [d["op"] for d in mem["deletions"]] == ["T1:E2"]
     assert mem["value"] == "v2"
     assert any("re-creates the deleted memory" in v["msg"] for v in graph["validation"])
     kinds = [e["kind"] for e in graph["edges"]]
@@ -753,12 +757,42 @@ def test_recreate_with_unchanged_value_is_not_a_restate(tmp_path):
     b.write(tmp_path / "t1", run_id="t1")
     graph = load_and_build([tmp_path])
     (mem,) = graph["memories"]
-    assert mem["deleted_by"] is None  # alive again
+    assert mem["deleted"] is False and mem["revived"] is True  # alive again
     msgs = [v["msg"] for v in graph["validation"]]
     assert sum("re-creates the deleted memory" in m for m in msgs) == 1
     assert not any("re-states existing memory" in m for m in msgs)
     assert [e["uncertain"] for e in graph["edges"] if e["kind"] == "supersedes"] == [False]
     assert [u["duplicate"] for u in mem["updates"]] == [False]
+
+
+def test_delete_recreate_delete_keeps_the_full_history(tmp_path):
+    """Delete → recreate → delete again: the memory carries BOTH deletions,
+    the revived marker, and the deleted terminal state — memories[] and the
+    deletes edges tell the same lifecycle, and the embedded HTML JSON carries
+    it (the old single deleted_by slot erased the first deletion from every
+    HTML view while the edges kept it)."""
+    from memgraph.html import render_html
+
+    cand = cure_ref("k", "v1", store_id=1)
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.memory_turn()
+    b.generate(produced=[cand], extraction_step="1", changes=[("create", [], [cand])])
+    b.memory_turn()
+    b.generate(extraction_step="1", changes=[("delete", [cand], [])])
+    revived = cure_ref("k", "v2", store_id=2)
+    b.memory_turn()
+    b.generate(produced=[revived], extraction_step="1", changes=[("create", [], [revived])])
+    b.memory_turn()
+    b.generate(extraction_step="1", changes=[("delete", [revived], [])])
+    b.write(tmp_path / "t1", run_id="t1")
+    graph = load_and_build([tmp_path])
+    (mem,) = graph["memories"]
+    assert [d["op"] for d in mem["deletions"]] == ["T1:E2", "T1:E4"]
+    assert mem["deleted"] is True and mem["revived"] is True
+    assert [e["kind"] for e in graph["edges"]] == [
+        "creates", "deletes", "supersedes", "deletes"]
+    html = render_html(graph)
+    assert "deleted_by" not in html and '"deletions"' in html
 
 
 def test_recreate_of_never_observed_memory_promotes_the_creation(tmp_path):
@@ -784,7 +818,8 @@ def test_recreate_of_never_observed_memory_promotes_the_creation(tmp_path):
     (mem,) = graph["memories"]
     assert mem["origin"] == "observed"
     assert mem["created"]["op"] == "T1:E2"
-    assert mem["deleted_by"] is None
+    assert mem["deleted"] is False and mem["revived"] is True
+    assert [d["op"] for d in mem["deletions"]] == ["T1:E1"]
     # the revival op takes the creation role: a creates edge, so consumers
     # reconstructing "which op created this memory" by kind == "creates"
     # find it — never a supersedes edge or an updates entry (nothing

@@ -81,6 +81,16 @@ class InjectionSpan:
     `seq_first`/`seq_last` bracket the span's ops (min/max event seq); a
     truncated-tail op merged across newer spans can make the range overlap
     a neighbor's.
+    `queries` is the distinct recorded search queries that produced the
+    span's injections (in delivery order); `placement_kind`/`placement_head`
+    describe how the injections were presented (the protocol's placement
+    kind and a capped excerpt of the delivered block's opening; None when
+    the placement recorded no content). `position`/`total` locate the span
+    among the trajectory's spans (0/0 when built directly, not via
+    group_spans). `window_last` bounds the judged footprint window: the next
+    span's first step minus one, set only when the next span starts strictly
+    after this span's deliveries end (overlapping spans stay unbounded —
+    never cut a span's own delivery steps); None = unbounded.
     """
 
     id: str  # f"{traj_id}:S{n}"
@@ -96,3 +106,9 @@ class InjectionSpan:
     step_gaps: list[int] = field(default_factory=list)
     new_keys: list[str] = field(default_factory=list)
     removed_keys: list[str] = field(default_factory=list)
+    queries: list[str] = field(default_factory=list)
+    placement_kind: str | None = None
+    placement_head: str | None = None
+    position: int = 0
+    total: int = 0
+    window_last: int | None = None

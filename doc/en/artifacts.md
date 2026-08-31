@@ -48,7 +48,7 @@ $$
 \mathrm{rates}[v] = \frac{\mathrm{count}[v]}{\mathrm{positive} + \mathrm{negative} + \mathrm{neutral}}
 $$
 
-`headline.judged_spans` is that denominator. `headline.wasted_token_share` is the injected-token cost of neutral and negative spans as a share of judged spans' cost: budget spent on injections that did not help.
+`headline.judged_spans` is that denominator. `headline.wasted_token_share` is the injected-token cost of neutral and negative spans as a share of judged spans' cost: budget spent on injections that did not help. The headline always presents the span rates and the wasted-token share together — a zero negative rate alone misreads an ignored flood as "harmless"; when the negative rate is 0 but the wasted share is high (> 0.5), `headline.caveat` names both known coarsenesses (the span-level proxy, and the verdict asymmetry: ignored garbage is neutral; only acted-on influence with no effect or harm is negative).
 
 ### Rubric Rates
 
@@ -57,7 +57,7 @@ The population is judge-scored deliveries (`span × key`) on LLM-judged spans. A
 | Rate | Numerator | Denominator | Reads as |
 |---|---|---|---|
 | `relevance` | `true` | `true` + `false` | relevant share |
-| `accuracy` | `corroborated` + `uncontradicted` | those + `contradicted` | uncontradicted-or-better share |
+| `accuracy_corroborated` / `accuracy_uncontradicted` / `accuracy_contradicted` | each value | all three accuracy-judged deliveries | the three-way split — never one "accurate" rate: `uncontradicted` asserts nothing, so folding it in would report ≈1.0 on a mostly unverifiable run |
 | `novelty` | `novel` + `confirming` | those + `redundant` | not-redundant share |
 | `influence` | `referenced` + `acted_on` + `decisive` | those + `none` | any-footprint share |
 | `positive_effect` | `improved` | `improved` + `no_effect` + `harmed` | improved share among deliveries that have an effect |
@@ -101,7 +101,9 @@ Per aggregate block (`overall` and each trajectory):
 | `error` / `unjudged` | Spans the judge failed to score / skipped by `--limit` |
 | `rates` | Verdict shares over judged spans (omitted when nothing was judged) |
 | `headline.judged_spans` | The rate denominator (the whole `headline` is omitted when this is 0) |
+| `headline.positive_span_rate` / `negative_span_rate` | The verdict rates, always presented together with the wasted-token share |
 | `headline.wasted_token_share` | Neutral + negative injected-token cost as a share of judged spans' cost |
+| `headline.caveat` | Only when the negative rate is 0 but the wasted share is high (> 0.5): names the span-level proxy coarseness and the verdict asymmetry |
 | `rubric.deliveries` | Judge-scored memory deliveries; the whole `rubric` is omitted when this is 0 |
 | `rubric.counts` / `rubric.rates` | Per-signal value distributions and projected rates |
 | `rubric.no_footprint_reasons` | Why ignored memories left no footprint: `irrelevant` / `redundant` / `confirming_ignored` / `ignored_novel` (omitted when empty) |
@@ -111,10 +113,11 @@ Per aggregate block (`overall` and each trajectory):
 | `input_paths` | Overall only: gated spans judged on the full-text vs chunked-scan input |
 | `gold_scored` | Overall only: spans scored under the gold rubric |
 | `over_budget` | Overall only: spans whose scoring input was sent as-is past `JUDGE_INPUT_TOKENS` |
+| `judge_compliance` | Judge-contract compliance: `pe_pairing_corrected_spans` / `llm_judged_spans` / `pe_pairing_correction_rate` — the share of LLM-judged spans whose rubric needed the positive_effect↔influence pairing correction (present whenever LLM-judged spans exist) |
 | `n_trajectories` | Overall only |
 | `memory_usage` | Per-memory usage tallies: `key` + non-zero `tallies`, plus `value_drift: true` when recorded content changed across spans. Labels are defined in [Verdict derivation](verdict-derivation.md#usage-labels). |
 | `low_confidence` | Span ids with confidence `< 0.5` (only when non-empty) |
-| `policy` | Delivery policy: `n_injections`, `n_steps`, `injection_density` (injections per agent step), `restated_ratio`, `est_injected_tokens`, `prompt_tokens_total` (billed usage), `injected_token_share`, `n_searches`. Overall also has `est_injected_tokens_billed` — the share's numerator when only some trajectories have usage records. |
+| `policy` | Delivery policy: `n_injections`, `n_steps`, `injection_density` (injections per agent step), `restated_ratio`, `est_injected_tokens`, `prompt_tokens_total` (billed usage), `injected_token_share`, `n_searches`, and per trajectory `n_extractions` / `extraction_failures` (generations recorded vs flagged as failed/incomplete — extraction reliability). Overall also has `est_injected_tokens_billed` — the share's numerator when only some trajectories have usage records. |
 
 ## Span Index
 
@@ -130,6 +133,6 @@ Each trajectory's `spans` is a narrative-free index into the report:
 
 ## Report-Only Fields
 
-`injudge-report.json` additionally carries, per operation: `memories` (full recorded refs), rubric notes, `analysis`, `evidence`, `step_gaps`, `new_keys` / `removed_keys`, `auto`, `error`, `judge_raw`, and `input` on gated spans (`path`: `full` or `scan`, plus scan counters, `"gold"`, `"over_budget"` when they apply). A span whose judging failed unexpectedly keeps a re-derived `{path, gold?}` record without scan counters, so the regime tallies still include it.
+`injudge-report.json` additionally carries, per operation: `memories` (full recorded refs), rubric notes, `analysis`, `evidence`, `step_gaps`, `new_keys` / `removed_keys`, `auto`, `error`, `judge_raw`, `pe_pairing_corrections` (when any), and `input` on gated spans (`path`: `full` or `scan`, plus scan counters, `"gold"`, `"over_budget"`, and `"length_fallback"` when they apply — the latter marks a full-text send the endpoint rejected as too long, rerouted to the scan path). A span whose judging failed unexpectedly keeps a re-derived `{path, gold?}` record without scan counters, so the regime tallies still include it.
 
 The `injections` array lists every raw delivery with its span, `role` (`first` or `restated`), `verdict`, `content_chars`, and its `op_id` / `seq` / `step`.

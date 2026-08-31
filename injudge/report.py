@@ -6,7 +6,9 @@ The runtime artifact's output contract: per operation
 plus the rubric that produced the verdict (per-memory relevance / accuracy /
 novelty / influence / positive_effect with notes), the judge's analysis,
 the input record on budget-gate spans ({"path": "full"|"scan", ...} with the
-scan counters, the gold-regime marker, and the over-budget-send marker),
+scan counters, the gold-regime marker, the over-budget-send marker, and the
+length-fallback marker when a too-long full-text send was rerouted to the
+scan path), the per-span pairing-correction count,
 the deterministic delivery-cost and delivery-policy accounting, and per-run
 aggregates (verdict rates, rubric distributions, headline numbers, the
 input-path, gold-regime and over-budget-send counts) over all
@@ -85,6 +87,11 @@ def operation_record(span: InjectionSpan, verdict: dict, delivery_cost: dict) ->
         # spans and --limit/dry-run unjudged spans omit it entirely (stamping
         # them "full" would pollute the regime diagnostic)
         **({"input": verdict["input"]} if verdict.get("input") else {}),
+        # judge-compliance marker: positive_effect↔influence pairing
+        # corrections applied at verdict assembly, only when any (the
+        # aggregated rate lives in the summary's judge_compliance block)
+        **({"pe_pairing_corrections": verdict["pe_pairing_corrections"]}
+           if verdict.get("pe_pairing_corrections") else {}),
         **({"judge_raw": verdict["judge_raw"]} if verdict.get("judge_raw") else {}),
     }
 
@@ -151,15 +158,24 @@ def _rubric_line(rub: dict) -> str | None:
     rates = rub.get("rates") or {}
     if not rub.get("deliveries") or not any(r is not None for r in rates.values()):
         return None
-    txt = ", ".join(
+    parts = [
         f"{label} {rates[s]:.0%}"
         for label, s in (
             ("relevant", "relevance"),
-            ("accurate", "accuracy"),
             ("influential", "influence"),
         )
         if rates.get(s) is not None
+    ]
+    # accuracy reports the three-way split, never one "accurate" rate —
+    # uncontradicted asserts nothing (see aggregate._rubric_rollup)
+    acc = ", ".join(
+        f"{v} {rates[f'accuracy_{v}']:.0%}"
+        for v in ("corroborated", "uncontradicted", "contradicted")
+        if rates.get(f"accuracy_{v}") is not None
     )
+    if acc:
+        parts.append(f"accuracy: {acc}")
+    txt = ", ".join(parts)
     # the novelty rate flattens the headline three-tier signal — surface the
     # distribution itself
     nov = (rub.get("counts") or {}).get("novelty") or {}
@@ -376,9 +392,18 @@ def _slim_aggregate(a: dict) -> dict:
     headline = a.get("headline") or {}
     judged = headline.get("judged_spans") or 0
     if judged:
-        h = {"judged_spans": judged}
+        # the two headline metrics are always presented together — a zero
+        # negative-span rate alone misreads an ignored flood as "harmless";
+        # the caveat rides along when it fired
+        h = {
+            "judged_spans": judged,
+            "positive_span_rate": headline.get("positive_span_rate"),
+            "negative_span_rate": headline.get("negative_span_rate"),
+        }
         if headline.get("wasted_token_share") is not None:
             h["wasted_token_share"] = headline["wasted_token_share"]
+        if headline.get("caveat"):
+            h["caveat"] = headline["caveat"]
         out["headline"] = h
     rub = a.get("rubric") or {}
     if rub.get("deliveries"):
@@ -402,7 +427,8 @@ def _slim_aggregate(a: dict) -> dict:
     buckets = a.get("confidence_buckets") or {}
     if means or any(buckets.values()):
         out["confidence"] = {"mean_by_verdict": means, "buckets": buckets}
-    for opt in ("n_trajectories", "input_paths", "gold_scored", "over_budget"):
+    for opt in ("n_trajectories", "input_paths", "gold_scored", "over_budget",
+                "judge_compliance"):
         if opt in a:
             out[opt] = a[opt]
     if a.get("policy"):
@@ -490,6 +516,11 @@ def print_summary(artifact: dict) -> int:
         )
     if (txt := _headline_line(agg.get("headline") or {})) is not None:
         print_safe(f"  {txt}")
+        # the wasted-token share never reads alone: a zero negative rate with
+        # a high wasted share gets its caveat stated outright
+        caveat = (agg.get("headline") or {}).get("caveat")
+        if caveat:
+            print_safe(f"  caveat: {caveat}")
     if (txt := _policy_line(agg.get("policy") or {})) is not None:
         print_safe(f"  {txt}")
     rub = agg.get("rubric") or {}

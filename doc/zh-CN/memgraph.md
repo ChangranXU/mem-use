@@ -28,7 +28,7 @@ JSON 产物——嵌在 HTML 里的是同一个 dict——的形状是：
 | 集合 | 内容 |
 |---|---|
 | `ops` | 记忆操作。`kind` 为 `extract`（生成）或 `recall`（投递）；每个操作锚定在 `(traj, step, seq)`。 |
-| `memories` | 每个 `(namespace, item_id)` 身份一条记录：来源、创建位置、后续更新、召回、删除。 |
+| `memories` | 每个 `(namespace, item_id)` 身份一条记录：来源、创建位置、后续更新、召回，以及删除历史——`deletions` 列出每一次观察到的删除（重新创建会标记 `revived`，绝不抹除历史），`deleted` 是终态。 |
 | `edges` | 从操作指向记忆的关系：`creates`、`supersedes`、`deletes`、`recalls`。 |
 
 两条时序说明——都属于合法输入而非错误：
@@ -75,7 +75,7 @@ JSON 产物——嵌在 HTML 里的是同一个 dict——的形状是：
 | 灰色 | neutral |
 | 琥珀色 | error |
 
-页眉加上判定计数；弹层展示评审分析、每条记忆的使用情况，以及该区间的输入路径（`full` / `scan`、gold、over-budget）。
+页眉加上判定计数；弹层展示评审分析、每条记忆的使用情况，以及该区间的输入路径（`full` / `scan`、gold、over-budget、length-fallback）。
 
 {% hint style="info" %}
 未匹配或歧义的连接记为 validation 说明，绝不报错。歧义键——多个已加载轨迹共享同一 `run_id`，或同一 `(run_id, seq)` 被多条报告注入或多条召回操作占用——会被跳过，而不是交叉标注。图仍会渲染。

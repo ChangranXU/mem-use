@@ -48,7 +48,7 @@ $$
 \mathrm{rates}[v] = \frac{\mathrm{count}[v]}{\mathrm{positive} + \mathrm{negative} + \mathrm{neutral}}
 $$
 
-`headline.judged_spans` 就是该分母。`headline.wasted_token_share` 是 neutral 与 negative 区间的注入 token 成本占已评判区间成本的份额：花在没有帮助的注入上的预算。
+`headline.judged_spans` 就是该分母。`headline.wasted_token_share` 是 neutral 与 negative 区间的注入 token 成本占已评判区间成本的份额：花在没有帮助的注入上的预算。headline 始终把区间判定率与 wasted-token share 一起呈现——negative 率为零单独看会把"被无视的灌水"误读为"无害"；当 negative 率为 0 而浪费份额偏高（> 0.5）时，`headline.caveat` 会指明两种已知的粗糙性（区间级代理，以及判定的不对称：被无视的垃圾是 neutral；只有 acted-on 且无效或有害才是 negative）。
 
 ### 评分比率
 
@@ -57,7 +57,7 @@ $$
 | 比率 | 分子 | 分母 | 读作 |
 |---|---|---|---|
 | `relevance` | `true` | `true` + `false` | 相关占比 |
-| `accuracy` | `corroborated` + `uncontradicted` | 上述 + `contradicted` | 未被证伪及以上占比 |
+| `accuracy_corroborated` / `accuracy_uncontradicted` / `accuracy_contradicted` | 各取值 | 全部三种 accuracy 已判定投递 | 三路拆分——绝不再合成单一的"accurate"比率：`uncontradicted` 不说明任何问题，折进去会让大量无法核实的运行报告 ≈1.0 |
 | `novelty` | `novel` + `confirming` | 上述 + `redundant` | 非冗余占比 |
 | `influence` | `referenced` + `acted_on` + `decisive` | 上述 + `none` | 有任何足迹的占比 |
 | `positive_effect` | `improved` | `improved` + `no_effect` + `harmed` | 有 effect 的投递中 improved 的占比 |
@@ -101,7 +101,9 @@ $$
 | `error` / `unjudged` | 评审失败的区间 / 被 `--limit` 截掉的区间 |
 | `rates` | 已评判区间上的判定占比（无评判时省略） |
 | `headline.judged_spans` | 比率的分母（为 0 时整个 `headline` 省略） |
+| `headline.positive_span_rate` / `negative_span_rate` | 判定率，始终与 wasted-token share 一起呈现 |
 | `headline.wasted_token_share` | neutral + negative 的注入 token 成本占已评判区间成本的份额 |
+| `headline.caveat` | 仅当 negative 率为 0 而浪费份额偏高（> 0.5）时：指明区间级代理的粗糙性与判定的不对称 |
 | `rubric.deliveries` | 被打分的记忆投递数；为 0 时整个 `rubric` 省略 |
 | `rubric.counts` / `rubric.rates` | 各信号的取值分布与投影比率 |
 | `rubric.no_footprint_reasons` | 被忽略记忆未留足迹的原因：`irrelevant` / `redundant` / `confirming_ignored` / `ignored_novel`（空时省略） |
@@ -111,10 +113,11 @@ $$
 | `input_paths` | 仅 overall：预算门后走全文 / 分块扫描输入的区间数 |
 | `gold_scored` | 仅 overall：在 gold 评分规则下评判的区间数 |
 | `over_budget` | 仅 overall：评分输入超过 `JUDGE_INPUT_TOKENS` 仍原样发送的区间数 |
+| `judge_compliance` | 评审契约合规度：`pe_pairing_corrected_spans` / `llm_judged_spans` / `pe_pairing_correction_rate`——LLM 已评判区间中评分表需要 positive_effect↔influence 配对纠正的占比（存在 LLM 已评判区间时写出） |
 | `n_trajectories` | 仅 overall |
 | `memory_usage` | 逐记忆使用统计：`key` + 非零 `tallies`；已录制内容跨区间变化时加 `value_drift: true`。标签定义见[判定推导](verdict-derivation.md#使用标签)。 |
 | `low_confidence` | 置信度 `< 0.5` 的区间 id（仅在非空时写出） |
-| `policy` | 投递策略：`n_injections`、`n_steps`、`injection_density`（每 agent 步的注入数）、`restated_ratio`、`est_injected_tokens`、`prompt_tokens_total`（计费用量）、`injected_token_share`、`n_searches`。overall 还带 `est_injected_tokens_billed`——仅部分轨迹有计费记录时，份额的分子取它。 |
+| `policy` | 投递策略：`n_injections`、`n_steps`、`injection_density`（每 agent 步的注入数）、`restated_ratio`、`est_injected_tokens`、`prompt_tokens_total`（计费用量）、`injected_token_share`、`n_searches`，以及逐轨迹的 `n_extractions` / `extraction_failures`（录制到的生成数 vs 被标记为失败/不完整的数量——提取可靠性）。overall 还带 `est_injected_tokens_billed`——仅部分轨迹有计费记录时，份额的分子取它。 |
 
 ## 区间索引
 
@@ -130,6 +133,6 @@ $$
 
 ## 仅 Report 中的字段
 
-`injudge-report.json` 每个操作还带有：`memories`（完整已录制引用）、评分 note、`analysis`、`evidence`、`step_gaps`、`new_keys` / `removed_keys`、`auto`、`error`、`judge_raw`，以及预算门区间上的 `input`（`path` 为 `full` 或 `scan`，外加扫描计数，适用时还有 `"gold"`、`"over_budget"`）。评判意外失败的区间会保留不含扫描计数的再推导 `{path, gold?}` 记录，使路径计数仍包含该区间。
+`injudge-report.json` 每个操作还带有：`memories`（完整已录制引用）、评分 note、`analysis`、`evidence`、`step_gaps`、`new_keys` / `removed_keys`、`auto`、`error`、`judge_raw`、`pe_pairing_corrections`（若有），以及预算门区间上的 `input`（`path` 为 `full` 或 `scan`，外加扫描计数，适用时还有 `"gold"`、`"over_budget"`、`"length_fallback"`——后者标记因端点拒绝过长输入而改走扫描路径的全文发送）。评判意外失败的区间会保留不含扫描计数的再推导 `{path, gold?}` 记录，使路径计数仍包含该区间。
 
 `injections` 数组列出每一次原始投递及其所属区间、`role`（`first` 或 `restated`）、`verdict`、`content_chars`，以及 `op_id` / `seq` / `step`。

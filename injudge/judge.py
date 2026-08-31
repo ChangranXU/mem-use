@@ -43,7 +43,12 @@ format refusal) and fails the span — the repeat is only
 judged there because a gateway rejecting every format field with one
 generic error body repeats it across the FORMAT tiers too, and only the
 format-less tier tells that from a tier-independent fault — as does any
-other non-429 4xx (auth, unknown URL, payload too large); with
+other non-429 4xx (auth, unknown URL). The one carve-out: a rejection
+reading as a length/context-window refusal (413 by status, or a signed
+400/422 body) fails as "length" at the branch entry — the budget gate's
+tiktoken estimate can undercount for the real judge tokenizer, so the
+scoring caller falls back to the chunked scan path instead of paying one
+rejection per tier before erroring the span. With
 OUTPUT_FORMAT pinned there is no chain to walk, so a 400/422 fails the
 span the same way (recorded per span, the run continues) rather than
 aborting the run. A response cut at the output-token budget MID-ANSWER
@@ -111,11 +116,15 @@ class JudgeError(Exception):
     `input` carries the budget-gate record of the span whose scoring call
     failed (stamped by judge_span/scan_span before re-raising), so the
     caller's blank error verdict keeps it in the input_paths/gold_scored
-    tallies; None while no gate span's record was stamped."""
+    tallies; None while no gate span's record was stamped. `too_long` marks
+    a length/context-window rejection (a "length" walk failure): the
+    verbatim send provably exceeds the endpoint's context, so judge_span may
+    fall back to the chunked scan path instead of erroring the span."""
 
     def __init__(self, message: str):
         super().__init__(message)
         self.input: dict | None = None
+        self.too_long = False
 
 
 def load_env(path: Path) -> dict[str, str]:
@@ -958,6 +967,7 @@ def _scoring_prompt(regime: str) -> str:
     )
     text = text.replace("@preamble@", load_prompt("injudge/scoring/preamble"))
     text = text.replace("@rules@", rules)
+    text = text.replace("@echo_example@", load_prompt("injudge/scoring/echo_example"))
     text = text.replace("@answer_contract@", load_prompt("injudge/scoring/answer_contract"))
     text = text.replace("@input_description@", load_prompt("injudge/scoring/input"))
     return _fill_signals(text, regime)
@@ -1086,6 +1096,15 @@ def _render_steps(steps: list[AgentStep]) -> str:
     return "\n".join(_render_step(st) for st in steps) or "(none)"
 
 
+def _step_text(s: AgentStep) -> str:
+    """One step's searchable text: reasoning, content, tool name/args/result —
+    the surfaces the scan anchors and the echo-overlap guard match against."""
+    parts = [s.reasoning, s.content]
+    for t in s.tools:
+        parts += [t.name or "", _cmd_of(t.args), t.result or ""]
+    return "\n".join(p for p in parts if p)
+
+
 @dataclass(frozen=True)
 class _StreamRender:
     """One steps list's rendered stream and its token count, memoized (the
@@ -1138,6 +1157,69 @@ def _render_stream(steps: list[AgentStep]) -> _StreamRender:
 _stream_render = _StepsMemo(_render_stream)
 
 
+# ------------------------------------------------- the same-episode echo guard
+
+# Content words the overlap check counts (4+ chars — shorter tokens are
+# stopword-grade noise). Heuristic thresholds: the guard is a display-level
+# warning, never a verdict rewrite, so a miss keeps today's behavior.
+_ECHO_WORD = re.compile(r"[A-Za-z0-9_]{4,}")
+_ECHO_MIN_WORDS = 6  # a shorter value is too coarse to call an echo
+_ECHO_MIN_OVERLAP = 0.8  # share of the value's words already seen pre-injection
+
+# per-step content-word sets, memoized per steps list like the stream render:
+# a trajectory's spans share the one list, so the words are split once
+_step_words = _StepsMemo(
+    lambda steps: tuple(
+        {w.lower() for w in _ECHO_WORD.findall(_step_text(st))} for st in steps
+    )
+)
+
+
+def _echo_overlap_warnings(
+    verdict: dict,
+    span: InjectionSpan,
+    steps: list[AgentStep],
+    task: str | None,
+    warnings: list[str],
+) -> None:
+    """Display-level guard against the same-episode echo trap: a memory whose
+    value substantially overlaps the pre-injection context (the task statement
+    or the agent's own pre-span steps) but was judged novelty=novel is the
+    signature of mid-episode extraction re-injecting the agent's own reasoning.
+    Warn like every other correction note here — the judged value stands."""
+    rubric = verdict.get("rubric") or {}
+    if not rubric or span.step_first is None:
+        return
+    pre: set[str] = set()
+    if task:
+        pre.update(w.lower() for w in _ECHO_WORD.findall(task))
+    for words in _step_words(steps)[: span.step_first - 1]:
+        pre |= words
+    if not pre:
+        return
+    for m in span.memories:
+        key = m.get("key")
+        if not key:
+            continue
+        signals = rubric.get(key)
+        if not signals or (signals.get("novelty") or {}).get("value") != "novel":
+            continue
+        value = m.get("value")
+        if not isinstance(value, str):
+            continue
+        words = {w.lower() for w in _ECHO_WORD.findall(value)}
+        if len(words) < _ECHO_MIN_WORDS:
+            continue
+        overlap = len(words & pre) / len(words)
+        if overlap >= _ECHO_MIN_OVERLAP:
+            warnings.append(
+                f"{span.id}: {key}.novelty judged 'novel' but {overlap:.0%} of the "
+                "value's words already appear in the task statement or the "
+                "pre-injection steps — a possible same-episode echo (the judged "
+                "novelty stands; review the span)"
+            )
+
+
 def _render_span_header(span: InjectionSpan, task: str | None, memories_note: str) -> str:
     """The task + span + delivered-memories header every judge-bound input
     carries (the scoring call and a scan chunk's extraction call alike — a
@@ -1156,6 +1238,31 @@ def _render_span_header(span: InjectionSpan, task: str | None, memories_note: st
         f"SPAN TO EVALUATE {span.id} — {span.n_injections} identical injection(s), "
         f"consumed at {consumed} (seqs {span.seq_first}–{span.seq_last})."
     )
+    if span.total:
+        # the span's position in the run (set by group_spans; 0/0 when the
+        # span was built directly) — k > 1 means earlier spans delivered
+        # memories before this one
+        parts.append(
+            f"This is span {span.position} of {span.total} in the trajectory"
+            + ("; earlier spans already delivered memories before it."
+               if span.position > 1 else ".")
+        )
+    if span.queries:
+        # the recorded search query(ies) that produced the injection — the
+        # delivery context the relevance/novelty calls were made against
+        shown = "; ".join(f'"{q}"' for q in span.queries[:2])
+        more = f" (+{len(span.queries) - 2} more)" if len(span.queries) > 2 else ""
+        noun = "query" if len(span.queries) == 1 else "queries (distinct, per injection)"
+        parts.append(f"Search {noun} that produced the injection: {shown}{more}")
+    if span.placement_kind or span.placement_head:
+        # how the injection was presented, from the recorded placement: the
+        # protocol's placement kind plus a capped excerpt of the delivered
+        # block's opening (the framing the agent actually saw). A redacted or
+        # locator placement records no content — the excerpt stays absent.
+        desc = f"Presentation: {span.placement_kind}" if span.placement_kind else "Presentation:"
+        if span.placement_head:
+            desc += f'{";" if span.placement_kind else ""} the delivered block opens with: "{span.placement_head}"'
+        parts.append(desc + ".")
     if span.step_gaps:
         parts.append(f"NOTE: the memory was NOT delivered at steps {span.step_gaps}.")
     if span.new_keys:
@@ -1202,11 +1309,18 @@ def _user_shell(
     attachments, the closing instruction). render_user joins shell and
     memoized stream into the judge input; the budget gate sums their token
     counts instead of re-encoding the whole stream per span."""
-    footprint = (
-        f"the span's footprint, if any, appears at steps >= {span.step_first}"
-        if span.step_first is not None
-        else "the span carries no attributed step (no agent turn classified)"
-    )
+    if span.step_first is not None and span.window_last is not None:
+        # the window is bounded at the next span's first step: a content
+        # change supersedes, so later steps are the newer span's window
+        footprint = (
+            f"the span's footprint, if any, appears at steps "
+            f"{span.step_first}–{span.window_last} (the next span's different "
+            f"content supersedes it from step {span.window_last + 1})"
+        )
+    elif span.step_first is not None:
+        footprint = f"the span's footprint, if any, appears at steps >= {span.step_first}"
+    else:
+        footprint = "the span carries no attributed step (no agent turn classified)"
     head = (
         _render_span_header(span, task, MEMORIES_NOTE)
         + f"\n\nCOMPLETE AGENT STEP STREAM ({len(steps)} steps; {footprint})\n"
@@ -1455,6 +1569,9 @@ def blank_verdict() -> dict:
         "auto": None,
         "error": None,
         "input": None,  # the budget-gate record; gate spans only
+        # positive_effect↔influence pairing corrections applied at assembly
+        # (a judge-compliance signal; aggregated in the summary)
+        "pe_pairing_corrections": 0,
     }
 
 
@@ -1545,12 +1662,14 @@ def _assemble_verdict(
                 f"{span.id}: {key}.positive_effect required when influence is "
                 "acted_on/decisive; usage unclear for this memory"
             )
+            verdict["pe_pairing_corrections"] += 1
         elif inf["value"] not in _ACTED and pe["value"] is not None:
             warnings.append(
                 f"{span.id}: {key}.positive_effect set while influence is "
                 f"{inf['value']!r}; coerced to null"
             )
             pe["value"] = None
+            verdict["pe_pairing_corrections"] += 1
         verdict["rubric"][key] = signals
         usage = _derive_usage(signals)
         usage_entry = {"usage": usage, "evidence": _usage_evidence(signals)}
@@ -1771,35 +1890,63 @@ def judge_span(
     injection point in the step stream, the scan's pre/post split and seam
     neighborhood have nothing to bracket (the CLI rule-judges such spans
     auto-neutral before judge_span ever runs; the fit path is what a direct
-    caller gets). The path taken is recorded on the verdict's `input` for
+    caller gets). A fit-path send the endpoint then rejects as too long
+    (tiktoken can undercount for the real judge tokenizer) falls back to the
+    same scan path once, marked `length_fallback` on the input record. The
+    path taken is recorded on the verdict's `input` for
     the operation record — and when the scoring call fails outright, the
     record rides the raised JudgeError so the caller's error verdict keeps
     it. With no scan config the gate is bypassed and the full-text call runs
-    as before (the unit-test entry point).
+    as before (the unit-test entry point). Either path's verdict then gets
+    the echo-overlap guard: a novelty=novel memory whose value substantially
+    overlaps the pre-injection context is warned about, never rewritten.
     """
     gold = gold or GoldInput()
     system = _scoring_system(gold)
+    if scan is not None:
+        # lazy import: injudge.scan builds on this module's client machinery
+        from injudge.scan import scan_span
     if (
         scan is not None
         and _gate_over_budget(system, span, steps, task, gold, scan.input_tokens)
     ):
-        # lazy import: injudge.scan builds on this module's client machinery
-        from injudge.scan import scan_span
-
-        return scan_span(span, steps, cfg, scan, gold, warnings, task, system)
-    user = render_user(span, steps, task, gold=gold)
-    record = _input_record("full", gold) if scan is not None else None
-    try:
-        verdict = _scoring_call(system, user, span, cfg, warnings)
-    except JudgeError as e:
-        # a gate span keeps its input record even when the scoring call never
-        # produced a verdict: it rides the exception so the caller's blank
-        # error verdict can stamp it (the scan path does the same in
-        # scan_span) — otherwise the run's input_paths/gold_scored undercount
-        e.input = record
-        raise
-    if record is not None:
-        verdict["input"] = record
+        verdict = scan_span(span, steps, cfg, scan, gold, warnings, task, system)
+    else:
+        user = render_user(span, steps, task, gold=gold)
+        record = _input_record("full", gold) if scan is not None else None
+        try:
+            verdict = _scoring_call(system, user, span, cfg, warnings)
+        except JudgeError as e:
+            if not (e.too_long and scan is not None and span.step_first is not None):
+                # a gate span keeps its input record even when the scoring call
+                # never produced a verdict: it rides the exception so the
+                # caller's blank error verdict can stamp it (the scan path does
+                # the same in scan_span) — otherwise the run's
+                # input_paths/gold_scored undercount
+                e.input = record
+                raise
+            # The budget gate's tiktoken estimate passed a send the endpoint
+            # rejected as too long: fall back to the chunked scan path (the
+            # step-less rule matches the gate's — with no injection point the
+            # scan's pre/post split has nothing to bracket). The scan record
+            # replaces the full-path one, marked so the regime tallies still
+            # show the routing change.
+            warnings.append(
+                f"{span.id}: scoring request rejected as too long "
+                f"({e}); falling back to the evidence-scan path"
+            )
+            try:
+                verdict = scan_span(span, steps, cfg, scan, gold, warnings, task, system)
+            except JudgeError as e2:
+                if e2.input is not None:
+                    e2.input["length_fallback"] = True
+                raise
+            if verdict.get("input") is not None:
+                verdict["input"]["length_fallback"] = True
+        else:
+            if record is not None:
+                verdict["input"] = record
+    _echo_overlap_warnings(verdict, span, steps, task, warnings)
     return verdict
 
 
@@ -1857,6 +2004,36 @@ def _failure_message(e: _CallFailed, contract: _CallContract) -> str:
     return msg
 
 
+# Length/context-window rejection signatures in a 400/413 error body
+# (lowercased substring match). tiktoken o200k can undercount for the real
+# judge tokenizer, so the budget gate can pass a send the endpoint then
+# rejects as too long. Routing-only heuristics: a miss keeps the fail-fast /
+# tier-walk behavior exactly as before; a hit routes the span to the chunked
+# scan path (judge_span) instead of erroring it.
+_LENGTH_SIGNATURES = (
+    "context length",
+    "context_length_exceeded",
+    "context window",
+    "prompt is too long",
+    "input is too long",
+    "too many tokens",
+    "reduce the length",
+    "token limit",
+    "request too large",
+    "payload too large",
+    "request entity too large",
+)
+
+
+def _length_rejection(code: int, body: str) -> bool:
+    """True when an HTTP error reads as a length/context-window rejection:
+    413 is Content Too Large by status; a 400/422 needs a body signature."""
+    if code == 413:
+        return True
+    lowered = body.lower()
+    return any(sig in lowered for sig in _LENGTH_SIGNATURES)
+
+
 _VERDICT_CALL = _CallContract(
     schema=VERDICT_SCHEMA,
     name="injudge_verdict",
@@ -1895,8 +2072,13 @@ def _contract_call(
     walk before the tier that answers. An empty rejection body is silence,
     not an unchanged rejection — it never triggers the fail-fast (a gateway
     dropping per-tier error text still gets the full walk). Any other
-    non-429 4xx (auth, unknown URL, payload too large) is an endpoint/config
-    fault, not a format problem, and fails the call immediately. With the
+    non-429 4xx (auth, unknown URL) is an endpoint/config
+    fault, not a format problem, and fails the call immediately — except a
+    length/context-window rejection (413 by status, or a 400/422 body
+    matching _length_rejection), detected at the 400/422 branch entry before
+    any tier walking: it fails as kind "length" so the scoring caller can
+    route the span to the chunked scan path (an extraction chunk has no
+    smaller path — it fails the chunk like any other request rejection). With the
     output format pinned there is no chain to walk, so a 400/422 fails the
     call naming the pin.
     Out-of-contract OUTPUT that proves the endpoint
@@ -1977,6 +2159,18 @@ def _contract_call(
                 last_error = f"HTTP {e.code}: {detail}"
                 pause = _retry_after(e)
             elif e.code in (400, 422):
+                # branch entry: a length/context-window rejection is not a
+                # format refusal — walking the tier chain would pay one
+                # rejection per tier for nothing. Fail as "length" so the
+                # scoring caller can fall back to the chunked scan path (a
+                # pinned tier falls back the same: the pin constrains the
+                # format field, not the input size).
+                if _length_rejection(e.code, body):
+                    raise _CallFailed(
+                        "length",
+                        f"the {contract.label} endpoint rejected the request as "
+                        f"too long for its context window (HTTP {e.code}: {detail})",
+                    ) from e
                 # request-level rejection: the endpoint refuses this tier's
                 # format field — degrade for free, no attempt consumed
                 if cfg.output_format is not None:
@@ -2022,8 +2216,17 @@ def _contract_call(
                 tier = nxt
                 continue
             else:
-                # 401/403/404/413 & co. are config faults, not format-tier
-                # rejections — fail fast instead of walking the chain
+                # 401/403/404 & co. are config faults, not format-tier
+                # rejections — fail fast instead of walking the chain; a
+                # length/context-window rejection (413 by status, or a signed
+                # body) fails as "length" so the scoring caller can fall back
+                # to the chunked scan path
+                if _length_rejection(e.code, body):
+                    raise _CallFailed(
+                        "length",
+                        f"the {contract.label} endpoint rejected the request as "
+                        f"too long for its context window (HTTP {e.code}: {detail})",
+                    ) from e
                 raise _CallFailed("request", f"HTTP {e.code}: {detail}") from e
         except (OSError, http.client.HTTPException) as e:
             # URLError/TimeoutError are OSError subclasses; HTTPException
@@ -2196,7 +2399,9 @@ def _scoring_call(
     contract walk (VERDICT_SCHEMA), then assemble the verdict.
 
     The walk's failure kinds map to the scoring failure records: a
-    request-level failure raises JudgeError for the caller to record; an
+    request-level failure raises JudgeError for the caller to record (a
+    length/context-window rejection raises it with `too_long` set, so
+    judge_span can fall back to the chunked scan path); an
     answer-level failure becomes an error verdict with the raw text kept —
     budget exhausted after invalid output names that answer's own contract
     violation (a later transport failure never misattributes the cause), and
@@ -2217,7 +2422,13 @@ def _scoring_call(
             return _error_verdict(
                 _failure_message(e, _VERDICT_CALL), e.text, span, warnings, cfg.api_key
             )
-        raise JudgeError(str(e)) from e
+        err = JudgeError(str(e))
+        # a length rejection is recoverable by the caller: the chunked scan
+        # path sends smaller requests (judge_span owns that fallback — this
+        # walk's other caller, the scan path's own scoring call, IS the
+        # fallback and must not loop into it)
+        err.too_long = e.kind == "length"
+        raise err from e
     return _assemble_verdict(obj, text, span, warnings, cfg.api_key)
 
 

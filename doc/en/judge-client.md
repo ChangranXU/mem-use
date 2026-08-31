@@ -17,6 +17,7 @@ The client walks a conformance tier chain — **structured** (constrained decodi
 
 - A rejected or proven-ignored format field degrades for free: tier discovery consumes no attempts.
 - The first working tier is memoized for the rest of the run.
+- A length/context-window rejection (413, or a signed 400/422 body) never walks the chain: a scoring call fails as "too long" at the branch entry and the span falls back to the chunked scan path once, marked `length_fallback` (see [Scoring input](scoring-input.md#guardrails)).
 - Pin a tier with `OUTPUT_FORMAT`. With a tier pinned there is no chain, so a 400/422 fails the span — recorded; the run continues.
 
 ## Retries and Failure Handling

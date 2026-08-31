@@ -4,7 +4,8 @@ One file, no external resources: the graph JSON is embedded and rendered with
 vanilla JS + inline SVG. Lanes (one per trajectory, x = agent step) hold
 extraction (▲) and recall (▼) ops; edges link each memory's creation to every
 recall that delivered it, across lanes, and dashed lifecycle edges link a
-memory's creation → updates → deletion. Memories recalled but never created
+memory's creation → updates → deletions (a revived memory keeps its full
+deletion history). Memories recalled but never created
 in the loaded set anchor a dashed ghost ▲ at the left edge of their first
 recall's lane. Consecutive identical recall injections collapse into ×n spans;
 consecutive history rewrites collapse into shaded bands (translucent with a
@@ -406,8 +407,8 @@ function buildSVG(){
       nDrawnEdges++;
       edgeEls.push(`<path class="edge" data-mem="${esc(mid)}" d="M${sx},${y0} C${sx},${y0+dy} ${bx},${y1-dy} ${bx},${y1}" fill="none" stroke="${col}" stroke-opacity="0.2" stroke-width="1.5"><title>${esc(m.key)}</title></path>`);
     }
-    // lifecycle: creation → each update → deletion, dashed in the memory color
-    const chain=[...new Set([fromId, ...(m.updates||[]).map(u=>u.op), m.deleted_by&&m.deleted_by.op]
+    // lifecycle: creation → each update → each deletion, dashed in the memory color
+    const chain=[...new Set([fromId, ...(m.updates||[]).map(u=>u.op), ...(m.deletions||[]).map(d=>d.op)]
       .filter(id=>id&&opPos[id]))].sort((p,q)=>opOrder[p]-opOrder[q]);
     for(let i=0;i+1<chain.length;i++){
       const a=opPos[chain[i]], b=opPos[chain[i+1]], col=memColor(mid);
@@ -517,7 +518,7 @@ function actionsAt(trajId, step){
         const id=memId(c), m=memById[id];
         add(id, m&&m.created&&m.created.op===o.id ? "created" : "updated");
       }
-      for(const m of G.memories) if(m.deleted_by&&m.deleted_by.op===o.id) add(memId(m),"deleted");
+      for(const m of G.memories) if((m.deletions||[]).some(d=>d.op===o.id)) add(memId(m),"deleted");
     } else {
       for(const dm of o.memories) if(dm.key) add(memId(dm),"recalled");
     }
@@ -576,23 +577,27 @@ function selectMemory(id){
     if(gh){ gh.scrollIntoView({behavior:"smooth", block:"nearest", inline:"center"});
       gh.classList.add("located"); setTimeout(()=>gh.classList.remove("located"), 1700); }
   }
-  // lifecycle trail: creating status → later review statuses → deletion
+  // lifecycle trail: creating status → later review statuses → deletion(s),
+  // with re-creations interleaved in op order (a revived memory keeps its
+  // deletions — the deletes edges carry the same record)
   const trail=[];
   const pushT=(st,op)=>{ if(st&&(!trail.length||trail[trail.length-1].st!==st)) trail.push({st,op}); };
   if(c.op) pushT(c.status||m.status, c.op);
-  for(const u of (m.updates||[])) pushT(u.review_status, u.op);
-  if(m.deleted_by) pushT("deleted", m.deleted_by.op);
+  const life=[...(m.updates||[]).map(u=>({st:u.review_status,op:u.op})),
+              ...(m.deletions||[]).map(d=>({st:"deleted",op:d.op}))];
+  life.sort((a,b)=>(opOrder[a.op]??0)-(opOrder[b.op]??0));
+  for(const x of life) pushT(x.st, x.op);
   const trailHtml=trail.length>1
     ? `<div class="kv">lifecycle: ${trail.map(x=>`<span class="chip" style="color:${x.st==="deleted"?"var(--flag)":(STATUS_COLOR[x.st]||"var(--muted)")}" title="${esc(x.op||"")}">${esc(x.st)}</span>`).join(" → ")}</div>`
     : "";
   detail.innerHTML=`<h3 style="color:${memColor(id)}">${esc(m.key)}</h3>
-    <div class="kv"><span class="chip">${esc(m.memory_type||"?")}</span><span class="chip">${esc(m.status)}</span>${m.deleted_by?`<span class="chip" style="color:var(--flag)">deleted</span>`:""}${m.confidence!=null?`<span class="chip">conf ${esc(m.confidence)}</span>`:""}${m.origin==="not_observed"?`<span class="chip">origin not observed</span>`:""}${m.namespace?`<span class="chip" title="store namespace ${esc(m.namespace)}">store ${esc(shorten(m.namespace,16))}</span>`:""}</div>
+    <div class="kv"><span class="chip">${esc(m.memory_type||"?")}</span><span class="chip">${esc(m.status)}</span>${m.deleted?`<span class="chip" style="color:var(--flag)">deleted</span>`:""}${m.revived?`<span class="chip">revived</span>`:""}${m.confidence!=null?`<span class="chip">conf ${esc(m.confidence)}</span>`:""}${m.origin==="not_observed"?`<span class="chip">origin not observed</span>`:""}${m.namespace?`<span class="chip" title="store namespace ${esc(m.namespace)}">store ${esc(shorten(m.namespace,16))}</span>`:""}</div>
     <div class="kv">created: ${c.op?`${esc(c.op)} @ ${esc(c.traj)} step ${c.step}`:"— (origin not observed)"}</div>
     ${trailHtml}
     ${m.recalled_before_creation&&m.recalled_before_creation.length?`<div class="kv" style="color:var(--flag)">⚠ ${m.recalled_before_creation.length} recall(s) precede this creation — the store entry likely predates the loaded trajectories</div>`:""}
     <div class="kv">used (${m.recalls.length}): ${collapseUses(m.recalls)||"—"}</div>
     ${m.updates&&m.updates.length?`<div class="kv">updates: ${m.updates.map(u=>`${esc(u.op)}@${u.step}${u.duplicate?" (duplicate)":""}`).join(", ")}</div>`:""}
-    ${m.deleted_by?`<div class="kv">deleted by ${esc(m.deleted_by.op)} @ step ${m.deleted_by.step}</div>`:""}
+    ${(m.deletions||[]).length?`<div class="kv">deleted by ${m.deletions.map(d=>`${esc(d.op)} @ step ${d.step}`).join(", ")}</div>`:""}
     <pre>${esc(m.value||"")}</pre>`;
 }
 function memChip(id,sign,label){
@@ -698,7 +703,7 @@ function showOp(opId){
         // judged the span — the path is artifact text, escaped like every
         // datum; the markers only select static suffixes
         const inp=d.input||{};
-        const inpTxt=inp.path?`<span class="meta">input: ${esc(inp.path)}${inp.gold?" · gold":""}${inp.over_budget?" · over budget":""}</span>`:"";
+        const inpTxt=inp.path?`<span class="meta">input: ${esc(inp.path)}${inp.gold?" · gold":""}${inp.over_budget?" · over budget":""}${inp.length_fallback?" · length fallback":""}</span>`:"";
         h+=`<div class="mrow"><div><span class="chip" style="color:${VD_COLOR[v]||"var(--muted)"}">${esc(v)}</span>${d.confidence!=null?`<span class="meta">conf ${esc(d.confidence)}</span>`:""}<span class="meta">${esc(x.verdict_span)}</span>${d.auto?`<span class="meta">auto: ${esc(d.auto)}</span>`:""}${dcTxt}${inpTxt}</div>`;
         if(d.error) h+=`<div class="flagbox">judge error: ${esc(d.error)}</div>`;
         if(d.analysis) h+=`<div class="vline" style="white-space:normal">${esc(d.analysis)}</div>`;
@@ -856,9 +861,14 @@ function renderMemList(filter){
     const used=m.recalls.length;
     const created=(m.created&&m.created.op)?1:0;
     // terminal state wins: a deleted memory shows "deleted", not its last review status
-    const effStatus=m.deleted_by? "deleted" : m.status;
-    const stCol=m.deleted_by? "var(--flag)" : (STATUS_COLOR[m.status]||"var(--muted)");
-    li.title=`${m.key}${m.namespace?` (store ${m.namespace})`:""} — status: ${effStatus}${m.deleted_by?` (was ${m.status}; deleted by ${m.deleted_by.op} @ step ${m.deleted_by.step})`:""}; created ${created?"at "+m.created.traj+" step "+m.created.step:"not observed"}; recalled ${used}×. Dot color matches its edges.`;
+    const lastDel=(m.deletions||[]).slice(-1)[0];
+    const effStatus=m.deleted? "deleted" : m.status;
+    const stCol=m.deleted? "var(--flag)" : (STATUS_COLOR[m.status]||"var(--muted)");
+    // the deletion history is terminal-state plus revival: a re-created
+    // memory keeps its deletion visible (the deletes edges carry it too)
+    const delTxt=m.deleted&&lastDel? ` (was ${m.status}; deleted by ${lastDel.op} @ step ${lastDel.step})`
+      : lastDel? ` (revived after deletion by ${lastDel.op} @ step ${lastDel.step})` : "";
+    li.title=`${m.key}${m.namespace?` (store ${m.namespace})`:""} — status: ${effStatus}${delTxt}; created ${created?"at "+m.created.traj+" step "+m.created.step:"not observed"}; recalled ${used}×. Dot color matches its edges.`;
     const stHtml=kinds
       ? [...kinds].map(k=>`<span class="act" style="color:${ACTION_COLOR[k]}">${ACTION_LABEL[k]}</span>`).join(" ")
       : `<span style="color:${stCol}">${esc(effStatus)}</span>${m.origin==="not_observed"?" · origin?":""} · ▲${created} ▼${used}`;

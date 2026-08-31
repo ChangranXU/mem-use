@@ -57,7 +57,6 @@ from injudge.judge import (
     _check_latin1_key,
     _check_output_format,
     _check_thinking_budget,
-    _cmd_of,
     _contract_call,
     _enum_config,
     _error_verdict,
@@ -75,6 +74,7 @@ from injudge.judge import (
     _render_step,
     _render_steps,
     _scoring_call,
+    _step_text,
     _substitute_enums,
     _system_tokens,
     count_tokens,
@@ -380,13 +380,6 @@ def _anchor_terms(span: InjectionSpan) -> list[str]:
             if len(terms) >= _MAX_ANCHOR_TERMS:
                 break
     return terms
-
-
-def _step_text(s: AgentStep) -> str:
-    parts = [s.reasoning, s.content]
-    for t in s.tools:
-        parts += [t.name or "", _cmd_of(t.args), t.result or ""]
-    return "\n".join(p for p in parts if p)
 
 
 # The scan path's per-step measurements ride judge's one-entry memo

@@ -13,4 +13,6 @@ Score EVERY delivered memory on this rubric — five signals, judged
 
 @rules@
 
+@echo_example@
+
 @answer_contract@

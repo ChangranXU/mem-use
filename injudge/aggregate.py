@@ -23,7 +23,10 @@ The counting rules:
   (namespace, item) identities.
 - rubric signal rates are over judge-scored memory-deliveries (span × key)
   of judged spans only; null signals never dilute a rate. positive_effect is
-  rated over the influential only (it is null by contract otherwise).
+  rated over the influential only (it is null by contract otherwise), and
+  accuracy is reported as the three-way split
+  (corroborated/uncontradicted/contradicted), never one "accurate" rate —
+  `uncontradicted` asserts nothing.
   Rule-judged auto-neutral spans carry placeholder null rubrics, so they are
   excluded: `deliveries` counts LLM-judged deliveries only.
 - delivery cost is deterministic: each span's full injection cost (all
@@ -35,7 +38,7 @@ The counting rules:
 
 from __future__ import annotations
 
-from injudge.judge import RUBRIC_SIGNALS
+from injudge.judge import _ACCURACY, RUBRIC_SIGNALS
 from injudge.steps import _mixed_sum, _token_share
 from memgraph.annotations import item_key, namespace_of
 
@@ -45,6 +48,21 @@ _BUCKETS = ("[0,0.5)", "[0.5,0.8)", "[0.8,1.0]")
 # the verdict classes every count/cost rollup tallies (error and unjudged are
 # counts, never rate denominators)
 _COUNTED = (*_VERDICTS, "error", "unjudged")
+
+# A zero negative rate must never read as "harmless" on its own: a system
+# flooding irrelevant-but-ignored memories scores negative 0 and all neutral
+# while wasting most of the injected budget. When the negative rate is 0 but
+# the wasted-token share is high, the headline carries this caveat naming
+# both known coarsenesses (the span-level proxy and the verdict asymmetry).
+_HIGH_WASTE_SHARE = 0.5
+ZERO_NEGATIVE_CAVEAT = (
+    "negative-span rate 0 with a high wasted-token share reads as 'ignored, "
+    "not cleared of harm': wasted_token_share is a span-level proxy (a neutral "
+    "span's referenced memories count as wasted; a positive span's ignored "
+    "memories count as productive), and the verdict rule is asymmetric "
+    "(ignored garbage judges neutral; only acted-on influence with no_effect "
+    "or harmed judges negative)"
+)
 
 
 def _key_identities(op: dict) -> dict[str, list[tuple[str | None, str]]]:
@@ -90,9 +108,13 @@ def _rubric_rollup(operations: list[dict]) -> dict:
 
     `counts` is the raw value distribution per signal (relevance is a bool,
     the rest are enums); `rates` projects each onto a boolean-style summary
-    rate for the one-line report (accuracy true = corroborated+uncontradicted;
-    novelty true = novel+confirming; influence true = any footprint;
-    positive_effect true = improved over judged effects). `deliveries` counts
+    rate for the one-line report (novelty true = novel+confirming; influence
+    true = any footprint; positive_effect true = improved over judged
+    effects) — except accuracy, which reports the three-way split as
+    separate shares over the accuracy-judged deliveries: folding
+    `uncontradicted` ("nothing refutes it") into an "accurate" rate would
+    report ≈1.0 on a run of mostly unverifiable memories while the
+    corroborated share is far lower. `deliveries` counts
     judge-answered entries only — a coverage gap's all-null entry is skipped —
     while aggregate()'s memory_usage tallies every delivered key (a gap lands
     as `unclear`): two populations over the same spans, by design.
@@ -136,15 +158,23 @@ def _rubric_rollup(operations: list[dict]) -> dict:
         den = num + sum(counts[s].get(v, 0) for v in false_vals)
         return round(num / den, 4) if den else None
 
+    # accuracy is NOT projected onto a boolean rate: `uncontradicted` asserts
+    # nothing, so the three-way split is reported as separate shares over the
+    # accuracy-judged deliveries (the counts distribution stays as-is)
+    acc = counts["accuracy"]
+    acc_total = sum(acc.get(v, 0) for v in _ACCURACY)
+    accuracy_rates = {
+        f"accuracy_{v}": (round(acc.get(v, 0) / acc_total, 4) if acc_total else None)
+        for v in _ACCURACY
+    }
+
     return {
         "deliveries": deliveries,
         "counts": counts,
         "rates": {
             "relevance": rate("relevance", ("true",), ("false",)),
             "novelty": rate("novelty", ("novel", "confirming"), ("redundant",)),
-            "accuracy": rate(
-                "accuracy", ("corroborated", "uncontradicted"), ("contradicted",)
-            ),
+            **accuracy_rates,
             "influence": rate(
                 "influence", ("referenced", "acted_on", "decisive"), ("none",)
             ),
@@ -216,6 +246,8 @@ def aggregate(operations: list[dict], n_injections: int, n_trajectories: int | N
     counts = dict.fromkeys(_COUNTED, 0)
     conf_sums: dict[str, list[float]] = {v: [] for v in _VERDICTS}
     usage_roll: dict[tuple[str | None, str], dict] = {}
+    llm_judged = 0  # spans a judge actually scored (rubric/usage population)
+    pe_corrected = 0  # ... of them needing the positive_effect↔influence correction
     for op in operations:
         v = op.get("verdict")
         counts[v if v in counts else "error"] += 1
@@ -231,6 +263,9 @@ def aggregate(operations: list[dict], n_injections: int, n_trajectories: int | N
                 out["confidence_buckets"][_BUCKETS[2]] += 1
         if v not in _VERDICTS or op.get("auto"):
             continue  # error/unjudged/rule-judged spans: usage untrusted or placeholder
+        llm_judged += 1
+        if op.get("pe_pairing_corrections"):
+            pe_corrected += 1
         identities = _key_identities(op)
         # identity -> the display key it rode in on (for the roll records)
         key_of = {ident: key for key, idents in identities.items() for ident in idents}
@@ -266,6 +301,15 @@ def aggregate(operations: list[dict], n_injections: int, n_trajectories: int | N
     out["memory_usage"] = [
         {"namespace": ns, "item_id": item, **roll} for (ns, item), roll in usage_roll.items()
     ]
+    if llm_judged:
+        # judge compliance made visible without reading validation notes: the
+        # share of LLM-judged spans whose rubric needed the
+        # positive_effect↔influence pairing correction at assembly
+        out["judge_compliance"] = {
+            "pe_pairing_corrected_spans": pe_corrected,
+            "llm_judged_spans": llm_judged,
+            "pe_pairing_correction_rate": round(pe_corrected / llm_judged, 4),
+        }
     # headline: the pre-registered numbers for cross-system claims; the
     # wasted-token share follows the same judged-only rule as the rates —
     # error/unjudged cost is a count, never a denominator
@@ -278,6 +322,11 @@ def aggregate(operations: list[dict], n_injections: int, n_trajectories: int | N
         "negative_span_rate": out["rates"]["negative"],
         "wasted_token_share": _token_share(wasted, judged_tok),
     }
+    share = out["headline"]["wasted_token_share"]
+    if out["rates"]["negative"] == 0 and share is not None and share > _HIGH_WASTE_SHARE:
+        # an all-ignored flood scores negative 0 while wasting most of the
+        # budget — the rate must never present alone as "harmless"
+        out["headline"]["caveat"] = ZERO_NEGATIVE_CAVEAT
     return out
 
 

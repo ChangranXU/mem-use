@@ -32,13 +32,15 @@ Each delivered memory is scored independently. Notes cite step and seq numbers f
 |---|---|---|
 | `relevance` | bool | Is the memory topically related to the task and to the agent's current subgoal at the injection point? Judged from the steps before the span's first step. |
 | `accuracy` | enum | `corroborated` (observable evidence it is right) / `uncontradicted` (no evidence either way) / `contradicted` (observable evidence it is wrong). |
-| `novelty` | enum | `novel` (substance never appeared pre-injection) / `confirming` (settles an open doubt the agent had articulated) / `redundant` (already established, no open doubt). |
-| `influence` | enum | `none` / `referenced` (mentioned only) / `acted_on` (shaped a later command, edit, or test) / `decisive` (explicitly credited with a pivot). Footprint is subsequent behavior, from the span's first step onward. |
+| `novelty` | enum | `novel` (substance appeared neither in the task statement nor the pre-injection steps) / `confirming` (settles an open doubt the agent had articulated) / `redundant` (already established, no open doubt). The task statement and the agent's initial context count as already-in-conversation, exactly like the agent's own pre-injection turns. |
+| `influence` | enum | `none` / `referenced` (mentioned only) / `acted_on` (shaped a later command, edit, or test) / `decisive` (explicitly credited with a pivot). Footprint is subsequent behavior: from the span's first step onward, bounded at the next span's first step when one follows with different content (a content change supersedes). The echo rule: a direction the agent had already announced, reasoned out, or applied before the span cannot be credited to a memory delivered afterward — even when the resulting action lands inside the window. |
 | `positive_effect` | enum or null | `improved` / `no_effect` / `harmed`. Non-null only when influence is `acted_on` or `decisive`. |
 
 {% hint style="warning" %}
 `positive_effect = no_effect` counts against the memory system: context and attention were spent without improving the work. A skip inferred only from an action's absence is `influence = none`; absence alone is not evidence.
 {% endhint %}
+
+The verdict rule is deliberately asymmetric: ignored garbage is **neutral** (no footprint), and only acted-on influence with no effect — or harm — is **negative**. A zero negative rate therefore never reads as "harmless" on its own: reporting always binds it to the wasted-token share, itself a span-level proxy (a neutral span's referenced memories count as wasted; a positive span's ignored memories count as productive), and states a caveat when the share is high (see [Artifacts](artifacts.md#verdict-rates)).
 
 The final task result, when discernible, may raise or lower confidence. It cannot decide a signal by itself.
 

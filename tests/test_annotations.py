@@ -173,6 +173,29 @@ def test_search_query_locator_resolves_like_the_task(tmp_path):
     assert recall.query == TASK
 
 
+def test_delivery_placement_fields_and_the_redacted_guard(tmp_path):
+    """The placement record feeds injudge's presentation line: the protocol's
+    placement kind plus a capped excerpt of the delivered block's opening. A
+    redacted placement records no content — the kind survives, the excerpt
+    stays absent. The fields are internal: never serialized into the graph
+    artifact."""
+    b = AnnotatedBuilder()
+    b.agent_turn(with_task=True)
+    b.recall(cure_ref("k1", "v1"), content="## Policy header\n- the memories")
+    b.recall(cure_ref("k2", "v2"), content="x" * 300)  # the excerpt is capped
+    sid = b.search(returned=[cure_ref("k3", "v3")])
+    b.agent_turn()
+    b.delivery(sid, memories=[cure_ref("k3", "v3")], bind=b.last_call, content=None)
+    _, ops, _ = parse(b, tmp_path)
+    recalls = [o for o in ops if o.kind == "recall"]
+    assert recalls[0].placement_kind == "prompt_message"
+    assert recalls[0].placement_head == "## Policy header\n- the memories"
+    assert recalls[1].placement_head == "x" * 160 + "…"
+    assert recalls[2].placement_kind == "prompt_message"
+    assert recalls[2].placement_head is None  # redacted: no content recorded
+    assert "placement_kind" not in recalls[0].to_dict()
+
+
 def test_task_locator_to_unresolvable_content_warns(tmp_path):
     """Locator kinds pointing outside trajectory.jsonl (call bodies, sidecar
     artifacts) resolve to None — with a note, never a silent drop."""
@@ -464,7 +487,8 @@ def test_delete_change_of_unobserved_memory_links_exact(tmp_path):
     graph = load_and_build([tmp_path])
     (mem,) = graph["memories"]
     assert mem["key"] == "old_k" and mem["origin"] == "not_observed"
-    assert mem["deleted_by"]["op"] == "T1:E1"
+    assert mem["deleted"] is True and mem["revived"] is False
+    assert [d["op"] for d in mem["deletions"]] == ["T1:E1"]
     (edge,) = [e for e in graph["edges"] if e["kind"] == "deletes"]
     assert edge["uncertain"] is False
     assert not any("matched no known memory" in v["msg"] for v in graph["validation"])
@@ -491,7 +515,7 @@ def test_removal_change_actions_and_unmodeled_ones(tmp_path):
     graph = load_and_build([tmp_path])
     (extract,) = [o for o in graph["ops"] if o["kind"] == "extract"]
     assert [d["target"] for d in extract["deletions"]] == ["k_gone"]
-    assert {m["key"] for m in graph["memories"] if m["deleted_by"]} == {"k_gone"}
+    assert {m["key"] for m in graph["memories"] if m["deleted"]} == {"k_gone"}
     assert any(
         "unmodeled change action(s) archive, expire, merge, restore" in v["msg"]
         for v in graph["validation"]

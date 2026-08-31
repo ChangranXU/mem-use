@@ -24,6 +24,7 @@ from injudge.judge import (
     SYSTEM_PROMPT,
     GoldInput,
     JudgeConfig,
+    JudgeError,
     _gate_tokens,
     _render_steps,
     _stream_render,
@@ -229,6 +230,119 @@ def test_step_less_span_never_takes_the_scan_path(monkeypatch, tmp_path):
     assert verdict["verdict"] == "positive"
     assert verdict["input"] == {"path": "full"}
     assert len(judge_record) == 1
+
+
+def test_length_rejection_falls_back_to_the_scan_path(monkeypatch, tmp_path):
+    """The budget gate's tiktoken estimate can undercount for the real judge
+    tokenizer: a full-text send the endpoint then rejects as too long (a
+    signed 400/422 body, or 413 by status) falls back to the chunked scan
+    path once — never walked through the tier chain first — with the routing
+    change marked on the input record and noted in warnings."""
+    span, steps, traj = _span_steps(tmp_path)
+    scan_record = []
+    judge_calls = []
+
+    def judge_open(req, timeout=None):
+        judge_calls.append(json.loads(req.data.decode()))
+        if len(judge_calls) == 1:
+            raise http_error(400, b"This model's maximum context length is "
+                                  b"8192 tokens. However, your messages resulted "
+                                  b"in 900000 tokens")
+        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
+
+    monkeypatch.setattr("injudge.judge.urlopen", judge_open)
+    monkeypatch.setattr("injudge.scan.urlopen", scan_stub(scan_record))
+    # the gate says the verbatim candidate FITS — the endpoint disagrees
+    scan = _scan_cfg(input_tokens=100_000)
+    warnings = []
+    verdict = judge_span(span, steps, _judge_cfg(), warnings, traj.task, scan=scan)
+    assert verdict["verdict"] == "positive"
+    # one rejection at the branch entry — never one per tier — then the scan
+    # path's own calls (extractions + the evidence-pack scoring call)
+    assert len(judge_calls) == 2 and scan_record
+    assert verdict["input"]["path"] == "scan"
+    assert verdict["input"]["length_fallback"] is True
+    assert any("falling back to the evidence-scan path" in w for w in warnings)
+
+
+def test_length_rejection_413_falls_back_by_status(monkeypatch, tmp_path):
+    """413 is Content Too Large by status — no body signature needed."""
+    span, steps, traj = _span_steps(tmp_path)
+    calls = []
+
+    def judge_open(req, timeout=None):
+        calls.append(req)
+        if len(calls) == 1:
+            raise http_error(413, b"Request Entity Too Large")
+        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
+
+    monkeypatch.setattr("injudge.judge.urlopen", judge_open)
+    monkeypatch.setattr("injudge.scan.urlopen", scan_stub([]))
+    verdict = judge_span(span, steps, _judge_cfg(), [], traj.task,
+                         scan=_scan_cfg(input_tokens=100_000))
+    assert verdict["input"]["path"] == "scan"
+    assert verdict["input"]["length_fallback"] is True
+
+
+def test_length_rejection_without_scan_config_stays_an_error(monkeypatch, tmp_path):
+    """No scan config (the unit-test entry point): the same rejection keeps
+    today's behavior — the span fails, nothing to fall back to."""
+    span, steps, traj = _span_steps(tmp_path)
+
+    def judge_open(req, timeout=None):
+        raise http_error(400, b"maximum context length exceeded")
+
+    monkeypatch.setattr("injudge.judge.urlopen", judge_open)
+    with pytest.raises(JudgeError, match="too long"):
+        judge_span(span, steps, _judge_cfg(), [], traj.task)
+
+
+def test_length_rejection_with_pinned_format_still_falls_back(monkeypatch, tmp_path):
+    """A pinned OUTPUT_FORMAT pins the format field, not the input size: a
+    length rejection at the branch entry falls back to the scan path the
+    same way instead of failing as a pin/config error."""
+    span, steps, traj = _span_steps(tmp_path)
+    calls = []
+
+    def judge_open(req, timeout=None):
+        calls.append(req)
+        if len(calls) == 1:
+            raise http_error(400, b"prompt is too long: 900000 tokens maximum")
+        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
+
+    monkeypatch.setattr("injudge.judge.urlopen", judge_open)
+    monkeypatch.setattr("injudge.scan.urlopen", scan_stub([]))
+    cfg = _judge_cfg()
+    cfg.output_format = "structured"
+    verdict = judge_span(span, steps, cfg, [], traj.task,
+                         scan=_scan_cfg(input_tokens=100_000))
+    assert verdict["verdict"] == "positive"
+    assert verdict["input"]["length_fallback"] is True
+
+
+def test_non_length_400_walks_the_tier_chain_without_fallback(monkeypatch, tmp_path):
+    """Signature matching is routing-only: an ordinary 400 (a format-field
+    refusal) degrades free through the tier chain on the FULL path — no
+    scan fallback, no marker."""
+    span, steps, traj = _span_steps(tmp_path)
+    scan_record = []
+    judge_calls = []
+
+    def judge_open(req, timeout=None):
+        judge_calls.append(json.loads(req.data.decode()))
+        if len(judge_calls) == 1:
+            raise http_error(400, b"unknown field response_format")
+        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
+
+    monkeypatch.setattr("injudge.judge.urlopen", judge_open)
+    monkeypatch.setattr("injudge.scan.urlopen", scan_stub(scan_record))
+    warnings = []
+    verdict = judge_span(span, steps, _judge_cfg(), warnings, traj.task,
+                         scan=_scan_cfg(input_tokens=100_000))
+    assert verdict["verdict"] == "positive"
+    assert verdict["input"] == {"path": "full"}  # no fallback, no marker
+    assert len(judge_calls) == 2 and scan_record == []
+    assert any("degrading to json" in w for w in warnings)
 
 
 def test_scan_path_without_extraction_config_fails_fast(tmp_path):
@@ -507,7 +621,7 @@ def test_assembled_user_over_budget_summary_then_sent_as_is(monkeypatch, tmp_pat
         "injudge.scan.urlopen",
         scan_stub(scan_record, chunk_answer=fat, summary_answer=fat),  # summary stays over
     )
-    scan = _scan_cfg(input_tokens=count_tokens(SYSTEM_PROMPT) + 350)
+    scan = _scan_cfg(input_tokens=count_tokens(SYSTEM_PROMPT) + 420)
     verdict = judge_span(span, steps, _judge_cfg(), [], traj.task, scan=scan)
     assert verdict["verdict"] == "positive"
     assert verdict["input"]["over_budget"] is True
@@ -531,7 +645,7 @@ def test_assembled_user_over_budget_summary_that_fits(monkeypatch, tmp_path):
         "injudge.scan.urlopen",
         scan_stub(scan_record, chunk_answer=fat, summary_answer=slim),
     )
-    scan = _scan_cfg(input_tokens=count_tokens(SYSTEM_PROMPT) + 350)
+    scan = _scan_cfg(input_tokens=count_tokens(SYSTEM_PROMPT) + 420)
     verdict = judge_span(span, steps, _judge_cfg(), [], traj.task, scan=scan)
     assert verdict["verdict"] == "positive"
     assert "over_budget" not in verdict["input"]
@@ -576,7 +690,7 @@ def test_summary_hint_reserves_the_reassembly_overhead(monkeypatch, tmp_path):
 
     monkeypatch.setattr("injudge.judge.urlopen", judge_stub(judge_record))
     monkeypatch.setattr("injudge.scan.urlopen", _open)
-    scan = _scan_cfg(input_tokens=count_tokens(SYSTEM_PROMPT) + 350)
+    scan = _scan_cfg(input_tokens=count_tokens(SYSTEM_PROMPT) + 420)
     verdict = judge_span(span, steps, _judge_cfg(), [], traj.task, scan=scan)
     assert verdict["verdict"] == "positive"
     assert "over_budget" not in verdict["input"]  # the on-target summary was used
@@ -982,7 +1096,7 @@ def test_assembled_user_over_budget_empty_summary_marks_over_budget(monkeypatch,
         "injudge.scan.urlopen",
         scan_stub(scan_record, chunk_answer=fat, summary_answer=NONE),
     )
-    scan = _scan_cfg(input_tokens=count_tokens(SYSTEM_PROMPT) + 350)
+    scan = _scan_cfg(input_tokens=count_tokens(SYSTEM_PROMPT) + 420)
     verdict = judge_span(span, steps, _judge_cfg(), [], traj.task, scan=scan)
     assert verdict["verdict"] == "positive"
     assert verdict["input"]["over_budget"] is True

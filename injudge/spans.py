@@ -19,6 +19,9 @@ non-first injections roll up as "restated".
 
 A gap in delivery steps does not break a span (the missing steps are
 recorded in `step_gaps` and surfaced to the judge); a content change does.
+The judged footprint window is bounded at the next span's first step when
+the spans are cleanly separated (`window_last`): a content change
+supersedes, so a memory delivered in two spans is never credited in both.
 A delivery carries no step only when no agent turn ever classified in the
 run (a memory-only or pre-first-response recording); such ops sort last and
 merge only into a matching-content span, and a span whose ops are ALL
@@ -102,6 +105,15 @@ def group_spans(recall_ops: list[MemoryOp], traj_id: str) -> list[InjectionSpan]
             span.seq_last = max(span.seq_last, op.seq)
             if op.step is not None:
                 steps_seen[target].append(op.step)
+            # the delivery context rides the span: distinct queries (a query
+            # rewrite between identical deliveries is still the span's
+            # provenance), and the first recorded placement description
+            if op.query and op.query not in span.queries:
+                span.queries.append(op.query)
+            if span.placement_kind is None:
+                span.placement_kind = op.placement_kind
+            if span.placement_head is None:
+                span.placement_head = op.placement_head
             continue
         latest[fp] = len(spans)
         spans.append(
@@ -116,6 +128,9 @@ def group_spans(recall_ops: list[MemoryOp], traj_id: str) -> list[InjectionSpan]
                 n_injections=1,
                 fingerprint=fp,
                 memories=op.memories,
+                queries=[op.query] if op.query else [],
+                placement_kind=op.placement_kind,
+                placement_head=op.placement_head,
             )
         )
         steps_seen.append([op.step] if op.step is not None else [])
@@ -143,4 +158,21 @@ def group_spans(recall_ops: list[MemoryOp], traj_id: str) -> list[InjectionSpan]
         span.new_keys = list(dict.fromkeys(cur[i] for i in cur if i not in prev))
         span.removed_keys = list(dict.fromkeys(prev[i] for i in prev if i not in cur))
         prev = cur
+    # position among the trajectory's spans, and the judged footprint window:
+    # bounded at the NEXT span's first step (a content change supersedes — the
+    # same memories' later influence is the newer span's to claim), but only
+    # when the spans are cleanly separated in steps: an overlapping neighbor
+    # (a content change mid-span) leaves the window unbounded rather than
+    # cutting this span's own delivery steps
+    for i, span in enumerate(spans):
+        span.position = i + 1
+        span.total = len(spans)
+        nxt = spans[i + 1] if i + 1 < len(spans) else None
+        if (
+            nxt is not None
+            and nxt.step_first is not None
+            and span.step_last is not None
+            and nxt.step_first > span.step_last
+        ):
+            span.window_last = nxt.step_first - 1
     return spans

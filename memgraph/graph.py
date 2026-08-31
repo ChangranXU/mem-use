@@ -171,15 +171,18 @@ def build_graph(
                     edges.append(Edge("creates", op.id, ident[1], ident[0]))
                 else:
                     mem = registry[ident]
-                    recreated = mem.deleted_by is not None
+                    recreated = mem.deleted
                     if recreated:
-                        # re-created after a deletion: alive again (the
-                        # deletes edge keeps the deletion in the record)
+                        # re-created after a deletion: alive again. The
+                        # deletion history (like the deletes edge) stays in
+                        # the record — the revival marks `revived`, it never
+                        # erases the deletion
                         note(
                             "info",
                             f"{op.id}: candidate re-creates the deleted memory {key!r}",
                         )
-                        mem.deleted_by = None
+                        mem.deleted = False
+                        mem.revived = True
                     if recreated and mem.created_op is None:
                         # The item was registered by the deletion's before-ref
                         # (its true origin predates the loaded set), so this
@@ -254,12 +257,11 @@ def build_graph(
                         f"{op.id}: deleted memory {key!r} has no observed creation in "
                         "the loaded trajectories (origin not observed)",
                     )
-                registry[ident].deleted_by = {
-                    "op": op.id,
-                    "traj": op.traj,
-                    "step": op.step,
-                    "target": target,
-                }
+                mem = registry[ident]
+                mem.deletions.append(
+                    {"op": op.id, "traj": op.traj, "step": op.step, "target": target}
+                )
+                mem.deleted = True
                 edges.append(Edge("deletes", op.id, ident[1], ident[0]))
 
     for op in all_ops:

@@ -28,7 +28,7 @@ The JSON artifact — the same dict embedded in the HTML — is:
 | Collection | Contents |
 |---|---|
 | `ops` | Memory operations. `kind` is `extract` (generation) or `recall` (delivery); each op is anchored at `(traj, step, seq)`. |
-| `memories` | One record per `(namespace, item_id)` identity: origin, creation site, later updates, recalls, deletion. |
+| `memories` | One record per `(namespace, item_id)` identity: origin, creation site, later updates, recalls, and the deletion history — `deletions` lists every observed deletion (a re-creation marks `revived` and never erases it), `deleted` is the terminal state. |
 | `edges` | Relationships from an op to a memory: `creates`, `supersedes`, `deletes`, `recalls`. |
 
 Two chronology notes — both valid input rather than errors:
@@ -75,7 +75,7 @@ Recall nodes are colored by `span_verdict`:
 | Gray | neutral |
 | Amber | error |
 
-The header gains a verdict tally. Popovers show the judge's analysis, per-memory usage, and the span's input regime (`full` / `scan`, gold, over-budget).
+The header gains a verdict tally. Popovers show the judge's analysis, per-memory usage, and the span's input regime (`full` / `scan`, gold, over-budget, length-fallback).
 
 {% hint style="info" %}
 Unmatched or ambiguous joins are validation notes, never errors. An ambiguous key — a `run_id` shared by several loaded trajectories, or one `(run_id, seq)` claimed by several report injections or several recall ops — is skipped rather than cross-annotated. The graph still renders.

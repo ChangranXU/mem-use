@@ -557,6 +557,88 @@ def test_spans_step_gap_recorded_not_broken(tmp_path):
     assert span.n_injections == 4
 
 
+def test_spans_window_bounded_at_the_next_span(tmp_path):
+    """The judged footprint window ends where the next span's different
+    content begins (a content change supersedes): one memory's later
+    influence is never credited to two spans. An overlapping neighbor — a
+    content change landing mid-span — leaves the window unbounded rather
+    than cutting the span's own delivery steps."""
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.recall(REF_A)  # step 2
+    b.recall(REF_A)  # step 3
+    b.recall(REF_B)  # step 4: different content breaks the span
+    spans = group_spans(_recall_ops(b, tmp_path), "T1")
+    assert len(spans) == 2
+    assert (spans[0].step_first, spans[0].step_last) == (2, 3)
+    assert spans[0].window_last == 3  # the next span's first step − 1
+    assert spans[0].position == 1 and spans[0].total == 2
+    assert spans[1].window_last is None  # last span: unbounded
+    assert spans[1].position == 2
+
+    # an overlapping neighbor (the new content's first delivery lands on the
+    # same step as the old span's last) never cuts the span's own deliveries
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.recall(REF_A)  # step 2
+    sid = b.search(returned=[REF_B])
+    b.agent_turn()  # step 3
+    b.delivery(sid, memories=[REF_B], main_step=2)  # declared back at step 2
+    spans = group_spans(_recall_ops(b, tmp_path), "T2")
+    assert len(spans) == 2
+    assert spans[0].window_last is None and spans[1].window_last is None
+
+
+def test_spans_thread_the_delivery_context(tmp_path):
+    """The span carries the delivery context the judge input renders: the
+    distinct recorded search queries (a rewrite between identical
+    re-deliveries is still the span's provenance) and the placement
+    description of the delivered block."""
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.recall(REF_A, query="the dtype bug")
+    b.recall(REF_A, query="the dtype bug, narrowed")
+    b.recall(REF_A, query="the dtype bug")  # a repeat stays distinct-listed once
+    (span,) = group_spans(_recall_ops(b, tmp_path), "T1")
+    assert span.queries == ["the dtype bug", "the dtype bug, narrowed"]
+    assert span.placement_kind == "prompt_message"
+    assert span.placement_head == "## CURE Memory Policy\n…"
+
+
+def test_render_user_carries_the_delivery_context():
+    """The judge input names the span's position in the run, the search
+    query that produced the injection, and the presentation the agent saw —
+    the context the novelty/relevance calls are made against."""
+    span, steps = _judge_input_fixture()
+    span.position, span.total = 2, 3
+    span.queries = ["the dtype bug", "the narrowed dtype bug", "a third rewrite"]
+    span.placement_kind = "prompt_message"
+    span.placement_head = "## CURE Memory Policy"
+    user = render_user(span, steps)
+    assert "This is span 2 of 3 in the trajectory; earlier spans already " \
+           "delivered memories before it." in user
+    assert 'Search queries (distinct, per injection) that produced the ' \
+           'injection: "the dtype bug"; "the narrowed dtype bug" (+1 more)' in user
+    assert 'Presentation: prompt_message; the delivered block opens with: ' \
+           '"## CURE Memory Policy".' in user
+    # a single query reads in the singular, and an unrecorded placement
+    # (redacted/locator) adds no presentation line at all
+    span.queries = ["the dtype bug"]
+    span.placement_kind = None
+    span.placement_head = None
+    user = render_user(span, steps)
+    assert 'Search query that produced the injection: "the dtype bug"' in user
+    assert "Presentation:" not in user
+
+
+def test_render_user_bounded_window_is_stated():
+    """A span whose window is bounded at the next span says so; an unbounded
+    one keeps the open-ended wording."""
+    span, steps = _judge_input_fixture()
+    assert "steps >= 1" in render_user(span, steps)
+    span.window_last = 3
+    user = render_user(span, steps)
+    assert "steps 1–3 (the next span's different content supersedes it from step 4)" in user
+    assert "steps >= 1" not in user
+
+
 def test_spans_unattributed_tail(tmp_path):
     b = TrajBuilder().agent_turn(with_task=True)
     b.recall(REF_A)  # bound → step 2
@@ -624,6 +706,9 @@ def test_spans_seq_range_brackets_every_op(tmp_path):
         def __init__(self, id, step, seq):
             self.id, self.step, self.seq = id, step, seq
             self.memories = ops[0].memories
+            self.query = None
+            self.placement_kind = None
+            self.placement_head = None
     (merged,) = group_spans([_Op("R1", 2, 90), _Op("R2", 3, 40)], "T1")
     assert (merged.seq_first, merged.seq_last) == (40, 90)
 
@@ -1251,9 +1336,10 @@ def _assert_stats_only(obj):
 def test_summary_v2_is_statistics_only():
     """The summary is the final statistics set, not a second copy of the
     judging narrative: no notes, no recorded memory text, no namespace
-    hashes, no validation log, no empty triage placeholders; the duplicated
-    span rates stay out of headline; a value drift earns a one-line marker;
-    two identities sharing a key get a short item_id suffix."""
+    hashes, no validation log, no empty triage placeholders; the headline
+    binds the span rates to the wasted-token share; a value drift earns a
+    one-line marker; two identities sharing a key get a short item_id
+    suffix."""
     ops = [
         _op("T1:S1", "positive", 0.9, {"k": {"usage": "used", "evidence": "dup"}},
             memories=[{"key": "k", "value": "v1", "item_id": "aaaaaaaaaaaa"},
@@ -1284,7 +1370,8 @@ def test_summary_v2_is_statistics_only():
     blob = json.dumps(summary)
     assert "v1" not in blob and '"v2"' not in blob  # no recorded memory text
     ov = summary["overall"]
-    assert set(ov["headline"]) == {"judged_spans", "wasted_token_share"}
+    assert set(ov["headline"]) == {"judged_spans", "positive_span_rate",
+                                   "negative_span_rate", "wasted_token_share"}
     assert ov["low_confidence"] == ["T1:S2"]
     # memory usage: bare tallies keyed by display key, drift marked, the two
     # identities sharing key "k" disambiguated with a short item_id suffix
@@ -1548,7 +1635,12 @@ def test_aggregate_rubric_rates():
     rub = aggregate(ops, 3)["rubric"]
     assert rub["deliveries"] == 3
     assert rub["rates"]["relevance"] == round(2 / 3, 4)
-    assert rub["rates"]["accuracy"] == 0.5  # nulls never dilute
+    # accuracy is the three-way split over accuracy-judged deliveries (nulls
+    # never dilute), renamed — never silently redefined under "accuracy"
+    assert "accuracy" not in rub["rates"]
+    assert rub["rates"]["accuracy_corroborated"] == 0.0
+    assert rub["rates"]["accuracy_uncontradicted"] == 0.5
+    assert rub["rates"]["accuracy_contradicted"] == 0.5
     # novelty projection: novel+confirming count as true, redundant as false
     assert rub["rates"]["novelty"] == round(2 / 3, 4)
     assert rub["counts"]["novelty"] == {"novel": 1, "confirming": 1, "redundant": 1}
@@ -1929,6 +2021,126 @@ def test_judge_span_end_to_end(monkeypatch):
     # the whole step stream is the judge input: step header + full surfaces
     assert "[step 1, turn 1, seqs 1–5]" in user
     assert "reasoning: thinking" in user and "result (completed): ok" in user
+
+
+def test_echo_overlap_warning_flags_a_novel_echo(monkeypatch):
+    """The code-side echo guard: novelty=novel for a memory whose value
+    substantially overlaps the pre-injection context (the agent's own
+    pre-span steps, or the task statement) earns a validation warning naming
+    the span and key — the judged novelty stands; the guard never rewrites
+    it. A disjoint value and a non-novel call earn none."""
+    record = []
+    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory(record))
+    echo = "the agent should preserve dtype information when copying variables into a fresh array"
+    steps = [
+        AgentStep(step=1, turn=1, seq_start=1, seq_end=5,
+                  reasoning=f"I see it now: {echo}", content="", tools=[]),
+        AgentStep(step=2, turn=2, seq_start=6, seq_end=9,
+                  reasoning="applying the fix", content="", tools=[]),
+    ]
+    span = InjectionSpan(
+        id="T1:S1", traj="T1", step_first=2, step_last=2, seq_first=6, seq_last=6,
+        n_injections=1,
+        memories=[{"key": "key_a", "value": echo},
+                  {"key": "key_b",
+                   "value": "unrelated telemetry from a different subsystem entirely"}],
+    )
+    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
+
+    warnings = []
+    verdict = judge_span(span, steps, cfg, warnings)
+    assert verdict["verdict"] == "positive"  # the judged rubric is untouched
+    assert warnings == [
+        "T1:S1: key_a.novelty judged 'novel' but 100% of the value's words "
+        "already appear in the task statement or the pre-injection steps — a "
+        "possible same-episode echo (the judged novelty stands; review the span)"
+    ]
+
+    # a redundant call is the judge applying the rule — no guard warning
+    payload = json.loads(GOOD)
+    _good_entries(payload)["key_a"]["novelty"]["value"] = "redundant"
+    mutant = {"choices": [{"message": {"content": json.dumps(payload)}}]}
+    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory([], payload=mutant))
+    warnings = []
+    judge_span(span, steps, cfg, warnings)
+    assert warnings == []
+
+    # the overlap can come from the task statement alone (it sits in the
+    # agent's context from step 0)
+    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory([]))
+    steps = [
+        AgentStep(step=1, turn=1, seq_start=1, seq_end=5,
+                  reasoning="exploring the repository layout first", content="", tools=[]),
+        steps[1],
+    ]
+    warnings = []
+    judge_span(span, steps, cfg, warnings, task=echo)
+    assert any("same-episode echo" in w for w in warnings)
+
+
+def test_pe_pairing_corrections_counted_and_aggregated(tmp_path):
+    """The positive_effect↔influence pairing corrections are counted per
+    span at assembly, carried on the operation record (only when any), and
+    aggregated as a judge-compliance rate over LLM-judged spans — drift is
+    visible without reading validation notes."""
+    payload = json.loads(GOOD)
+    entries = _good_entries(payload)
+    entries["key_a"]["positive_effect"]["value"] = None  # acted_on, effect missing
+    entries["key_b"]["positive_effect"]["value"] = "improved"  # influence none → coerced
+    warnings = []
+    v = parse_verdict(json.dumps(payload), _FakeSpan(), warnings)
+    assert v["pe_pairing_corrections"] == 2
+    span = InjectionSpan(id="T1:S1", traj="T1", op_ids=["T1:R1"], step_first=1,
+                         step_last=1, seq_first=3, seq_last=3, n_injections=1,
+                         memories=[{"key": "key_a", "value": "v"},
+                                   {"key": "key_b", "value": "w"}])
+    op = operation_record(span, v, {"deliveries": 1, "content_chars_total": 0,
+                                    "approx_tokens_total": 0})
+    assert op["pe_pairing_corrections"] == 2
+    clean = _op("T1:S2", "neutral", 0.9)  # judged, no corrections
+    auto = {**_op("T1:S3", "neutral", None,
+                  usage={"k": {"usage": "unclear", "evidence": ""}}),
+            "auto": "no_subsequent_turn",
+            "pe_pairing_corrections": 5}  # rule-judged: never in the rate
+    agg = aggregate([op, clean, auto], 3)
+    assert agg["judge_compliance"] == {
+        "pe_pairing_corrected_spans": 1,
+        "llm_judged_spans": 2,
+        "pe_pairing_correction_rate": 0.5,
+    }
+    artifact = build_artifact({}, [{"id": "T1", "run_id": "r"}], [op, clean, auto],
+                              [], {"T1": 3}, [])
+    assert build_summary(artifact)["overall"]["judge_compliance"] == agg["judge_compliance"]
+    assert "pe_pairing_corrections" not in operation_record(span, auto_verdict_no_subsequent_turn(span),
+                                                            {"deliveries": 0})
+
+
+def test_headline_zero_negative_high_waste_carries_the_caveat(capsys):
+    """A flood of ignored memories scores negative 0 while wasting most of
+    the budget: the headline binds the two metrics and states the caveat
+    (the span-level proxy and the verdict asymmetry), in the aggregate, the
+    summary projection, and the stdout summary."""
+    ops = [
+        _op("T1:S1", "neutral", 0.9,
+            cost={"deliveries": 1, "content_chars_total": 400, "approx_tokens_total": 300}),
+        _op("T1:S2", "positive", 0.9,
+            cost={"deliveries": 1, "content_chars_total": 400, "approx_tokens_total": 100}),
+    ]
+    agg = aggregate(ops, 2)
+    assert agg["headline"]["negative_span_rate"] == 0.0
+    assert agg["headline"]["wasted_token_share"] == 0.75
+    assert "span-level proxy" in agg["headline"]["caveat"]
+    assert "asymmetric" in agg["headline"]["caveat"]
+    artifact = build_artifact({}, [{"id": "T1", "run_id": "r"}], ops, [], {"T1": 2}, [])
+    slim = build_summary(artifact)["overall"]["headline"]
+    assert slim["negative_span_rate"] == 0.0 and "caveat" in slim
+    print_summary(artifact)
+    assert "caveat: negative-span rate 0" in capsys.readouterr().out
+
+    # a low wasted share needs no caveat
+    ops[0]["delivery_cost"] = {"deliveries": 1, "content_chars_total": 400,
+                               "approx_tokens_total": 40}
+    assert "caveat" not in aggregate(ops, 2)["headline"]
 
 
 def test_render_user_single_step_span_says_step_not_steps():
@@ -4316,6 +4528,8 @@ def test_cli_end_to_end_mocked_judge(monkeypatch, tmp_path):
     pol = artifact["trajectories"][0]["policy"]
     assert pol["n_injections"] == 3 and pol["n_steps"] == 4
     assert pol["n_searches"] == 3
+    # extraction reliability stats: the fixture recorded no generations
+    assert pol["n_extractions"] == 0 and pol["extraction_failures"] == 0
     assert pol["injection_density"] == 0.75 and pol["restated_ratio"] == round(2 / 3, 4)
     assert pol["est_injected_tokens"] == chars // 4
     assert pol["prompt_tokens_total"] is None and pol["injected_token_share"] is None
@@ -4338,7 +4552,14 @@ def test_cli_end_to_end_mocked_judge(monkeypatch, tmp_path):
     _assert_stats_only(summary)
     ov = summary["overall"]
     assert ov["positive"] == 1 and ov["rates"]["positive"] == 1.0
-    assert ov["headline"] == {"judged_spans": 1, "wasted_token_share": 0.0}
+    # the slim headline binds the span rates to the wasted-token share
+    assert ov["headline"] == {"judged_spans": 1, "positive_span_rate": 1.0,
+                              "negative_span_rate": 0.0, "wasted_token_share": 0.0}
+    # judge compliance: no pairing corrections were needed (the stubbed judge
+    # honors the positive_effect↔influence contract)
+    assert ov["judge_compliance"] == {"pe_pairing_corrected_spans": 0,
+                                      "llm_judged_spans": 1,
+                                      "pe_pairing_correction_rate": 0.0}
     assert ov["input_paths"] == {"full": 1, "scan": 0} and ov["gold_scored"] == 0
     assert ov["rubric"]["rates"]["influence"] == 1.0 and ov["rubric"]["deliveries"] == 1
     # empty triage lists are omitted, not written as placeholders
@@ -4360,6 +4581,94 @@ def test_cli_end_to_end_mocked_judge(monkeypatch, tmp_path):
         assert shell not in t2
     # no verdicts HTML by default
     assert not (out / "memgraph-verdicts.html").exists()
+
+
+def test_cli_notes_the_latest_only_residency_regime(monkeypatch, tmp_path):
+    """A restating-heavy run whose deliveries are each followed by a dropping
+    history rewrite keeps only the LATEST memory block resident — the report
+    states which residency regime the restated metrics assume."""
+    b = TrajBuilder().agent_turn(with_task=True)
+    for _ in range(3):
+        b.recall(REF_A, content=RECALL_CONTENT)
+        b.rewrite(kept=3, dropped=1, replay_tool_ends=False)
+    _write_run(tmp_path / "runs", "20260101-000000.000Z-run-a", b)
+    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory([]))
+    out = tmp_path / "out"
+    rc = injudge_main.main([str(tmp_path / "runs"), "-o", str(out), "--env",
+                            str(_env(tmp_path))])
+    assert rc == 0
+    artifact = json.loads((out / "injudge-report.json").read_text())
+    notes = [v["msg"] for v in artifact["validation"]]
+    assert any("keeps only the LATEST memory block resident" in m for m in notes)
+
+    # no rewrites after deliveries → the accumulation regime: no note
+    b = TrajBuilder().agent_turn(with_task=True)
+    for _ in range(3):
+        b.recall(REF_A, content=RECALL_CONTENT)
+    _write_run(tmp_path / "runs2", "20260101-000000.000Z-run-b", b)
+    out = tmp_path / "out2"
+    rc = injudge_main.main([str(tmp_path / "runs2"), "-o", str(out), "--env",
+                            str(_env(tmp_path))])
+    assert rc == 0
+    artifact = json.loads((out / "injudge-report.json").read_text())
+    notes = [v["msg"] for v in artifact["validation"]]
+    assert not any("memory block resident" in m for m in notes)
+
+
+def test_residency_note_gates_on_restating_and_the_drop_pattern():
+    """_residency_note fires only when restating dominates AND most
+    deliveries are followed by a dropping main-lane rewrite before the next
+    delivery; memory-lane rewrites never count."""
+
+    class _T:
+        side_lanes = set()
+
+        def __init__(self, rewrites):
+            self.rewrites = rewrites
+
+    class _Op:
+        def __init__(self, seq):
+            self.seq = seq
+
+    def rw(seq, dropped=1, on_mem=False, src="MAIN"):
+        return {"seq": seq, "dropped": dropped, "on_memory_lane": on_mem,
+                "proxy_source": src}
+
+    ops = [_Op(s) for s in (10, 20, 30, 40)]
+    # 3 of 4 deliveries followed by a drop before the next delivery
+    t = _T([rw(11), rw(21), rw(31)])
+    note = injudge_main._residency_note(t, ops, 0.75)
+    assert "3 of 4 deliveries" in note and "75%" in note
+    assert injudge_main._residency_note(t, ops, 0.4) is None  # restating gate
+    assert injudge_main._residency_note(_T([]), ops, 0.75) is None  # no drops
+    assert injudge_main._residency_note(_T([rw(11, on_mem=True)]), ops, 0.75) is None
+    assert injudge_main._residency_note(_T([rw(11, dropped=0)]), ops, 0.75) is None
+    # a minority pattern never fires: 1 of 3 deliveries followed by a drop
+    assert injudge_main._residency_note(_T([rw(15)]), ops[:3], 0.75) is None
+
+
+def test_cli_policy_reports_extraction_reliability(monkeypatch, tmp_path):
+    """The per-trajectory policy block carries extraction reliability: the
+    recorded generations and how many were flagged (a failed status or a
+    missing end)."""
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.memory_turn()
+    b.generate(produced=[cure_ref("k1")], extraction_step="1",
+               changes=[("create", [], [cure_ref("k1")])])
+    b.memory_turn()
+    b.generate(status="failed", extraction_step="1", error_codes=["RemoteProtocolError"])
+    b.recall(REF_A, content=RECALL_CONTENT)
+    _write_run(tmp_path / "runs", "20260101-000000.000Z-run-a", b)
+    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory([]))
+    out = tmp_path / "out"
+    rc = injudge_main.main([str(tmp_path / "runs"), "-o", str(out), "--env",
+                            str(_env(tmp_path))])
+    assert rc == 0
+    artifact = json.loads((out / "injudge-report.json").read_text())
+    pol = artifact["trajectories"][0]["policy"]
+    assert pol["n_extractions"] == 2 and pol["extraction_failures"] == 1
+    summary = json.loads((out / "summary.json").read_text())
+    assert summary["trajectories"][0]["policy"]["extraction_failures"] == 1
 
 
 def test_cli_zero_injection_trajectory(monkeypatch, tmp_path):

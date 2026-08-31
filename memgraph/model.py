@@ -73,7 +73,9 @@ class MemoryOp:
     kind == "recall": one delivered memory injection (a memory_delivery
         event) — `memories` from its MemoryRefs, `query`/`matched` from the
         linked search operation, `content_chars`/`binding_status` from the
-        placement record.
+        placement record, plus the internal `placement_kind`/`placement_head`
+        (how the injection was presented; injudge's span header — never
+        serialized into the graph artifact).
     """
 
     id: str  # e.g. "T1:E2" / "T1:R1"
@@ -99,6 +101,12 @@ class MemoryOp:
     # matched_count — may exceed the returned top-k subset it falls back to)
     content_chars: int | None = None  # placement content size
     binding_status: str | None = None  # delivery cursor-binding status
+    # how the injection was presented (internal — injudge's span header;
+    # never serialized into the graph artifact): the protocol's placement
+    # kind plus a capped excerpt of the delivered block's opening (None for
+    # redacted/locator placements, which record no content)
+    placement_kind: str | None = None
+    placement_head: str | None = None
 
     def to_dict(self) -> dict:
         d = {
@@ -167,7 +175,12 @@ class MemoryUnit:
     created_step: int | None = None
     recalls: list[dict] = field(default_factory=list)  # [{op, traj, step}]
     updates: list[dict] = field(default_factory=list)  # later candidates reusing the key
-    deleted_by: dict | None = None  # {op, traj, step, target}
+    # every observed deletion {op, traj, step, target} — a re-creation marks
+    # `revived` and clears `deleted` but never erases the history, so the
+    # memories[] record stays coherent with the `deletes` edges
+    deletions: list[dict] = field(default_factory=list)
+    revived: bool = False  # a creation followed a deletion (delete → recreate)
+    deleted: bool = False  # terminal state: the latest lifecycle event is a deletion
     # recalls that precede the first observed creation (store entry predates
     # the loaded trajectories, or lanes are misordered)
     recalled_before_creation: list[dict] = field(default_factory=list)
@@ -190,7 +203,9 @@ class MemoryUnit:
             },
             "recalls": self.recalls,
             "updates": self.updates,
-            "deleted_by": self.deleted_by,
+            "deletions": self.deletions,
+            "revived": self.revived,
+            "deleted": self.deleted,
             "recalled_before_creation": self.recalled_before_creation,
         }
 

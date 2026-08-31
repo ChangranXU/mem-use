@@ -79,7 +79,11 @@
   The judge walks the conformance tier chain structured → json → prompt
   (anthropic: structured → prompt); tier discovery on a 400/422 or a
   proven-ignored format field is free, everything else consumes
-  `MAX_ATTEMPTS`. An answer cut at the output-token budget mid-way (no
+  `MAX_ATTEMPTS` — with one carve-out: a length/context-window rejection
+  (413 by status, or a signed 400/422 body) fails as "length" at the branch
+  entry instead of walking the chain, so the scoring caller falls back to
+  the chunked scan path once (the tiktoken gate can undercount for the real
+  judge tokenizer). An answer cut at the output-token budget mid-way (no
   complete JSON value in it) is a budget property, never proof of an ignored
   format field: it becomes an `error` verdict naming the truncation (no
   degrade, no same-budget retry). A complete-but-out-of-contract answer
@@ -243,7 +247,9 @@ These are load-bearing; never weaken them:
   input budget gate carries an `input` record (`{"path": "full"}` or
   `{"path": "scan", "chunks", "none_chunks", "evidence_tokens"}`, plus the
   `"gold"` regime marker and the `"over_budget"` send-as-is marker when they
-  apply); rule-judged auto-neutral spans and unjudged spans omit it. A span
+  apply, and the `"length_fallback"` marker when a full-text send the
+  endpoint rejected as too long was rerouted to the scan path); rule-judged
+  auto-neutral spans and unjudged spans omit it. A span
   whose judging failed UNEXPECTEDLY (a non-JudgeError — a bug, never an
   endpoint failure) keeps a re-derived `{"path", "gold"?}` record without
   the scan counters — they die with the exception — so the regime tallies
@@ -252,10 +258,15 @@ These are load-bearing; never weaken them:
   `over_budget`).
   The companion `summary.json` (`injudge.summary/v2`) is the final
   statistics set of the run: counts/rates, rubric distributions, cost,
-  confidence, and slim per-memory usage tallies — per trajectory (`instance_id`
+  confidence, judge compliance (the positive_effect↔influence correction
+  rate), per-trajectory extraction reliability (`n_extractions` /
+  `extraction_failures`), and slim per-memory usage tallies — per
+  trajectory (`instance_id`
   / `model` / `adapter` when recorded) with a narrative-free span index
   (verdict / confidence / usage labels). Empty rate/headline/rubric/
   confidence/cost shells are omitted when a trajectory had no judged spans.
+  The headline binds the span rates to the wasted-token share and states a
+  caveat when the negative rate is 0 but the wasted share is high.
   Identities sharing one display key carry a `key#<item-or-namespace>`
   suffix (8-char prefix, full base on a prefix collision) so the tallies
   never conflate memories the report tells apart. Narrative and

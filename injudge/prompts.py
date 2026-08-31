@@ -15,8 +15,8 @@ Grouped by tool and purpose (new prompts get their own folder group):
   shapes, verbatim and scanned evidence pack), the scan user's note, the
   delivered-memories header note, the gold attachment frames
   (`golden_block.md`, `correctness_block.md`), the shared binding rules,
-  the shared answer contract, the shared closing instruction, and the
-  corrective-retry note.
+  the worked echo-trap example (`echo_example.md`), the shared answer
+  contract, the shared closing instruction, and the corrective-retry note.
 - `prompts/injudge/extraction/` — the overflow scan's chunk-extraction
   prompt with its per-side guidance, the chunk header's evidence-target
   note, the pre-filled anchors label, the chunk user's closing instruction,

@@ -37,9 +37,11 @@ Delivery cost and delivery-policy metrics are computed deterministically from th
 Identical content is often re-injected, so the judged unit is the **injection span**: a maximal run of consecutive recall ops whose delivered set has the same portable identity.
 
 - Step gaps do not break a span; they are recorded in `step_gaps` and shown to the judge.
-- A content change does break a span.
+- A content change does break a span. The judged footprint window runs from the span's first step to the next span's first step (a content change supersedes — a memory delivered in two spans is never credited in both); the last span's window is unbounded.
 - Re-deliveries roll up as `restated`: they count toward delivery cost and `n_injections`, but never appear in verdict rates.
 - A span with no attributed agent step (`step_first` is `None`) has no downstream footprint. It is rule-judged **neutral** with `auto: no_subsequent_turn`, and no judge call is made.
+
+The one-verdict-per-span rollup presupposes the earlier injection still resides in the agent's context. When the recording shows the opposite regime — most deliveries followed by a dropping history rewrite before the next delivery, so only the LATEST memory block is resident and re-delivery is the visibility mechanism — and restated re-deliveries dominate the run, the report states that residency regime in its validation notes, so readers know which harness semantics the restated metrics assume.
 
 Span construction, including the fingerprint fallback for undigested content, is specified in [Memory identity](input-contract.md#memory-identity).
 
