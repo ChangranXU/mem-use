@@ -1027,8 +1027,8 @@ def test_non_string_run_id_never_breaks_parse_or_html(tmp_path):
 
 def test_unhashable_change_action_degrades_never_crashes(tmp_path):
     """A hand-edited memory_change can carry an unhashable action (a list):
-    the removal-membership test hashes its operand, so the corrupt action
-    must degrade to the unmodeled-action warning, never raise TypeError."""
+    the action compares by == (never hashed), so the corrupt action must
+    degrade to the unmodeled-action warning, never raise TypeError."""
     b = TrajBuilder().agent_turn(with_task=True)
     b.memory_turn()
     b.generate(changes=[("delete", [cure_ref("k", "v")], [])], extraction_step="1")

@@ -471,28 +471,29 @@ def test_delete_change_of_unobserved_memory_links_exact(tmp_path):
 
 
 def test_removal_change_actions_and_unmodeled_ones(tmp_path):
-    """delete/archive/expire all remove the before-refs from the active
-    store, so all three graph as deletions; the state effects the graph does
-    not model (merge/split/restore/unknown) are noted, never silently
-    dropped."""
+    """delete is the bridge contract's only removal action (memory-bridge
+    AGENTS.md: add/update/delete), so only its before-refs graph as
+    deletions; every other schema action (archive/expire/merge/split/
+    restore/unknown) is unmodeled — noted, never silently dropped."""
     b = AnnotatedBuilder()
     b.agent_turn(with_task=True)
     b.memory_turn()
-    archived = cure_ref("k_arch", "archived value", store_id=7)
-    expired = cure_ref("k_expr", "expired value", store_id=8)
+    gone = cure_ref("k_gone", "gone value", store_id=7)
+    archived = cure_ref("k_arch", "archived value", store_id=8)
     b.generate(extraction_step="1", changes=[
+        ("delete", [gone], []),
         ("archive", [archived], []),
-        ("expire", [expired], []),
+        ("expire", [archived], []),
         ("restore", [], [archived]),
-        ("merge", [archived, expired], []),
+        ("merge", [archived, gone], []),
     ])
     b.write(tmp_path / "t1")
     graph = load_and_build([tmp_path])
     (extract,) = [o for o in graph["ops"] if o["kind"] == "extract"]
-    assert [d["target"] for d in extract["deletions"]] == ["k_arch", "k_expr"]
-    assert {m["key"] for m in graph["memories"] if m["deleted_by"]} == {"k_arch", "k_expr"}
+    assert [d["target"] for d in extract["deletions"]] == ["k_gone"]
+    assert {m["key"] for m in graph["memories"] if m["deleted_by"]} == {"k_gone"}
     assert any(
-        "unmodeled change action(s) merge, restore" in v["msg"]
+        "unmodeled change action(s) archive, expire, merge, restore" in v["msg"]
         for v in graph["validation"]
     )
 

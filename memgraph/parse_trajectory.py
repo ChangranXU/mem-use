@@ -65,12 +65,14 @@ from memgraph.model import MemoryOp, Trajectory
 
 _QUERY_CAP = 300  # recall-op query previews are informational; keep artifacts lean
 
-# memory_change actions whose before-refs leave the active store — the graph's
-# deletions. create/update after-refs ARE read (into the extract op's
+# The bridge's memory-action contract is add/update/delete (memory-bridge
+# AGENTS.md): a delete change's before-refs leave the active store and graph
+# as the deletions. create/update after-refs ARE read (into the extract op's
 # candidates, deduplicated against the end event's produced refs — see
 # _extract_op_from_generation): a partial generation can end produced: []
 # with rows landed, leaving the change series as the only record of them.
-_REMOVAL_ACTIONS = frozenset({"delete", "archive", "expire"})
+# Every other schema action (merge/split/archive/restore/...) is unmodeled —
+# warned below, never silently dropped.
 
 
 def load_events(path: Path, warnings: list[str]) -> list[dict]:
@@ -407,16 +409,15 @@ def _extract_op_from_generation(
     for change in operation.changes:
         cp = change["payload"]
         action = cp.get("action")
-        # the frozenset membership test hashes its operand: an unhashable
-        # hand-edited action (a list) would raise TypeError — a corrupt
-        # action degrades to the unmodeled warning below, never a crash
-        if isinstance(action, str) and action in _REMOVAL_ACTIONS:
+        # == comparisons never hash their operand, so an unhashable hand-edited
+        # action (a list) degrades to the unmodeled warning below, never a crash
+        if action == "delete":
             for ref in list_field(cp, "before"):
                 op.deletions.append({"target": ref_key(ref), "ref": ref_to_memory(ref)})
         elif action in ("create", "update"):
             afters.extend(ref_to_memory(ref) for ref in list_field(cp, "after"))
         elif action != "noop":
-            # merge/split/restore/unknown carry before/after state effects the
+            # the schema's other actions carry before/after state effects the
             # graph does not model — noted, never silently dropped
             unmodeled.add(str(action))
     if unmodeled:
