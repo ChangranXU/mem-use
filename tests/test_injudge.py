@@ -557,34 +557,77 @@ def test_spans_step_gap_recorded_not_broken(tmp_path):
     assert span.n_injections == 4
 
 
-def test_spans_window_bounded_at_the_next_span(tmp_path):
-    """The judged footprint window ends where the next span's different
-    content begins (a content change supersedes): one memory's later
-    influence is never credited to two spans. An overlapping neighbor — a
-    content change landing mid-span — leaves the window unbounded rather
-    than cutting the span's own delivery steps."""
+def test_spans_window_bounded_at_the_memorys_next_redelivery(tmp_path):
+    """Each memory's judged footprint window ends where THAT memory is next
+    re-delivered (a re-delivery supersedes — the later influence is the newer
+    span's to claim, so one memory is never credited in two spans); an
+    unrelated span in between bounds nothing."""
     b = TrajBuilder().agent_turn(with_task=True)
     b.recall(REF_A)  # step 2
-    b.recall(REF_A)  # step 3
-    b.recall(REF_B)  # step 4: different content breaks the span
+    b.agent_turn().agent_turn()  # steps 3,4
+    b.recall(REF_B)  # step 5: unrelated content breaks the span
+    b.agent_turn()  # step 6
+    b.recall(REF_A)  # step 7: A re-delivered
+    spans = group_spans(_recall_ops(b, tmp_path), "T1")
+    assert len(spans) == 3
+    assert (spans[0].step_first, spans[0].step_last) == (2, 2)
+    # key_a's window ends at its re-delivery (step 7) minus one — NOT at the
+    # unrelated span's step 5
+    assert spans[0].memory_windows == {"key_a": 6}
+    assert spans[1].memory_windows == {"key_b": None}  # never re-delivered
+    assert spans[2].memory_windows == {"key_a": None}  # the last span
+    assert [s.position for s in spans] == [1, 2, 3]
+    assert all(s.total == 3 for s in spans)
+
+
+def test_spans_windows_are_per_memory_within_one_span(tmp_path):
+    """A span delivering A and B together where only A is re-delivered later:
+    A's window ends at the re-delivery while B's stays unbounded — any
+    span-level bound would silently drop B's later influence."""
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.recall([REF_A, REF_B])  # step 2: co-delivered in one span
+    b.agent_turn().agent_turn()  # steps 3,4
+    b.agent_turn().agent_turn()  # steps 5,6
+    b.recall(REF_A)  # step 7: only A re-delivered
     spans = group_spans(_recall_ops(b, tmp_path), "T1")
     assert len(spans) == 2
-    assert (spans[0].step_first, spans[0].step_last) == (2, 3)
-    assert spans[0].window_last == 3  # the next span's first step − 1
-    assert spans[0].position == 1 and spans[0].total == 2
-    assert spans[1].window_last is None  # last span: unbounded
-    assert spans[1].position == 2
+    assert spans[0].memory_windows == {"key_a": 6, "key_b": None}
+    assert spans[1].memory_windows == {"key_a": None}
 
-    # an overlapping neighbor (the new content's first delivery lands on the
-    # same step as the old span's last) never cuts the span's own deliveries
+
+def test_spans_window_unbounded_without_a_redelivery(tmp_path):
+    """A memory delivered once keeps an unbounded window even when a later
+    span delivers unrelated content — disjoint content supersedes nothing,
+    so the memory's later influence stays creditable to this span."""
     b = TrajBuilder().agent_turn(with_task=True)
     b.recall(REF_A)  # step 2
-    sid = b.search(returned=[REF_B])
-    b.agent_turn()  # step 3
-    b.delivery(sid, memories=[REF_B], main_step=2)  # declared back at step 2
-    spans = group_spans(_recall_ops(b, tmp_path), "T2")
+    b.agent_turn().agent_turn()  # steps 3,4
+    b.recall(REF_B)  # step 5: unrelated content
+    spans = group_spans(_recall_ops(b, tmp_path), "T1")
     assert len(spans) == 2
-    assert spans[0].window_last is None and spans[1].window_last is None
+    assert spans[0].memory_windows == {"key_a": None}
+    assert spans[1].memory_windows == {"key_b": None}
+
+
+def test_spans_window_never_cuts_the_spans_own_delivery_steps(tmp_path):
+    """The overlapping-neighbor guard, per identity: a re-delivery whose
+    first step does not clear this span's last delivery step leaves that
+    memory unbounded rather than cutting the span's own deliveries."""
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.recall(REF_A)  # step 2
+    b.recall(REF_A)  # step 3 — same content extends the span
+    sid_b = b.search(returned=[REF_B])
+    b.delivery(sid_b, memories=[REF_B], main_step=3)  # B declared at step 3
+    sid_a = b.search(returned=[REF_A])
+    b.delivery(sid_a, memories=[REF_A], main_step=3)  # A re-delivered at step 3
+    spans = group_spans(_recall_ops(b, tmp_path), "T1")
+    assert len(spans) == 3
+    assert (spans[0].step_first, spans[0].step_last) == (2, 3)
+    # the re-delivery's first step (3) is not strictly after the span's last
+    # delivery step (3): the FIRST re-delivery decides, and it bounds nothing
+    assert spans[0].memory_windows == {"key_a": None}
+    assert spans[1].memory_windows == {"key_b": None}
+    assert spans[2].memory_windows == {"key_a": None}
 
 
 def test_spans_thread_the_delivery_context(tmp_path):
@@ -629,14 +672,19 @@ def test_render_user_carries_the_delivery_context():
 
 
 def test_render_user_bounded_window_is_stated():
-    """A span whose window is bounded at the next span says so; an unbounded
-    one keeps the open-ended wording."""
+    """A span with at least one bounded memory states each memory's window
+    separately (mixed bounded/unbounded in one span); an all-unbounded span
+    keeps the open-ended wording and adds no windows line."""
     span, steps = _judge_input_fixture()
-    assert "steps >= 1" in render_user(span, steps)
-    span.window_last = 3
     user = render_user(span, steps)
-    assert "steps 1–3 (the next span's different content supersedes it from step 4)" in user
-    assert "steps >= 1" not in user
+    assert "steps >= 1" in user
+    assert "Footprint windows:" not in user
+    span.memory_windows = {"key_a": 3, "key_b": None}
+    user = render_user(span, steps)
+    assert "Footprint windows: key_a — steps 1–3 (re-delivered from step 4; " \
+           "later steps belong to that span); key_b — steps 1 onward " \
+           "(never re-delivered)." in user
+    assert "steps >= 1" in user  # the stream label keeps its base wording
 
 
 def test_spans_unattributed_tail(tmp_path):

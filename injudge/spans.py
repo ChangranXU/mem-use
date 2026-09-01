@@ -19,9 +19,12 @@ non-first injections roll up as "restated".
 
 A gap in delivery steps does not break a span (the missing steps are
 recorded in `step_gaps` and surfaced to the judge); a content change does.
-The judged footprint window is bounded at the next span's first step when
-the spans are cleanly separated (`window_last`): a content change
-supersedes, so a memory delivered in two spans is never credited in both.
+Each delivered memory's judged footprint window is bounded individually at
+THAT memory's next re-delivery when the re-delivery starts strictly after
+this span's deliveries end (`memory_windows`): a re-delivery supersedes,
+so a memory delivered in two spans is never credited in both — while an
+unrelated span in between bounds nothing, and a co-delivered memory that
+is never re-delivered keeps the rest of the stream.
 A delivery carries no step only when no agent turn ever classified in the
 run (a memory-only or pre-first-response recording); such ops sort last and
 merge only into a matching-content span, and a span whose ops are ALL
@@ -136,6 +139,7 @@ def group_spans(recall_ops: list[MemoryOp], traj_id: str) -> list[InjectionSpan]
         steps_seen.append([op.step] if op.step is not None else [])
 
     prev: dict[tuple[str | None, str], str] = {}  # previous span: (namespace, item) identity -> display key
+    span_idents: list[dict[tuple[str | None, str], str]] = []  # per span: identity -> rubric key
     for span, steps in zip(spans, steps_seen):
         if steps:
             span.step_first = min(steps)
@@ -151,28 +155,58 @@ def group_spans(recall_ops: list[MemoryOp], traj_id: str) -> list[InjectionSpan]
         # item — graph.py notes the legal collapse). A key whose item identity
         # changed lands in BOTH lists: the old identity left, the new arrived.
         cur: dict[tuple[str | None, str], str] = {}
+        idents: dict[tuple[str | None, str], str] = {}
         for m in span.memories:
             item = item_key(m)
             if item:
-                cur.setdefault((namespace_of(m), item), m.get("key") or item)
+                ident = (namespace_of(m), item)
+                cur.setdefault(ident, m.get("key") or item)
+                key = m.get("key")
+                if isinstance(key, str) and key:
+                    # the rubric scores per bare key, so the footprint windows
+                    # ride the same identity -> key mapping; an unkeyed memory
+                    # is unjudged (judge.py drops it from the rubric) and gets
+                    # no window
+                    idents.setdefault(ident, key)
+        span_idents.append(idents)
         span.new_keys = list(dict.fromkeys(cur[i] for i in cur if i not in prev))
         span.removed_keys = list(dict.fromkeys(prev[i] for i in prev if i not in cur))
         prev = cur
-    # position among the trajectory's spans, and the judged footprint window:
-    # bounded at the NEXT span's first step (a content change supersedes — the
-    # same memories' later influence is the newer span's to claim), but only
-    # when the spans are cleanly separated in steps: an overlapping neighbor
-    # (a content change mid-span) leaves the window unbounded rather than
-    # cutting this span's own delivery steps
+    # position among the trajectory's spans, and the per-memory judged
+    # footprint windows: each delivered memory's window ends where THAT
+    # memory is next re-delivered (a re-delivery supersedes — the later
+    # influence is the newer span's to claim, so one memory is never credited
+    # in two spans); intermediate spans with disjoint content bound nothing.
+    # The overlapping-neighbor guard applies per identity: the FIRST
+    # re-delivery decides, and only when it starts strictly after this span's
+    # deliveries end — an overlapping re-delivery leaves the memory unbounded
+    # (never cut the span's own delivery steps) rather than deferring the
+    # bound to a later re-delivery.
     for i, span in enumerate(spans):
         span.position = i + 1
         span.total = len(spans)
-        nxt = spans[i + 1] if i + 1 < len(spans) else None
-        if (
-            nxt is not None
-            and nxt.step_first is not None
-            and span.step_last is not None
-            and nxt.step_first > span.step_last
-        ):
-            span.window_last = nxt.step_first - 1
+        windows: dict[str, int | None] = {}
+        for ident, key in span_idents[i].items():
+            end = None
+            for j in range(i + 1, len(spans)):
+                if ident not in span_idents[j]:
+                    continue
+                first = spans[j].step_first
+                if (
+                    first is not None
+                    and span.step_last is not None
+                    and first > span.step_last
+                ):
+                    end = first - 1
+                break  # the first re-delivery decides; an overlapping one bounds nothing
+            if key not in windows:
+                windows[key] = end
+            elif windows[key] is None:
+                windows[key] = end  # no bound so far; take this identity's
+            elif end is not None:
+                # two identities sharing one rubric key (the judge contract's
+                # per-key collapse): the earliest bound wins — a re-delivery
+                # of either refreshes what the collapsed entry names
+                windows[key] = min(windows[key], end)
+        span.memory_windows = windows
     return spans

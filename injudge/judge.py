@@ -1269,6 +1269,27 @@ def _render_span_header(span: InjectionSpan, task: str | None, memories_note: st
         parts.append(f"New memories vs the previous span: {span.new_keys}.")
     if span.removed_keys:
         parts.append(f"Removed vs the previous span: {span.removed_keys}.")
+    if span.step_first is not None and any(
+        end is not None for end in span.memory_windows.values()
+    ):
+        # per-memory footprint windows: each memory is judged up to ITS OWN
+        # next re-delivery (later steps belong to the re-delivery span); a
+        # memory never re-delivered keeps the rest of the stream, and one
+        # memory's bound never caps a co-delivered memory's window. Stated at
+        # the rubric's per-key granularity — and only when at least one
+        # memory is bounded (all-unbounded keeps the stream label's open
+        # wording). The shared header carries it, so the scan path's chunk
+        # headers state the same bounds to extraction.
+        frags = []
+        for key, end in span.memory_windows.items():
+            if end is not None:
+                frags.append(
+                    f"{key} — {step_range(span.step_first, end)} (re-delivered "
+                    f"from step {end + 1}; later steps belong to that span)"
+                )
+            else:
+                frags.append(f"{key} — steps {span.step_first} onward (never re-delivered)")
+        parts.append("Footprint windows: " + "; ".join(frags) + ".")
     parts.append(memories_note)
     parts.extend(_memory_line(m) for m in span.memories)
     return "\n".join(parts)
@@ -1309,15 +1330,10 @@ def _user_shell(
     attachments, the closing instruction). render_user joins shell and
     memoized stream into the judge input; the budget gate sums their token
     counts instead of re-encoding the whole stream per span."""
-    if span.step_first is not None and span.window_last is not None:
-        # the window is bounded at the next span's first step: a content
-        # change supersedes, so later steps are the newer span's window
-        footprint = (
-            f"the span's footprint, if any, appears at steps "
-            f"{span.step_first}–{span.window_last} (the next span's different "
-            f"content supersedes it from step {span.window_last + 1})"
-        )
-    elif span.step_first is not None:
+    if span.step_first is not None:
+        # the footprint's start rides the stream label; the per-memory bounds,
+        # when any memory is re-delivered later, ride the span header's
+        # Footprint windows line above
         footprint = f"the span's footprint, if any, appears at steps >= {span.step_first}"
     else:
         footprint = "the span carries no attributed step (no agent turn classified)"

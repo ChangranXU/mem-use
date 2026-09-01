@@ -11,6 +11,9 @@ injection point attached.
 Steps before the span's first step are the pre-injection context (what the
 agent had done and planned when the injection arrived); steps from the
 span's first step onward are where the span's footprint, if any, appears —
-bounded at the next span's first step when one follows with different
-content (a content change supersedes: later steps are the newer span's
-window, so one memory's influence is never credited to two spans).
+bounded PER MEMORY at that memory's next re-delivery (a re-delivery
+supersedes: later steps are the re-delivery span's window, so one memory's
+influence is never credited to two spans). An unrelated span delivering
+different memories bounds nothing; a memory never re-delivered keeps the
+rest of the stream, and one delivered memory's window ending never caps a
+co-delivered memory's window.

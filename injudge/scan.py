@@ -7,8 +7,11 @@ read in chunks instead of truncated: each chunk EXTRACTS EVIDENCE ONLY
 evidence pack the existing scoring call (judge._scoring_call) reads. The
 chunks partition the step stream — split at the span's step_first into
 pre-injection and post-injection sides, every step lands in exactly one
-chunk, and chunks never receive another chunk's text (the seam-neighborhood
-verbatim is scoring-input only, attached at assembly).
+chunk (up to the footprint windows: the post side stops at the largest
+per-memory window end when every delivered memory is re-delivered later —
+those steps are the newer spans' to claim), and chunks never receive
+another chunk's text (the seam-neighborhood verbatim is scoring-input only,
+attached at assembly).
 
 Failure policy: a chunk with no usable record after its attempt budget
 fails the SPAN — an error verdict naming the chunk, no further chunks
@@ -267,11 +270,15 @@ def _chunks(
     delivered value's words echoed across many steps can blow the cap the
     split pretends to enforce (the endpoint then rejects the chunk and the
     whole span degrades to an error verdict).
-    The chunks PARTITION the step stream — every step lands in exactly one
-    chunk; SCAN_NEIGHBORHOOD steps are never duplicated into a neighboring
-    chunk (their verbatim text is scoring-input only). A single step whose
-    measured chunk body already exceeds the cap is its own chunk and still
-    enters extraction in full (no truncate-to-fit)."""
+    The chunks PARTITION the step stream up to the footprint windows — every
+    step lands in exactly one chunk, except that the post side stops at the
+    largest per-memory window end when EVERY delivered memory is re-delivered
+    later (those steps are the newer spans' to claim — scanning them for this
+    span's footprint would be pure waste; a single unbounded memory runs the
+    post side to the end). SCAN_NEIGHBORHOOD steps are never duplicated into
+    a neighboring chunk (their verbatim text is scoring-input only). A single
+    step whose measured chunk body already exceeds the cap is its own chunk
+    and still enters extraction in full (no truncate-to-fit)."""
     header = _chunk_header(span, task)
     header_tokens = count_tokens(header) + _shell_tokens()
     # (term, lowered term) pairs: the substring match rides the lowered
@@ -281,12 +288,19 @@ def _chunks(
     texts = _step_texts(steps)
     renders = _step_renders(steps)
     out: list[_Chunk] = []
+    post_end = len(steps)
+    ends = [end for end in span.memory_windows.values() if end is not None]
+    if span.memory_windows and len(ends) == len(span.memory_windows):
+        # every delivered memory is re-delivered later: the span's footprint
+        # ends at the largest window end (step numbering rides the ordinal
+        # invariant — window end E is steps index E)
+        post_end = min(post_end, max(ends))
     # the side split rides the ordinal invariant directly (steps[i].step ==
     # i + 1 — build_step_stream's construction), never two filtered copies
     # of the steps list per overflowing span
     for side, side_idx in (
         ("pre", range(span.step_first - 1)),
-        ("post", range(span.step_first - 1, len(steps))),
+        ("post", range(span.step_first - 1, post_end)),
     ):
         groups: list[tuple[list[AgentStep], list[str], list[str]]] = []
         cur: list[AgentStep] = []

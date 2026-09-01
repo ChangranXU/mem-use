@@ -87,10 +87,17 @@ class InjectionSpan:
     kind and a capped excerpt of the delivered block's opening; None when
     the placement recorded no content). `position`/`total` locate the span
     among the trajectory's spans (0/0 when built directly, not via
-    group_spans). `window_last` bounds the judged footprint window: the next
-    span's first step minus one, set only when the next span starts strictly
-    after this span's deliveries end (overlapping spans stay unbounded —
-    never cut a span's own delivery steps); None = unbounded.
+    group_spans). `memory_windows` bounds each delivered memory's judged
+    footprint window individually: rubric display key (the bare memory key;
+    unkeyed memories are unjudged and carry no entry) → the window's last
+    step, the memory's next re-delivery step minus one (a re-delivery
+    supersedes — from then on the memory's influence is the newer span's to
+    claim), or None when the memory is never re-delivered later (unbounded).
+    A bound is set only when the re-delivery starts strictly after this
+    span's deliveries end — an overlapping re-delivery leaves the memory
+    unbounded, never cutting the span's own delivery steps. One key shared
+    by several identities (the rubric's per-key collapse) keeps the earliest
+    bound. Empty when built directly, not via group_spans.
     """
 
     id: str  # f"{traj_id}:S{n}"
@@ -111,4 +118,4 @@ class InjectionSpan:
     placement_head: str | None = None
     position: int = 0
     total: int = 0
-    window_last: int | None = None
+    memory_windows: dict[str, int | None] = field(default_factory=dict)

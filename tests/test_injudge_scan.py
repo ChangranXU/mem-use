@@ -766,6 +766,42 @@ def test_chunks_partition_the_step_stream(tmp_path):
     assert all(len(c.steps) == 1 for c in chunks) and len(chunks) == 8
 
 
+def test_chunks_cut_the_post_side_at_the_footprint_windows(tmp_path):
+    """When EVERY delivered memory is re-delivered later, the post side stops
+    at the largest per-memory window end — later steps are the re-delivery
+    span's to claim — and the chunk header states the per-memory bounds to
+    extraction. A single unbounded memory runs the post side to the end."""
+    ref_b = cure_ref("key_b", "an unrelated note")
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.recall(REF_A)  # step 2 — the judged span
+    for _ in range(5):
+        b.agent_turn()  # steps 3-7
+    b.recall(ref_b)  # step 8: unrelated content
+    b.agent_turn().agent_turn()  # steps 9,10
+    b.recall(REF_A)  # step 11: A re-delivered → key_a's window ends at 10
+    d = b.write(tmp_path / "t1")
+    from memgraph.parse_trajectory import parse_trajectory
+    from injudge.steps import build_step_stream
+    from injudge.spans import group_spans
+
+    warnings = []
+    traj, ops, events = parse_trajectory(d, warnings)
+    steps = build_step_stream(events, traj.memory_lanes, warnings)
+    spans = group_spans([op for op in ops if op.kind == "recall"], traj.id)
+    assert len(spans) == 3
+    span = spans[0]
+    assert span.memory_windows == {"key_a": 10}
+    chunks = _chunks(steps, span, _scan_cfg(), traj.task)
+    # step 11 is the re-delivery span's window, never scanned for this span
+    assert [s.step for c in chunks for s in c.steps] == list(range(1, 11))
+    assert "Footprint windows: key_a — steps 2–10 (re-delivered from step 11" \
+           in chunks[0].header
+    # one unbounded memory among the deliveries runs the post side to the end
+    span.memory_windows = {"key_a": 10, "key_b": None}
+    chunks = _chunks(steps, span, _scan_cfg(), traj.task)
+    assert [s.step for c in chunks for s in c.steps] == list(range(1, 12))
+
+
 def test_chunk_cap_counts_the_anchor_block(tmp_path):
     """The chunk token cap sizes the WHOLE user body — header, metadata
     shell, rendered steps AND the anchor block: a delivered value's words

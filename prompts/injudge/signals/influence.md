@@ -1,9 +1,10 @@
 4. influence (@influence@) — the memory's
    footprint in the agent's SUBSEQUENT behavior: the steps from the span's
-   first step onward, bounded at the next span's first step when one follows
-   with different content (a content change supersedes — later steps are the
-   newer span's window, so one delivery's influence is never credited to two
-   spans):
+   first step onward, bounded where THIS memory is next re-delivered (a
+   re-delivery supersedes — later steps are the re-delivery span's window,
+   so one memory's influence is never credited to two spans). A memory never
+   re-delivered is judged to the end of the stream; another memory's
+   re-delivery bounds only its own window, never this one's:
    - referenced: the agent mentioned or quoted it, but its actions did not
      change because of it;
    - acted_on: a later command, edit, or test was shaped by the memory
