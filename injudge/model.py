@@ -90,14 +90,15 @@ class InjectionSpan:
     group_spans). `memory_windows` bounds each delivered memory's judged
     footprint window individually: rubric display key (the bare memory key;
     unkeyed memories are unjudged and carry no entry) → the window's last
-    step, the memory's next re-delivery step minus one (a re-delivery
-    supersedes — from then on the memory's influence is the newer span's to
-    claim), or None when the memory is never re-delivered later (unbounded).
-    A bound is set only when the re-delivery starts strictly after this
-    span's deliveries end — an overlapping re-delivery leaves the memory
-    unbounded, never cutting the span's own delivery steps. One key shared
-    by several identities (the rubric's per-key collapse) keeps the earliest
-    bound. Empty when built directly, not via group_spans.
+    step, the first later re-delivery starting strictly after this span's
+    last delivery step, minus one (a re-delivery supersedes — from then on
+    the memory's influence is the newer span's to claim), or None when none
+    qualifies: overlapping re-deliveries are skipped, not terminal, so the
+    memory is unbounded only when no cleanly separated re-delivery exists.
+    The strict > keeps the bound from ever cutting the span's own delivery
+    steps. One key shared by several identities (the rubric's per-key
+    collapse) keeps the earliest bound. Empty when built directly, not via
+    group_spans.
     """
 
     id: str  # f"{traj_id}:S{n}"

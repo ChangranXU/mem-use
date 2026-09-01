@@ -20,11 +20,13 @@ non-first injections roll up as "restated".
 A gap in delivery steps does not break a span (the missing steps are
 recorded in `step_gaps` and surfaced to the judge); a content change does.
 Each delivered memory's judged footprint window is bounded individually at
-THAT memory's next re-delivery when the re-delivery starts strictly after
-this span's deliveries end (`memory_windows`): a re-delivery supersedes,
+THAT memory's first re-delivery starting strictly after this span's
+deliveries end (`memory_windows`): a re-delivery supersedes,
 so a memory delivered in two spans is never credited in both — while an
-unrelated span in between bounds nothing, and a co-delivered memory that
-is never re-delivered keeps the rest of the stream.
+unrelated span in between bounds nothing, an overlapping re-delivery
+(possible only from declared-back or corrupt steps) is skipped rather than
+terminal, and a co-delivered memory with no cleanly separated re-delivery
+keeps the rest of the stream.
 A delivery carries no step only when no agent turn ever classified in the
 run (a memory-only or pre-first-response recording); such ops sort last and
 merge only into a matching-content span, and a span whose ops are ALL
@@ -177,11 +179,14 @@ def group_spans(recall_ops: list[MemoryOp], traj_id: str) -> list[InjectionSpan]
     # memory is next re-delivered (a re-delivery supersedes — the later
     # influence is the newer span's to claim, so one memory is never credited
     # in two spans); intermediate spans with disjoint content bound nothing.
-    # The overlapping-neighbor guard applies per identity: the FIRST
-    # re-delivery decides, and only when it starts strictly after this span's
-    # deliveries end — an overlapping re-delivery leaves the memory unbounded
-    # (never cut the span's own delivery steps) rather than deferring the
-    # bound to a later re-delivery.
+    # Per identity, later spans are scanned in span order and the FIRST
+    # re-delivery starting strictly after this span's last delivery step
+    # sets the bound — an overlapping re-delivery is skipped, never terminal
+    # (overlap means declared-back or corrupt steps; clean recordings are
+    # strictly sequential), and the memory stays unbounded only when no
+    # cleanly separated re-delivery exists at all. The strict > is the hard
+    # guard: bound >= step_last, so a window never cuts the span's own
+    # delivery steps.
     for i, span in enumerate(spans):
         span.position = i + 1
         span.total = len(spans)
@@ -198,7 +203,7 @@ def group_spans(recall_ops: list[MemoryOp], traj_id: str) -> list[InjectionSpan]
                     and first > span.step_last
                 ):
                     end = first - 1
-                break  # the first re-delivery decides; an overlapping one bounds nothing
+                    break  # the first cleanly separated re-delivery decides
             if key not in windows:
                 windows[key] = end
             elif windows[key] is None:

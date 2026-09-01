@@ -609,10 +609,63 @@ def test_spans_window_unbounded_without_a_redelivery(tmp_path):
     assert spans[1].memory_windows == {"key_b": None}
 
 
-def test_spans_window_never_cuts_the_spans_own_delivery_steps(tmp_path):
-    """The overlapping-neighbor guard, per identity: a re-delivery whose
-    first step does not clear this span's last delivery step leaves that
-    memory unbounded rather than cutting the span's own deliveries."""
+def test_spans_window_bounds_at_the_first_qualifying_redelivery(tmp_path):
+    """Two later re-deliveries, both cleanly separated: the FIRST one sets
+    the bound — the search never skips past a qualifying re-delivery to a
+    later one (its steps already belong to the first re-delivery's span)."""
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.recall(REF_A)  # step 2
+    for _ in range(5):
+        b.recall([REF_A, REF_B])  # steps 3-7: A co-delivered with B
+    b.recall(REF_A)  # step 8
+    b.recall(REF_A)  # step 9 — same content extends the span
+    spans = group_spans(_recall_ops(b, tmp_path), "T1")
+    assert len(spans) == 3
+    assert (spans[0].step_first, spans[0].step_last) == (2, 2)
+    assert (spans[1].step_first, spans[1].step_last) == (3, 7)
+    # span 1 is the first later span re-delivering key_a and it clears this
+    # span's last delivery step: the bound lands there (3 − 1), never at
+    # span 2's later re-delivery
+    assert spans[0].memory_windows == {"key_a": 2}
+    assert spans[1].memory_windows == {"key_a": 7, "key_b": None}
+    assert spans[2].memory_windows == {"key_a": None}
+
+
+def test_spans_window_defers_past_an_overlapping_redelivery(tmp_path):
+    """An overlapping re-delivery (declared-back steps) is skipped, never
+    terminal: the bound defers to the first re-delivery starting strictly
+    after this span's last delivery step. The strict > still guards per span
+    — a re-delivery not clearing a span's OWN last delivery step never cuts
+    that span's own deliveries."""
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.recall(REF_A)  # step 2
+    b.recall(REF_A)  # step 3 — same content extends the span
+    for _ in range(6):
+        b.agent_turn()  # steps 4-9, so the declared-back steps are in range
+    sid_ab = b.search(returned=[REF_A, REF_B])
+    b.delivery(sid_ab, memories=[REF_A, REF_B], main_step=3)  # overlaps
+    b.delivery(sid_ab, memories=[REF_A, REF_B], main_step=8)  # extends its span
+    sid_a = b.search(returned=[REF_A])
+    b.delivery(sid_a, memories=[REF_A], main_step=8)  # A re-delivered at 8
+    spans = group_spans(_recall_ops(b, tmp_path), "T1")
+    assert len(spans) == 3
+    assert (spans[0].step_first, spans[0].step_last) == (2, 3)
+    assert (spans[1].step_first, spans[1].step_last) == (3, 8)
+    # the middle span's first step (3) does not clear the first span's last
+    # delivery step (3) — skipped, not terminal; the re-delivery at step 8
+    # is the first cleanly separated one → the bound is 8 − 1
+    assert spans[0].memory_windows == {"key_a": 7}
+    # the last span's first step (8) does not clear the middle span's OWN
+    # last step (8): unbounded — a bound of 7 would cut its own delivery
+    assert spans[1].memory_windows == {"key_a": None, "key_b": None}
+    assert spans[2].memory_windows == {"key_a": None}
+
+
+def test_spans_window_unbounded_when_every_redelivery_overlaps(tmp_path):
+    """The all-overlapping case: every later re-delivery fails to start
+    strictly after this span's last delivery step, so none qualifies and
+    the memory keeps the rest of the stream — the skipped re-delivery
+    bounds nothing, and the window never cuts the span's own deliveries."""
     b = TrajBuilder().agent_turn(with_task=True)
     b.recall(REF_A)  # step 2
     b.recall(REF_A)  # step 3 — same content extends the span
@@ -623,8 +676,8 @@ def test_spans_window_never_cuts_the_spans_own_delivery_steps(tmp_path):
     spans = group_spans(_recall_ops(b, tmp_path), "T1")
     assert len(spans) == 3
     assert (spans[0].step_first, spans[0].step_last) == (2, 3)
-    # the re-delivery's first step (3) is not strictly after the span's last
-    # delivery step (3): the FIRST re-delivery decides, and it bounds nothing
+    # the only re-delivery (step 3) is not strictly after the span's last
+    # delivery step (3): skipped, and nothing later qualifies — unbounded
     assert spans[0].memory_windows == {"key_a": None}
     assert spans[1].memory_windows == {"key_b": None}
     assert spans[2].memory_windows == {"key_a": None}
