@@ -1,6 +1,6 @@
 """Merge injudge verdicts into the graph for rendering.
 
-`apply_verdicts` joins an `injudge.report/v5` artifact onto a
+`apply_verdicts` joins an `injudge.report/v6` artifact onto a
 loaded graph by (run_id, op seq) — robust to the two tools assigning different
 T-numbers when run on different path sets — and annotates each recall op in
 place:
@@ -29,11 +29,11 @@ from pathlib import Path
 
 from memgraph.annotations import is_int
 
-_SCHEMA = "injudge.report/v5"
+from injudge import REPORT_SCHEMA
 
 
 def load_verdict_report(path: Path) -> dict:
-    """Read and sanity-check an injudge.report/v5 artifact."""
+    """Read and sanity-check an injudge.report/v6 artifact."""
     try:
         report = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError, RecursionError) as e:
@@ -42,9 +42,9 @@ def load_verdict_report(path: Path) -> dict:
         # a corrupt artifact fails fast with a targeted message, never a traceback
         raise SystemExit(f"error: cannot read verdicts report {path}: {e}") from e
     tool = report.get("tool") if isinstance(report, dict) else None
-    if not isinstance(tool, dict) or tool.get("schema") != _SCHEMA:
+    if not isinstance(tool, dict) or tool.get("schema") != REPORT_SCHEMA:
         raise SystemExit(
-            f"error: {path} is not an injudge.report artifact (expected schema {_SCHEMA})"
+            f"error: {path} is not an injudge.report artifact (expected schema {REPORT_SCHEMA})"
         )
     return report
 

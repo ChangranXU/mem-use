@@ -590,8 +590,11 @@ function selectMemory(id){
   const trailHtml=trail.length>1
     ? `<div class="kv">lifecycle: ${trail.map(x=>`<span class="chip" style="color:${x.st==="deleted"?"var(--flag)":(STATUS_COLOR[x.st]||"var(--muted)")}" title="${esc(x.op||"")}">${esc(x.st)}</span>`).join(" → ")}</div>`
     : "";
+  // chips follow the list's terminal-state-wins rule: a revived memory
+  // deleted again shows "deleted", not "revived" (the revival stays visible
+  // in the lifecycle trail and the deletions list)
   detail.innerHTML=`<h3 style="color:${memColor(id)}">${esc(m.key)}</h3>
-    <div class="kv"><span class="chip">${esc(m.memory_type||"?")}</span><span class="chip">${esc(m.status)}</span>${m.deleted?`<span class="chip" style="color:var(--flag)">deleted</span>`:""}${m.revived?`<span class="chip">revived</span>`:""}${m.confidence!=null?`<span class="chip">conf ${esc(m.confidence)}</span>`:""}${m.origin==="not_observed"?`<span class="chip">origin not observed</span>`:""}${m.namespace?`<span class="chip" title="store namespace ${esc(m.namespace)}">store ${esc(shorten(m.namespace,16))}</span>`:""}</div>
+    <div class="kv"><span class="chip">${esc(m.memory_type||"?")}</span><span class="chip">${esc(m.status)}</span>${m.deleted?`<span class="chip" style="color:var(--flag)">deleted</span>`:""}${m.revived&&!m.deleted?`<span class="chip">revived</span>`:""}${m.confidence!=null?`<span class="chip">conf ${esc(m.confidence)}</span>`:""}${m.origin==="not_observed"?`<span class="chip">origin not observed</span>`:""}${m.namespace?`<span class="chip" title="store namespace ${esc(m.namespace)}">store ${esc(shorten(m.namespace,16))}</span>`:""}</div>
     <div class="kv">created: ${c.op?`${esc(c.op)} @ ${esc(c.traj)} step ${c.step}`:"— (origin not observed)"}</div>
     ${trailHtml}
     ${m.recalled_before_creation&&m.recalled_before_creation.length?`<div class="kv" style="color:var(--flag)">⚠ ${m.recalled_before_creation.length} recall(s) precede this creation — the store entry likely predates the loaded trajectories</div>`:""}

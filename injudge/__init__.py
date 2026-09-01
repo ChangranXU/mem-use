@@ -14,3 +14,9 @@ rendering, judging, aggregation, and reporting on top.
 
 from __future__ import annotations
 
+# The report artifact's schema string, shared by the writer
+# (injudge/report.py) and the reader (memgraph/verdicts.py) so a bump can
+# never land on one side only and surface at read time. Tests pin the
+# literal deliberately — a bump must update them (see AGENTS.md).
+REPORT_SCHEMA = "injudge.report/v6"
+

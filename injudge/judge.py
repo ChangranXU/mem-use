@@ -1272,12 +1272,13 @@ def _render_span_header(span: InjectionSpan, task: str | None, memories_note: st
     if span.step_first is not None and any(
         end is not None for end in span.memory_windows.values()
     ):
-        # per-memory footprint windows: each memory is judged up to ITS OWN
-        # next re-delivery (later steps belong to the re-delivery span); a
-        # memory never re-delivered keeps the rest of the stream, and one
-        # memory's bound never caps a co-delivered memory's window. Stated at
-        # the rubric's per-key granularity — and only when at least one
-        # memory is bounded (all-unbounded keeps the stream label's open
+        # footprint windows at the rubric's per-KEY granularity (identities
+        # sharing one display key merge to the earliest bound — spans.py's
+        # rubric collapse): each key is judged up to its next re-delivery
+        # (later steps belong to the re-delivery span); a key never
+        # re-delivered keeps the rest of the stream, and one key's bound
+        # never caps a co-delivered key's window. Stated only when at least
+        # one memory is bounded (all-unbounded keeps the stream label's open
         # wording). The shared header carries it, so the scan path's chunk
         # headers state the same bounds to extraction.
         frags = []
@@ -2020,8 +2021,10 @@ def _failure_message(e: _CallFailed, contract: _CallContract) -> str:
     return msg
 
 
-# Length/context-window rejection signatures in a 400/413 error body
-# (lowercased substring match). tiktoken o200k can undercount for the real
+# Length/context-window rejection signatures in a 400/422 error body
+# (lowercased substring match; a 413 needs no signature — it is Content Too
+# Large by status, and any OTHER status is a config fault whatever the body
+# says). tiktoken o200k can undercount for the real
 # judge tokenizer, so the budget gate can pass a send the endpoint then
 # rejects as too long. Routing-only heuristics: a miss keeps the fail-fast /
 # tier-walk behavior exactly as before; a hit routes the span to the chunked
@@ -2043,9 +2046,15 @@ _LENGTH_SIGNATURES = (
 
 def _length_rejection(code: int, body: str) -> bool:
     """True when an HTTP error reads as a length/context-window rejection:
-    413 is Content Too Large by status; a 400/422 needs a body signature."""
+    413 is Content Too Large by status; a 400/422 needs a body signature.
+    Any other status is a config/auth fault whatever the body says — a proxy
+    or WAF error page mentioning a "token limit" on a 401/403/404 must fail
+    fast as the config fault it is, never reroute the span to the paid
+    chunked scan path."""
     if code == 413:
         return True
+    if code not in (400, 422):
+        return False
     lowered = body.lower()
     return any(sig in lowered for sig in _LENGTH_SIGNATURES)
 
@@ -2091,9 +2100,9 @@ def _contract_call(
     non-429 4xx (auth, unknown URL) is an endpoint/config
     fault, not a format problem, and fails the call immediately — except a
     length/context-window rejection (413 by status, or a 400/422 body
-    matching _length_rejection), detected at the 400/422 branch entry before
-    any tier walking: it fails as kind "length" so the scoring caller can
-    route the span to the chunked scan path (an extraction chunk has no
+    matching _length_rejection), detected at the HTTPError branch entry
+    before any tier walking: it fails as kind "length" so the scoring caller
+    can route the span to the chunked scan path (an extraction chunk has no
     smaller path — it fails the chunk like any other request rejection). With the
     output format pinned there is no chain to walk, so a 400/422 fails the
     call naming the pin.
@@ -2171,22 +2180,26 @@ def _contract_call(
             # the raw bytes
             body = raw.decode("utf-8", "replace")
             detail = _masked_head(body, cfg.api_key, 300)  # capped in messages/artifacts; comparisons are not
+            # branch entry, before any status split or tier walking: a
+            # length/context-window rejection (413 by status, or a signed
+            # 400/422 body — _length_rejection guards the status itself, so
+            # a 429/5xx or an auth fault never matches) is not a format
+            # refusal, and walking the tier chain would pay one rejection
+            # per tier for nothing. Fail as "length" so the scoring caller
+            # can fall back to the chunked scan path (a pinned tier falls
+            # back the same: the pin constrains the format field, not the
+            # input size); an extraction chunk has no smaller path — it
+            # fails the chunk like any other request rejection.
+            if _length_rejection(e.code, body):
+                raise _CallFailed(
+                    "length",
+                    f"the {contract.label} endpoint rejected the request as "
+                    f"too long for its context window (HTTP {e.code}: {detail})",
+                ) from e
             if e.code == 429 or e.code >= 500:
                 last_error = f"HTTP {e.code}: {detail}"
                 pause = _retry_after(e)
             elif e.code in (400, 422):
-                # branch entry: a length/context-window rejection is not a
-                # format refusal — walking the tier chain would pay one
-                # rejection per tier for nothing. Fail as "length" so the
-                # scoring caller can fall back to the chunked scan path (a
-                # pinned tier falls back the same: the pin constrains the
-                # format field, not the input size).
-                if _length_rejection(e.code, body):
-                    raise _CallFailed(
-                        "length",
-                        f"the {contract.label} endpoint rejected the request as "
-                        f"too long for its context window (HTTP {e.code}: {detail})",
-                    ) from e
                 # request-level rejection: the endpoint refuses this tier's
                 # format field — degrade for free, no attempt consumed
                 if cfg.output_format is not None:
@@ -2233,16 +2246,7 @@ def _contract_call(
                 continue
             else:
                 # 401/403/404 & co. are config faults, not format-tier
-                # rejections — fail fast instead of walking the chain; a
-                # length/context-window rejection (413 by status, or a signed
-                # body) fails as "length" so the scoring caller can fall back
-                # to the chunked scan path
-                if _length_rejection(e.code, body):
-                    raise _CallFailed(
-                        "length",
-                        f"the {contract.label} endpoint rejected the request as "
-                        f"too long for its context window (HTTP {e.code}: {detail})",
-                    ) from e
+                # rejections — fail fast instead of walking the chain
                 raise _CallFailed("request", f"HTTP {e.code}: {detail}") from e
         except (OSError, http.client.HTTPException) as e:
             # URLError/TimeoutError are OSError subclasses; HTTPException

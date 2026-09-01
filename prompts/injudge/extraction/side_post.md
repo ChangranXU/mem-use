@@ -5,4 +5,8 @@ test shaped by it; explicit credit for a course change; an announced intent
 dropped after the injection — a skip-intent anchor), positive_effect
 aftermath (correct choice sooner, saved effort, avoided error — or led
 astray: wrong location, false lead, reverted correct work), and accuracy
-(tool results confirming or refuting a memory's content).
+(tool results confirming or refuting a memory's content). A memory's
+footprint window (the header's Footprint windows line) bounds ITS evidence:
+past that window the memory was re-delivered and its influence belongs to
+the re-delivering span — report such evidence only when it also speaks to a
+co-delivered memory still inside its window.

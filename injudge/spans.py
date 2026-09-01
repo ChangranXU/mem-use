@@ -38,9 +38,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+from bisect import bisect_right
 
 from injudge.model import InjectionSpan
-from memgraph.annotations import item_key, namespace_of
+from memgraph.annotations import item_key, namespace_of, version_identity
 from memgraph.model import MemoryOp
 
 
@@ -48,28 +49,24 @@ def content_fingerprint(op: MemoryOp) -> str:
     """sha1 over the portable delivered-set identity, robust to ordering.
 
     Per memory: namespace / identity_scheme / version_id / content sha256 —
-    the same tuple the gate's delivery-subsequence checks compare on. An
-    `operation_local` version_id names nothing outside its own
-    operation (the gate's identity-strength join rule), so it is withheld
-    and the content digest alone carries the comparison; for the stable
-    strengths the version_id already names one content digest. Scheme alone
-    distinguishes NOTHING (it is constant across one store's memories), so a
-    memory with neither a (withheld-adjusted) version_id nor a content digest
-    falls back to its delivered (namespace, key, value) — the namespace still
-    separates two stores' same-keyed deliveries (the registry's (namespace,
-    item) pair), while the triple degenerates to (namespace, key) for
-    redacted
-    content (no value is ever recorded), leaving distinct redacted contents
-    under one (namespace, key) indistinguishable and sharing one span.
+    the gate's version-level tuple (annotations.version_identity, with the
+    operation-local version_id WITHHELD: it names nothing outside its own
+    operation, so the content digest alone carries the comparison; for the
+    stable strengths the version_id already names one content digest).
+    Scheme alone distinguishes NOTHING (it is constant across one store's
+    memories), so a memory with neither a (withheld-adjusted) version_id
+    nor a content digest falls back to its delivered (namespace, key,
+    value) — the namespace still separates two stores' same-keyed
+    deliveries (the registry's (namespace, item) pair), while the triple
+    degenerates to (namespace, key) for redacted content (no value is ever
+    recorded), leaving distinct redacted contents under one (namespace,
+    key) indistinguishable and sharing one span.
     """
     canon = []
     for m in op.memories:
-        version_id = (
-            m.get("version_id") if m.get("identity_strength") != "operation_local" else None
-        )
-        digest = m.get("content_sha256")
+        ns, scheme, version_id, digest = version_identity(m, withhold_local=True)
         if version_id is not None or digest is not None:
-            ident = [m.get("namespace"), m.get("identity_scheme"), version_id, digest]
+            ident = [ns, scheme, version_id, digest]
         else:
             ident = [m.get("namespace"), m.get("key"), m.get("value")]
         canon.append(json.dumps(ident, ensure_ascii=False))
@@ -179,31 +176,46 @@ def group_spans(recall_ops: list[MemoryOp], traj_id: str) -> list[InjectionSpan]
     # memory is next re-delivered (a re-delivery supersedes — the later
     # influence is the newer span's to claim, so one memory is never credited
     # in two spans); intermediate spans with disjoint content bound nothing.
-    # Per identity, later spans are scanned in span order and the FIRST
-    # re-delivery starting strictly after this span's last delivery step
+    # Per identity, its later carrier spans are walked in span order and the
+    # FIRST re-delivery starting strictly after this span's last delivery step
     # sets the bound — an overlapping re-delivery is skipped, never terminal
     # (overlap means declared-back or corrupt steps; clean recordings are
     # strictly sequential), and the memory stays unbounded only when no
     # cleanly separated re-delivery exists at all. The strict > is the hard
     # guard: bound >= step_last, so a window never cuts the span's own
     # delivery steps.
+    # The carrier index (identity -> the span indexes re-delivering it with
+    # an attributed first step, in span order — a step-less span can never
+    # bound) is built ONCE: the window loop otherwise re-scans every later
+    # span per (span, identity) pair, and a span whose step_last is None can
+    # never satisfy the strict > guard — it would scan them all for no bound
+    # at all, so it never enters the walk either.
+    carriers: dict[tuple[str | None, str], list[int]] = {}
+    for j, idents in enumerate(span_idents):
+        if spans[j].step_first is None:
+            continue
+        for ident in idents:
+            carriers.setdefault(ident, []).append(j)
     for i, span in enumerate(spans):
         span.position = i + 1
         span.total = len(spans)
         windows: dict[str, int | None] = {}
         for ident, key in span_idents[i].items():
             end = None
-            for j in range(i + 1, len(spans)):
-                if ident not in span_idents[j]:
-                    continue
-                first = spans[j].step_first
-                if (
-                    first is not None
-                    and span.step_last is not None
-                    and first > span.step_last
-                ):
-                    end = first - 1
-                    break  # the first cleanly separated re-delivery decides
+            if span.step_last is not None:
+                js = carriers.get(ident)
+                if js:
+                    # the carrier list is ascending by construction, so
+                    # bisect jumps straight to the LATER carriers — no linear
+                    # skip of this span's own and earlier indexes per pair.
+                    # The first cleanly separated re-delivery decides (the
+                    # carrier index holds attributed spans only, so
+                    # step_first is never None here)
+                    for j in js[bisect_right(js, i) :]:
+                        first = spans[j].step_first
+                        if first > span.step_last:
+                            end = first - 1
+                            break
             if key not in windows:
                 windows[key] = end
             elif windows[key] is None:

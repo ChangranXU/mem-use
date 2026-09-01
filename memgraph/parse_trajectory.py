@@ -14,9 +14,10 @@ names, or label conventions.
   main-lane traffic by protocol, so an operation event that drifted onto
   one of them never pulls the agent's lane into the memory set.
 - **Extract ops** come from generation operations (`memory_generate_start` /
-  `memory_change` / `memory_generate_end`): produced MemoryRefs as
-  candidates — plus create/update change after-refs produced does not
-  already cover (a partial generation can leave the change series as the
+  `memory_change` / `memory_generate_end`): create/update change after-refs
+  merged with the end event's produced MemoryRefs as candidates —
+  version-level dedupe, each item's versions in the two records' merged
+  landing order (a partial record on either side leaves the other as the
   only record of what landed) — delete changes as deletions with exact
   refs, per-reason rejection counts, trigger and status.
 - **Recall ops** come from `memory_delivery` events: exact delivered refs,
@@ -53,13 +54,13 @@ from memgraph.annotations import (
     content_chars,
     is_int,
     item_key,
-    namespace_of,
     operation_extraction_step,
     operation_rejection_counts,
     ref_key,
     ref_to_memory,
     slot_index,
     resolved_content_text,
+    version_identity,
 )
 from memgraph.model import MemoryOp, Trajectory
 
@@ -70,10 +71,12 @@ _PLACEMENT_HEAD_CAP = 160
 
 # The bridge's memory-action contract is add/update/delete (memory-bridge
 # AGENTS.md): a delete change's before-refs leave the active store and graph
-# as the deletions. create/update after-refs ARE read (into the extract op's
-# candidates, deduplicated against the end event's produced refs — see
-# _extract_op_from_generation): a partial generation can end produced: []
-# with rows landed, leaving the change series as the only record of them.
+# as the deletions. create/update after-refs ARE read (merged with the end
+# event's produced refs into the extract op's candidates — version-level
+# dedupe, each item's versions in the two records' merged landing order,
+# see _extract_op_from_generation): a partial generation can end
+# produced: [] with rows landed, leaving the change series as the only
+# record of them.
 # Every other schema action (merge/split/archive/restore/...) is unmodeled —
 # warned below, never silently dropped.
 
@@ -380,6 +383,43 @@ def _op_anchor(operation: AnnotatedOperation) -> dict[str, Any]:
     return operation.end or (operation.changes[-1] if operation.changes else operation.start)
 
 
+def _version_ident(entry: dict) -> tuple:
+    """A mapped ref's identity for the candidate dedupe: the item-level
+    pair leading, then the gate's version-level tuple
+    (annotations.version_identity — operation-local ids KEPT: produced and
+    the change afters live in the SAME operation, where the local id names
+    one version). Two refs naming the same landed state collapse; a NEWER
+    version of the same item stays distinct."""
+    ns, scheme, version_id, sha = version_identity(entry)
+    return (ns, item_key(entry), scheme, version_id, sha)
+
+
+def _version_order(series: list[tuple], produced: list[tuple]) -> list[tuple]:
+    """One item's version order from its two landing records: the change
+    series (recording order) and the end event's produced list. Each is
+    chronological for the versions it carries, so the item's landed order
+    is a linear extension of both — a version one record missed slots in
+    where the other record's neighbours place it: a complete produced list
+    reorders a partial series (a lost change event, an unmodeled action's
+    state effect) just as a complete series orders a partial produced list
+    (a timed-out add ended produced: []). Unconstrained pairs and
+    contradictory records (a hand-edited cycle) both degrade to the
+    series-first preference, never raise."""
+    preds: dict[tuple, set[tuple]] = {}
+    for record in (series, produced):
+        for earlier, later in zip(record, record[1:]):
+            preds.setdefault(later, set()).add(earlier)
+    pool = list(dict.fromkeys([*series, *produced]))
+    placed: set[tuple] = set()
+    order = []
+    while pool:
+        nxt = next((v for v in pool if preds.get(v, frozenset()) <= placed), pool[0])
+        pool.remove(nxt)
+        placed.add(nxt)
+        order.append(nxt)
+    return order
+
+
 def _extract_op_from_generation(
     operation: AnnotatedOperation,
     op_id: str,
@@ -443,22 +483,58 @@ def _extract_op_from_generation(
             op.flagged = f"generation status {op.status!r}" + (
                 f" (error_codes: {', '.join(map(str, codes))})" if codes else ""
             )
-    op.candidates.extend(produced)
-    # A create/update change's after-refs record the same landed state the
-    # end event's produced refs do, so they are candidates wherever produced
-    # does not already cover the item — on the success path both carry the
-    # same rows and merging blind would double every candidate, while a
-    # partial generation (e.g. a timed-out add that persisted server-side,
-    # ended produced: []) leaves the change series as the ONLY record of
-    # what landed. Dedupe on the registry's item-level identity (namespace,
-    # item_key); a ref carrying no item identity is never deduped — it
-    # cannot collide legitimately, and the graph already notes and skips
-    # keyless candidates.
-    covered = {(namespace_of(entry), item_key(entry)) for entry in produced}
-    for entry in afters:
-        ident = (namespace_of(entry), item_key(entry))
-        if ident[1] is None or ident not in covered:
-            op.candidates.append(entry)
+    # Merge the change-series afters and the end event's produced refs into
+    # the candidate list. The two records carry the same landed rows (on the
+    # success path identically — merging blind would double every candidate),
+    # each in landing order for the versions it carries, and a partial record
+    # on EITHER side must not invert an item's chronology: a generation
+    # landing TWO versions of one item (a create then an update) graphs
+    # create-then-supersede with the value on the newest version whether the
+    # end event missed rows (a timed-out add that persisted server-side can
+    # end produced: [] with rows landed — the change series is the only
+    # record) or the series did (a lost change event, an unmodeled action's
+    # state effect). So dedupe on the version-level identity (_version_ident)
+    # — never the item-level pair, which would drop a NEWER version of a
+    # covered item and lose the update — then order each item's versions as
+    # the linear extension of its two records (_version_order). A repeat row
+    # of one version (a duplicated create, a status-only update re-recording
+    # it) collapses instead of graphing a spurious supersedes edge; of two
+    # copies naming one landed state, the value-carrying one wins (a locator
+    # copy resolves to none). A ref carrying no item identity is never
+    # deduped — it cannot collide legitimately, and the graph already notes
+    # and skips keyless candidates.
+    candidates: list[dict] = []
+    slot_of: dict[tuple, int] = {}  # version ident -> index in candidates
+    series_orders: dict[tuple, list[tuple]] = {}  # item pair -> version idents
+    produced_orders: dict[tuple, list[tuple]] = {}
+    for orders, source in ((series_orders, afters), (produced_orders, produced)):
+        for entry in source:
+            ident = _version_ident(entry)
+            item = ident[:2]  # the (namespace, item) pair leads the ident
+            if item[1] is None:
+                candidates.append(entry)
+                continue
+            seen = orders.setdefault(item, [])
+            if ident not in seen:  # each record speaks in first-landing order
+                seen.append(ident)
+            if ident in slot_of:
+                if entry.get("value") and not candidates[slot_of[ident]].get("value"):
+                    candidates[slot_of[ident]] = entry
+                continue
+            slot_of[ident] = len(candidates)
+            candidates.append(entry)
+    # The per-item reorder: an item's candidate SLOTS stay (cross-item
+    # interleaving keeps recording order); only which version of the item
+    # sits in each slot follows the merged landing order.
+    for item in dict.fromkeys([*series_orders, *produced_orders]):
+        idents = dict.fromkeys([*series_orders.get(item, []), *produced_orders.get(item, [])])
+        if len(idents) < 2:
+            continue
+        order = _version_order(series_orders.get(item, []), produced_orders.get(item, []))
+        entries = {i: candidates[slot_of[i]] for i in idents}
+        for pos, ident in zip(sorted(slot_of[i] for i in idents), order):
+            candidates[pos] = entries[ident]
+    op.candidates = candidates
     return op
 
 

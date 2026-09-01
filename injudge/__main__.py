@@ -104,7 +104,9 @@ def _residency_note(
     restated numbers presuppose one of the two regimes — so when restating
     dominates and the recorded rewrites show the drop pattern (most
     deliveries followed by a dropping main-lane rewrite before the next
-    delivery), the note states which regime the metrics assume.
+    delivery — a drop trailing the final delivery counts too: it evicts that
+    block before the run's end), the note states which regime the metrics
+    assume.
     """
     if restated_ratio is None or restated_ratio <= 0.5 or len(recall_ops) < 2:
         return None
@@ -133,8 +135,10 @@ def _residency_note(
         return None
     return (
         f"{followed} of {len(seqs)} deliveries were followed by a history "
-        "rewrite dropping context before the next delivery, and restated "
-        f"re-deliveries are {restated_ratio:.0%} of injections: this harness "
+        "rewrite dropping resident context (before the next delivery — or, "
+        "after the final delivery, before the run's end; a trailing drop "
+        "evicts that block too), and restated re-deliveries are "
+        f"{restated_ratio:.0%} of injections: this harness "
         "keeps only the LATEST memory block resident (re-delivery is the "
         "visibility mechanism) — the one-verdict-per-span metrics assume "
         "that residency regime"

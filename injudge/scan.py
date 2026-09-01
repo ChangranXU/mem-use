@@ -8,10 +8,11 @@ evidence pack the existing scoring call (judge._scoring_call) reads. The
 chunks partition the step stream — split at the span's step_first into
 pre-injection and post-injection sides, every step lands in exactly one
 chunk (up to the footprint windows: the post side stops at the largest
-per-memory window end when every delivered memory is re-delivered later —
-those steps are the newer spans' to claim), and chunks never receive
-another chunk's text (the seam-neighborhood verbatim is scoring-input only,
-attached at assembly).
+per-key window end when every KEYED delivered memory is re-delivered
+later — those steps are the newer spans' to claim; an unkeyed memory,
+unjudged and carrying no window, never holds the post side open), and
+chunks never receive another chunk's text (the seam-neighborhood verbatim
+is scoring-input only, attached at assembly).
 
 Failure policy: a chunk with no usable record after its attempt budget
 fails the SPAN — an error verdict naming the chunk, no further chunks
@@ -272,18 +273,27 @@ def _chunks(
     whole span degrades to an error verdict).
     The chunks PARTITION the step stream up to the footprint windows — every
     step lands in exactly one chunk, except that the post side stops at the
-    largest per-memory window end when EVERY delivered memory is re-delivered
+    largest per-key window end when EVERY keyed memory is re-delivered
     later (those steps are the newer spans' to claim — scanning them for this
-    span's footprint would be pure waste; a single unbounded memory runs the
-    post side to the end). SCAN_NEIGHBORHOOD steps are never duplicated into
-    a neighboring chunk (their verbatim text is scoring-input only). A single
-    step whose measured chunk body already exceeds the cap is its own chunk
-    and still enters extraction in full (no truncate-to-fit)."""
+    span's footprint would be pure waste; a single unbounded keyed memory
+    runs the post side to the end, and an unkeyed memory — unjudged, carrying
+    no window — never holds the post side open). Where the per-key windows
+    differ, the union range stands (a later-bounded co-delivered key still
+    claims those steps) and each key's bound rides the chunk header and
+    binds the anchors (_anchor_terms), so the earlier-bounded key is not
+    double-credited here. The windows are per display KEY, never per
+    identity: identities sharing one key merge to the earliest bound
+    (spans.py's rubric collapse — the judge contract scores per bare key).
+    SCAN_NEIGHBORHOOD steps are never duplicated
+    into a neighboring chunk (their verbatim text is scoring-input only). A
+    single step whose measured chunk body already exceeds the cap is its own
+    chunk and still enters extraction in full (no truncate-to-fit)."""
     header = _chunk_header(span, task)
     header_tokens = count_tokens(header) + _shell_tokens()
-    # (term, lowered term) pairs: the substring match rides the lowered
-    # forms, the anchor line keeps the term's recorded casing
-    terms = [(t, t.lower()) for t in _anchor_terms(span)]
+    # (term, lowered term, window end) triples: the substring match rides
+    # the lowered forms, the anchor line keeps the term's recorded casing,
+    # and the window end binds each hit to this span's footprint
+    terms = [(t, t.lower(), end) for t, end in _anchor_terms(span)]
     step_tokens = _step_tokens(steps)
     texts = _step_texts(steps)
     renders = _step_renders(steps)
@@ -291,9 +301,11 @@ def _chunks(
     post_end = len(steps)
     ends = [end for end in span.memory_windows.values() if end is not None]
     if span.memory_windows and len(ends) == len(span.memory_windows):
-        # every delivered memory is re-delivered later: the span's footprint
-        # ends at the largest window end (step numbering rides the ordinal
-        # invariant — window end E is steps index E)
+        # every keyed delivered memory is re-delivered later (the windows
+        # hold keyed entries only — an unkeyed memory is unjudged and never
+        # holds the post side open): the span's footprint ends at the
+        # largest window end (step numbering rides the ordinal invariant —
+        # window end E is steps index E)
         post_end = min(post_end, max(ends))
     # the side split rides the ordinal invariant directly (steps[i].step ==
     # i + 1 — build_step_stream's construction), never two filtered copies
@@ -363,37 +375,55 @@ _MAX_ANCHOR_TERM_CHARS = 200
 _ANCHOR_WORD = re.compile(r"\S+")
 
 
-def _anchor_terms(span: InjectionSpan) -> list[str]:
+def _anchor_terms(span: InjectionSpan) -> list[tuple[str, int | None]]:
     """Each delivered memory's whole key, plus only those value words that
     look like a path or identifier (contain `/` or `::`) or are at least 8
     characters long — short plain words are never anchors. Capped at
     _MAX_ANCHOR_TERMS (keys first, then value words in delivery order), each
     term at _MAX_ANCHOR_TERM_CHARS (truncated prefixes dedupe together). The
     raw stream is lazy and stops AT the cap — bounding this scan work is the
-    cap's point."""
+    cap's point.
+    Every term carries the footprint-window end of its memory's display key
+    (None = unbounded; the windows are the per-key merged ones — identities
+    sharing one key carry the earliest bound): a hit PAST the window is the
+    re-delivering span's evidence, never this span's — the per-key windows
+    the chunk header states bind the anchors too, or the pre-filled items
+    would double-credit a memory whose re-delivery already superseded it.
+    A term shared by several memories keeps the widest window (it stays live
+    while any of them is in-window) — within the capped prefix: a stream cut
+    between two co-delivered memories drops the later memory's wider claim
+    on an already-kept term, which under-fills anchors past the narrower
+    window but never over-claims (extraction reads the full chunk text
+    regardless, and the header states the true windows). An unkeyed memory
+    has no window entry, so its terms stay unbounded."""
 
-    def raws() -> Iterable[str]:
+    def raws() -> Iterable[tuple[str, int | None]]:
         for m in span.memories:
             key = m.get("key")
+            end = (
+                span.memory_windows.get(key)
+                if isinstance(key, str) and key
+                else None
+            )
             if isinstance(key, str) and key.strip():
-                yield key.strip()
+                yield key.strip(), end
             value = m.get("value")
             if isinstance(value, str):
                 for match in _ANCHOR_WORD.finditer(value):
                     w = match.group()
                     if "/" in w or "::" in w or len(w) >= 8:
-                        yield w
+                        yield w, end
 
-    terms: list[str] = []
-    seen: set[str] = set()
-    for raw in raws():
+    ends: dict[str, int | None] = {}  # term -> the widest window claiming it
+    for raw, end in raws():
         t = raw[:_MAX_ANCHOR_TERM_CHARS]
-        if t not in seen:
-            seen.add(t)
-            terms.append(t)
-            if len(terms) >= _MAX_ANCHOR_TERMS:
+        if t not in ends:
+            if len(ends) >= _MAX_ANCHOR_TERMS:
                 break
-    return terms
+            ends[t] = end
+        elif ends[t] is not None and (end is None or end > ends[t]):
+            ends[t] = end  # a co-delivered memory claims it for longer
+    return list(ends.items())
 
 
 # The scan path's per-step measurements ride judge's one-entry memo
@@ -409,20 +439,26 @@ _step_texts = _StepsMemo(lambda steps: tuple(_step_text(s).lower() for s in step
 _step_tokens = _StepsMemo(lambda steps: tuple(count_tokens(t) for t in _step_renders(steps)))
 
 
-def _step_anchors(terms: list[tuple[str, str]], text: str, s: AgentStep) -> list[str]:
+def _step_anchors(
+    terms: list[tuple[str, str, int | None]], text: str, s: AgentStep
+) -> list[str]:
     """One step's pre-filled evidence items: every anchor term hitting the
-    step's text (case-insensitive substring — terms and text arrive with
-    their lowered forms precomputed, so the per-term lower never reruns per
-    step; the line itself keeps the term's recorded casing), citing its
-    step/seq. Anchors seed extraction and never replace it; they ride the
-    merge like any other evidence item — a `none` chunk carrying anchors
-    still contributes them."""
+    step's text INSIDE its footprint window (case-insensitive substring —
+    terms and text arrive with their lowered forms precomputed, so the
+    per-term lower never reruns per step; the line itself keeps the term's
+    recorded casing), citing its step/seq. A hit past the window end belongs
+    to the re-delivering span and is never pre-filled here (the pre side
+    needs no branch: every bound sits at or past the span's own last
+    delivery step, so a pre-side step can never pass one). Anchors seed
+    extraction and never replace it; they ride the merge like any other
+    evidence item — a `none` chunk carrying anchors still contributes
+    them."""
     seq_end = s.seq_end if s.seq_end is not None else "?"
     return [
         f'[anchor] "{term}" appears at step {s.step} '
         f"(seqs {s.seq_start}–{seq_end})"
-        for term, lowered in terms
-        if lowered in text
+        for term, lowered, end in terms
+        if (end is None or s.step <= end) and lowered in text
     ]
 
 

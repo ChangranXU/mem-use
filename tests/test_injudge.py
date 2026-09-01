@@ -1465,7 +1465,7 @@ def test_summary_v2_is_statistics_only():
         [{"level": "warn", "msg": "process note"}],
     )
     summary = build_summary(artifact)
-    assert summary["tool"]["schema"] == "injudge.summary/v2"
+    assert summary["tool"]["schema"] == "injudge.summary/v3"
     assert "validation" not in summary
     _assert_stats_only(summary)
     blob = json.dumps(summary)
@@ -2654,7 +2654,7 @@ def test_echoed_key_in_a_200_answer_never_reaches_judge_raw(monkeypatch):
 def test_echoed_key_in_a_conforming_verdict_never_reaches_the_artifact(monkeypatch):
     """A 200 verdict is endpoint output too: the key echoed into its
     analysis, evidence claims, or per-signal notes would land verbatim in
-    injudge.report/v5 — mask it in every copied field, not just judge_raw."""
+    injudge.report/v6 — mask it in every copied field, not just judge_raw."""
     key = "sk-secret+key"
     obj = json.loads(GOOD)
     obj["analysis"] = f"the agent saw {key} in the injection"
@@ -4606,7 +4606,7 @@ def test_cli_end_to_end_mocked_judge(monkeypatch, tmp_path):
                             "-o", str(out), "--env", str(_env(tmp_path))])
     assert rc == 0
     artifact = json.loads((out / "injudge-report.json").read_text())
-    assert artifact["tool"]["schema"] == "injudge.report/v5"
+    assert artifact["tool"]["schema"] == "injudge.report/v6"
     assert artifact["tool"]["judge_model"] == "judge-m"
     assert len(artifact["operations"]) == 1
     op = artifact["operations"][0]
@@ -4648,7 +4648,7 @@ def test_cli_end_to_end_mocked_judge(monkeypatch, tmp_path):
     assert len(record) == 1  # one judge call for one span
     # the summary artifact: the statistics-only distillation (v2)
     summary = json.loads((out / "summary.json").read_text())
-    assert summary["tool"]["schema"] == "injudge.summary/v2"
+    assert summary["tool"]["schema"] == "injudge.summary/v3"
     assert "validation" not in summary  # the process log stays in the report
     _assert_stats_only(summary)
     ov = summary["overall"]

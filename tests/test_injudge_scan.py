@@ -345,6 +345,26 @@ def test_non_length_400_walks_the_tier_chain_without_fallback(monkeypatch, tmp_p
     assert any("degrading to json" in w for w in warnings)
 
 
+def test_signed_body_on_an_auth_failure_is_no_length_rejection(monkeypatch, tmp_path):
+    """The body signature binds 400/422 only (413 passes on status alone): a
+    proxy/WAF error page mentioning a "token limit" on a 401 is a config
+    fault — it fails the span fast as a request error, never rerouting to
+    the paid chunked scan path."""
+    span, steps, traj = _span_steps(tmp_path)
+    scan_record = []
+
+    def judge_open(req, timeout=None):
+        raise http_error(401, b"authentication failed at the gateway; check "
+                              b"your plan's token limit and credentials")
+
+    monkeypatch.setattr("injudge.judge.urlopen", judge_open)
+    monkeypatch.setattr("injudge.scan.urlopen", scan_stub(scan_record))
+    with pytest.raises(JudgeError, match="401"):
+        judge_span(span, steps, _judge_cfg(), [], traj.task,
+                   scan=_scan_cfg(input_tokens=100_000))
+    assert scan_record == []  # no paid scan chunks were started
+
+
 def test_scan_path_without_extraction_config_fails_fast(tmp_path):
     """A ScanConfig carrying extraction=None (the dry-run shape) can never
     run the scan path: the overflow route fails fast naming the missing
@@ -475,7 +495,9 @@ def test_none_chunks_omitted_anchor_only_blocks_kept(monkeypatch, tmp_path):
 
 def test_anchor_terms_and_hits():
     """Anchors: whole keys plus value words that look like a path/identifier
-    (contain / or ::) or are at least 8 chars; short plain words never are."""
+    (contain / or ::) or are at least 8 chars; short plain words never are.
+    Every term carries its memory's footprint-window end (None when the span
+    was built directly, with no group_spans windows)."""
     from injudge.model import InjectionSpan
 
     span = InjectionSpan(
@@ -483,13 +505,33 @@ def test_anchor_terms_and_hits():
         memories=[{"key": "key_a", "value": "Use xarray/core/variable.py "
                                              "apply_ufunc carefully, ok? a::b"}],
     )
-    terms = _anchor_terms(span)
+    terms = dict(_anchor_terms(span))
     assert "key_a" in terms
     assert "xarray/core/variable.py" in terms  # a path
     assert "apply_ufunc" in terms  # >= 8 chars
     assert "a::b" in terms  # an identifier
     assert "carefully," in terms  # >= 8 with punctuation kept literal
     assert "Use" not in terms and "ok?" not in terms  # short plain words
+    assert set(terms.values()) == {None}  # no windows recorded: unbounded
+
+
+def test_anchor_terms_keep_the_widest_window():
+    """A term shared by several memories stays live while ANY of them is
+    in-window: its window end is the widest claimant's (None = unbounded
+    wins, else the largest end)."""
+    from injudge.model import InjectionSpan
+
+    span = InjectionSpan(
+        id="T1:S1", traj="T1",
+        memories=[
+            {"key": "key_a", "value": "shared_term_x"},
+            {"key": "key_b", "value": "shared_term_x"},
+        ],
+        memory_windows={"key_a": 6, "key_b": None},
+    )
+    terms = dict(_anchor_terms(span))
+    assert terms["key_a"] == 6 and terms["key_b"] is None
+    assert terms["shared_term_x"] is None  # key_b's unbounded window wins
 
 
 def test_anchor_terms_capped():
@@ -507,9 +549,9 @@ def test_anchor_terms_capped():
     )
     terms = _anchor_terms(span)
     assert len(terms) == _MAX_ANCHOR_TERMS
-    assert terms[0] == "blob_key"  # keys come first
-    assert terms[1] == "longword0000"
-    assert terms[-1] == f"longword{_MAX_ANCHOR_TERMS - 2:04d}"
+    assert terms[0] == ("blob_key", None)  # keys come first
+    assert terms[1] == ("longword0000", None)
+    assert terms[-1] == (f"longword{_MAX_ANCHOR_TERMS - 2:04d}", None)
 
 
 def test_anchor_term_length_capped():
@@ -527,10 +569,32 @@ def test_anchor_term_length_capped():
         memories=[{"key": "blob_key", "value": f"see {blob} end"}],
     )
     terms = _anchor_terms(span)
-    assert terms == ["blob_key", blob[:_MAX_ANCHOR_TERM_CHARS]]
+    assert terms == [("blob_key", None), (blob[:_MAX_ANCHOR_TERM_CHARS], None)]
     # the truncated term still matches a step echoing the blob (a prefix is a
     # substring), keeping the anchor line bounded
-    assert terms[1] in blob
+    assert terms[1][0] in blob
+
+
+def test_step_anchors_stop_at_the_footprint_window():
+    """A hit PAST the term's footprint-window end is the re-delivering
+    span's evidence and is never pre-filled for this span — the per-memory
+    windows the chunk header states bind the anchors too (a co-delivered
+    unbounded term keeps firing)."""
+    from injudge.model import AgentStep
+
+    terms = [("key_a", "key_a", 6), ("key_b", "key_b", None)]
+    s_in = AgentStep(step=5, turn=5, seq_start=10, content="mentions key_a and key_b")
+    s_out = AgentStep(step=8, turn=8, seq_start=20, content="mentions key_a and key_b")
+    (text_in,) = _step_texts([s_in])
+    (text_out,) = _step_texts([s_out])
+    assert _step_anchors(terms, text_in, s_in) == [
+        '[anchor] "key_a" appears at step 5 (seqs 10–?)',
+        '[anchor] "key_b" appears at step 5 (seqs 10–?)',
+    ]
+    # step 8 is past key_a's window end (6): only the unbounded key_b fires
+    assert _step_anchors(terms, text_out, s_out) == [
+        '[anchor] "key_b" appears at step 8 (seqs 20–?)'
+    ]
 
 
 def test_step_anchors_match_lowered_keep_recorded_casing():
@@ -541,7 +605,7 @@ def test_step_anchors_match_lowered_keep_recorded_casing():
 
     s = AgentStep(step=3, turn=3, seq_start=10, content="found APPLY_UFUNC here")
     (text,) = _step_texts([s])
-    assert _step_anchors([("apply_ufunc", "apply_ufunc")], text, s) == [
+    assert _step_anchors([("apply_ufunc", "apply_ufunc", None)], text, s) == [
         '[anchor] "apply_ufunc" appears at step 3 (seqs 10–?)'
     ]
 
@@ -800,6 +864,40 @@ def test_chunks_cut_the_post_side_at_the_footprint_windows(tmp_path):
     span.memory_windows = {"key_a": 10, "key_b": None}
     chunks = _chunks(steps, span, _scan_cfg(), traj.task)
     assert [s.step for c in chunks for s in c.steps] == list(range(1, 12))
+
+
+def test_chunk_anchors_respect_each_memorys_own_window(tmp_path):
+    """Where the per-memory windows differ, the post side still scans the
+    union range (the later-bounded memory claims those steps), but the
+    pre-filled anchors respect EACH memory's own bound: a hit past key_a's
+    window is the re-delivering span's evidence, never pre-filled for this
+    span — while the unbounded co-delivered key_b keeps firing to the end."""
+    ref_b = cure_ref("key_b", "an unrelated note")
+    echo = "mentions key_a and key_b again"
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.recall([REF_A, ref_b])  # step 2 — the judged span
+    for _ in range(4):
+        b.agent_turn(result=echo)  # steps 3-6
+    b.recall(REF_A)  # step 7: key_a re-delivered alone → its window ends at 6
+    b.agent_turn(result=echo).agent_turn(result=echo)  # steps 8,9
+    d = b.write(tmp_path / "t1")
+    from memgraph.parse_trajectory import parse_trajectory
+    from injudge.steps import build_step_stream
+    from injudge.spans import group_spans
+
+    warnings = []
+    traj, ops, events = parse_trajectory(d, warnings)
+    steps = build_step_stream(events, traj.memory_lanes, warnings)
+    spans = group_spans([op for op in ops if op.kind == "recall"], traj.id)
+    span = spans[0]
+    assert span.memory_windows == {"key_a": 6, "key_b": None}
+    chunks = _chunks(steps, span, _scan_cfg(), traj.task)
+    # key_b is unbounded: the post side runs to the end of the stream
+    assert [s.step for c in chunks for s in c.steps] == list(range(1, 10))
+    anchors = [a for c in chunks for a in c.anchors]
+    assert any('"key_a"' in a and "step 5" in a for a in anchors)  # in-window
+    assert not any('"key_a"' in a and "step 8" in a for a in anchors)  # past the window
+    assert any('"key_b"' in a and "step 8" in a for a in anchors)  # unbounded keeps firing
 
 
 def test_chunk_cap_counts_the_anchor_block(tmp_path):
@@ -1454,7 +1552,7 @@ def test_cli_scan_path_end_to_end(monkeypatch, tmp_path):
     )
     assert rc == 0
     artifact = json.loads((out / "injudge-report.json").read_text())
-    assert artifact["tool"]["schema"] == "injudge.report/v5"
+    assert artifact["tool"]["schema"] == "injudge.report/v6"
     op = artifact["operations"][0]
     assert op["verdict"] == "positive"
     assert op["input"]["path"] == "scan" and op["input"]["chunks"] == 4

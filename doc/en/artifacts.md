@@ -1,5 +1,5 @@
 ---
-description: "injudge.report/v5, injudge.summary/v2, every field, and how every rate is counted."
+description: "injudge.report/v6, injudge.summary/v3, every field, and how every rate is counted."
 icon: box-archive
 ---
 
@@ -11,8 +11,8 @@ injudge writes all artifacts to the output folder (`-o DIR`, default `output/`).
 
 | File | Schema | Role |
 |---|---|---|
-| `injudge-report.json` | `injudge.report/v5` | Runtime judging record. Rewritten after every trajectory so a crash keeps completed work. Feed it to memgraph with `--verdicts`. |
-| `summary.json` | `injudge.summary/v2` | Final statistics set: counts, rates, and a narrative-free span index. |
+| `injudge-report.json` | `injudge.report/v6` | Runtime judging record. Rewritten after every trajectory so a crash keeps completed work. Feed it to memgraph with `--verdicts`. |
+| `summary.json` | `injudge.summary/v3` | Final statistics set: counts, rates, and a narrative-free span index. |
 | `memgraph-verdicts.html` | — | Only with `--html` (off by default): memgraph with recall nodes colored by span verdict. |
 
 memgraph's `--json` artifact is `{tool, trajectories, ops, memories, edges, validation}` — the same dict embedded in the HTML. See [memgraph](memgraph.md#graph-model).

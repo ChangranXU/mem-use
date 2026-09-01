@@ -323,9 +323,12 @@ def aggregate(operations: list[dict], n_injections: int, n_trajectories: int | N
         "wasted_token_share": _token_share(wasted, judged_tok),
     }
     share = out["headline"]["wasted_token_share"]
-    if out["rates"]["negative"] == 0 and share is not None and share > _HIGH_WASTE_SHARE:
-        # an all-ignored flood scores negative 0 while wasting most of the
-        # budget — the rate must never present alone as "harmless"
+    if counts["negative"] == 0 and share is not None and share > _HIGH_WASTE_SHARE:
+        # the COUNT, never the rounded rate: past ~20k judged spans a single
+        # negative span rounds the rate to 0.0 and the rate test would stamp
+        # the caveat on a run that HAS a negative span. An all-ignored flood
+        # scores negative 0 while wasting most of the budget — the rate must
+        # never present alone as "harmless"
         out["headline"]["caveat"] = ZERO_NEGATIVE_CAVEAT
     return out
 

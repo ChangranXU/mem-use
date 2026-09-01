@@ -1,5 +1,5 @@
-"""Report assembly: the `injudge.report/v5` JSON artifact, the statistics-only
-`injudge.summary/v2` distillation, and the stdout summary.
+"""Report assembly: the `injudge.report/v6` JSON artifact, the statistics-only
+`injudge.summary/v3` distillation, and the stdout summary.
 
 The runtime artifact's output contract: per operation
 {operation_id, kind, seq, payload_summary, verdict, confidence, evidence[]}
@@ -34,7 +34,9 @@ from datetime import datetime, timezone
 
 from util import print_safe, print_validation
 
+from injudge import REPORT_SCHEMA
 from injudge.aggregate import aggregate, policy_rollup
+from injudge.judge import _ACCURACY, _NOVELTY
 from injudge.model import InjectionSpan, step_range
 
 
@@ -142,7 +144,7 @@ def build_artifact(
     overall = aggregate(operations, sum(n_injections_by_traj.values()), len(trajectories))
     overall["policy"] = policy_rollup(trajectories, validation)
     return {
-        "tool": {"name": "injudge", "schema": "injudge.report/v5", **tool_cfg},
+        "tool": {"name": "injudge", "schema": REPORT_SCHEMA, **tool_cfg},
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "trajectories": trajectories,
         "operations": operations,
@@ -167,10 +169,11 @@ def _rubric_line(rub: dict) -> str | None:
         if rates.get(s) is not None
     ]
     # accuracy reports the three-way split, never one "accurate" rate —
-    # uncontradicted asserts nothing (see aggregate._rubric_rollup)
+    # uncontradicted asserts nothing (see aggregate._rubric_rollup); the
+    # enum labels come from judge's contract constants, never re-spelled here
     acc = ", ".join(
         f"{v} {rates[f'accuracy_{v}']:.0%}"
-        for v in ("corroborated", "uncontradicted", "contradicted")
+        for v in _ACCURACY
         if rates.get(f"accuracy_{v}") is not None
     )
     if acc:
@@ -179,10 +182,10 @@ def _rubric_line(rub: dict) -> str | None:
     # the novelty rate flattens the headline three-tier signal — surface the
     # distribution itself
     nov = (rub.get("counts") or {}).get("novelty") or {}
-    n_nov = sum(nov.get(v, 0) for v in ("novel", "confirming", "redundant"))
+    n_nov = sum(nov.get(v, 0) for v in _NOVELTY)
     if n_nov:
         txt += "; novelty: " + ", ".join(
-            f"{v} {nov.get(v, 0) / n_nov:.0%}" for v in ("novel", "confirming", "redundant")
+            f"{v} {nov.get(v, 0) / n_nov:.0%}" for v in _NOVELTY
         )
     if rates.get("positive_effect") is not None:
         txt += f"; of the influential, improved {rates['positive_effect']:.0%}"
@@ -465,7 +468,7 @@ def _summary_span_index(op: dict) -> dict:
 
 
 def build_summary(artifact: dict) -> dict:
-    """The `injudge.summary/v2` artifact: the final statistics set of a run —
+    """The `injudge.summary/v3` artifact: the final statistics set of a run —
     the combined overall aggregate, and per trajectory the trajectory-level
     aggregate plus a narrative-free span index. The report artifact stays the
     judging record (rubric notes, analysis, judge_raw, the validation log);
@@ -474,7 +477,7 @@ def build_summary(artifact: dict) -> dict:
     for op in artifact["operations"]:
         spans_by_traj.setdefault(op["traj"], []).append(_summary_span_index(op))
     return {
-        "tool": {"name": "injudge", "schema": "injudge.summary/v2"},
+        "tool": {"name": "injudge", "schema": "injudge.summary/v3"},
         "generated_at": artifact["generated_at"],
         "overall": _slim_aggregate(artifact["aggregates"]["overall"]),
         "trajectories": [

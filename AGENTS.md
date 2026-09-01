@@ -4,7 +4,7 @@
   memory-system quality. Two read-only tools share one parsing core:
   **memgraph** renders every memory operation and its relationships as a
   self-contained HTML/JSON graph; **injudge** scores each recall injection's
-  impact with an LLM rubric and emits the `injudge.report/v5` artifact
+  impact with an LLM rubric and emits the `injudge.report/v6` artifact
   (feedable back into memgraph via `--verdicts`). The methodology in one
   line: an injection is judged by its *subsequent influence* on the agent —
   never by the final task result.
@@ -128,7 +128,7 @@ memgraph/model.py            # Trajectory / MemoryOp / MemoryUnit / Edge datacla
 memgraph/parse_trajectory.py # trajectory.jsonl → ops (annotation-driven, turn table)
 memgraph/graph.py            # path discovery, cross-trajectory linking, validation
 memgraph/html.py             # self-contained HTML renderer (template + embedded graph JSON)
-memgraph/verdicts.py         # merge injudge.report/v5 verdicts onto recall ops
+memgraph/verdicts.py         # merge injudge.report/v6 verdicts onto recall ops
 memgraph/__main__.py         # CLI: python3 -m memgraph
 injudge/model.py             # AgentStep / ToolExec / InjectionSpan dataclasses
 injudge/steps.py             # agent-lane step stream + all-lane billed prompt tokens
@@ -138,7 +138,7 @@ injudge/scan.py              # overflow path: chunk knobs, evidence extraction, 
 injudge/gold.py              # golden-answer / correctness sidecars (harness-report + plain shapes)
 injudge/prompts.py           # loads prompt files from prompts/ (never inline prompts in code)
 injudge/aggregate.py         # verdict counts/rates, per-memory usage roll-ups
-injudge/report.py            # injudge.report/v5 artifact + injudge.summary/v2 stats, stdout summary
+injudge/report.py            # injudge.report/v6 artifact + injudge.summary/v3 stats, stdout summary
 injudge/__main__.py          # CLI: python3 -m injudge
 prompts/                     # every LLM prompt, as files grouped by tool/purpose folder
 doc/                         # user docs, GitBook layout (LANGS.md + en/ + zh-CN/, each with SUMMARY.md)
@@ -241,7 +241,7 @@ These are load-bearing; never weaken them:
   markers by each marker's own `on_memory_lane` flag, computed at parse time
   against the final lane set) are still part of the JSON contract — the HTML
   embeds the same dict by design; do not prune them from one consumer only.
-- injudge writes `injudge.report/v5` (`{tool, generated_at, trajectories,
+- injudge writes `injudge.report/v6` (`{tool, generated_at, trajectories,
   operations, injections, aggregates, validation}`), rewritten after every
   trajectory so a crash keeps completed work. Each operation that hit the
   input budget gate carries an `input` record (`{"path": "full"}` or
@@ -256,7 +256,7 @@ These are load-bearing; never weaken them:
   never lose the span.
   `aggregates.overall` counts the regimes (`input_paths`, `gold_scored`,
   `over_budget`).
-  The companion `summary.json` (`injudge.summary/v2`) is the final
+  The companion `summary.json` (`injudge.summary/v3`) is the final
   statistics set of the run: counts/rates, rubric distributions, cost,
   confidence, judge compliance (the positive_effect↔influence correction
   rate), per-trajectory extraction reliability (`n_extractions` /

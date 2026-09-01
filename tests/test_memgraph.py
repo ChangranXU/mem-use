@@ -14,6 +14,7 @@ from memgraph.graph import build_graph, discover_trajectories, load_and_build
 from memgraph.parse_trajectory import parse_trajectory
 from annotated_fixtures import AnnotatedBuilder as TrajBuilder
 from annotated_fixtures import cure_ref, parse
+from injudge import REPORT_SCHEMA
 
 
 # ---------------------------------------------------------------- parsing
@@ -115,6 +116,131 @@ def test_change_afters_fill_only_candidates_produced_missed(tmp_path):
     assert warnings == []
     graph = load_and_build([tmp_path])
     assert [e["kind"] for e in graph["edges"]] == ["creates", "creates"]
+
+
+def test_repeat_after_row_inside_the_change_series_collapses(tmp_path):
+    """The covered set grows as afters are appended: a change series
+    re-recording the SAME landed row (a duplicated create, a status-only
+    update naming the same version) yields ONE candidate — appending it
+    twice would graph a spurious supersedes edge on the recovery path."""
+    landed = cure_ref("landed_k", "persisted", item_id="item-landed")
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.memory_turn()
+    b.generate(status="partial", extraction_step="1",
+               changes=[("create", [], [landed]), ("update", [landed], [landed])])
+    _, ops, _ = parse(b, tmp_path)
+    assert [c["key"] for c in ops[0].candidates] == ["landed_k"]
+    graph = load_and_build([tmp_path])
+    assert [e["kind"] for e in graph["edges"]] == ["creates"]
+
+
+def test_newer_version_after_ref_survives_the_produced_cover(tmp_path):
+    """The dedupe compares version-level identities, never the item-level
+    pair: a change after-ref recording a NEWER version of an item produced
+    already lists is a distinct landed state — dropping it would lose the
+    update (the registry would keep the stale v1 value)."""
+    v1 = cure_ref("k", "v1", item_id="item-k")
+    v2 = cure_ref("k", "v2", item_id="item-k")
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.memory_turn()
+    b.generate(produced=[v1], extraction_step="1",
+               changes=[("create", [], [v1]), ("update", [v1], [v2])])
+    _, ops, _ = parse(b, tmp_path)
+    assert [c["value"] for c in ops[0].candidates] == ["v1", "v2"]
+    graph = load_and_build([tmp_path])
+    assert [e["kind"] for e in graph["edges"]] == ["creates", "supersedes"]
+    (mem,) = graph["memories"]
+    assert mem["value"] == "v2"
+
+
+def test_produced_newest_version_does_not_invert_the_change_series(tmp_path):
+    """The change series leads, produced follows: a generation landing TWO
+    versions of one item (create v1, then update to v2) with the end event's
+    produced carrying the FINAL version must graph create-then-supersede in
+    recording order — produced-first would register v2 as the create and the
+    older v1 after-ref as a later supersedes, stranding mem.value at v1."""
+    v1 = cure_ref("k", "v1", item_id="item-k")
+    v2 = cure_ref("k", "v2", item_id="item-k")
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.memory_turn()
+    b.generate(produced=[v2], extraction_step="1",
+               changes=[("create", [], [v1]), ("update", [v1], [v2])])
+    _, ops, _ = parse(b, tmp_path)
+    assert [c["value"] for c in ops[0].candidates] == ["v1", "v2"]
+    graph = load_and_build([tmp_path])
+    assert [e["kind"] for e in graph["edges"]] == ["creates", "supersedes"]
+    (mem,) = graph["memories"]
+    assert mem["value"] == "v2"
+
+
+def test_partial_change_series_does_not_invert_the_produced_order(tmp_path):
+    """The dual partial record: the change series missed the create (a lost
+    change event, an unmodeled action's state effect) while the end event's
+    produced lists both versions in landing order. The item's versions order
+    as the linear extension of the two records — produced places v1 before
+    the series-carried v2 — so a series-first merge would graph v2 as the
+    create and the older v1 as a later supersedes, stranding mem.value at
+    v1."""
+    v1 = cure_ref("k", "v1", item_id="item-k")
+    v2 = cure_ref("k", "v2", item_id="item-k")
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.memory_turn()
+    b.generate(produced=[v1, v2], extraction_step="1",
+               changes=[("update", [v1], [v2])])
+    _, ops, _ = parse(b, tmp_path)
+    assert [c["value"] for c in ops[0].candidates] == ["v1", "v2"]
+    graph = load_and_build([tmp_path])
+    assert [e["kind"] for e in graph["edges"]] == ["creates", "supersedes"]
+    (mem,) = graph["memories"]
+    assert mem["value"] == "v2"
+
+
+def test_produced_only_version_slots_between_series_versions(tmp_path):
+    """A version carried ONLY by produced slots in where produced places it
+    relative to the series-carried versions: the series holds v1 and v3,
+    produced lists v1, v2, v3 — the landing order is v1 → v2 → v3, which
+    neither fixed order reconstructs (series-first graphs v2 superseding
+    v3)."""
+    v1 = cure_ref("k", "v1", item_id="item-k")
+    v2 = cure_ref("k", "v2", item_id="item-k")
+    v3 = cure_ref("k", "v3", item_id="item-k")
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.memory_turn()
+    b.generate(produced=[v1, v2, v3], extraction_step="1",
+               changes=[("create", [], [v1]), ("update", [v2], [v3])])
+    _, ops, _ = parse(b, tmp_path)
+    assert [c["value"] for c in ops[0].candidates] == ["v1", "v2", "v3"]
+    graph = load_and_build([tmp_path])
+    assert [e["kind"] for e in graph["edges"]] == ["creates", "supersedes", "supersedes"]
+    (mem,) = graph["memories"]
+    assert mem["value"] == "v3"
+
+
+def test_collapsed_version_keeps_the_value_carrying_copy(tmp_path):
+    """Two refs naming ONE landed state collapse to one candidate, and the
+    kept copy carries the value: a locator copy of the same version records
+    the content digest but no text, so keeping IT would strand the memory's
+    value at None."""
+    inline = cure_ref("k", "v1", item_id="item-k")
+    locator = {
+        **{k: v for k, v in inline.items() if k != "content"},
+        "content": {
+            "availability": "trajectory_message",
+            "locator": {"kind": "trajectory_message", "logical_role": "memory",
+                        "msg_index": 1},
+            "sha256": inline["content"]["sha256"],
+        },
+    }
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.memory_turn()
+    b.generate(produced=[inline], extraction_step="1",
+               changes=[("create", [], [locator])])
+    _, ops, _ = parse(b, tmp_path)
+    assert [c["value"] for c in ops[0].candidates] == ["v1"]
+    graph = load_and_build([tmp_path])
+    assert [e["kind"] for e in graph["edges"]] == ["creates"]
+    (mem,) = graph["memories"]
+    assert mem["value"] == "v1"
 
 
 def test_removal_and_noop_changes_unaffected_by_after_merge(tmp_path):
@@ -1313,7 +1439,7 @@ def test_multiple_generations_and_lanes_in_tool_config(tmp_path):
 
 
 def verdict_report(run_id, span_id, entries, verdict="neutral"):
-    """Minimal injudge.report/v5 fixture.
+    """Minimal injudge.report/v6 fixture.
 
     entries: list of (seq, step, role) covering the span's injections. The
     report-side trajectory id ("T99") deliberately differs from the graph's
@@ -1356,7 +1482,7 @@ def verdict_report(run_id, span_id, entries, verdict="neutral"):
         for i, (seq, step, role) in enumerate(entries)
     ]
     return {
-        "tool": {"name": "injudge", "schema": "injudge.report/v5"},
+        "tool": {"name": "injudge", "schema": REPORT_SCHEMA},
         "trajectories": [{"id": "T99", "run_id": run_id}],
         "operations": [op_record],
         "injections": injections,
@@ -1719,7 +1845,7 @@ def test_apply_verdicts_missing_run_ids_are_not_ambiguous(tmp_path):
         ],
         "ops": [],
     }
-    apply_verdicts(graph, {"tool": {"schema": "injudge.report/v5"}})
+    apply_verdicts(graph, {"tool": {"schema": REPORT_SCHEMA}})
     msgs = [v["msg"] for v in graph["validation"]]
     assert not any(m.startswith("None:") for m in msgs)
     assert sum("ambiguous" in m for m in msgs) == 1  # the real duplicate only
@@ -1756,7 +1882,7 @@ def test_apply_verdicts_runless_trajectory_note_names_the_trajectory():
         "trajectories": [{"id": "T1", "run_id": None}],
         "ops": [{"id": "T1:R1", "kind": "recall", "traj": "T1", "seq": 1}],
     }
-    apply_verdicts(graph, {"tool": {"schema": "injudge.report/v5"}})
+    apply_verdicts(graph, {"tool": {"schema": REPORT_SCHEMA}})
     msgs = [v["msg"] for v in graph["validation"]]
     assert any(m.startswith("T1: no verdicts in the report") for m in msgs)
     assert not any(m.startswith("None:") for m in msgs)
@@ -1787,12 +1913,12 @@ def test_load_verdict_report_requires_injudge_schema(tmp_path):
     with pytest.raises(SystemExit):
         load_verdict_report(bad)
     # older artifact versions are rejected, not adapted
-    bad.write_text(json.dumps({"tool": {"schema": "injudge.report/v3"}}), encoding="utf-8")
-    with pytest.raises(SystemExit, match="injudge.report/v5"):
+    bad.write_text(json.dumps({"tool": {"schema": "injudge.report/v5"}}), encoding="utf-8")
+    with pytest.raises(SystemExit, match="injudge.report/v6"):
         load_verdict_report(bad)
     good = tmp_path / "good.json"
-    good.write_text(json.dumps({"tool": {"schema": "injudge.report/v5"}}), encoding="utf-8")
-    assert load_verdict_report(good)["tool"]["schema"] == "injudge.report/v5"
+    good.write_text(json.dumps({"tool": {"schema": "injudge.report/v6"}}), encoding="utf-8")
+    assert load_verdict_report(good)["tool"]["schema"] == "injudge.report/v6"
 
 
 def test_render_html_with_verdicts_embeds_them(tmp_path):

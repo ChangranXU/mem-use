@@ -26,8 +26,8 @@ Each run writes into `-o DIR` (default `output/`):
 
 | File | Contents |
 |---|---|
-| `injudge-report.json` | The runtime judging record (`injudge.report/v5`), rewritten after every trajectory so a crash keeps completed work |
-| `summary.json` | The final statistics (`injudge.summary/v2`): counts, rates, per-memory usage |
+| `injudge-report.json` | The runtime judging record (`injudge.report/v6`), rewritten after every trajectory so a crash keeps completed work |
+| `summary.json` | The final statistics (`injudge.summary/v3`): counts, rates, per-memory usage |
 | `memgraph-verdicts.html` | Only with `--html`: memgraph with recall nodes colored by verdict |
 
 Delivery cost and delivery-policy metrics are computed deterministically from the recordings, not judged — see [Artifacts](artifacts.md#delivery-cost-and-policy). The full field reference lives there too.
@@ -37,7 +37,7 @@ Delivery cost and delivery-policy metrics are computed deterministically from th
 Identical content is often re-injected, so the judged unit is the **injection span**: a maximal run of consecutive recall ops whose delivered set has the same portable identity.
 
 - Step gaps do not break a span; they are recorded in `step_gaps` and shown to the judge.
-- A content change does break a span. Each delivered memory's judged footprint window runs from the span's first step to that memory's next re-delivery (a re-delivery supersedes — a memory delivered in two spans is never credited in both); a memory never re-delivered keeps the rest of the stream, an unrelated span in between bounds nothing, and one memory's window ending never caps a co-delivered memory's window.
+- A content change does break a span. Each delivered key's judged footprint window runs from the span's first step to that key's next re-delivery (a re-delivery supersedes — a memory delivered in two spans is never credited in both); a key never re-delivered keeps the rest of the stream, an unrelated span in between bounds nothing, and one key's window ending never caps a co-delivered key's window. The windows ride the rubric's per-key granularity: identities sharing one display key merge to the earliest bound.
 - Re-deliveries roll up as `restated`: they count toward delivery cost and `n_injections`, but never appear in verdict rates.
 - A span with no attributed agent step (`step_first` is `None`) has no downstream footprint. It is rule-judged **neutral** with `auto: no_subsequent_turn`, and no judge call is made.
 

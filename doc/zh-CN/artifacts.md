@@ -1,5 +1,5 @@
 ---
-description: "injudge.report/v5、injudge.summary/v2、全部字段，以及每项比率如何计数。"
+description: "injudge.report/v6、injudge.summary/v3、全部字段，以及每项比率如何计数。"
 icon: box-archive
 ---
 
@@ -11,8 +11,8 @@ injudge 的全部产物写入输出目录（`-o DIR`，默认 `output/`）。
 
 | 文件 | Schema | 作用 |
 |---|---|---|
-| `injudge-report.json` | `injudge.report/v5` | 运行时评审记录。每条轨迹完成后重写，崩溃也保留已完成部分。用 `--verdicts` 喂给 memgraph。 |
-| `summary.json` | `injudge.summary/v2` | 最终统计集合：计数、比率，以及无叙述的区间索引。 |
+| `injudge-report.json` | `injudge.report/v6` | 运行时评审记录。每条轨迹完成后重写，崩溃也保留已完成部分。用 `--verdicts` 喂给 memgraph。 |
+| `summary.json` | `injudge.summary/v3` | 最终统计集合：计数、比率，以及无叙述的区间索引。 |
 | `memgraph-verdicts.html` | — | 仅在 `--html` 时产出（默认关闭）：召回节点按区间判定着色的 memgraph。 |
 
 memgraph 的 `--json` 产物是 `{tool, trajectories, ops, memories, edges, validation}`——与 HTML 内嵌的同一个 dict。见 [memgraph](memgraph.md#图模型)。

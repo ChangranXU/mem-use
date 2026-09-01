@@ -685,7 +685,8 @@ def _cure_ext(holder: Any) -> dict[str, Any]:
 def _ref_identity(ref: Any) -> tuple[Any, Any, Any, Any]:
     """The gate's portable identity of one raw MemoryRef — (namespace,
     identity_scheme, version_id, content sha256): the tuple the recorder's
-    `memory_identity` compares on for the delivery subsequence check. A
+    `memory_identity` compares on for the delivery subsequence check (the
+    raw-read twin of version_identity, which reads mapped entries). A
     corrupt entry degrades to nulls, never raises."""
     if not isinstance(ref, dict):
         return (None, None, None, None)
@@ -728,6 +729,38 @@ def item_key(memory: Any) -> str | None:
         return item
     key = memory.get("key")
     return key if isinstance(key, str) and key else None
+
+
+def version_identity(memory: Any, *, withhold_local: bool = False) -> tuple:
+    """The gate's version-level identity of one MAPPED memory entry
+    (ref_to_memory output): (namespace, identity_scheme, version_id,
+    content sha256) — the tuple the gate's own `memory_identity` compares
+    on, naming one landed state of an item. The one construction the span
+    fingerprint and the candidate dedupe share, so the two can never drift
+    apart; `_ref_identity` is the raw-MemoryRef twin for the delivery
+    subsequence check. Every part is string-guarded: a hand-edited
+    non-string names nothing and reads as absent, so an unhashable value
+    never reaches a set/dict keyed on the tuple. An `operation_local`
+    version_id names nothing outside its own operation (the gate's
+    identity-strength join rule), so a consumer comparing ACROSS operations
+    (span fingerprinting) withholds it and lets the content digest carry
+    the comparison, while a consumer merging ONE operation's own records
+    (the candidate dedupe) keeps it — inside the operation the local id
+    names one version.
+    """
+    if not isinstance(memory, dict):
+        return (None, None, None, None)
+    scheme = memory.get("identity_scheme")
+    version_id = memory.get("version_id")
+    if withhold_local and memory.get("identity_strength") == "operation_local":
+        version_id = None
+    sha = memory.get("content_sha256")
+    return (
+        namespace_of(memory),
+        scheme if isinstance(scheme, str) else None,
+        version_id if isinstance(version_id, str) else None,
+        sha if isinstance(sha, str) else None,
+    )
 
 
 def ref_key(ref: Any) -> str | None:
