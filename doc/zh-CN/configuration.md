@@ -58,6 +58,8 @@ icon: sliders
 | `--dry-run` | 关 | 打印评审输入；不发起调用、不写文件 |
 | `--golden PATH` | 边车 | 每次评分调用附上的 golden answer 正文 |
 | `--correctness resolved\|unresolved` | 边车 | 已记录的任务结果，仅作佐证 |
+| `--gold-metadata PATH` | 不设 | verified-metadata.json：按各轨迹记录的 `instance_id` 连接该实例的 gold patch（优先级介于 `--golden` 与边车之间） |
+| `--harness-report PATH` | 不设 | 整个运行共用一份 SWE-bench 风格评测报告，按 `instance_id` 逐轨迹连接（优先级介于 `--correctness` 与边车之间） |
 | `-o DIR` | `output/` | 产物目录 |
 | `--html` | 关 | 同时写出 `memgraph-verdicts.html` |
 

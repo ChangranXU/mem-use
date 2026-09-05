@@ -40,7 +40,13 @@ except ImportError as e:
     ) from e
 
 from util import atomic_write, check_writable, print_safe, print_validation
-from injudge.gold import load_sidecar
+from injudge.gold import (
+    join_gold_patch,
+    join_harness_report,
+    load_gold_patches,
+    load_harness_report,
+    load_sidecar,
+)
 from injudge.judge import (
     MAX_PARALLEL,
     GoldInput,
@@ -269,6 +275,24 @@ def main(argv: list[str] | None = None) -> int:
         "(corroboration only — it never selects the gold rubric); overrides a "
         "trajectory's correctness.json sidecar",
     )
+    ap.add_argument(
+        "--gold-metadata",
+        type=Path,
+        default=None,
+        help="verified-metadata.json with per-instance gold patches: each "
+        "trajectory's patch is joined by its recorded instance_id and "
+        "switches that call to the gold rubric; sits between --golden and "
+        "the trajectory's golden.txt/golden.md sidecar in precedence",
+    )
+    ap.add_argument(
+        "--harness-report",
+        type=Path,
+        default=None,
+        help="one SWE-bench-style harness report (resolved_ids/unresolved_ids/"
+        "...) shared by the whole run: each trajectory's correctness is "
+        "joined by its recorded instance_id; sits between --correctness and "
+        "the trajectory's correctness.json sidecar in precedence",
+    )
     ap.add_argument("--limit", type=int, default=None,
                     help="judge at most N spans with the LLM (rest: unjudged); "
                     "also caps --dry-run to printing the first N spans' judge "
@@ -325,6 +349,17 @@ def main(argv: list[str] | None = None) -> int:
                 "loaded: the same gold/correctness applies to every trajectory",
             }
         )
+    # per-instance gold linkage (the multi-trajectory form --golden/
+    # --correctness cannot serve): loaded once, joined per trajectory by its
+    # recorded instance_id inside the loop
+    gold_patches: dict[str, str] = {}
+    if args.gold_metadata is not None:
+        gold_patches, md_notes = load_gold_patches(args.gold_metadata)
+        for n in md_notes:
+            validation.append({"level": "warn", "msg": n})
+    harness_report: dict | None = None
+    if args.harness_report is not None:
+        harness_report = load_harness_report(args.harness_report)
 
     cfg = None
     scan_cfg: ScanConfig | None = None
@@ -526,18 +561,23 @@ def main(argv: list[str] | None = None) -> int:
         )
 
         # golden-answer / correctness attachments (final scoring call only):
-        # the CLI values win; the trajectory's own sidecar files fill the rest
-        sidecar = load_sidecar(
-            Path(t.path),
-            t.instance_id,
-            lambda msg: validation.append({"level": "warn", "msg": f"{run_id}: {msg}"}),
-        )
-        gold = GoldInput(
-            golden=cli_golden if cli_golden is not None else sidecar.golden,
-            correctness=(
-                cli_correctness if cli_correctness is not None else sidecar.correctness
-            ),
-        )
+        # the CLI values win, then the per-instance linkage files (joined by
+        # the recorded instance_id), then the trajectory's own sidecar files
+        def _gold_warn(msg: str) -> None:
+            validation.append({"level": "warn", "msg": f"{run_id}: {msg}"})
+
+        sidecar = load_sidecar(Path(t.path), t.instance_id, _gold_warn)
+        golden = cli_golden
+        if golden is None and gold_patches:
+            golden = join_gold_patch(gold_patches, t.instance_id, _gold_warn)
+        if golden is None:
+            golden = sidecar.golden
+        correctness = cli_correctness
+        if correctness is None and harness_report is not None:
+            correctness = join_harness_report(harness_report, t.instance_id, _gold_warn)
+        if correctness is None:
+            correctness = sidecar.correctness
+        gold = GoldInput(golden=golden, correctness=correctness)
 
         verdict_by_span: dict[str, dict] = {}
         # per-span routing is decided serially — rule-judged auto-neutral,

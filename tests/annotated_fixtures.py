@@ -58,7 +58,8 @@ def cure_ref(key, value="v", memory_type="insight", confidence=0.9,
 class AnnotatedBuilder:
     """Assembles a synthetic annotated (schema v6) trajectory.jsonl."""
 
-    def __init__(self, main=MAIN, mem=MEM, adapter=None, task_ref=None):
+    def __init__(self, main=MAIN, mem=MEM, adapter=None, task_ref=None,
+                 instance_id="pydata__xarray-2905"):
         self.events = []
         self.seq = 0
         self.turn = 0
@@ -74,7 +75,7 @@ class AnnotatedBuilder:
                 "trace_session_id": SID,
                 "session_kind": "episode",
                 "adapter": self.adapter,
-                "instance_id": "pydata__xarray-2905",
+                "instance_id": instance_id,
                 "task": task_ref or {"availability": "inline", "text": TASK},
             },
             lane=self.main,

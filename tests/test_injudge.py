@@ -4684,6 +4684,95 @@ def test_cli_end_to_end_mocked_judge(monkeypatch, tmp_path):
     assert not (out / "memgraph-verdicts.html").exists()
 
 
+def test_cli_gold_linkage_metadata_and_harness_report(monkeypatch, tmp_path):
+    """--gold-metadata/--harness-report are the multi-trajectory gold form:
+    each trajectory's golden patch and resolved bit join by its recorded
+    instance_id — every scoring call lands on the gold rubric with its OWN
+    instance's patch, and the artifact counts the gold regime."""
+    from injudge.judge import GOLD_SYSTEM_PROMPT
+
+    a = TrajBuilder(instance_id="pydata__xarray-2905").agent_turn(with_task=True)
+    a.recall(REF_A, content=RECALL_CONTENT)
+    _write_run(tmp_path / "runs", "20260101-000000.000Z-run-a", a)
+    b = TrajBuilder(instance_id="astropy__astropy-7166").agent_turn(with_task=True)
+    b.recall(REF_B, content=RECALL_CONTENT)
+    _write_run(tmp_path / "runs", "20260101-010000.000Z-run-b", b)
+    md = tmp_path / "verified-metadata.json"
+    md.write_text(json.dumps({"instances": {
+        "pydata__xarray-2905": {"patch": "gold patch for xarray"},
+        "astropy__astropy-7166": {"patch": "gold patch for astropy"},
+    }}))
+    hr = tmp_path / "local-eval.json"
+    hr.write_text(json.dumps({"resolved_ids": ["pydata__xarray-2905"],
+                              "unresolved_ids": ["astropy__astropy-7166"]}))
+    record = []
+    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory(record))
+    out = tmp_path / "out"
+    rc = injudge_main.main([str(tmp_path / "runs"), "-o", str(out),
+                            "--env", str(_env(tmp_path)),
+                            "--gold-metadata", str(md),
+                            "--harness-report", str(hr)])
+    assert rc == 0
+    assert len(record) == 2  # one scoring call per trajectory's span
+    assert all(body["messages"][0]["content"] == GOLD_SYSTEM_PROMPT for body in record)
+    users = [body["messages"][1]["content"] for body in record]
+    assert any("gold patch for xarray" in u and "resolved" in u for u in users)
+    assert any("gold patch for astropy" in u and "unresolved" in u for u in users)
+    artifact = json.loads((out / "injudge-report.json").read_text())
+    assert all(op["input"].get("gold") is True for op in artifact["operations"])
+    assert artifact["aggregates"]["overall"]["gold_scored"] == 2
+    assert not any("carries no patch" in v["msg"] for v in artifact["validation"])
+    assert not any("harness report" in v["msg"] for v in artifact["validation"])
+
+
+def test_cli_gold_linkage_precedence_and_fallthrough(monkeypatch, tmp_path):
+    """A join miss falls through to the trajectory's sidecar WITH the join's
+    note — the note states the file's miss, never the final attachment, so
+    it cannot lie when the sidecar fills the gap. And --golden beats the
+    metadata join outright (the join is skipped, not overridden per call)."""
+    a = TrajBuilder(instance_id="pydata__xarray-2905").agent_turn(with_task=True)
+    a.recall(REF_A, content=RECALL_CONTENT)
+    traj_dir = _write_run(tmp_path / "runs", "20260101-000000.000Z-run-a", a)
+    (traj_dir / "golden.txt").write_text("sidecar gold")
+    (traj_dir / "correctness.json").write_text('{"resolved": true, "score": 0.9}')
+    b = TrajBuilder(instance_id="astropy__astropy-7166").agent_turn(with_task=True)
+    b.recall(REF_B, content=RECALL_CONTENT)
+    _write_run(tmp_path / "runs", "20260101-010000.000Z-run-b", b)
+    md = tmp_path / "verified-metadata.json"
+    md.write_text(json.dumps({"instances":
+                              {"astropy__astropy-7166": {"patch": "metadata gold"}}}))
+    hr = tmp_path / "local-eval.json"
+    hr.write_text(json.dumps({"resolved_ids": ["astropy__astropy-7166"]}))
+    record = []
+    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory(record))
+    out = tmp_path / "out"
+    rc = injudge_main.main([str(tmp_path / "runs"), "-o", str(out),
+                            "--env", str(_env(tmp_path)),
+                            "--gold-metadata", str(md),
+                            "--harness-report", str(hr)])
+    assert rc == 0
+    users = [body["messages"][1]["content"] for body in record]
+    # run a: the metadata/report misses fell through to the sidecars
+    assert any("sidecar gold" in u and "score: 0.9" in u for u in users)
+    # run b: the joins hit — metadata patch, harness resolved bit
+    assert any("metadata gold" in u and "resolved" in u for u in users)
+    notes = [v["msg"] for v in
+             json.loads((out / "injudge-report.json").read_text())["validation"]]
+    assert any("carries no patch for pydata__xarray-2905" in m for m in notes)
+    assert any("harness report covers neither resolved nor unresolved "
+               "for pydata__xarray-2905" in m for m in notes)
+    # --golden short-circuits the metadata join: the patch never reaches a call
+    record.clear()
+    cli_gold = tmp_path / "cli-gold.txt"
+    cli_gold.write_text("cli gold")
+    rc = injudge_main.main([str(tmp_path / "runs"), "-o", str(tmp_path / "out2"),
+                            "--env", str(_env(tmp_path)), "--golden", str(cli_gold),
+                            "--gold-metadata", str(md)])
+    assert rc == 0
+    users = [body["messages"][1]["content"] for body in record]
+    assert all("cli gold" in u and "metadata gold" not in u for u in users)
+
+
 def test_cli_notes_the_latest_only_residency_regime(monkeypatch, tmp_path):
     """A restating-heavy run whose deliveries are each followed by a dropping
     history rewrite keeps only the LATEST memory block resident — the report

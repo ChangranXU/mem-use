@@ -1457,6 +1457,89 @@ def test_sidecar_contradictory_harness_report(tmp_path):
     assert any("contradictory" in n for n in notes)
 
 
+# ------------------------------------------- per-instance gold linkage files
+
+
+def test_load_gold_patches_skips_corrupt_entries(tmp_path):
+    """Corrupt metadata ENTRIES (a non-object instance, a non-string or empty
+    patch) degrade to skips plus a note while the usable rest survives; only
+    a file with no instances table at all fails fast."""
+    from injudge.gold import load_gold_patches
+
+    p = tmp_path / "verified-metadata.json"
+    p.write_text(json.dumps({"meta": {}, "instances": {
+        "pydata__xarray-2905": {"patch": "diff --git a/x"},
+        "astropy__astropy-7166": {"patch": "   "},   # blank patch
+        "sympy__sympy-11618": {"repo": "sympy/sympy"},  # no patch field
+        "scikit-learn__scikit-learn-9288": "not an object",
+    }}))
+    patches, notes = load_gold_patches(p)
+    assert patches == {"pydata__xarray-2905": "diff --git a/x"}
+    assert len(notes) == 3 and all("no usable patch" in n for n in notes)
+
+
+def test_load_gold_patches_and_harness_report_fail_fast(tmp_path):
+    """An operator-given linkage file that cannot serve its purpose at all
+    (unreadable, unparseable, wrong shape) is CLI misuse: a targeted
+    SystemExit before any paid judge call, not a silent no-gold run."""
+    from injudge.gold import load_gold_patches, load_harness_report
+
+    with pytest.raises(SystemExit, match="cannot read the gold metadata"):
+        load_gold_patches(tmp_path / "missing.json")
+    p = tmp_path / "not-json.json"
+    p.write_text("{nope")
+    with pytest.raises(SystemExit, match="not parseable JSON"):
+        load_gold_patches(p)
+    p.write_text('["a", "b"]')
+    with pytest.raises(SystemExit, match="not a JSON object"):
+        load_gold_patches(p)
+    p.write_text('{"instances": ["not", "a", "dict"]}')
+    with pytest.raises(SystemExit, match="no instances object"):
+        load_gold_patches(p)
+
+    with pytest.raises(SystemExit, match="cannot read the harness report"):
+        load_harness_report(tmp_path / "missing.json")
+    p.write_text('{"resolved": true}')  # a plain record, not a harness report
+    with pytest.raises(SystemExit, match="no harness-report shape"):
+        load_harness_report(p)
+    # recognized shape: any one of the four list fields, even corrupt ones
+    p.write_text('{"resolved_ids": "corrupt"}')
+    assert load_harness_report(p) == {"resolved_ids": "corrupt"}
+
+
+def test_join_gold_patch_and_harness_report_notes():
+    """The per-trajectory joins: a hit attaches silently; a miss (no recorded
+    instance_id, or the instance absent from the file) is absent plus a note
+    — one phrased as the file's miss, never as the final attachment (the
+    sidecar chain may still fill it)."""
+    from injudge.gold import join_gold_patch, join_harness_report
+
+    patches = {"pydata__xarray-2905": "diff --git a/x"}
+    notes = []
+    assert join_gold_patch(patches, "pydata__xarray-2905", notes.append) == "diff --git a/x"
+    assert not notes
+    assert join_gold_patch(patches, "astropy__astropy-7166", notes.append) is None
+    assert any("carries no patch for astropy__astropy-7166" in n for n in notes)
+    notes.clear()
+    assert join_gold_patch(patches, None, notes.append) is None
+    assert any("recorded no instance_id" in n for n in notes)
+
+    report = {"resolved_ids": ["pydata__xarray-2905"],
+              "unresolved_ids": ["astropy__astropy-7166"]}
+    notes.clear()
+    assert join_harness_report(report, "pydata__xarray-2905",
+                               notes.append) == {"resolved": True}
+    assert join_harness_report(report, "astropy__astropy-7166",
+                               notes.append) == {"resolved": False}
+    assert not notes  # clean hits attach silently
+    assert join_harness_report(report, "sympy__sympy-11618", notes.append) is None
+    assert notes == ["harness report covers neither resolved nor unresolved "
+                     "for sympy__sympy-11618"]
+    notes.clear()
+    assert join_harness_report(report, None, notes.append) is None
+    assert any("recorded no instance_id" in n for n in notes)
+
+
 def test_sidecar_corrupt_harness_list_degrades_with_a_note(tmp_path):
     """A present-but-corrupt harness list field degrades to [] WITH a
     validation note: silently coercing a non-list resolved_ids could read

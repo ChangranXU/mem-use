@@ -57,13 +57,13 @@ Retry, tier, and failure behavior of the calls themselves is in [Judge client](j
 
 ## Golden Answer and Correctness
 
-The scoring call accepts two optional attachments. Each comes either from a sidecar next to `trajectory.jsonl` or from the CLI; CLI values override the same-named sidecar fields. One CLI gold over several loaded trajectories warns.
+The scoring call accepts two optional attachments. Each comes from a sidecar next to `trajectory.jsonl`, a per-instance linkage file, or the CLI; precedence is CLI value → linkage join → sidecar. One CLI gold over several loaded trajectories warns.
 
 | Attachment | Source | Effect |
 |---|---|---|
-| Golden-answer body | `golden.txt` (wins over `golden.md` when both are usable), or `--golden PATH` | Switches that call to the **gold rubric** (`GOLD_SYSTEM_PROMPT`). Same five signals, same schema, same derive chain. `relevance` and the direction of `positive_effect` are judged against the gold text; gold does not speak to `accuracy`, `novelty`, or `influence`. |
-| Recorded correctness | `correctness.json`, or `--correctness resolved\|unresolved` | Attaches as a `TASK CORRECTNESS` block under whichever prompt the call uses. Corroboration only: it cannot decide a signal, and it does not select the gold rubric. |
+| Golden-answer body | `golden.txt` (wins over `golden.md` when both are usable), `--gold-metadata PATH` (verified-metadata.json: the instance's gold `patch`, joined by the recorded `instance_id`), or `--golden PATH` | Switches that call to the **gold rubric** (`GOLD_SYSTEM_PROMPT`). Same five signals, same schema, same derive chain. `relevance` and the direction of `positive_effect` are judged against the gold text; gold does not speak to `accuracy`, `novelty`, or `influence`. |
+| Recorded correctness | `correctness.json`, `--harness-report PATH` (one SWE-bench-style harness report for the whole run, joined by the recorded `instance_id`), or `--correctness resolved\|unresolved` | Attaches as a `TASK CORRECTNESS` block under whichever prompt the call uses. Corroboration only: it cannot decide a signal, and it does not select the gold rubric. |
 
-`correctness.json` accepts a plain `{"resolved": true|false, "score": …}` record or a SWE-bench-style harness report (`resolved_ids` / `unresolved_ids`). A harness report is joined by the trajectory's recorded `instance_id`; errored or incomplete instances are harness failures, not outcomes, so no correctness attaches.
+`correctness.json` accepts a plain `{"resolved": true|false, "score": …}` record or a SWE-bench-style harness report (`resolved_ids` / `unresolved_ids`). A harness report is joined by the trajectory's recorded `instance_id`; errored or incomplete instances are harness failures, not outcomes, so no correctness attaches. The `--gold-metadata` / `--harness-report` links are the multi-trajectory form: each trajectory gets its own instance's patch and resolved bit, and a trajectory that fails to join (no recorded `instance_id`, or the instance absent from the file) degrades to the next source with a validation note. An unusable linkage file (unreadable, unparseable, wrong shape) fails fast before any paid judge call.
 
 With neither attachment, scoring uses the plain rubric. The gold regime is recorded on each gated operation's `input` (`"gold": true`) and counted in `aggregates.overall.gold_scored`.

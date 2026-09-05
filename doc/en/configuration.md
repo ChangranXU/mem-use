@@ -58,6 +58,8 @@ These knobs apply when the verbatim scoring input exceeds `JUDGE_INPUT_TOKENS`. 
 | `--dry-run` | off | Print the judge input; no calls, no files |
 | `--golden PATH` | sidecar | Golden-answer body for every scoring call |
 | `--correctness resolved\|unresolved` | sidecar | Recorded task outcome, corroboration only |
+| `--gold-metadata PATH` | unset | verified-metadata.json: per-instance gold patches joined by each trajectory's recorded `instance_id` (sits between `--golden` and the sidecar) |
+| `--harness-report PATH` | unset | One SWE-bench-style harness report for the run, joined per trajectory by `instance_id` (sits between `--correctness` and the sidecar) |
 | `-o DIR` | `output/` | Artifact directory |
 | `--html` | off | Also write `memgraph-verdicts.html` |
 

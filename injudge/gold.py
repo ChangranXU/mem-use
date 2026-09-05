@@ -1,13 +1,19 @@
 """Golden-answer / correctness sidecars for the final scoring call.
 
-Both are optional and local: a trajectory dir may carry `golden.txt` (or
+All are optional and local: a trajectory dir may carry `golden.txt` (or
 `golden.md`; golden.txt wins when both exist — but only a USABLE one wins:
 an empty or unreadable golden.txt falls back to golden.md instead of
 suppressing it) and `correctness.json` beside its `trajectory.jsonl`.
 Missing files mean absent; malformed ones degrade to absent plus a
 validation note — never a crash (the corrupt-input rule). injudge never
-derives either one from test logs or the dataset: the sidecar is the
-hand-off point.
+derives either one from test logs or fetches the dataset itself: the
+sidecars and the operator-given linkage files are the hand-off points —
+`--gold-metadata` (the curated verified-metadata.json: per-instance gold
+patches joined by the trajectory's recorded instance_id) and
+`--harness-report` (one SWE-bench-style harness report shared by every
+trajectory in the run, joined the same way). A linkage file that cannot
+serve its purpose at all fails fast (explicit CLI input); a trajectory
+that fails to join degrades to absent plus a note.
 
 `correctness.json` comes in two recognized shapes:
 
@@ -34,6 +40,19 @@ from pathlib import Path
 from injudge.judge import GoldInput
 
 
+def _is_harness_report(obj: dict) -> bool:
+    """Format recognition: one harness list field present, valid or corrupt —
+    a report where every instance failed the harness may carry ONLY the
+    error/incomplete lists, and a hand-edit that turned every list into a
+    non-list still IS this format (misreading either as "no known format"
+    would misdirect the operator; the outcome is absent either way, and a
+    corrupt field must be named by the caller — degrade, never silently)."""
+    return any(
+        obj.get(key) is not None
+        for key in ("resolved_ids", "unresolved_ids", "error_ids", "incomplete_ids")
+    )
+
+
 def _harness_correctness(obj: dict, instance_id: str | None) -> tuple[dict | None, str | None]:
     """The harness-report recognizer: (correctness, note); (None, None) when
     the object is not this format. A present-but-corrupt list field degrades
@@ -41,16 +60,7 @@ def _harness_correctness(obj: dict, instance_id: str | None) -> tuple[dict | Non
     wrong resolved bit (the corrupt-input rule: degrade, never silently)."""
     resolved = obj.get("resolved_ids")
     unresolved = obj.get("unresolved_ids")
-    # recognition needs one harness list field present, valid or corrupt: a
-    # report where every instance failed the harness may carry ONLY the
-    # error/incomplete lists, and a hand-edit that turned every list into a
-    # non-list still IS this format — misreading either as "no known format"
-    # would misdirect the operator (the outcome is absent either way), and a
-    # corrupt field must be named below (degrade, never silently)
-    if not any(
-        obj.get(key) is not None
-        for key in ("resolved_ids", "unresolved_ids", "error_ids", "incomplete_ids")
-    ):
+    if not _is_harness_report(obj):
         return None, None  # not this format
     corrupt = [
         key
@@ -167,3 +177,87 @@ def load_sidecar(
                 warn(f"correctness.json: {cnote}")
             gold.correctness = correctness
     return gold
+
+
+def _read_json_object(path: Path, what: str) -> dict:
+    """An operator-given JSON file parsed to an object, or a targeted
+    SystemExit: explicit CLI input that cannot serve its purpose at all
+    fails fast (the CLI rule), unlike the corrupt sidecars read per
+    trajectory (the corrupt-input rule)."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        raise SystemExit(f"error: cannot read the {what} file {path}: {e}") from e
+    try:
+        obj = json.loads(text)
+    except (ValueError, RecursionError) as e:
+        raise SystemExit(f"error: the {what} file {path} is not parseable JSON ({e})") from e
+    if not isinstance(obj, dict):
+        raise SystemExit(f"error: the {what} file {path} is not a JSON object")
+    return obj
+
+
+def load_gold_patches(path: Path) -> tuple[dict[str, str], list[str]]:
+    """verified-metadata.json → ({instance_id: patch}, notes). Corrupt
+    entries (a missing/non-object instance or a non-string/empty patch)
+    degrade to skips plus a note, never lose the usable rest; a file with
+    no usable instances table fails fast."""
+    obj = _read_json_object(path, "gold metadata")
+    instances = obj.get("instances")
+    if not isinstance(instances, dict):
+        raise SystemExit(
+            f"error: the gold metadata file {path} carries no instances object"
+        )
+    patches: dict[str, str] = {}
+    notes: list[str] = []
+    for iid, entry in instances.items():
+        patch = entry.get("patch") if isinstance(entry, dict) else None
+        if isinstance(patch, str) and patch.strip():
+            patches[iid] = patch
+        else:
+            notes.append(f"gold metadata: no usable patch for {iid}; skipped")
+    return patches, notes
+
+
+def load_harness_report(path: Path) -> dict:
+    """One SWE-bench-style harness report shared by every trajectory,
+    validated once up front by the same format recognition the
+    correctness.json sidecar uses; per-instance joins happen later and
+    degrade per trajectory."""
+    obj = _read_json_object(path, "harness report")
+    if not _is_harness_report(obj):
+        raise SystemExit(
+            f"error: the harness report file {path} matches no harness-report "
+            "shape (no resolved_ids/unresolved_ids/error_ids/incomplete_ids field)"
+        )
+    return obj
+
+
+def join_gold_patch(
+    patches: dict[str, str], instance_id: str | None, warn: Callable[[str], None]
+) -> str | None:
+    """One trajectory's golden patch out of the loaded metadata; a miss is
+    absent plus a note (the run continues on the plain rubric)."""
+    if not instance_id:
+        warn("gold metadata given but the run recorded no instance_id; "
+             "no patch joined from it")
+        return None
+    patch = patches.get(instance_id)
+    if patch is None:
+        warn(f"gold metadata carries no patch for {instance_id}; "
+             "no patch joined from it")
+    return patch
+
+
+def join_harness_report(
+    report: dict, instance_id: str | None, warn: Callable[[str], None]
+) -> dict | None:
+    """One trajectory's correctness out of the loaded harness report —
+    the sidecar recognizer's join, notes routed to the run's validation.
+    The recognizer's notes end with 'no correctness attached' (the sidecar
+    context, where nothing follows); here a sidecar may still attach one
+    after the miss, so the note states the report's miss alone."""
+    correctness, note = _harness_correctness(report, instance_id)
+    if note:
+        warn(f"harness report {note.removesuffix('; no correctness attached')}")
+    return correctness

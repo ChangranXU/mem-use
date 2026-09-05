@@ -56,13 +56,13 @@ uv run -m injudge <paths> --dry-run --limit 3
 
 ## Golden Answer 与 Correctness
 
-评分调用可携带两类可选附件。各自来自 `trajectory.jsonl` 旁的边车文件或命令行；命令行值覆盖同名边车字段。对多条已加载轨迹共用一个 CLI gold 会给出警告。
+评分调用可携带两类可选附件。各自来自 `trajectory.jsonl` 旁的边车文件、按实例连接的 linkage 文件或命令行；优先级为：命令行值 → linkage 连接 → 边车文件。对多条已加载轨迹共用一个 CLI gold 会给出警告。
 
 | 附件 | 来源 | 作用 |
 |---|---|---|
-| Golden answer 正文 | `golden.txt`（与可用的 `golden.md` 同时存在时优先），或 `--golden PATH` | 把该次调用切换到 **gold 评分规则**（`GOLD_SYSTEM_PROMPT`）。同样的五个信号、同样的 schema、同样的推导链。`relevance` 与 `positive_effect` 的方向相对 gold 文本评判；gold 不评判 `accuracy`、`novelty`、`influence`。 |
-| 已记录的 correctness | `correctness.json`，或 `--correctness resolved\|unresolved` | 以 `TASK CORRECTNESS` 块附加在该次调用所用提示词之下。仅作佐证：不能决定任何信号，也不会选用 gold 规则。 |
+| Golden answer 正文 | `golden.txt`（与可用的 `golden.md` 同时存在时优先）、`--gold-metadata PATH`（verified-metadata.json：按记录的 `instance_id` 连接该实例的 gold `patch`），或 `--golden PATH` | 把该次调用切换到 **gold 评分规则**（`GOLD_SYSTEM_PROMPT`）。同样的五个信号、同样的 schema、同样的推导链。`relevance` 与 `positive_effect` 的方向相对 gold 文本评判；gold 不评判 `accuracy`、`novelty`、`influence`。 |
+| 已记录的 correctness | `correctness.json`、`--harness-report PATH`（整个运行共用一份 SWE-bench 风格评测报告，按记录的 `instance_id` 连接），或 `--correctness resolved\|unresolved` | 以 `TASK CORRECTNESS` 块附加在该次调用所用提示词之下。仅作佐证：不能决定任何信号，也不会选用 gold 规则。 |
 
-`correctness.json` 接受简单的 `{"resolved": true|false, "score": …}` 记录，或 SWE-bench 风格的评测报告（`resolved_ids` / `unresolved_ids`）。评测报告按轨迹记录的 `instance_id` 连接；error / incomplete 实例属于 harness 故障而非结果，不附加 correctness。
+`correctness.json` 接受简单的 `{"resolved": true|false, "score": …}` 记录，或 SWE-bench 风格的评测报告（`resolved_ids` / `unresolved_ids`）。评测报告按轨迹记录的 `instance_id` 连接；error / incomplete 实例属于 harness 故障而非结果，不附加 correctness。`--gold-metadata` / `--harness-report` 是多轨迹形态：每条轨迹获得自己实例的 patch 与 resolved 位；连接失败（未记录 `instance_id`，或文件中缺该实例）时降级到下一来源并附 validation 注记。不可用的 linkage 文件（不可读、不可解析、形状不符）在任何付费 judge 调用之前快速失败。
 
 两者都没有时，评分使用朴素规则。gold 体系记录在每个经过预算门的操作的 `input` 上（`"gold": true`），并计入 `aggregates.overall.gold_scored`。
