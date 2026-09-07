@@ -10,6 +10,7 @@ memory-lane turns. No network: the judge's urlopen is monkeypatched throughout.
 
 import http.client
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 from io import BytesIO
@@ -18,8 +19,9 @@ from urllib.error import HTTPError
 import pytest
 
 from injudge import __main__ as injudge_main
-from injudge.aggregate import aggregate, policy_rollup
+from injudge.aggregate import WASTE_SHARE_CAVEAT, aggregate, policy_rollup
 from injudge.judge import (
+    GOLD_SYSTEM_PROMPT,
     SYSTEM_PROMPT,
     VERDICT_SCHEMA,
     JudgeConfig,
@@ -544,6 +546,64 @@ def test_spans_same_key_changed_value_breaks(tmp_path):
     assert spans[0].fingerprint != spans[1].fingerprint
 
 
+def test_span_previous_keys_span_a_gap(tmp_path):
+    """The novelty baseline is cumulative: an identity delivered in S1,
+    absent in S2, and re-delivered in S3 is still 'delivered in an earlier
+    span' — the header's promise — and a value change across the gap
+    compares against the identity's last recorded earlier delivery, never
+    hiding behind the intervening span."""
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.recall(REF_A)   # S1: key_a
+    b.recall(REF_B)   # S2: key_b only (key_a absent)
+    b.recall(REF_A)   # S3: key_a re-delivered across the gap
+    spans = group_spans(_recall_ops(b, tmp_path), "T1")
+    assert len(spans) == 3
+    assert spans[2].new_keys == ["key_a"]        # membership: new vs the previous span
+    assert spans[2].previous_keys == ["key_a"]   # baseline: seen in S1
+    assert spans[2].changed_keys == []           # the same recorded value came back
+
+    revised = cure_ref("key_a", "Use xarray/core/variable.py apply_ufunc, revised")
+    b2 = TrajBuilder().agent_turn(with_task=True)
+    b2.recall(REF_A)
+    b2.recall(REF_B)
+    b2.recall(revised)  # same item identity, a drifted value, across the gap
+    spans = group_spans(_recall_ops(b2, tmp_path, name="t2"), "T1")
+    assert spans[2].previous_keys == ["key_a"]
+    assert spans[2].changed_keys == ["key_a"]
+
+
+def test_span_changed_keys_reads_the_deliverys_latest_version(tmp_path):
+    """A delivery carrying several versions of one identity speaks with its
+    LAST recorded value (the newest version the agent saw): compared against
+    the identity's last recorded earlier delivery, a first-version read
+    would miss the drift the delivery's own later version carries — and the
+    novelty baseline accumulates the newest recorded value, never the
+    superseded one."""
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.recall(cure_ref("key_a", "v1", item_id="i1"))  # S1: v1
+    b.agent_turn()
+    # S2: ONE delivery carrying two versions of the same identity
+    b.recall([cure_ref("key_a", "v1", item_id="i1"),
+              cure_ref("key_a", "v2", item_id="i1")])
+    spans = group_spans(_recall_ops(b, tmp_path), "T1")
+    assert spans[1].previous_keys == ["key_a"]
+    assert spans[1].changed_keys == ["key_a"]  # the delivered v2 drifted from v1
+
+    # the same delivery against an earlier v2 records no drift (a first-wins
+    # read would forge one against the stale end), and the baseline folds the
+    # newest value: a later plain v2 delivery drifts from nothing either
+    b2 = TrajBuilder().agent_turn(with_task=True)
+    b2.recall(cure_ref("key_a", "v2", item_id="i1"))  # S1: v2
+    b2.agent_turn()
+    b2.recall([cure_ref("key_a", "v1", item_id="i1"),
+               cure_ref("key_a", "v2", item_id="i1")])
+    b2.agent_turn()
+    b2.recall(cure_ref("key_a", "v2", item_id="i1"))  # S3: v2 again
+    spans = group_spans(_recall_ops(b2, tmp_path, name="t2"), "T1")
+    assert spans[1].changed_keys == []  # latest delivered version v2 == baseline v2
+    assert spans[2].changed_keys == []  # the baseline accumulated v2, not v1
+
+
 def test_spans_step_gap_recorded_not_broken(tmp_path):
     b = TrajBuilder().agent_turn(with_task=True)
     for _ in range(2):  # steps 2,3
@@ -573,9 +633,9 @@ def test_spans_window_bounded_at_the_memorys_next_redelivery(tmp_path):
     assert (spans[0].step_first, spans[0].step_last) == (2, 2)
     # key_a's window ends at its re-delivery (step 7) minus one — NOT at the
     # unrelated span's step 5
-    assert spans[0].memory_windows == {"key_a": 6}
-    assert spans[1].memory_windows == {"key_b": None}  # never re-delivered
-    assert spans[2].memory_windows == {"key_a": None}  # the last span
+    assert spans[0].memory_windows == {"m1": 6}
+    assert spans[1].memory_windows == {"m1": None}  # never re-delivered
+    assert spans[2].memory_windows == {"m1": None}  # the last span
     assert [s.position for s in spans] == [1, 2, 3]
     assert all(s.total == 3 for s in spans)
 
@@ -591,8 +651,8 @@ def test_spans_windows_are_per_memory_within_one_span(tmp_path):
     b.recall(REF_A)  # step 7: only A re-delivered
     spans = group_spans(_recall_ops(b, tmp_path), "T1")
     assert len(spans) == 2
-    assert spans[0].memory_windows == {"key_a": 6, "key_b": None}
-    assert spans[1].memory_windows == {"key_a": None}
+    assert spans[0].memory_windows == {"m1": 6, "m2": None}
+    assert spans[1].memory_windows == {"m1": None}
 
 
 def test_spans_window_unbounded_without_a_redelivery(tmp_path):
@@ -605,8 +665,8 @@ def test_spans_window_unbounded_without_a_redelivery(tmp_path):
     b.recall(REF_B)  # step 5: unrelated content
     spans = group_spans(_recall_ops(b, tmp_path), "T1")
     assert len(spans) == 2
-    assert spans[0].memory_windows == {"key_a": None}
-    assert spans[1].memory_windows == {"key_b": None}
+    assert spans[0].memory_windows == {"m1": None}
+    assert spans[1].memory_windows == {"m1": None}
 
 
 def test_spans_window_bounds_at_the_first_qualifying_redelivery(tmp_path):
@@ -626,9 +686,9 @@ def test_spans_window_bounds_at_the_first_qualifying_redelivery(tmp_path):
     # span 1 is the first later span re-delivering key_a and it clears this
     # span's last delivery step: the bound lands there (3 − 1), never at
     # span 2's later re-delivery
-    assert spans[0].memory_windows == {"key_a": 2}
-    assert spans[1].memory_windows == {"key_a": 7, "key_b": None}
-    assert spans[2].memory_windows == {"key_a": None}
+    assert spans[0].memory_windows == {"m1": 2}
+    assert spans[1].memory_windows == {"m1": 7, "m2": None}
+    assert spans[2].memory_windows == {"m1": None}
 
 
 def test_spans_window_defers_past_an_overlapping_redelivery(tmp_path):
@@ -654,11 +714,11 @@ def test_spans_window_defers_past_an_overlapping_redelivery(tmp_path):
     # the middle span's first step (3) does not clear the first span's last
     # delivery step (3) — skipped, not terminal; the re-delivery at step 8
     # is the first cleanly separated one → the bound is 8 − 1
-    assert spans[0].memory_windows == {"key_a": 7}
+    assert spans[0].memory_windows == {"m1": 7}
     # the last span's first step (8) does not clear the middle span's OWN
     # last step (8): unbounded — a bound of 7 would cut its own delivery
-    assert spans[1].memory_windows == {"key_a": None, "key_b": None}
-    assert spans[2].memory_windows == {"key_a": None}
+    assert spans[1].memory_windows == {"m1": None, "m2": None}
+    assert spans[2].memory_windows == {"m1": None}
 
 
 def test_spans_window_unbounded_when_every_redelivery_overlaps(tmp_path):
@@ -678,9 +738,9 @@ def test_spans_window_unbounded_when_every_redelivery_overlaps(tmp_path):
     assert (spans[0].step_first, spans[0].step_last) == (2, 3)
     # the only re-delivery (step 3) is not strictly after the span's last
     # delivery step (3): skipped, and nothing later qualifies — unbounded
-    assert spans[0].memory_windows == {"key_a": None}
-    assert spans[1].memory_windows == {"key_b": None}
-    assert spans[2].memory_windows == {"key_a": None}
+    assert spans[0].memory_windows == {"m1": None}
+    assert spans[1].memory_windows == {"m1": None}
+    assert spans[2].memory_windows == {"m1": None}
 
 
 def test_spans_thread_the_delivery_context(tmp_path):
@@ -695,7 +755,10 @@ def test_spans_thread_the_delivery_context(tmp_path):
     (span,) = group_spans(_recall_ops(b, tmp_path), "T1")
     assert span.queries == ["the dtype bug", "the dtype bug, narrowed"]
     assert span.placement_kind == "prompt_message"
-    assert span.placement_head == "## CURE Memory Policy\n…"
+    # recall's default placement renders the delivered values in full
+    assert span.placement_head == (
+        "- [insight] key_a: Use xarray/core/variable.py apply_ufunc carefully"
+    )
 
 
 def test_render_user_carries_the_delivery_context():
@@ -732,10 +795,10 @@ def test_render_user_bounded_window_is_stated():
     user = render_user(span, steps)
     assert "steps >= 1" in user
     assert "Footprint windows:" not in user
-    span.memory_windows = {"key_a": 3, "key_b": None}
+    span.memory_windows = {"m1": 3, "m2": None}
     user = render_user(span, steps)
-    assert "Footprint windows: key_a — steps 1–3 (re-delivered from step 4; " \
-           "later steps belong to that span); key_b — steps 1 onward " \
+    assert "Footprint windows: m1 (key_a) — steps 1–3 (re-delivered from step 4; " \
+           "later steps belong to that span); m2 (key_b) — steps 1 onward " \
            "(never re-delivered)." in user
     assert "steps >= 1" in user  # the stream label keeps its base wording
 
@@ -759,7 +822,7 @@ def test_spans_unattributed_tail(tmp_path):
     verdict = auto_verdict_no_subsequent_turn(spans2[0])
     assert verdict["verdict"] == "neutral" and verdict["auto"] == "no_subsequent_turn"
     assert verdict["confidence"] is None  # rule-judged: no judge, no confidence
-    assert verdict["memory_usage"]["key_b"]["usage"] == "unclear"
+    assert verdict["memory_usage"]["m1"]["usage"] == "unclear"
 
 
 def test_spans_unattributed_tail_merges_into_an_earlier_matching_span(tmp_path):
@@ -807,6 +870,7 @@ def test_spans_seq_range_brackets_every_op(tmp_path):
         def __init__(self, id, step, seq):
             self.id, self.step, self.seq = id, step, seq
             self.memories = ops[0].memories
+            self.exposure = []
             self.query = None
             self.placement_kind = None
             self.placement_head = None
@@ -957,8 +1021,11 @@ def _signals(rel=True, acc="uncontradicted", nov="novel", inf="none", pe=None):
 
 
 def parse_verdict(text, span, warnings):
-    """Test facade over the strict-parse → assemble chain judge_span inlines.
-    No api key in play, so the mask argument is empty."""
+    """Test facade over the strict-parse → assemble chain _scoring_call
+    inlines. The span-relative semantics (_verdict_semantics) ride the
+    attempt loop's validate hook — exercised by the judge_span tests, never
+    here (a _FakeSpan carries no step stream to anchor against). No api key
+    in play, so the mask argument is empty."""
     obj, error = _strict_parse(text or "")
     if obj is None:
         return _error_verdict(f"judge output {error}", text, span, warnings, "")
@@ -968,43 +1035,46 @@ def parse_verdict(text, span, warnings):
 GOOD = json.dumps({
     "memories": [
         {
-            "key": "key_a",
+            "id": "m1",
             "relevance": {"value": True, "note": "task is about this bug"},
             "accuracy": {"value": "corroborated", "note": "consistent with the file at step 2"},
             "novelty": {"value": "novel", "note": "agent had not seen this before"},
-            "influence": {"value": "acted_on", "note": "agent grepped it at step 3"},
+            "influence": {"value": "acted_on", "note": "agent grepped it at step 2"},
             "positive_effect": {"value": "improved", "note": "saved exploration"},
+            "anchors": [2],
         },
         {
-            "key": "key_b",
+            "id": "m2",
             "relevance": {"value": False, "note": "unrelated to the task"},
             "accuracy": {"value": "uncontradicted", "note": "plausible, uncontradicted"},
             "novelty": {"value": "novel", "note": "new content"},
             "influence": {"value": "none", "note": "never referenced"},
             "positive_effect": {"value": None, "note": "n/a"},
+            "anchors": [],
         },
     ],
-    "analysis": "key_a guided the search at step 3; key_b was ignored.",
+    "analysis": "m1 (key_a) guided the search at step 3; m2 (key_b) was ignored.",
     "evidence": [{"claim": "grep for the file", "steps": [3], "seqs": [44]}],
     "confidence": 0.8,
 })
 
 
 def _good_entries(payload):
-    """The array-form memories of a GOOD-derived payload as a key map."""
-    return {e["key"]: e for e in payload["memories"]}
+    """The array-form memories of a GOOD-derived payload as an id map."""
+    return {e["id"]: e for e in payload["memories"]}
 
 
 def test_parse_verdict_clean():
     warnings = []
     v = parse_verdict(GOOD, _FakeSpan(), warnings)
     assert v["verdict"] == "positive" and v["confidence"] == 0.8
-    assert v["memory_usage"]["key_a"]["usage"] == "used"
-    assert v["memory_usage"]["key_b"]["usage"] == "ignored"
-    assert v["memory_usage"]["key_b"]["reason"] == "irrelevant"
-    assert v["rubric"]["key_a"]["influence"]["value"] == "acted_on"
-    assert v["rubric"]["key_a"]["accuracy"]["value"] == "corroborated"
-    assert v["rubric"]["key_b"]["positive_effect"]["value"] is None
+    assert v["memory_usage"]["m1"]["usage"] == "used"
+    assert v["memory_usage"]["m2"]["usage"] == "ignored"
+    assert v["memory_usage"]["m2"]["reason"] == "irrelevant"
+    assert v["rubric"]["m1"]["influence"]["value"] == "acted_on"
+    assert v["rubric"]["m1"]["accuracy"]["value"] == "corroborated"
+    assert v["rubric"]["m1"]["anchors"] == [2]
+    assert v["rubric"]["m2"]["positive_effect"]["value"] is None
     assert v["analysis"]
     assert v["evidence"] == [{"claim": "grep for the file", "steps": [3], "seqs": [44]}]
     assert warnings == []
@@ -1020,7 +1090,7 @@ def test_parse_verdict_fenced_or_embedded_is_error():
     assert v["verdict"] == "error"
 
 
-def test_parse_verdict_garbage_is_error_never_neutral():
+def test_parse_verdict_garbage_is_error_unmatched_ids_degrade():
     warnings = []
     v = parse_verdict("total garbage", _FakeSpan(), warnings)
     assert v["verdict"] == "error" and v["judge_raw"] == "total garbage"
@@ -1028,9 +1098,16 @@ def test_parse_verdict_garbage_is_error_never_neutral():
     v = parse_verdict(json.dumps({"analysis": "no rubric at all"}), _FakeSpan(), warnings)
     assert v["verdict"] == "error" and "memories" in v["error"]
     warnings = []
-    v = parse_verdict(json.dumps({"memories": [{"key": "other_key", **_signals()}],
+    v = parse_verdict(json.dumps({"memories": [{"id": "m9", **_signals(),
+                                                "anchors": []}],
                                   "confidence": 0.5}), _FakeSpan(), warnings)
-    assert v["verdict"] == "error" and "covers none" in v["error"]
+    # the shape is valid, so assembly degrades the unmatched entries; the
+    # live path (the attempt loop) rejects unknown ids as a semantic
+    # violation before assembly ever runs — see the semantics tests
+    assert v["verdict"] == "neutral"
+    assert all(e["usage"] == "unclear" for e in v["memory_usage"].values())
+    # the unknown id is dropped WITH a warning, never silently
+    assert any("unknown id" in w and "m9" in w for w in warnings)
 
 
 def test_parse_verdict_out_of_contract_values_are_errors():
@@ -1038,13 +1115,13 @@ def test_parse_verdict_out_of_contract_values_are_errors():
     signal values, and string/named/missing confidences are all invalid
     output, never coerced."""
     mutations = [
-        lambda e, p: e["key_a"]["influence"].update(value="critical"),   # synonym
-        lambda e, p: e["key_a"]["accuracy"].update(value=True),          # bool map
-        lambda e, p: e["key_b"]["novelty"].update(value=False),          # bool map
-        lambda e, p: e["key_a"].update(influence="acted_on"),            # bare value
-        lambda e, p: e["key_a"]["relevance"].update(value="true"),       # string bool
-        lambda e, p: e["key_a"]["relevance"].update(value=None),         # null bool
-        lambda e, p: e["key_a"]["positive_effect"].update(value="helped"),  # synonym
+        lambda e, p: e["m1"]["influence"].update(value="critical"),      # synonym
+        lambda e, p: e["m1"]["accuracy"].update(value=True),             # bool map
+        lambda e, p: e["m2"]["novelty"].update(value=False),             # bool map
+        lambda e, p: e["m1"].update(influence="acted_on"),               # bare value
+        lambda e, p: e["m1"]["relevance"].update(value="true"),          # string bool
+        lambda e, p: e["m1"]["relevance"].update(value=None),            # null bool
+        lambda e, p: e["m1"]["positive_effect"].update(value="helped"),  # synonym
         lambda e, p: p.update(confidence="0.9"),                         # string number
         lambda e, p: p.update(confidence="high"),                        # named level
         lambda e, p: p.pop("confidence"),                                # missing
@@ -1068,8 +1145,9 @@ def test_parse_verdict_duplicate_memory_entry_is_error():
 
 def test_parse_verdict_span_delivering_two_versions_of_one_key():
     """A delivery may carry two versions of one key (distinct portable
-    identities); the judge contract scores per key, so the versions collapse
-    into one rubric/memory_usage entry — loudly, never silently."""
+    identities); the span-local id contract scores them INDEPENDENTLY — the
+    display-key collapse that merged them into one judgment is gone, and the
+    two entries keep their own rubric rows."""
     class Span:
         id = "T1:S1"
         memories = [
@@ -1078,37 +1156,42 @@ def test_parse_verdict_span_delivering_two_versions_of_one_key():
         ]
 
     payload = json.dumps({
-        "memories": [{"key": "k", **_signals(inf="acted_on", pe="improved")}],
+        "memories": [
+            {"id": "m1", **_signals(inf="acted_on", pe="improved"), "anchors": [1]},
+            {"id": "m2", **_signals(), "anchors": []},
+        ],
         "analysis": "", "evidence": [], "confidence": 0.9,
     })
     warnings = []
     v = parse_verdict(payload, Span(), warnings)
     assert v["verdict"] == "positive"
-    assert list(v["rubric"]) == ["k"] and list(v["memory_usage"]) == ["k"]
-    assert sum("judged once per key" in w for w in warnings) == 1
+    assert list(v["rubric"]) == ["m1", "m2"]
+    assert list(v["memory_usage"]) == ["m1", "m2"]
+    assert v["memory_usage"]["m1"]["usage"] == "used"
+    assert v["memory_usage"]["m2"]["usage"] == "ignored"
+    assert v["rubric"]["m1"]["anchors"] == [1]
 
 
 def test_parse_verdict_contract_validation_kept():
     """Not format tolerance — the semantic checks a schema can't express:
-    pe/influence pairing correction, unknown-key drop, evidence int
-    filtering, confidence range clamp."""
+    pe/influence pairing correction, evidence int filtering, confidence
+    range clamp. Id coverage/anchor windows are the attempt loop's
+    (_verdict_semantics), never assembly's."""
     warnings = []
     payload = json.loads(GOOD)
     entries = _good_entries(payload)
     # positive_effect set while influence is not acted-on → coerced to null
-    entries["key_b"]["positive_effect"] = {"value": "no_effect", "note": "x"}
-    payload["memories"].append({"key": "unknown_key", **_signals()})
+    entries["m2"]["positive_effect"] = {"value": "no_effect", "note": "x"}
     payload["confidence"] = 1.7  # out of range → clamped
     payload["evidence"] = [{"claim": "ok", "steps": ["3", 4.0, True, 3], "seqs": None},
                            "junk", {"steps": [1]}]
     v = parse_verdict(json.dumps(payload), _FakeSpan(), warnings)
     assert v["verdict"] == "positive"
     assert v["confidence"] == 1.0
-    assert v["rubric"]["key_b"]["positive_effect"]["value"] is None
-    assert "unknown_key" not in v["rubric"]
+    assert v["rubric"]["m2"]["positive_effect"]["value"] is None
     # no coercion inside evidence: only true ints survive
     assert v["evidence"] == [{"claim": "ok", "steps": [3], "seqs": []}]
-    assert len(warnings) >= 3
+    assert len(warnings) >= 2
 
 
 def test_parse_verdict_non_array_evidence_never_crashes():
@@ -1221,8 +1304,10 @@ def test_clamped_confidence_warning_is_bounded():
 
 def test_derived_verdict_matrix():
     def payload(inf_a, pe_a, inf_b="none", pe_b=None):
-        return json.dumps({"memories": [{"key": "key_a", **_signals(inf=inf_a, pe=pe_a)},
-                                        {"key": "key_b", **_signals(inf=inf_b, pe=pe_b)}],
+        return json.dumps({"memories": [{"id": "m1", **_signals(inf=inf_a, pe=pe_a),
+                                         "anchors": [1] if inf_a in ("acted_on", "decisive") else []},
+                                        {"id": "m2", **_signals(inf=inf_b, pe=pe_b),
+                                         "anchors": []}],
                            "confidence": 0.9})
 
     cases = [
@@ -1238,83 +1323,94 @@ def test_derived_verdict_matrix():
         warnings = []
         v = parse_verdict(payload(*args), _FakeSpan(), warnings)
         assert v["verdict"] == want, args
-    # the unclear case warns and marks usage unclear
+    # the unclear case (the contract's sanctioned uncertainty null) warns and
+    # marks usage unclear — but it is not counted as a pairing correction
     warnings = []
     v = parse_verdict(payload("acted_on", None), _FakeSpan(), warnings)
-    assert v["memory_usage"]["key_a"]["usage"] == "unclear"
-    assert any("positive_effect required" in w for w in warnings)
+    assert v["memory_usage"]["m1"]["usage"] == "unclear"
+    assert any("positive_effect undetermined" in w for w in warnings)
+    assert v["pe_pairing_corrections"] == 0
 
 
 def test_footprint_reason_taxonomy():
     """ignored memories carry the reason the neutral bucket was overloaded with."""
     payload = json.dumps({
         "memories": [
-            {"key": "key_a", **_signals(rel=False)},        # irrelevant
-            {"key": "key_b", **_signals(nov="redundant")},  # redundant (relevant, not novel)
+            {"id": "m1", **_signals(rel=False), "anchors": []},        # irrelevant
+            {"id": "m2", **_signals(nov="redundant"), "anchors": []},  # redundant
         ],
         "confidence": 0.9,
     })
     warnings = []
     v = parse_verdict(payload, _FakeSpan(), warnings)
-    assert v["memory_usage"]["key_a"] == {
+    assert v["memory_usage"]["m1"] == {
         "usage": "ignored", "evidence": "", "reason": "irrelevant"}
-    assert v["memory_usage"]["key_b"] == {
+    assert v["memory_usage"]["m2"] == {
         "usage": "ignored", "evidence": "", "reason": "redundant"}
     assert v["verdict"] == "neutral"
     # a confirming memory nobody acted on is a manual-review bucket
-    payload = json.dumps({"memories": [{"key": "key_a", **_signals(nov="confirming")},
-                                       {"key": "key_b", **_signals(nov="confirming")}],
+    payload = json.dumps({"memories": [{"id": "m1", **_signals(nov="confirming"),
+                                        "anchors": []},
+                                       {"id": "m2", **_signals(nov="confirming"),
+                                        "anchors": []}],
                           "confidence": 0.9})
     v = parse_verdict(payload, _FakeSpan(), [])
     assert all(e["reason"] == "confirming_ignored" for e in v["memory_usage"].values())
-    payload = json.dumps({"memories": [{"key": "key_a", **_signals()},
-                                       {"key": "key_b", **_signals()}],
+    payload = json.dumps({"memories": [{"id": "m1", **_signals(), "anchors": []},
+                                       {"id": "m2", **_signals(), "anchors": []}],
                           "confidence": 0.9})
     v = parse_verdict(payload, _FakeSpan(), [])
     assert all(e["reason"] == "ignored_novel" for e in v["memory_usage"].values())
 
 
-def test_missing_memory_key_is_unclear_not_ignored():
+def test_missing_memory_entry_is_unclear_not_ignored():
+    """The direct-assembly degrade for an unanswered entry: nulled signals +
+    unclear usage + a warning. Through _scoring_call this cannot happen —
+    coverage is enforced inside the attempt loop — so this is the belt under
+    the loop's braces, never a live path."""
     payload = json.loads(GOOD)
-    payload["memories"] = [e for e in payload["memories"] if e["key"] != "key_b"]
+    payload["memories"] = [e for e in payload["memories"] if e["id"] != "m2"]
     warnings = []
     v = parse_verdict(json.dumps(payload), _FakeSpan(), warnings)
-    assert v["memory_usage"]["key_b"]["usage"] == "unclear"
-    assert all(s["value"] is None for s in v["rubric"]["key_b"].values())
+    assert v["memory_usage"]["m2"]["usage"] == "unclear"
+    assert all(v["rubric"]["m2"][s]["value"] is None for s in
+               ("relevance", "accuracy", "novelty", "influence", "positive_effect"))
     assert any("rubric missing memory" in w for w in warnings)
-    assert v["verdict"] == "positive"  # key_a still establishes use
+    assert v["verdict"] == "positive"  # m1 still establishes use
 
 
-def test_keyless_span_is_neutral_not_error():
-    """A span whose delivered memories all lack keys (unidentified refs) has
-    no keys the rubric could cover: the empty-rubric warning path, never the
-    zero-coverage judge error."""
+def test_keyless_span_is_judged_not_dropped():
+    """A span whose delivered memories all lack keys (unidentified refs) is
+    still judged: the span-local id contract needs no display key, so the
+    entries score under their ids — never silently excluded from the
+    rubric."""
     span = _FakeSpan()
     span.memories = [{"key": None, "value": "v"}, {"value": "w"}]
     warnings = []
     v = parse_verdict(GOOD, span, warnings)
-    assert v["verdict"] == "neutral"
-    assert v["rubric"] == {} and v["memory_usage"] == {}
-    assert any("no parseable memories" in w for w in warnings)
-    # a span delivering nothing at all takes the same path
+    assert v["verdict"] == "positive"
+    assert set(v["rubric"]) == {"m1", "m2"}
+    assert set(v["memory_usage"]) == {"m1", "m2"}
+    assert not any("with no key" in w for w in warnings)
+    # a span delivering nothing at all takes the empty-rubric warning path
     span.memories = []
     warnings = []
     v = parse_verdict(GOOD, span, warnings)
     assert v["verdict"] == "neutral"
-    assert any("no parseable memories" in w for w in warnings)
+    assert any("delivers no memories" in w for w in warnings)
 
 
-def test_mixed_keyed_and_unkeyed_span_warns():
-    """A delivery mixing keyed and unkeyed memories: the rubric contract keys
-    entries by memory key, so the unkeyed ones can never be covered — their
-    absence from the verdict record is warned about, never silent."""
+def test_mixed_keyed_and_unkeyed_span_judges_every_entry():
+    """A delivery mixing keyed and unkeyed memories: both entries are judged
+    under their span-local ids — the unkeyed one is never excluded from the
+    rubric and usage records."""
     span = _FakeSpan()
     span.memories = [{"key": "key_a", "value": "v"}, {"key": None, "value": "w"}]
     warnings = []
     v = parse_verdict(GOOD, span, warnings)
-    assert v["verdict"] == "positive"  # key_a still judged (GOOD covers it)
-    assert set(v["rubric"]) == {"key_a"}
-    assert any("with no key" in w for w in warnings)
+    assert v["verdict"] == "positive"
+    assert set(v["rubric"]) == {"m1", "m2"}
+    assert v["memory_usage"]["m2"]["usage"] == "ignored"
 
 
 # ---------------------------------------------------------------- aggregation
@@ -1434,7 +1530,7 @@ def _assert_stats_only(obj):
             _assert_stats_only(v)
 
 
-def test_summary_v2_is_statistics_only():
+def test_summary_is_statistics_only():
     """The summary is the final statistics set, not a second copy of the
     judging narrative: no notes, no recorded memory text, no namespace
     hashes, no validation log, no empty triage placeholders; the headline
@@ -1442,15 +1538,21 @@ def test_summary_v2_is_statistics_only():
     one-line marker; two identities sharing a key get a short item_id
     suffix."""
     ops = [
-        _op("T1:S1", "positive", 0.9, {"k": {"usage": "used", "evidence": "dup"}},
-            memories=[{"key": "k", "value": "v1", "item_id": "aaaaaaaaaaaa"},
-                      {"key": "k", "value": "w", "item_id": "bbbbbbbbbbbb"}],
-            rubric={"k": _signals(inf="acted_on", pe="improved")},
+        _op("T1:S1", "positive", 0.9,
+            {"m1": {"usage": "used", "evidence": "dup"},
+             "m2": {"usage": "used", "evidence": "dup"}},
+            memories=[{"key": "k", "value": "v1", "item_id": "aaaaaaaaaaaa",
+                       "id": "m1"},
+                      {"key": "k", "value": "w", "item_id": "bbbbbbbbbbbb",
+                       "id": "m2"}],
+            rubric={"m1": _signals(inf="acted_on", pe="improved"),
+                    "m2": _signals(inf="acted_on", pe="improved")},
             cost={"content_chars_total": 8, "approx_tokens_total": 2}),
         # `noted` must not trip a substring check for rubric `note`
-        _op("T1:S2", "neutral", 0.4, {"k": {"usage": "noted", "evidence": "dup2"}},
-            memories=[{"key": "k", "value": "v2", "item_id": "aaaaaaaaaaaa"}],
-            rubric={"k": _signals(rel=False, nov="redundant")},
+        _op("T1:S2", "neutral", 0.4, {"m1": {"usage": "noted", "evidence": "dup2"}},
+            memories=[{"key": "k", "value": "v2", "item_id": "aaaaaaaaaaaa",
+                       "id": "m1"}],
+            rubric={"m1": _signals(rel=False, nov="redundant")},
             cost={"content_chars_total": 8, "approx_tokens_total": 2}),
     ]
     ops[0]["n_injections"] = 2
@@ -1465,14 +1567,15 @@ def test_summary_v2_is_statistics_only():
         [{"level": "warn", "msg": "process note"}],
     )
     summary = build_summary(artifact)
-    assert summary["tool"]["schema"] == "injudge.summary/v3"
+    assert summary["tool"]["schema"] == "injudge.summary/v4"
     assert "validation" not in summary
     _assert_stats_only(summary)
     blob = json.dumps(summary)
-    assert "v1" not in blob and '"v2"' not in blob  # no recorded memory text
+    assert '"v1"' not in blob and '"v2"' not in blob  # no recorded memory text
     ov = summary["overall"]
     assert set(ov["headline"]) == {"judged_spans", "positive_span_rate",
-                                   "negative_span_rate", "wasted_token_share"}
+                                   "negative_span_rate", "wasted_token_share",
+                                   "wasted_tokens", "judged_tokens"}
     assert ov["low_confidence"] == ["T1:S2"]
     # memory usage: bare tallies keyed by display key, drift marked, the two
     # identities sharing key "k" disambiguated with a short item_id suffix
@@ -1490,12 +1593,12 @@ def test_summary_v2_is_statistics_only():
     (s1,) = [s for s in t1["spans"] if s["operation_id"] == "T1:S1"]
     assert s1 == {"operation_id": "T1:S1", "verdict": "positive",
                   "confidence": 0.9, "steps": [1, 3], "n_injections": 2,
-                  "usage": {"k": "used"}}
+                  "usage": {"m1": "used", "m2": "used"}}
     (s2,) = [s for s in t1["spans"] if s["operation_id"] == "T1:S2"]
-    assert s2["usage"] == {"k": "noted"}
+    assert s2["usage"] == {"m1": "noted"}
     # the full aggregate keeps its narrative/identity detail in the report
     op1 = artifact["operations"][0]
-    assert op1["memory_usage"]["k"]["evidence"] == "dup"
+    assert op1["memory_usage"]["m1"]["evidence"] == "dup"
     assert artifact["validation"]
 
 
@@ -1618,16 +1721,18 @@ def test_summary_display_keys_escalation_rechecks_the_surviving_bases():
 
 
 def test_aggregate_multi_namespace_delivery_tallies_each_identity():
-    """A key delivered under several namespaces in one op is judged once (the
-    contract is one entry per key) but tallies under EACH of its
-    (namespace, item) identities — never a phantom namespace-less entry that
+    """A key delivered under several namespaces in one op is judged per
+    ENTRY (the span-local id contract), and each entry tallies under its own
+    (namespace, item) identity — never a phantom namespace-less entry that
     loses the value drift."""
     ops = [
-        _op("T1:S1", "positive", 0.9, {"k": {"usage": "used", "evidence": ""}},
-            memories=[{"key": "k", "value": "v1", "namespace": "nsA"},
-                      {"key": "k", "value": "v2", "namespace": "nsB"}]),
-        _op("T1:S2", "neutral", 0.9, {"k": {"usage": "ignored", "evidence": ""}},
-            memories=[{"key": "k", "value": "v3", "namespace": "nsA"}]),
+        _op("T1:S1", "positive", 0.9,
+            {"m1": {"usage": "used", "evidence": ""},
+             "m2": {"usage": "used", "evidence": ""}},
+            memories=[{"key": "k", "value": "v1", "namespace": "nsA", "id": "m1"},
+                      {"key": "k", "value": "v2", "namespace": "nsB", "id": "m2"}]),
+        _op("T1:S2", "neutral", 0.9, {"m1": {"usage": "ignored", "evidence": ""}},
+            memories=[{"key": "k", "value": "v3", "namespace": "nsA", "id": "m1"}]),
     ]
     rolls = {(r["namespace"], r["key"]): r for r in aggregate(ops, 2)["memory_usage"]}
     assert set(rolls) == {("nsA", "k"), ("nsB", "k")}
@@ -1641,12 +1746,13 @@ def test_aggregate_multi_namespace_delivery_tallies_each_identity():
 
 
 def test_rubric_rollup_lists_each_namespace_identity():
-    """A jointly judged multi-store delivery lands on each of its
+    """A multi-store delivery lands on each of its entries'
     (namespace, item) identities in the inaccurate/irrelevant lists too."""
-    rubric = {"k": {"accuracy": {"value": "contradicted", "note": ""}}}
+    rubric = {"m1": {"accuracy": {"value": "contradicted", "note": ""}},
+              "m2": {"accuracy": {"value": "contradicted", "note": ""}}}
     ops = [_op("T1:S1", "neutral", 0.9, rubric=rubric,
-               memories=[{"key": "k", "value": "v1", "namespace": "nsA"},
-                         {"key": "k", "value": "v2", "namespace": "nsB"}])]
+               memories=[{"key": "k", "value": "v1", "namespace": "nsA", "id": "m1"},
+                         {"key": "k", "value": "v2", "namespace": "nsB", "id": "m2"}])]
     keys = aggregate(ops, 1)["rubric"]["inaccurate_keys"]
     assert [(e["namespace"], e["key"]) for e in keys] == [("nsA", "k"), ("nsB", "k")]
 
@@ -1751,9 +1857,9 @@ def test_aggregate_rubric_rates():
     assert rub["counts"]["influence"] == {"acted_on": 1, "none": 2}
     assert rub["no_footprint_reasons"] == {"irrelevant": 1, "redundant": 1}
     assert rub["inaccurate_keys"] == [
-        {"namespace": None, "item_id": "ka", "key": "ka", "spans": ["T1:S2"]}]
+        {"namespace": None, "item_id": "T1:S2:ka", "key": "ka", "spans": ["T1:S2"]}]
     assert rub["irrelevant_keys"] == [
-        {"namespace": None, "item_id": "kb", "key": "kb", "spans": ["T1:S1"]}]
+        {"namespace": None, "item_id": "T1:S1:kb", "key": "kb", "spans": ["T1:S1"]}]
 
 
 def test_aggregate_usage_rollup_separates_namespaces():
@@ -1761,10 +1867,12 @@ def test_aggregate_usage_rollup_separates_namespaces():
     stores is two memories in the rollup — separate tallies and per-namespace
     value drift, never one merged entry whose last-seen value wins."""
     ops = [
-        _op("T1:S1", "positive", 0.9, {"k": {"usage": "used", "evidence": ""}},
-            memories=[{"key": "k", "value": "from-a", "namespace": "store-a"}]),
-        _op("T2:S1", "neutral", 0.9, {"k": {"usage": "ignored", "evidence": ""}},
-            memories=[{"key": "k", "value": "from-b", "namespace": "store-b"}]),
+        _op("T1:S1", "positive", 0.9, {"m1": {"usage": "used", "evidence": ""}},
+            memories=[{"key": "k", "value": "from-a", "namespace": "store-a",
+                       "id": "m1"}]),
+        _op("T2:S1", "neutral", 0.9, {"m1": {"usage": "ignored", "evidence": ""}},
+            memories=[{"key": "k", "value": "from-b", "namespace": "store-b",
+                       "id": "m1"}]),
     ]
     by_ns = {r["namespace"]: r for r in aggregate(ops, 2)["memory_usage"]}
     assert set(by_ns) == {"store-a", "store-b"}
@@ -1779,15 +1887,119 @@ def test_rubric_key_lists_carry_the_namespace():
     """inaccurate/irrelevant key lists join by the same (namespace, item)
     identity — two stores' same-keyed memories list separately."""
     ops = [
-        _op("T1:S1", "neutral", 0.9, rubric={"k": _signals(acc="contradicted")},
-            memories=[{"key": "k", "value": "v", "namespace": "store-a"}]),
-        _op("T1:S2", "neutral", 0.9, rubric={"k": _signals(acc="contradicted")},
-            memories=[{"key": "k", "value": "v", "namespace": "store-b"}]),
+        _op("T1:S1", "neutral", 0.9, rubric={"m1": _signals(acc="contradicted")},
+            memories=[{"key": "k", "value": "v", "namespace": "store-a",
+                       "id": "m1"}]),
+        _op("T1:S2", "neutral", 0.9, rubric={"m1": _signals(acc="contradicted")},
+            memories=[{"key": "k", "value": "v", "namespace": "store-b",
+                       "id": "m1"}]),
     ]
     assert aggregate(ops, 2)["rubric"]["inaccurate_keys"] == [
         {"namespace": "store-a", "item_id": "k", "key": "k", "spans": ["T1:S1"]},
         {"namespace": "store-b", "item_id": "k", "key": "k", "spans": ["T1:S2"]},
     ]
+
+
+def test_aggregate_multi_version_delivery_names_the_span_once():
+    """One delivery carrying two versions of the same item is judged per
+    ENTRY (two rubric entries, two tally counts) — but the triage lists and
+    the usage roll name the producing SPAN once per identity: the spans
+    lists are provenance, not judgment counts."""
+    ops = [
+        _op("T1:S1", "neutral", 0.9,
+            {"m1": {"usage": "ignored", "evidence": ""},
+             "m2": {"usage": "ignored", "evidence": ""}},
+            memories=[{"key": "k", "value": "v1", "item_id": "i1", "id": "m1"},
+                      {"key": "k", "value": "v2", "item_id": "i1", "id": "m2"}],
+            rubric={"m1": _signals(rel=False, acc="contradicted"),
+                    "m2": _signals(rel=False, acc="contradicted")}),
+    ]
+    agg = aggregate(ops, 1)
+    assert agg["rubric"]["inaccurate_keys"] == [
+        {"namespace": None, "item_id": "i1", "key": "k", "spans": ["T1:S1"]}]
+    assert agg["rubric"]["irrelevant_keys"] == [
+        {"namespace": None, "item_id": "i1", "key": "k", "spans": ["T1:S1"]}]
+    (roll,) = agg["memory_usage"]
+    assert roll["spans"] == ["T1:S1"]
+    assert roll["tallies"]["ignored"] == 2  # the per-entry judgments still count
+
+
+def test_aggregate_multi_version_delivery_first_and_last_values():
+    """A multi-version delivery's first_value is its FIRST version's value
+    and last_value its LAST's (delivery order) — a last-write-wins read
+    sources both ends from the latest version, so [v1,v2] then [v1] would
+    fabricate a v2→v1 drift whose true ends are both v1."""
+    mems = [{"key": "k", "value": "v1", "item_id": "i1", "id": "m1"},
+            {"key": "k", "value": "v2", "item_id": "i1", "id": "m2"}]
+    usage = {"m1": {"usage": "noted", "evidence": ""},
+             "m2": {"usage": "noted", "evidence": ""}}
+    ops = [
+        _op("T1:S1", "neutral", 0.9, usage, memories=mems),
+        _op("T1:S2", "neutral", 0.9, {"m1": {"usage": "noted", "evidence": ""}},
+            memories=[{"key": "k", "value": "v1", "item_id": "i1", "id": "m1"}]),
+    ]
+    (roll,) = aggregate(ops, 2)["memory_usage"]
+    assert roll["first_value"] == "v1" and roll["last_value"] == "v1"
+    # the reversed order keeps the real drift: [v1] then [v1,v2]
+    (roll,) = aggregate(ops[::-1], 2)["memory_usage"]
+    assert roll["first_value"] == "v1" and roll["last_value"] == "v2"
+
+
+def test_aggregate_identity_less_entries_never_merge_across_spans():
+    """An identity-less delivery (no item_id, no key) has no pair to join on,
+    and a span-local entry id is unique only within its span: two spans'
+    keyless m1 entries tally per span — never merged into one rollup cell
+    that would conflate two memories nothing can tell apart."""
+    ops = [
+        _op("T1:S1", "positive", 0.9, {"m1": {"usage": "used", "evidence": ""}},
+            memories=[{"key": None, "value": "alpha", "id": "m1"}]),
+        _op("T1:S2", "negative", 0.9, {"m1": {"usage": "misused", "evidence": ""}},
+            memories=[{"key": None, "value": "beta", "id": "m1"}]),
+    ]
+    by_id = {r["item_id"]: r for r in aggregate(ops, 2)["memory_usage"]}
+    assert set(by_id) == {"T1:S1:m1", "T1:S2:m1"}
+    assert by_id["T1:S1:m1"]["tallies"]["used"] == 1
+    assert by_id["T1:S2:m1"]["tallies"]["misused"] == 1
+    # the triage lists tell them apart too
+    rubric = {"m1": _signals(acc="contradicted")}
+    ops2 = [_op("T1:S1", "neutral", 0.9, rubric=rubric,
+                memories=[{"key": None, "value": "alpha", "id": "m1"}]),
+            _op("T1:S2", "neutral", 0.9, rubric=rubric,
+                memories=[{"key": None, "value": "beta", "id": "m1"}])]
+    keys = aggregate(ops2, 2)["rubric"]["inaccurate_keys"]
+    assert {(e["namespace"], e["item_id"]) for e in keys} == {
+        (None, "T1:S1:m1"), (None, "T1:S2:m1")}
+
+
+def test_aggregate_unstamped_entry_named_by_key_joins_its_identity():
+    """The hand-edit degrade: a usage entry keyed by a display key (no
+    stamped id on the memories) tallies under the delivered identity whose
+    item half it spells — across spans (with no item_id recorded the key IS
+    the identity), and into the memory's own namespace, never a phantom
+    namespace-less row."""
+    ops = [
+        _op("T1:S1", "neutral", 0.9, {"k": {"usage": "ignored", "evidence": ""}},
+            memories=[{"key": "k", "value": "v1", "namespace": "nsA"}]),
+        _op("T1:S2", "positive", 0.9, {"k": {"usage": "used", "evidence": ""}},
+            memories=[{"key": "k", "value": "v2", "namespace": "nsA"}]),
+    ]
+    (roll,) = aggregate(ops, 2)["memory_usage"]
+    assert (roll["namespace"], roll["item_id"]) == ("nsA", "k")
+    assert roll["tallies"]["used"] == 1 and roll["tallies"]["ignored"] == 1
+    assert roll["first_value"] == "v1" and roll["last_value"] == "v2"
+
+
+def test_aggregate_unstamped_entry_ambiguous_across_namespaces_scopes_per_span():
+    """A key-keyed entry spelling TWO delivered identities' item half (one
+    key, two stores) names neither: it tallies span-scoped rather than
+    conflating two stores' memories."""
+    ops = [
+        _op("T1:S1", "positive", 0.9, {"k": {"usage": "used", "evidence": ""}},
+            memories=[{"key": "k", "value": "v1", "namespace": "nsA"},
+                      {"key": "k", "value": "v2", "namespace": "nsB"}]),
+    ]
+    (roll,) = aggregate(ops, 1)["memory_usage"]
+    assert (roll["namespace"], roll["item_id"]) == (None, "T1:S1:k")
 
 
 def test_rubric_line_surfaces_the_novelty_distribution(capsys):
@@ -1875,8 +2087,12 @@ def test_aggregate_headline_metrics():
         "judged_spans": 3,
         "positive_span_rate": round(1 / 3, 4),
         "negative_span_rate": round(1 / 3, 4),
-        # (negative + neutral) cost / total cost = 300 / 400
+        # (negative + neutral) cost / judged-class cost = 300 / 400
         "wasted_token_share": 0.75,
+        "wasted_tokens": 300,
+        "judged_tokens": 400,
+        # the share clears the proxy-caveat threshold with negatives present
+        "caveat": WASTE_SHARE_CAVEAT,
     }
     assert aggregate([], 0)["headline"]["wasted_token_share"] is None
 
@@ -2070,12 +2286,60 @@ class FakeResponse:
         return False
 
 
+def _auto_verdict_body(req) -> dict:
+    """A conforming endpoint answer for whatever span the request carries:
+    one entry per delivered-memory id line in the request's user content
+    (the judge input's own `- [mN] …` rendering), the first acted_on and
+    improved at an in-window step, the rest ignored. The coverage contract
+    means a canned two-entry answer would error any other span — the fake
+    endpoint reads the span like the real one does."""
+    user = ""
+    try:
+        body = json.loads(req.data.decode())
+        for m in body.get("messages") or []:
+            # the FIRST user message is the judge input; a corrective retry
+            # appends its note as a later one, which carries no memory lines
+            if m.get("role") == "user" and not user:
+                user = m.get("content") or ""
+    except (ValueError, AttributeError):
+        pass
+    ids = re.findall(r"(?m)^- \[(m\d+)\] ", user)
+    # the span's own consumption step: inside every footprint window by
+    # construction (windows never cut a span's delivery steps)
+    consumed = re.search(r"consumed at (?:agent )?steps? (\d+)", user)
+    anchor_step = int(consumed.group(1)) if consumed else 1
+    entries = []
+    for i, mid in enumerate(ids):
+        acted = i == 0
+        entries.append({
+            "id": mid,
+            "relevance": {"value": True, "note": "topical"},
+            "accuracy": {"value": "corroborated", "note": "matches the steps"},
+            "novelty": {"value": "novel", "note": "not seen before"},
+            "influence": (
+                {"value": "acted_on", "note": "shaped the action"}
+                if acted else {"value": "none", "note": "never referenced"}
+            ),
+            "positive_effect": (
+                {"value": "improved", "note": "saved work"} if acted
+                else {"value": None, "note": "n/a"}
+            ),
+            "anchors": [anchor_step] if acted else [],
+        })
+    return {"choices": [{"message": {"content": json.dumps({
+        "memories": entries,
+        "analysis": "auto",
+        "evidence": [],
+        "confidence": 0.8,
+    })}}]}
+
+
 def fake_urlopen_factory(record, payload=None, fail=None):
     def _open(req, timeout=None):
         record.append(json.loads(req.data.decode()))
         if fail:
             raise fail
-        return FakeResponse(payload or {"choices": [{"message": {"content": GOOD}}]})
+        return FakeResponse(payload or _auto_verdict_body(req))
     return _open
 
 
@@ -2089,8 +2353,10 @@ def _judge_input_fixture():
         id="T1:S1", traj="T1", step_first=1, step_last=2, seq_first=3, seq_last=9,
         n_injections=2,
         memories=[{"key": "key_a", "value": "v", "memory_type": "insight",
-                   "confidence": 0.9}],
-        new_keys=["key_a"],
+                   "confidence": 0.9},
+                  {"key": "key_b", "value": "w", "memory_type": "bug",
+                   "confidence": 0.8}],
+        new_keys=["key_a", "key_b"],
     )
     steps = [
         AgentStep(
@@ -2098,6 +2364,14 @@ def _judge_input_fixture():
             reasoning="thinking", content="",
             tools=[ToolExec(tool_call_id="c1", name="bash", args={"command": "ls"},
                             result="ok", status="completed", seq_start=4, seq_end=5)],
+        ),
+        AgentStep(  # the span's step_last (2) must name a real step: the
+            # anchor window of a never-re-delivered memory ends at the
+            # stream's final step
+            step=2, turn=2, seq_start=6, seq_end=8,
+            reasoning="more thinking", content="",
+            tools=[ToolExec(tool_call_id="c2", name="bash", args={"command": "pwd"},
+                            result="ok", status="completed", seq_start=7, seq_end=8)],
         ),
     ]
     return span, steps
@@ -2152,14 +2426,15 @@ def test_echo_overlap_warning_flags_a_novel_echo(monkeypatch):
     verdict = judge_span(span, steps, cfg, warnings)
     assert verdict["verdict"] == "positive"  # the judged rubric is untouched
     assert warnings == [
-        "T1:S1: key_a.novelty judged 'novel' but 100% of the value's words "
-        "already appear in the task statement or the pre-injection steps — a "
-        "possible same-episode echo (the judged novelty stands; review the span)"
+        "T1:S1: m1 (key_a).novelty judged 'novel' but 100% of the value's "
+        "words already appear in the task statement or the pre-injection "
+        "steps — a possible same-episode echo (the judged novelty stands; "
+        "review the span)"
     ]
 
     # a redundant call is the judge applying the rule — no guard warning
     payload = json.loads(GOOD)
-    _good_entries(payload)["key_a"]["novelty"]["value"] = "redundant"
+    _good_entries(payload)["m1"]["novelty"]["value"] = "redundant"
     mutant = {"choices": [{"message": {"content": json.dumps(payload)}}]}
     monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory([], payload=mutant))
     warnings = []
@@ -2183,21 +2458,25 @@ def test_pe_pairing_corrections_counted_and_aggregated(tmp_path):
     """The positive_effect↔influence pairing corrections are counted per
     span at assembly, carried on the operation record (only when any), and
     aggregated as a judge-compliance rate over LLM-judged spans — drift is
-    visible without reading validation notes."""
+    visible without reading validation notes. The acted-on-but-null answer
+    is the contract's sanctioned uncertainty route: warned about, never
+    counted as a correction."""
     payload = json.loads(GOOD)
     entries = _good_entries(payload)
-    entries["key_a"]["positive_effect"]["value"] = None  # acted_on, effect missing
-    entries["key_b"]["positive_effect"]["value"] = "improved"  # influence none → coerced
+    entries["m1"]["positive_effect"]["value"] = None  # acted_on, direction undetermined
+    entries["m2"]["positive_effect"]["value"] = "improved"  # influence none → coerced
     warnings = []
     v = parse_verdict(json.dumps(payload), _FakeSpan(), warnings)
-    assert v["pe_pairing_corrections"] == 2
+    assert v["pe_pairing_corrections"] == 1
+    assert any("positive_effect undetermined" in w for w in warnings)
+    assert any("coerced to null" in w for w in warnings)
     span = InjectionSpan(id="T1:S1", traj="T1", op_ids=["T1:R1"], step_first=1,
                          step_last=1, seq_first=3, seq_last=3, n_injections=1,
                          memories=[{"key": "key_a", "value": "v"},
                                    {"key": "key_b", "value": "w"}])
     op = operation_record(span, v, {"deliveries": 1, "content_chars_total": 0,
                                     "approx_tokens_total": 0})
-    assert op["pe_pairing_corrections"] == 2
+    assert op["pe_pairing_corrections"] == 1
     clean = _op("T1:S2", "neutral", 0.9)  # judged, no corrections
     auto = {**_op("T1:S3", "neutral", None,
                   usage={"k": {"usage": "unclear", "evidence": ""}}),
@@ -2216,11 +2495,12 @@ def test_pe_pairing_corrections_counted_and_aggregated(tmp_path):
                                                             {"deliveries": 0})
 
 
-def test_headline_zero_negative_high_waste_carries_the_caveat(capsys):
-    """A flood of ignored memories scores negative 0 while wasting most of
-    the budget: the headline binds the two metrics and states the caveat
-    (the span-level proxy and the verdict asymmetry), in the aggregate, the
-    summary projection, and the stdout summary."""
+def test_headline_high_waste_carries_the_caveat(capsys):
+    """A flood of ignored memories wasting most of the budget carries the
+    proxy caveat whether the negative rate is zero or not (a few negatives
+    do not make the share per-memory truth): the headline binds the metrics
+    and states the caveat in the aggregate, the summary projection, and the
+    stdout summary."""
     ops = [
         _op("T1:S1", "neutral", 0.9,
             cost={"deliveries": 1, "content_chars_total": 400, "approx_tokens_total": 300}),
@@ -2230,13 +2510,13 @@ def test_headline_zero_negative_high_waste_carries_the_caveat(capsys):
     agg = aggregate(ops, 2)
     assert agg["headline"]["negative_span_rate"] == 0.0
     assert agg["headline"]["wasted_token_share"] == 0.75
-    assert "span-level proxy" in agg["headline"]["caveat"]
+    assert "span-level non-beneficial-delivery proxy" in agg["headline"]["caveat"]
     assert "asymmetric" in agg["headline"]["caveat"]
     artifact = build_artifact({}, [{"id": "T1", "run_id": "r"}], ops, [], {"T1": 2}, [])
     slim = build_summary(artifact)["overall"]["headline"]
     assert slim["negative_span_rate"] == 0.0 and "caveat" in slim
     print_summary(artifact)
-    assert "caveat: negative-span rate 0" in capsys.readouterr().out
+    assert "caveat: wasted_token_share" in capsys.readouterr().out
 
     # a low wasted share needs no caveat
     ops[0]["delivery_cost"] = {"deliveries": 1, "content_chars_total": 400,
@@ -2654,7 +2934,7 @@ def test_echoed_key_in_a_200_answer_never_reaches_judge_raw(monkeypatch):
 def test_echoed_key_in_a_conforming_verdict_never_reaches_the_artifact(monkeypatch):
     """A 200 verdict is endpoint output too: the key echoed into its
     analysis, evidence claims, or per-signal notes would land verbatim in
-    injudge.report/v6 — mask it in every copied field, not just judge_raw."""
+    injudge.report/v7 — mask it in every copied field, not just judge_raw."""
     key = "sk-secret+key"
     obj = json.loads(GOOD)
     obj["analysis"] = f"the agent saw {key} in the injection"
@@ -2668,8 +2948,8 @@ def test_echoed_key_in_a_conforming_verdict_never_reaches_the_artifact(monkeypat
     verdict = judge_span(span, steps, cfg, [])
     assert verdict["verdict"] == "positive"  # a conforming answer
     for field in (verdict["analysis"], verdict["evidence"][0]["claim"],
-                  verdict["rubric"]["key_a"]["positive_effect"]["note"],
-                  verdict["memory_usage"]["key_a"]["evidence"]):
+                  verdict["rubric"]["m1"]["positive_effect"]["note"],
+                  verdict["memory_usage"]["m1"]["evidence"]):
         assert key not in field and "sk-secret%2Bkey" not in field
         assert "***" in field
 
@@ -2802,35 +3082,33 @@ def test_strict_parse_violation_naming_the_key_stays_masked(monkeypatch):
         assert "***" in echo
 
 
-def test_unknown_rubric_key_and_malformed_evidence_warnings_stay_masked(monkeypatch):
-    """The judge's own keys and malformed evidence entries are endpoint
-    output kept in validation notes: an echoed credential inside either
-    must be masked before it reaches the artifact."""
+def test_unknown_rubric_id_fails_coverage_with_the_echo_masked(monkeypatch):
+    """A rubric entry for an id the span never delivered is a COVERAGE
+    violation — the attempt loop corrects it, and a stubborn answer ends in
+    an error verdict whose text (the judge's own id is endpoint output, an
+    echoed credential inside it) must be masked before it reaches the
+    artifact."""
     key = "sk-secret+key"
     obj = json.loads(GOOD)
-    # a rubric entry (valid rubric shape) for a key the span never delivered
+    # a rubric entry (valid shape) for an id the span never delivered
     obj["memories"].append({
-        "key": key,
+        "id": key,
         "relevance": {"value": True, "note": ""},
         "accuracy": {"value": "corroborated", "note": ""},
         "novelty": {"value": "novel", "note": ""},
         "influence": {"value": "none", "note": ""},
         "positive_effect": {"value": None, "note": ""},
+        "anchors": [],
     })
-    # a malformed (non-object) evidence entry embedding the echo
-    obj["evidence"].append(f"auth Bearer {key}")
     payload = {"choices": [{"message": {"content": json.dumps(obj)}}]}
     monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory([], payload))
     span, steps = _judge_input_fixture()
     cfg = JudgeConfig(base_url="http://x", api_key=key, model="m")
     warnings: list[str] = []
     verdict = judge_span(span, steps, cfg, warnings)
-    assert verdict["verdict"] == "positive"  # the span's own keys stay covered
-    dropped = [w for w in warnings if "dropped" in w]
-    # the span delivers key_a only: GOOD's key_b and the echoed key are both
-    # unknown rubric entries, plus the malformed evidence entry
-    assert len(dropped) == 3
-    for w in dropped:
+    assert verdict["verdict"] == "error" and "covers ids" in verdict["error"]
+    assert key not in verdict["error"] and "sk-secret%2Bkey" not in verdict["error"]
+    for w in warnings:
         assert key not in w and "sk-secret%2Bkey" not in w
 
 
@@ -4589,7 +4867,7 @@ def test_cli_surrogate_content_still_writes_the_artifact(monkeypatch, tmp_path):
     artifact = json.loads((out / "injudge-report.json").read_text(encoding="utf-8"))
     assert artifact["operations"][0]["memories"][0]["value"] == text
     summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
-    assert summary["trajectories"][0]["spans"][0]["usage"] == {"key_a": "used"}
+    assert summary["trajectories"][0]["spans"][0]["usage"] == {"m1": "used"}
 
 
 def test_cli_end_to_end_mocked_judge(monkeypatch, tmp_path):
@@ -4606,7 +4884,7 @@ def test_cli_end_to_end_mocked_judge(monkeypatch, tmp_path):
                             "-o", str(out), "--env", str(_env(tmp_path))])
     assert rc == 0
     artifact = json.loads((out / "injudge-report.json").read_text())
-    assert artifact["tool"]["schema"] == "injudge.report/v6"
+    assert artifact["tool"]["schema"] == "injudge.report/v7"
     assert artifact["tool"]["judge_model"] == "judge-m"
     assert len(artifact["operations"]) == 1
     op = artifact["operations"][0]
@@ -4615,9 +4893,10 @@ def test_cli_end_to_end_mocked_judge(monkeypatch, tmp_path):
     for field in ("seq", "payload_summary", "confidence", "evidence", "memory_usage",
                   "rubric", "analysis", "delivery_cost"):
         assert field in op
-    assert op["rubric"]["key_a"]["influence"]["value"] == "acted_on"
-    assert op["rubric"]["key_a"]["novelty"]["value"] == "novel"
-    assert op["analysis"].startswith("key_a guided")
+    assert op["rubric"]["m1"]["influence"]["value"] == "acted_on"
+    assert op["rubric"]["m1"]["novelty"]["value"] == "novel"
+    assert op["rubric"]["m1"]["anchors"] == [2]
+    assert op["analysis"] == "auto"  # the auto-verdict stub's analysis
     chars = 3 * len(RECALL_CONTENT)
     assert op["delivery_cost"] == {"deliveries": 3, "content_chars_total": chars,
                                    "approx_tokens_total": chars // 4}
@@ -4648,14 +4927,15 @@ def test_cli_end_to_end_mocked_judge(monkeypatch, tmp_path):
     assert len(record) == 1  # one judge call for one span
     # the summary artifact: the statistics-only distillation (v2)
     summary = json.loads((out / "summary.json").read_text())
-    assert summary["tool"]["schema"] == "injudge.summary/v3"
+    assert summary["tool"]["schema"] == "injudge.summary/v4"
     assert "validation" not in summary  # the process log stays in the report
     _assert_stats_only(summary)
     ov = summary["overall"]
     assert ov["positive"] == 1 and ov["rates"]["positive"] == 1.0
     # the slim headline binds the span rates to the wasted-token share
     assert ov["headline"] == {"judged_spans": 1, "positive_span_rate": 1.0,
-                              "negative_span_rate": 0.0, "wasted_token_share": 0.0}
+                              "negative_span_rate": 0.0, "wasted_token_share": 0.0,
+                              "wasted_tokens": 0, "judged_tokens": chars // 4}
     # judge compliance: no pairing corrections were needed (the stubbed judge
     # honors the positive_effect↔influence contract)
     assert ov["judge_compliance"] == {"pe_pairing_corrected_spans": 0,
@@ -4673,7 +4953,7 @@ def test_cli_end_to_end_mocked_judge(monkeypatch, tmp_path):
     assert t1["spans"] == [{
         "operation_id": "T1:S1", "verdict": "positive", "confidence": 0.8,
         "steps": [2, 4], "n_injections": 3,
-        "usage": {"key_a": "used"},
+        "usage": {"m1": "used"},
     }]
     t2 = summary["trajectories"][1]
     assert t2["spans"] == []  # zero-injection run
@@ -4880,7 +5160,7 @@ def test_cli_zero_injection_trajectory(monkeypatch, tmp_path):
 def test_cli_notes_unsized_placement_content(monkeypatch, tmp_path):
     """A redacted placement records no content size: its delivery cost counts
     0 tokens, and the understatement is a validation note — never silent."""
-    b = TrajBuilder().agent_turn(with_task=True).recall(REF_A, content=None)
+    b = TrajBuilder().agent_turn(with_task=True).recall(REF_A, content="redacted")
     _write_run(tmp_path / "runs", "t1", b)
     monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory([]))
     out = tmp_path / "out"
@@ -5260,7 +5540,7 @@ def test_cli_judge_error_exit_2_partial_artifact(monkeypatch, tmp_path):
         calls["n"] += 1
         if calls["n"] == 2:
             raise OSError("boom")
-        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
+        return FakeResponse(_auto_verdict_body(req))
 
     monkeypatch.setattr("injudge.judge.urlopen", flaky)
     out = tmp_path / "out"
@@ -5487,3 +5767,516 @@ def test_cli_judge_failure_keeps_the_attempt_warnings(monkeypatch, tmp_path):
     msgs = [v["msg"] for v in artifact["validation"]]
     assert any("degrading to json" in m for m in msgs)
     assert any("judge request failed" in m and "HTTP 401" in m for m in msgs)
+
+
+# ------------------------------------------------- redirect credential safety
+
+
+def test_redirects_are_refused_never_forwarded():
+    """The stdlib redirect handler forwards Authorization/x-api-key to any
+    Location (cross-host, HTTPS→HTTP downgrade included); the judge
+    transport refuses the redirect instead — no Request is ever built for
+    the redirected URL, so the credential's destination stays the
+    configured endpoint."""
+    from urllib.request import HTTPRedirectHandler, Request
+
+    from injudge.judge import _JUDGE_OPENER, _NoRedirectHandler
+
+    req = Request(
+        "https://api.example.com/v1/chat/completions", data=b"{}",
+        headers={"Authorization": "Bearer sk-secret-judge"}, method="POST",
+    )
+    handler = _NoRedirectHandler()
+    for newurl in (
+        "http://evil.example.com/steal",  # cross-host AND scheme downgrade
+        "https://other.example.com/v1",  # cross-host, same scheme
+        "https://api.example.com/v1/elsewhere",  # same-origin too: no knob to tune
+    ):
+        with pytest.raises(HTTPError) as e:
+            handler.redirect_request(
+                req, fp=None, code=302, msg="Found",
+                headers={"location": newurl}, newurl=newurl,
+            )
+        assert e.value.code == 302
+    # the module-level opener carries the refusing handler and no plain
+    # stdlib redirect handler alongside it (build_opener replaces, not adds)
+    assert any(isinstance(h, _NoRedirectHandler) for h in _JUDGE_OPENER.handlers)
+    assert not any(type(h) is HTTPRedirectHandler for h in _JUDGE_OPENER.handlers)
+
+
+def test_3xx_response_fails_the_span_without_following(monkeypatch):
+    """A refused redirect surfaces as a 3xx HTTPError: not a format refusal
+    (no tier walk), not retried — the span records a request failure naming
+    the status, and the run continues."""
+    def _open(req, timeout=None):
+        raise http_error(302, b"Found: https://elsewhere.example.com/")
+
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
+    span, steps = _judge_input_fixture()
+    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
+    with pytest.raises(JudgeError, match="302"):
+        judge_span(span, steps, cfg, [])
+
+
+# ------------------------------------------------------------ placement exposure
+
+
+def test_exposure_state_full_clipped_unknown():
+    """The adapter-free exposure read: the portable value versus the exact
+    placement text. full when the value occurs verbatim (a trailing framing
+    cut changes nothing); clipped with the longest occurring prefix when the
+    placement carries only part of it; unknown when nothing determinable —
+    never an assumed-full."""
+    from memgraph.annotations import exposure_state
+
+    value = "use python zipfile when the unzip binary is missing"
+    full = exposure_state(value, f"## header\n- [t] k: {value}\n- footer")
+    assert full == {"state": "full", "exposed_chars": len(value),
+                    "value_chars": len(value)}
+    cut = value[:20]
+    clipped = exposure_state(value, f"- [t] k: {cut}…")
+    assert clipped == {"state": "clipped", "exposed_chars": 20,
+                       "value_chars": len(value)}
+    # placement text absent (redacted/locator), value absent, a transformed
+    # rendering, and a coincidence-grade short prefix all read unknown
+    assert exposure_state(value, None)["state"] == "unknown"
+    assert exposure_state(None, "- [t] k: x")["state"] == "unknown"
+    assert exposure_state(value, "- [t] k: use PYTHON **zipfile** now")["state"] \
+        == "unknown"
+    assert exposure_state(value, "an unrelated placement mentioning use only")[
+        "state"] == "unknown"
+
+
+def test_span_exposure_merges_to_the_widest_delivery(tmp_path):
+    """A span's exposure is the union of what its deliveries exposed: any
+    full delivery wins, else the longest clipped prefix — the judge never
+    scores less than the agent could have seen."""
+    value = REF_A["content"]["text"]
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.recall(REF_A, content=value[:14])  # clipped short
+    b.recall(REF_A, content=value[:22])  # clipped longer
+    (span,) = group_spans(_recall_ops(b, tmp_path), "T1")
+    assert span.memory_exposure == [
+        {"state": "clipped", "exposed_chars": 22, "value_chars": len(value)}
+    ]
+    b.recall(REF_A, content=f"- [insight] key_a: {value}")  # delivered whole
+    (span,) = group_spans(_recall_ops(b, tmp_path), "T1")
+    assert span.memory_exposure == [
+        {"state": "full", "exposed_chars": len(value), "value_chars": len(value)}
+    ]
+
+
+def test_span_exposure_aligns_across_a_reordered_redelivery(tmp_path):
+    """The span fingerprint is order-insensitive, so a re-delivery re-ranked
+    by a query rewrite can list the identical set in a different order: the
+    exposure merge aligns by the entry's portable identity, never by
+    position — a positional zip would lend one entry's exposure to another
+    and could credit a suffix that entry's placements never showed."""
+    va, vb = REF_A["content"]["text"], REF_B["content"]["text"]
+    b = TrajBuilder().agent_turn(with_task=True)
+    # delivery 1: [A, B] — A whole, B clipped; delivery 2: the identical
+    # set reordered — B whole, A clipped
+    b.recall([REF_A, REF_B],
+             content=f"- [insight] key_a: {va}\n- [bug] key_b: {vb[:14]}…")
+    b.recall([REF_B, REF_A], query="the same bug, re-ranked",
+             content=f"- [bug] key_b: {vb}\n- [insight] key_a: {va[:14]}…")
+    (span,) = group_spans(_recall_ops(b, tmp_path), "T1")
+    assert [m["key"] for m in span.memories] == ["key_a", "key_b"]
+    # each entry keeps its OWN widest exposure: both were shown whole once
+    assert span.memory_exposure == [
+        {"state": "full", "exposed_chars": len(va), "value_chars": len(va)},
+        {"state": "full", "exposed_chars": len(vb), "value_chars": len(vb)},
+    ]
+    # and the never-fully-shown case stays clipped: A is clipped in BOTH
+    # deliveries even though B's full record shares A's position in one
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.recall([REF_A, REF_B],
+             content=f"- [bug] key_b: {vb}\n- [insight] key_a: {va[:14]}…")
+    b.recall([REF_B, REF_A], query="the same bug, re-ranked",
+             content=f"- [bug] key_b: {vb}\n- [insight] key_a: {va[:18]}…")
+    (span,) = group_spans(_recall_ops(b, tmp_path), "T1")
+    assert span.memory_exposure == [
+        {"state": "clipped", "exposed_chars": 18, "value_chars": len(va)},
+        {"state": "full", "exposed_chars": len(vb), "value_chars": len(vb)},
+    ]
+
+
+def test_render_user_grounds_memories_to_their_exposure():
+    """The judged evidence never exceeds the exposure: a clipped entry shows
+    ONLY the exposed prefix with the clip named, an unverified value says so
+    instead of implying full visibility, and a full/default entry stays
+    bare."""
+    span, steps = _judge_input_fixture()
+    span.memory_exposure = [
+        {"state": "clipped", "exposed_chars": 1, "value_chars": 1},
+        {"state": "unknown", "exposed_chars": None, "value_chars": 1},
+    ]
+    user = render_user(span, steps)
+    assert "[EXPOSED CLIP — only the first 1 of 1 chars" in user
+    assert "judge only the exposed prefix" in user
+    assert "[EXPOSURE UNVERIFIED" in user
+    # a span built without exposure records keeps the canonical rendering
+    span.memory_exposure = []
+    assert "[EXPOSURE" not in render_user(span, steps)
+
+
+def test_cli_records_exposure_and_notes_clipped_deliveries(monkeypatch, tmp_path):
+    """The report carries each entry's exposure beside the canonical values,
+    and a clipped trajectory gets one validation note naming the fidelity
+    boundary — never a per-span note per entry."""
+    value = REF_A["content"]["text"]
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.recall(REF_A, content=value[:10])  # a prefix-only placement
+    _write_run(tmp_path / "runs", "t1", b)
+    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory([]))
+    out = tmp_path / "out"
+    rc = injudge_main.main([str(tmp_path / "runs"),
+                            "-o", str(out), "--env", str(_env(tmp_path))])
+    assert rc == 0
+    artifact = json.loads((out / "injudge-report.json").read_text())
+    op = artifact["operations"][0]
+    assert op["memories"][0]["id"] == "m1"
+    assert op["memories"][0]["value"] == value  # canonical, unchanged
+    assert op["memory_exposure"] == [
+        {"state": "clipped", "exposed_chars": 10, "value_chars": len(value)}
+    ]
+    notes = [v["msg"] for v in artifact["validation"] if "clipped by the placement" in v["msg"]]
+    assert len(notes) == 1 and "1 of 1" in notes[0]
+    # the judge input the span was scored against showed only the prefix
+    record = []
+    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory(record))
+    span = InjectionSpan(id=op["operation_id"], traj="T1", step_first=2,
+                         step_last=2, seq_first=1, seq_last=1, n_injections=1,
+                         memories=[m for m in op["memories"]],
+                         memory_exposure=op["memory_exposure"])
+    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
+    judge_span(span, [], cfg, [])  # no steps: no anchors required
+    assert value[10:] not in record[0]["messages"][1]["content"]
+
+
+def test_operation_record_carries_the_anchor_window_bounds():
+    """The per-entry footprint window ends the anchors were validated
+    against ride the operation record, so the enforced bounds stay
+    auditable from the artifact; a step-less span omits them like `steps`
+    (no window bounds anything there)."""
+    span = InjectionSpan(id="T1:S1", traj="T1", op_ids=["T1:R1"], step_first=2,
+                         step_last=3, seq_first=3, seq_last=4, n_injections=2,
+                         memories=[{"key": "key_a", "value": "v"},
+                                   {"key": "key_b", "value": "w"}])
+    span.memory_windows = {"m1": 4, "m2": None}
+    v = parse_verdict(GOOD, _FakeSpan(), [])
+    op = operation_record(span, v, {"deliveries": 2, "content_chars_total": 0,
+                                    "approx_tokens_total": 0})
+    assert op["memory_windows"] == {"m1": 4, "m2": None}
+    stepless = InjectionSpan(id="T1:S2", traj="T1", op_ids=["T1:R2"],
+                             step_first=None, step_last=None, seq_first=5,
+                             seq_last=5, n_injections=1, fingerprint="x",
+                             memories=[{"key": "k", "value": "v"}])
+    assert "memory_windows" not in operation_record(
+        stepless, auto_verdict_no_subsequent_turn(stepless), {"deliveries": 1})
+
+
+# ------------------------------------------------- the span-relative contract
+
+
+def _semantic_answers(*bodies):
+    """A stub answering each body in order (the last repeats); each call is
+    recorded so the test can see the corrective retries."""
+    calls = []
+
+    def _open(req, timeout=None):
+        calls.append(json.loads(req.data.decode()))
+        body = bodies[min(len(calls) - 1, len(bodies) - 1)]
+        return FakeResponse({"choices": [{"message": {"content": body}}]})
+
+    return _open, calls
+
+
+def test_empty_memories_array_is_corrected_and_the_second_answer_wins(monkeypatch):
+    """The offline-replayed F3 failure: a valid JSON object with an EMPTY
+    memories array passes the shape check; the span-relative coverage check
+    rejects it inside the attempt loop, the corrective note is sent, and a
+    good second answer is consumed — never a zero-coverage error off the
+    first answer."""
+    bad = json.dumps({"memories": [], "analysis": "", "evidence": [],
+                      "confidence": 0.5})
+    good = json.dumps({"memories": [
+        {"id": "m1", **_signals(inf="acted_on", pe="improved"), "anchors": [1]},
+        {"id": "m2", **_signals(), "anchors": []},
+    ], "analysis": "ok", "evidence": [], "confidence": 0.9})
+    _open, calls = _semantic_answers(bad, good)
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
+    span, steps = _judge_input_fixture()
+    warnings: list[str] = []
+    verdict = judge_span(span, steps, JudgeConfig("http://x", "k", "m"), warnings)
+    assert verdict["verdict"] == "positive"
+    assert len(calls) == 2
+    # the retry carried the corrective note, so it was never a blind repeat
+    assert "not valid per the output contract" in calls[1]["messages"][-1]["content"]
+    assert warnings == []  # a corrected answer leaves no stale failure note
+
+
+def test_unknown_id_answer_is_corrected_not_dropped(monkeypatch):
+    """A `[type] key`-style or otherwise unknown id is a coverage violation:
+    corrected inside the loop, never silently dropped from the rubric."""
+    bad = json.dumps({"memories": [
+        {"id": "[insight] key_a", **_signals(), "anchors": []},
+    ], "analysis": "", "evidence": [], "confidence": 0.5})
+    good = json.dumps({"memories": [
+        {"id": "m1", **_signals(inf="acted_on", pe="improved"), "anchors": [2]},
+        {"id": "m2", **_signals(), "anchors": []},
+    ], "analysis": "", "evidence": [], "confidence": 0.9})
+    _open, calls = _semantic_answers(bad, good)
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
+    span, steps = _judge_input_fixture()
+    warnings: list[str] = []
+    verdict = judge_span(span, steps, JudgeConfig("http://x", "k", "m"), warnings)
+    assert verdict["verdict"] == "positive"
+    assert len(calls) == 2
+
+
+def test_coverage_exhaustion_is_an_error_naming_the_violation(monkeypatch):
+    bad = json.dumps({"memories": [], "analysis": "", "evidence": [],
+                      "confidence": 0.5})
+    _open, calls = _semantic_answers(bad)
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
+    span, steps = _judge_input_fixture()
+    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", max_attempts=2)
+    verdict = judge_span(span, steps, cfg, [])
+    assert verdict["verdict"] == "error"
+    assert "covers ids" in verdict["error"]
+    assert len(calls) == 2  # the attempt budget, then failure
+
+
+def test_acted_on_without_anchors_is_corrected(monkeypatch):
+    """The structured causal evidence an acted-on claim must carry: no
+    anchors, no accepted verdict — the loop corrects, exhaustion errors."""
+    bad = json.dumps({"memories": [
+        {"id": "m1", **_signals(inf="acted_on", pe="improved"), "anchors": []},
+        {"id": "m2", **_signals(), "anchors": []},
+    ], "analysis": "", "evidence": [], "confidence": 0.9})
+    good = json.dumps({"memories": [
+        {"id": "m1", **_signals(inf="acted_on", pe="improved"), "anchors": [2]},
+        {"id": "m2", **_signals(), "anchors": []},
+    ], "analysis": "", "evidence": [], "confidence": 0.9})
+    _open, _calls = _semantic_answers(bad, good)
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
+    span, steps = _judge_input_fixture()
+    warnings: list[str] = []
+    verdict = judge_span(span, steps, JudgeConfig("http://x", "k", "m"), warnings)
+    assert verdict["verdict"] == "positive"
+    assert len(warnings) == 0  # corrected before any failure was recorded
+
+
+def test_pre_span_and_out_of_window_anchors_are_rejected(monkeypatch):
+    """The F2 temporal rule, enforced: an anchor before the span's first
+    step (crediting a patch the agent had already applied) or past the
+    memory's re-delivery bound is not evidence for this span — the answer is
+    corrected, and a stubborn one errors naming the window."""
+    span, steps = _judge_input_fixture()
+    span.step_first = span.step_last = 4  # the injection lands mid-stream
+    span.memory_windows = {"m1": 5, "m2": 5}  # both re-delivered from step 6
+    pre_span = json.dumps({"memories": [
+        {"id": "m1", **_signals(inf="decisive", pe="improved"), "anchors": [1]},
+        {"id": "m2", **_signals(), "anchors": []},
+    ], "analysis": "", "evidence": [], "confidence": 0.93})
+    _open, _calls = _semantic_answers(pre_span)
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
+    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", max_attempts=2)
+    verdict = judge_span(span, steps, cfg, [])
+    assert verdict["verdict"] == "error"
+    assert "outside its footprint window" in verdict["error"]
+
+    past_bound = json.dumps({"memories": [
+        {"id": "m1", **_signals(inf="acted_on", pe="improved"), "anchors": [7]},
+        {"id": "m2", **_signals(), "anchors": []},
+    ], "analysis": "", "evidence": [], "confidence": 0.9})
+    _open2, _c2 = _semantic_answers(past_bound)
+    monkeypatch.setattr("injudge.judge.urlopen", _open2)
+    verdict = judge_span(span, steps, cfg, [])
+    assert verdict["verdict"] == "error" and "footprint window" in verdict["error"]
+
+
+def test_anchor_past_the_stream_end_is_rejected(monkeypatch):
+    """A never-re-delivered memory's window is the stream's end, and the
+    stream's end is a real number: an anchor citing a step past the last
+    recorded step is a hallucination — corrected on the retry, and a
+    stubborn one errors naming the stream's actual last step."""
+    span, steps = _judge_input_fixture()  # the stream carries steps 1–2
+    span.memory_windows = {"m1": None, "m2": None}  # never re-delivered
+    hallucinated = json.dumps({"memories": [
+        {"id": "m1", **_signals(inf="decisive", pe="improved"), "anchors": [99]},
+        {"id": "m2", **_signals(), "anchors": []},
+    ], "analysis": "", "evidence": [], "confidence": 0.9})
+    good = json.dumps({"memories": [
+        {"id": "m1", **_signals(inf="acted_on", pe="improved"), "anchors": [2]},
+        {"id": "m2", **_signals(), "anchors": []},
+    ], "analysis": "", "evidence": [], "confidence": 0.9})
+    _open, calls = _semantic_answers(hallucinated, good)
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
+    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", max_attempts=2)
+    verdict = judge_span(span, steps, cfg, [])
+    assert verdict["verdict"] == "positive"
+    assert len(calls) == 2  # the corrective retry was sent and its answer consumed
+
+    _open2, _c2 = _semantic_answers(hallucinated)
+    monkeypatch.setattr("injudge.judge.urlopen", _open2)
+    verdict = judge_span(span, steps, cfg, [])
+    assert verdict["verdict"] == "error"
+    assert "ends at step 2" in verdict["error"]
+
+
+def test_verdict_semantics_anchor_bound_is_never_silently_dropped():
+    """The stream-end anchor bound is a required argument (None only as the
+    explicit no-stream choice): a direct caller cannot omit it and leave a
+    never-re-delivered memory's window open past the stream's end."""
+    import inspect
+
+    from injudge.judge import _scoring_call, _verdict_semantics
+
+    assert inspect.signature(_scoring_call).parameters["last_step"].default is inspect.Parameter.empty
+    assert inspect.signature(_verdict_semantics).parameters["last_step"].default is inspect.Parameter.empty
+    span, _steps = _judge_input_fixture()  # steps 1–2; m1 never re-delivered
+    span.memory_windows = {"m1": None, "m2": None}
+    obj = json.loads(GOOD)  # m1 anchors at step 2 — the stream's last step
+    assert _verdict_semantics(obj, span, 2) is None
+    obj["memories"][0]["anchors"] = [99]  # past the stream's end
+    assert "outside its footprint window" in _verdict_semantics(obj, span, 2)
+    assert _verdict_semantics(obj, span, None) is None  # explicit: no stream held
+
+
+def test_anchor_and_coverage_violations_never_degrade_the_tier(monkeypatch):
+    """A semantic violation is a model error at the structured tier too —
+    constrained decoding cannot know this span's ids or windows, so it is
+    never a free tier discovery (the memo must not move off one span's
+    wrong-answer)."""
+    bad = json.dumps({"memories": [], "analysis": "", "evidence": [],
+                      "confidence": 0.5})
+    _open, calls = _semantic_answers(bad)
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
+    span, steps = _judge_input_fixture()
+    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", max_attempts=2)
+    verdict = judge_span(span, steps, cfg, [])
+    assert verdict["verdict"] == "error"
+    # both attempts carried the SAME (structured) format field: no degrade
+    assert calls[0]["response_format"]["type"] == "json_schema"
+    assert calls[1]["response_format"]["type"] == "json_schema"
+    assert cfg.learned_tier == "structured"
+
+
+def test_scoring_prompts_state_the_evidence_rules():
+    """The F2/F5 prompt groundings ride the assembled prompts: context is
+    not memory content, changed action beats continuation, the task
+    statement is a citable novelty baseline without a step number, the
+    delivered-memories note bounds judgment to the exposure, and the answer
+    contract demands ids with in-window anchors."""
+    from injudge.judge import MEMORIES_NOTE
+
+    for prompt in (SYSTEM_PROMPT, GOLD_SYSTEM_PROMPT):
+        assert "Context is not memory content" in prompt
+        assert "Changed action, not continuation" in prompt
+        assert "naming it as the task statement is the correct citation" in prompt
+        assert "CONTEXT, not memory content" in prompt
+        assert "one entry per delivered memory id" in prompt
+        assert "Anchors outside the memory's window are rejected" in prompt
+    assert "an exposure marker bounds what" in MEMORIES_NOTE
+
+
+# ------------------------------------------------------------- stdout honesty
+
+
+def test_print_summary_names_denominators_and_error_buckets(capsys):
+    """F6: the cost line includes the error/unjudged token buckets the
+    rates exclude, the headline labels its wasted-share numerator and
+    denominator, and the improved rate names its judged-effects
+    population."""
+    ops = [
+        _op("T1:S1", "positive", 0.9,
+            rubric={"m1": _signals(inf="acted_on", pe="improved")},
+            memories=[{"key": "k", "id": "m1"}],
+            cost={"content_chars_total": 400, "approx_tokens_total": 100}),
+        _op("T1:S2", "neutral", 0.9,
+            rubric={"m1": _signals(inf="acted_on", pe="no_effect")},
+            memories=[{"key": "k", "id": "m1"}],
+            cost={"content_chars_total": 400, "approx_tokens_total": 100}),
+        _op("T1:S3", "error", None,
+            cost={"content_chars_total": 400, "approx_tokens_total": 100}),
+        _op("T1:S4", "unjudged", None,
+            cost={"content_chars_total": 400, "approx_tokens_total": 100}),
+    ]
+    artifact = build_artifact({}, [{"id": "T1", "run_id": "r"}], ops, [], {"T1": 4}, [])
+    assert print_summary(artifact) == 1
+    out = capsys.readouterr().out
+    assert "!100 error" in out and "?100 unjudged" in out
+    assert "in no rate or share" in out
+    # the buckets reconcile: 4 x 100 total, 3 of them named by class
+    assert "≈400 injected tokens" in out
+    assert "wasted-token share 50% (neutral+negative ≈100 of ≈200 judged-class" in out
+    assert "≈200 error/unjudged tokens in no denominator" in out
+    # the improved rate names its population, never a bare "of the influential"
+    assert "positive_effect improved 50% (1 of 2 judged effects)" in out
+
+
+def test_policy_rollup_carries_extraction_reliability():
+    """F6: the overall policy block sums the per-trajectory extraction
+    reliability — a memory-system quality dimension separate from the
+    judge's error spans."""
+    trajectories = [
+        {"policy": {"n_extractions": 10, "extraction_failures": 2, "n_steps": 5}},
+        {"policy": {"n_extractions": 5, "extraction_failures": 1, "n_steps": 5}},
+        {"policy": {"n_steps": 5}},  # no generations recorded: no zeros
+    ]
+    pol = policy_rollup(trajectories)
+    assert pol["n_extractions"] == 15 and pol["extraction_failures"] == 3
+
+
+# --------------------------------------------------------------- run manifest
+
+
+def test_cli_manifest_is_resolved_and_secret_free(monkeypatch, tmp_path):
+    """F9: the tool block records the resolved, secret-free configuration
+    the run judged with — never the API key, never a URL's userinfo or
+    query string — and the summary carries the judge identity too."""
+    b = TrajBuilder().agent_turn(with_task=True).recall(REF_A)
+    _write_run(tmp_path / "runs", "t1", b)
+    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory([]))
+    env = tmp_path / ".env"
+    env.write_text(
+        "BASE_URL=https://user:secretpw@judge.local/v1?token=hush\n"
+        "API_KEY=sk-live-abcdef123456\n"
+        "MODEL=judge-m\n"
+        "THINKING=enabled\n"
+        "THINKING_EFFORT=high\n"
+        "JUDGE_PARALLEL=2\n"
+        "JUDGE_INPUT_TOKENS=900000\n"
+    )
+    out = tmp_path / "out"
+    rc = injudge_main.main([str(tmp_path / "runs"), "-o", str(out), "--env", str(env)])
+    assert rc == 0
+    artifact = json.loads((out / "injudge-report.json").read_text())
+    cfg = artifact["tool"]["config"]
+    assert cfg["api"] == "openai-chat" and "api_key" not in cfg
+    assert cfg["base_url"] == "https://judge.local/v1"  # no userinfo/query
+    assert cfg["thinking"] == "enabled" and cfg["thinking_effort"] == "high"
+    assert cfg["judge_parallel"] == 2
+    assert cfg["scan"]["input_tokens"] == 900000
+    blob = json.dumps(artifact)
+    assert "sk-live-abcdef123456" not in blob and "secretpw" not in blob
+    assert "token=hush" not in blob
+    summary = json.loads((out / "summary.json").read_text())
+    assert summary["tool"]["judge_model"] == "judge-m"
+    assert summary["tool"]["config"]["base_url"] == "https://judge.local/v1"
+
+
+def test_safe_endpoint_survives_a_bad_port():
+    """resolve's URL check (Request construction) accepts a port urlsplit
+    refuses to cast — non-numeric or out of range — so the manifest
+    spelling must degrade to "(unparsed)" there instead of raising at
+    report time; userinfo and query strings never survive a good URL."""
+    _safe = injudge_main._safe_endpoint
+    assert _safe("http://host:notaport/v1") == "(unparsed)"
+    assert _safe("http://host:99999/v1") == "(unparsed)"
+    assert _safe("not a url") == "(unparsed)"
+    assert _safe("https://judge.local:8443/v1?token=x") == "https://judge.local:8443/v1"
+    assert _safe("https://user:pw@[::1]:8443/v1") == "https://[::1]:8443/v1"
+    assert _safe("https://user:pw@judge.local") == "https://judge.local"

@@ -37,9 +37,12 @@ uv run -m memgraph <paths> --verdicts output/injudge-report.json -o memgraph-ver
 ## 工作原理
 
 injudge 把内容相同的重复注入归并为**区间（span）**，让评审模型对每条投递
-记忆打五个信号（relevance、accuracy、novelty、influence、positive
-effect），再由代码推导区间判定：任一记忆被误用 ⇒ **negative**，否则任一
-被采纳 ⇒ **positive**，否则 **neutral**。映射、示例与汇总公式见
+记忆条目打五个信号（relevance、accuracy、novelty、influence、positive
+effect，按稳定的区间本地 id 逐条评分），再由代码推导区间判定：任一记忆
+被误用 ⇒ **negative**，否则任一被采纳 ⇒ **positive**，否则 **neutral**。
+被评判的证据不超出录制 placement 实际曝光的内容（被截断的值只按已曝光
+前缀评判；无法确定的曝光标记为未验证），acted-on 的影响力断言必须携带
+落在该记忆足迹窗口内的动作步骤锚点。映射、示例与汇总公式见
 [判定推导](doc/zh-CN/verdict-derivation.md)。长轨迹走分块证据扫描；输入不
 为凑预算而截断。
 

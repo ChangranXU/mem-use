@@ -39,6 +39,13 @@ from pathlib import Path
 
 from injudge.judge import GoldInput
 
+# The SWE-bench-style harness report's list fields: the outcome lists carry
+# the resolved bit, the failure lists mark harness failures (an errored or
+# incomplete instance is no outcome). Defined once — the format recognizer
+# and the join below must never drift apart on a hand-edited copy.
+_HARNESS_FAILURE_FIELDS = ("error_ids", "incomplete_ids")
+_HARNESS_LIST_FIELDS = ("resolved_ids", "unresolved_ids", *_HARNESS_FAILURE_FIELDS)
+
 
 def _is_harness_report(obj: dict) -> bool:
     """Format recognition: one harness list field present, valid or corrupt —
@@ -47,10 +54,7 @@ def _is_harness_report(obj: dict) -> bool:
     non-list still IS this format (misreading either as "no known format"
     would misdirect the operator; the outcome is absent either way, and a
     corrupt field must be named by the caller — degrade, never silently)."""
-    return any(
-        obj.get(key) is not None
-        for key in ("resolved_ids", "unresolved_ids", "error_ids", "incomplete_ids")
-    )
+    return any(obj.get(key) is not None for key in _HARNESS_LIST_FIELDS)
 
 
 def _harness_correctness(obj: dict, instance_id: str | None) -> tuple[dict | None, str | None]:
@@ -64,7 +68,7 @@ def _harness_correctness(obj: dict, instance_id: str | None) -> tuple[dict | Non
         return None, None  # not this format
     corrupt = [
         key
-        for key in ("resolved_ids", "unresolved_ids", "error_ids", "incomplete_ids")
+        for key in _HARNESS_LIST_FIELDS
         if obj.get(key) is not None and not isinstance(obj.get(key), list)
     ]
 
@@ -76,7 +80,7 @@ def _harness_correctness(obj: dict, instance_id: str | None) -> tuple[dict | Non
     unresolved = unresolved if isinstance(unresolved, list) else []
     failed = [
         x
-        for key in ("error_ids", "incomplete_ids")
+        for key in _HARNESS_FAILURE_FIELDS
         for x in (obj.get(key) if isinstance(obj.get(key), list) else [])
     ]
     if not instance_id:
@@ -85,7 +89,7 @@ def _harness_correctness(obj: dict, instance_id: str | None) -> tuple[dict | Non
     hits = (
         (["resolved_ids"] if instance_id in resolved else [])
         + (["unresolved_ids"] if instance_id in unresolved else [])
-        + (["error_ids/incomplete_ids"] if instance_id in failed else [])
+        + (["/".join(_HARNESS_FAILURE_FIELDS)] if instance_id in failed else [])
     )
     if len(hits) > 1:
         # one instance in several mutually exclusive lists is a contradictory
@@ -228,7 +232,7 @@ def load_harness_report(path: Path) -> dict:
     if not _is_harness_report(obj):
         raise SystemExit(
             f"error: the harness report file {path} matches no harness-report "
-            "shape (no resolved_ids/unresolved_ids/error_ids/incomplete_ids field)"
+            f"shape (no {'/'.join(_HARNESS_LIST_FIELDS)} field)"
         )
     return obj
 

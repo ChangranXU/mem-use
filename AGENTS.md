@@ -4,7 +4,7 @@
   memory-system quality. Two read-only tools share one parsing core:
   **memgraph** renders every memory operation and its relationships as a
   self-contained HTML/JSON graph; **injudge** scores each recall injection's
-  impact with an LLM rubric and emits the `injudge.report/v6` artifact
+  impact with an LLM rubric and emits the `injudge.report/v7` artifact
   (feedable back into memgraph via `--verdicts`). The methodology in one
   line: an injection is judged by its *subsequent influence* on the agent —
   never by the final task result.
@@ -76,6 +76,23 @@
   reuse that rule, never re-derive it.
 - injudge's span verdict is derived in code from the rubric (any misused ⇒
   negative, else any used ⇒ positive, else neutral) — never asked of the LLM.
+  The judge contract keys every rubric entry by a span-local memory id
+  (`m1`, `m2`, … per delivered entry — display keys are labels), and two
+  span-relative semantic checks run INSIDE the attempt loop via the
+  contract's validate hook: exact id coverage (one entry per delivered
+  entry) and action anchors (acted-on/decisive claims cite step numbers
+  inside that entry's footprint window, never past the step stream's
+  end). A shape-valid answer failing
+  either is a model error at every tier — never a free tier discovery
+  (constrained decoding cannot know the span's ids or windows) — so it
+  takes the corrective retry, and exhaustion is a visible `error`, never a
+  silently partial verdict. The judged input grounds every memory to its
+  recorded placement exposure (adapter-free value-vs-placement compare:
+  full / clipped prefix only / unknown-marked), so the judged evidence
+  never exceeds what the agent could have seen. HTTP redirects are refused
+  outright on every judge call (both clients): the stdlib redirect handler
+  would forward the credential headers to any Location (cross-host or
+  HTTPS→HTTP downgrade), so a 3xx fails the span as a request fault instead.
   The judge walks the conformance tier chain structured → json → prompt
   (anthropic: structured → prompt); tier discovery on a 400/422 or a
   proven-ignored format field is free, everything else consumes
@@ -128,7 +145,7 @@ memgraph/model.py            # Trajectory / MemoryOp / MemoryUnit / Edge datacla
 memgraph/parse_trajectory.py # trajectory.jsonl → ops (annotation-driven, turn table)
 memgraph/graph.py            # path discovery, cross-trajectory linking, validation
 memgraph/html.py             # self-contained HTML renderer (template + embedded graph JSON)
-memgraph/verdicts.py         # merge injudge.report/v6 verdicts onto recall ops
+memgraph/verdicts.py         # merge injudge.report/v7 verdicts onto recall ops
 memgraph/__main__.py         # CLI: python3 -m memgraph
 injudge/model.py             # AgentStep / ToolExec / InjectionSpan dataclasses
 injudge/steps.py             # agent-lane step stream + all-lane billed prompt tokens
@@ -138,7 +155,7 @@ injudge/scan.py              # overflow path: chunk knobs, evidence extraction, 
 injudge/gold.py              # golden-answer / correctness sidecars (harness-report + plain shapes)
 injudge/prompts.py           # loads prompt files from prompts/ (never inline prompts in code)
 injudge/aggregate.py         # verdict counts/rates, per-memory usage roll-ups
-injudge/report.py            # injudge.report/v6 artifact + injudge.summary/v3 stats, stdout summary
+injudge/report.py            # injudge.report/v7 artifact + injudge.summary/v4 stats, stdout summary
 injudge/__main__.py          # CLI: python3 -m injudge
 prompts/                     # every LLM prompt, as files grouped by tool/purpose folder
 doc/                         # user docs, GitBook layout (LANGS.md + en/ + zh-CN/, each with SUMMARY.md)
@@ -241,9 +258,21 @@ These are load-bearing; never weaken them:
   markers by each marker's own `on_memory_lane` flag, computed at parse time
   against the final lane set) are still part of the JSON contract — the HTML
   embeds the same dict by design; do not prune them from one consumer only.
-- injudge writes `injudge.report/v6` (`{tool, generated_at, trajectories,
+- injudge writes `injudge.report/v7` (`{tool, generated_at, trajectories,
   operations, injections, aggregates, validation}`), rewritten after every
-  trajectory so a crash keeps completed work. Each operation that hit the
+  trajectory so a crash keeps completed work. The rubric and memory_usage are
+  keyed by span-local entry ids (`m1`, `m2`, … per delivered entry, stamped
+  on the operation's `memories`): display keys are labels only, so two
+  entries sharing a key (distinct identities, or two versions in one
+  delivery) are judged independently, each rubric entry carries its judged
+  action `anchors` (validated against `memory_windows`, the per-entry
+  footprint-window ends recorded on the operation), and `memory_exposure`
+  records per entry what the
+  placement actually showed (`full` / `clipped` prefix length / `unknown` —
+  the judge scores the exposure, never an unseen suffix; canonical values
+  and digests are never overwritten). `tool.config` carries the resolved,
+  secret-free judge/scan configuration (URLs sanitized to
+  scheme://host[:port][/path]). Each operation that hit the
   input budget gate carries an `input` record (`{"path": "full"}` or
   `{"path": "scan", "chunks", "none_chunks", "evidence_tokens"}`, plus the
   `"gold"` regime marker and the `"over_budget"` send-as-is marker when they
@@ -256,7 +285,7 @@ These are load-bearing; never weaken them:
   never lose the span.
   `aggregates.overall` counts the regimes (`input_paths`, `gold_scored`,
   `over_budget`).
-  The companion `summary.json` (`injudge.summary/v3`) is the final
+  The companion `summary.json` (`injudge.summary/v4`) is the final
   statistics set of the run: counts/rates, rubric distributions, cost,
   confidence, judge compliance (the positive_effect↔influence correction
   rate), per-trajectory extraction reliability (`n_extractions` /
@@ -265,8 +294,10 @@ These are load-bearing; never weaken them:
   / `model` / `adapter` when recorded) with a narrative-free span index
   (verdict / confidence / usage labels). Empty rate/headline/rubric/
   confidence/cost shells are omitted when a trajectory had no judged spans.
-  The headline binds the span rates to the wasted-token share and states a
-  caveat when the negative rate is 0 but the wasted share is high.
+  The headline binds the span rates to the wasted-token share, names the
+  share's numerator/denominator (`wasted_tokens` / `judged_tokens`), shows
+  `error_unjudged_tokens` when non-zero, and states the proxy caveat
+  whenever the wasted share is high — zero-negative or not.
   Identities sharing one display key carry a `key#<item-or-namespace>`
   suffix (8-char prefix, full base on a prefix collision) so the tallies
   never conflate memories the report tells apart. Narrative and

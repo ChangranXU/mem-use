@@ -28,6 +28,7 @@ import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 try:
     from tqdm import tqdm
@@ -50,6 +51,7 @@ from injudge.gold import (
 from injudge.judge import (
     MAX_PARALLEL,
     GoldInput,
+    JudgeConfig,
     JudgeError,
     _gate_over_budget,
     _gate_tokens,
@@ -80,6 +82,86 @@ from memgraph.graph import build_graph, load_trajectories
 from memgraph.html import render_html
 from memgraph.model import MemoryOp, Trajectory
 from memgraph.verdicts import apply_verdicts
+
+
+def _safe_endpoint(url: str) -> str:
+    """A shareable spelling of an endpoint URL: scheme://host[:port][/path].
+    Query strings and userinfo are dropped — either can carry a secret (a
+    proxy token in ?key=, credentials in user@host), and the manifest
+    exists to make the run reproducible, never to leak them. An unparseable
+    or non-HTTP(S) value reads as "(unparsed)" — resolve's URL check
+    (Request construction) rejects bracket-mangled pastes but not a
+    non-numeric/out-of-range port, whose `.port` access raises ValueError
+    only here."""
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return "(unparsed)"
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return "(unparsed)"
+    host = parts.hostname
+    # an IPv6 host needs its brackets back (urlsplit strips them)
+    if ":" in host and port:
+        netloc = f"[{host}]:{port}"
+    elif ":" in host:
+        netloc = f"[{host}]"
+    elif port:
+        netloc = f"{host}:{port}"
+    else:
+        netloc = host
+    return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+
+
+def _run_manifest(
+    cfg: JudgeConfig, scan: ScanConfig | None, judge_parallel: int
+) -> dict:
+    """The resolved, secret-free configuration the run actually judged
+    with: a saved report is replayable evidence only if its judge settings
+    are recoverable from it. Never the API key, never a URL's
+    userinfo/query (see _safe_endpoint); runtime-mutating state
+    (learned_tier) and the credentials stay out by construction."""
+    manifest: dict = {
+        "api": cfg.api,
+        "base_url": _safe_endpoint(cfg.base_url),
+        "timeout_s": cfg.timeout,
+        "max_attempts": cfg.max_attempts,
+        "max_tokens": cfg.max_tokens,
+        "temperature": cfg.temperature,
+        "output_format": cfg.output_format,
+        "judge_parallel": judge_parallel,
+    }
+    for key in ("thinking", "thinking_effort", "thinking_budget"):
+        if getattr(cfg, key) is not None:
+            manifest[key] = getattr(cfg, key)
+    if scan is not None:
+        scan_cfg: dict = {
+            "parallel": scan.parallel,
+            "input_tokens": scan.input_tokens,
+            "chunk_steps": scan.chunk_steps,
+            "chunk_tokens": scan.chunk_tokens,
+            "neighborhood": scan.neighborhood,
+            "evidence_tokens": scan.evidence_tokens,
+        }
+        ext = scan.extraction
+        if ext is not None:
+            scan_cfg.update(
+                {
+                    "api": ext.api,
+                    "base_url": _safe_endpoint(ext.base_url),
+                    "model": ext.model,
+                    "thinking": ext.thinking,
+                    "max_attempts": ext.max_attempts,
+                    "max_tokens": ext.max_tokens,
+                    "temperature": ext.temperature,
+                    "output_format": ext.output_format,
+                }
+            )
+            for key in ("thinking_effort", "thinking_budget"):
+                if getattr(ext, key) is not None:
+                    scan_cfg[key] = getattr(ext, key)
+        manifest["scan"] = scan_cfg
+    return manifest
 
 
 def _unjudged(reason: str) -> dict:
@@ -444,7 +526,15 @@ def main(argv: list[str] | None = None) -> int:
         atomic_write(report_path, json.dumps(artifact, indent=1, ensure_ascii=False) + "\n")
 
     def tool_cfg() -> dict:
-        return {"judge_model": cfg.model if cfg else None}
+        if cfg is None:
+            return {"judge_model": None}  # a dry run (flush never runs there)
+        return {
+            "judge_model": cfg.model,
+            # the resolved, secret-free settings the run judged with — a
+            # report is replayable evidence only if its configuration is
+            # recoverable from it (see _run_manifest)
+            "config": _run_manifest(cfg, scan_cfg, judge_parallel),
+        }
 
     progress = _Progress(len(trajs), enabled=not args.dry_run)
     for t in trajs:
@@ -459,6 +549,44 @@ def main(argv: list[str] | None = None) -> int:
         recall_ops = [op for op in ops if op.kind == "recall"]
         ops_by_id = {op.id: op for op in recall_ops}
         spans = group_spans(recall_ops, t.id)
+        # placement-exposure summary: the fidelity boundary between the
+        # canonical values and what the agent actually saw — one note per
+        # trajectory (per-span detail rides each operation's
+        # memory_exposure), never one per span
+        clipped_entries = sum(
+            1
+            for span in spans
+            for exp in span.memory_exposure
+            if exp.get("state") == "clipped"
+        )
+        unknown_entries = sum(
+            1
+            for span in spans
+            for exp in span.memory_exposure
+            if exp.get("state") == "unknown"
+        )
+        total_entries = sum(len(span.memories) for span in spans)
+        if clipped_entries:
+            validation.append(
+                {
+                    "level": "warn",
+                    "msg": f"{run_id}: {clipped_entries} of {total_entries} span "
+                           "memory entries were delivered clipped by the placement "
+                           "budget; the judge scores only each entry's exposed "
+                           "prefix, never the unshown suffix",
+                }
+            )
+        if unknown_entries:
+            validation.append(
+                {
+                    "level": "warn",
+                    "msg": f"{run_id}: {unknown_entries} of {total_entries} span "
+                           "memory entries have undeterminable placement exposure "
+                           "(redacted/unrecorded placement, or a renderer that "
+                           "transformed the value); the judge input marks them "
+                           "unverified instead of implying full visibility",
+                }
+            )
         progress.start_trajectory(t.instance_id or run_id, len(spans))
         n_injections_by_traj[t.id] = len(recall_ops)
         # delivery cost per span: the exact placement content size recorded

@@ -1,5 +1,5 @@
 ---
-description: "injudge.report/v6、injudge.summary/v3、全部字段，以及每项比率如何计数。"
+description: "injudge.report/v7、injudge.summary/v4、全部字段，以及每项比率如何计数。"
 icon: box-archive
 ---
 
@@ -11,8 +11,8 @@ injudge 的全部产物写入输出目录（`-o DIR`，默认 `output/`）。
 
 | 文件 | Schema | 作用 |
 |---|---|---|
-| `injudge-report.json` | `injudge.report/v6` | 运行时评审记录。每条轨迹完成后重写，崩溃也保留已完成部分。用 `--verdicts` 喂给 memgraph。 |
-| `summary.json` | `injudge.summary/v3` | 最终统计集合：计数、比率，以及无叙述的区间索引。 |
+| `injudge-report.json` | `injudge.report/v7` | 运行时评审记录。每条轨迹完成后重写，崩溃也保留已完成部分。用 `--verdicts` 喂给 memgraph。 |
+| `summary.json` | `injudge.summary/v4` | 最终统计集合：计数、比率，以及无叙述的区间索引。 |
 | `memgraph-verdicts.html` | — | 仅在 `--html` 时产出（默认关闭）：召回节点按区间判定着色的 memgraph。 |
 
 memgraph 的 `--json` 产物是 `{tool, trajectories, ops, memories, edges, validation}`——与 HTML 内嵌的同一个 dict。见 [memgraph](memgraph.md#图模型)。
@@ -48,11 +48,11 @@ $$
 \mathrm{rates}[v] = \frac{\mathrm{count}[v]}{\mathrm{positive} + \mathrm{negative} + \mathrm{neutral}}
 $$
 
-`headline.judged_spans` 就是该分母。`headline.wasted_token_share` 是 neutral 与 negative 区间的注入 token 成本占已评判区间成本的份额：花在没有帮助的注入上的预算。headline 始终把区间判定率与 wasted-token share 一起呈现——negative 率为零单独看会把"被无视的灌水"误读为"无害"；当 negative 率为 0 而浪费份额偏高（> 0.5）时，`headline.caveat` 会指明两种已知的粗糙性（区间级代理，以及判定的不对称：被无视的垃圾是 neutral；只有 acted-on 且无效或有害才是 negative）。
+`headline.judged_spans` 就是该分母。`headline.wasted_token_share` 是 neutral 与 negative 区间的注入 token 成本占已评判区间成本的份额——一个**区间级"无收益投递"代理**：neutral 区间被引用的记忆计入浪费，positive 区间被无视的记忆计入产出，混合捆绑整体按其判定计费；因此份额的分子与分母（`wasted_tokens` / `judged_tokens`）随行命名，被排除的 error/unjudged token 在非零时以 `error_unjudged_tokens` 呈现；且只要份额偏高（> 0.5），`headline.caveat` 就会重申两种已知的粗糙性（区间级代理，以及判定的不对称：被无视的垃圾是 neutral；只有 acted-on 且无效或有害才是 negative）——不会因为存在少量 negative 区间而消失。
 
 ### 评分比率
 
-总体是 LLM 已评判区间上的已打分投递（`区间 × key`）。全空的覆盖缺口行会被跳过；为 null 的信号值绝不进入分母。
+总体是 LLM 已评判区间上的已打分投递（`区间 × 投递条目`，按条目的区间本地 id 键控）。全空的覆盖缺口行会被跳过；为 null 的信号值绝不进入分母。
 
 | 比率 | 分子 | 分母 | 读作 |
 |---|---|---|---|
@@ -66,11 +66,11 @@ $$
 
 ### 排查清单
 
-`inaccurate_keys` 收集 `accuracy` 为 `contradicted` 的身份；`irrelevant_keys` 收集 `relevance` 为 `false` 的身份。每条带上产生它的区间 id。同一次操作中一个 key 对应多个 `(namespace, item)` 身份时，每个身份都会入账。
+`inaccurate_keys` 收集 `accuracy` 为 `contradicted` 的身份；`irrelevant_keys` 收集 `relevance` 为 `false` 的身份。每条带上产生它的区间 id。每个投递条目恰好映射回其自身投递的一个 `(namespace, item)` 身份，因此一个 key 由多个身份投递时，每个身份都会入账。未携带已录制身份（无 `item_id`、无 key——如 redacted 匿名引用）的条目没有可联结的身份对：按区间作用域入账（其 `item_id` 记录操作与区间内 id），两个区间的无身份条目绝不合并。
 
 ### 逐记忆使用
 
-只在 LLM 已评判区间上按 `(namespace, item)` 合并。对多 item 投递的联合判断会在每个身份下计数。当首尾两个*已录制* value 都存在且不同时，`value_drift` 为 true；redact（未录制）的末端不是 drift。
+只在 LLM 已评判区间上按 `(namespace, item)` 合并。对多 item 投递的联合判断会在每个身份下计数。当首尾两个*已录制* value 都存在且不同时，`value_drift` 为 true；redact（未录制）的末端不是 drift。无身份条目与上文排查清单一样按区间作用域入账。
 
 ### 交付成本与策略
 
@@ -88,7 +88,7 @@ $$
 
 ## summary.json 字段
 
-顶层：`tool.schema`、`generated_at`、`overall`（全部轨迹合并）、`trajectories`（逐轨迹块，含同样的统计外加区间索引）。每条轨迹在有记录时带上 `instance_id` / `model` / `adapter`。
+顶层：`tool.schema`、`tool.judge_model`、`tool.config`（本次运行实际使用的、已解析且无密钥的评审/扫描配置）、`generated_at`、`overall`（全部轨迹合并）、`trajectories`（逐轨迹块，含同样的统计外加区间索引）。每条轨迹在有记录时带上 `instance_id` / `model` / `adapter`。
 
 每个聚合块（`overall` 与每条轨迹）：
 
@@ -102,8 +102,9 @@ $$
 | `rates` | 已评判区间上的判定占比（无评判时省略） |
 | `headline.judged_spans` | 比率的分母（为 0 时整个 `headline` 省略） |
 | `headline.positive_span_rate` / `negative_span_rate` | 判定率，始终与 wasted-token share 一起呈现 |
-| `headline.wasted_token_share` | neutral + negative 的注入 token 成本占已评判区间成本的份额 |
-| `headline.caveat` | 仅当 negative 率为 0 而浪费份额偏高（> 0.5）时：指明区间级代理的粗糙性与判定的不对称 |
+| `headline.wasted_token_share` | neutral + negative 的注入 token 成本占已评判区间成本的份额，随行命名 `wasted_tokens` / `judged_tokens` |
+| `headline.error_unjudged_tokens` | 不进任何比率或份额分母的 token 桶（仅非零时写出） |
+| `headline.caveat` | 只要浪费份额偏高（> 0.5），无论 negative 率是否为 0：指明区间级代理的粗糙性与判定的不对称 |
 | `rubric.deliveries` | 被打分的记忆投递数；为 0 时整个 `rubric` 省略 |
 | `rubric.counts` / `rubric.rates` | 各信号的取值分布与投影比率 |
 | `rubric.no_footprint_reasons` | 被忽略记忆未留足迹的原因：`irrelevant` / `redundant` / `confirming_ignored` / `ignored_novel`（空时省略） |
@@ -133,6 +134,6 @@ $$
 
 ## 仅 Report 中的字段
 
-`injudge-report.json` 每个操作还带有：`memories`（完整已录制引用）、评分 note、`analysis`、`evidence`、`step_gaps`、`new_keys` / `removed_keys`、`auto`、`error`、`judge_raw`、`pe_pairing_corrections`（若有），以及预算门区间上的 `input`（`path` 为 `full` 或 `scan`，外加扫描计数，适用时还有 `"gold"`、`"over_budget"`、`"length_fallback"`——后者标记因端点拒绝过长输入而改走扫描路径的全文发送）。评判意外失败的区间会保留不含扫描计数的再推导 `{path, gold?}` 记录，使路径计数仍包含该区间。
+`injudge-report.json` 每个操作还带有：`memories`（完整已录制引用，每条标注其区间本地 `id`）、`memory_exposure`（逐条目：placement 对该值是 `full`、`clipped` 到 N 字符前缀，还是 `unknown`）、`memory_windows`（逐条目 id：该条目动作 `anchors` 校验所依据的足迹窗口结束步——从未被重投递时为 `null`，即其上界是步骤流末尾；无 agent 回合归类时省略）、评分 note 与各条目的动作 `anchors`、`analysis`、`evidence`、`step_gaps`、`new_keys` / `removed_keys` / `previous_keys` / `changed_keys`、`auto`、`error`、`judge_raw`、`pe_pairing_corrections`（若有），以及预算门区间上的 `input`（`path` 为 `full` 或 `scan`，外加扫描计数，适用时还有 `"gold"`、`"over_budget"`、`"length_fallback"`——后者标记因端点拒绝过长输入而改走扫描路径的全文发送）。评判意外失败的区间会保留不含扫描计数的再推导 `{path, gold?}` 记录，使路径计数仍包含该区间。`tool.config` 记录已解析、无密钥的评审/扫描配置（净化为 `scheme://host[:port][/path]`），便于从产物本身复现运行。
 
 `injections` 数组列出每一次原始投递及其所属区间、`role`（`first` 或 `restated`）、`verdict`、`content_chars`，以及 `op_id` / `seq` / `step`。

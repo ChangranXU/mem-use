@@ -22,6 +22,24 @@ def ev(seq, type, **kw):
     return {"seq": seq, "type": type, **kw}
 
 
+def _placement_line(ref) -> str | None:
+    """One rendered memory line for recall's default placement, fully
+    shape-guarded (corrupt-ref fixtures flow through here too — a corrupt
+    ref renders no line, never raises)."""
+    if not isinstance(ref, dict):
+        return None
+    content = ref.get("content")
+    if not isinstance(content, dict) or not isinstance(content.get("text"), str):
+        return None
+    ext = ref.get("extensions")
+    cure = ext.get("cure") if isinstance(ext, dict) else None
+    cure = cure if isinstance(cure, dict) else {}
+    key = cure.get("key")
+    if not isinstance(key, str) or not key:
+        return None
+    return f"- [{cure.get('memory_type')}] {key}: {content['text']}"
+
+
 def cure_ref(key, value="v", memory_type="insight", confidence=0.9,
              review_status="approved", store_id=1, version_id=None, namespace="ns",
              item_id=None):
@@ -290,12 +308,20 @@ class AnnotatedBuilder:
         )
         return self
 
-    def recall(self, ref=None, query="the task query", content="## CURE Memory Policy\n…"):
+    def recall(self, ref=None, query="the task query", content=None):
         """Convenience: search + agent turn + bound delivery (one injection).
-        `ref` may be a single MemoryRef or a list of them."""
+        `ref` may be a single MemoryRef or a list of them. The default
+        placement renders the delivered values in full (a bridge that places
+        what it returns — full placement exposure); pass content for any
+        other placement, or content="redacted" for a redacted one."""
         refs = list(ref) if isinstance(ref, (list, tuple)) else [
             ref or cure_ref("key_a", "Some value here")
         ]
+        if content is None:
+            lines = [line for line in (_placement_line(r) for r in refs) if line]
+            content = "\n".join(lines) or "## CURE Memory Policy\n…"
+        elif content == "redacted":
+            content = None
         sid = self.search(returned=refs, query=query)
         self.agent_turn()
         self.delivery(sid, memories=refs, bind=self.last_call, content=content)

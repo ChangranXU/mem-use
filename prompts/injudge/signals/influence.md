@@ -18,6 +18,20 @@
      action's absence is none — absence alone is never evidence.
    A mention is not proof of influence: the agent may have known or found
    the fact on its own (check novelty and the pre-injection steps).
+   Context is not memory content: the search query that produced the
+   injection, the task statement, the step stream itself, and the golden
+   answer are what the agent and you both already had — a fact appearing
+   THERE is never a fact this memory delivered. Credit a memory only for
+   content its delivered entry (within its exposure marker) carries.
+   Changed action, not continuation: acted_on/decisive require a step that
+   DIFFERS from the course already established before the injection. A
+   patch already applied, a test already passing, an analysis or plan
+   already written at pre-injection steps, or merely continued/executed
+   afterward, is continuation — influence none or referenced, whatever the
+   memory's topic. The `anchors` you give must be the post-injection steps
+   where that changed action happened, inside this memory's window; steps
+   before the span's first step may support a novelty or accuracy judgment,
+   never an influence claim.
    Echo rule: a direction the agent had already announced, reasoned out, or
    applied at pre-span steps cannot be credited to a memory delivered
    afterward — even when the resulting action lands inside the footprint

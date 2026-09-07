@@ -51,7 +51,7 @@ The rendered page provides:
 |---|---|
 | `-o PATH` | HTML output path (default `memory-graph.html`) |
 | `--json PATH` | Also write the machine-readable graph artifact |
-| `--verdicts PATH` | Merge an `injudge.report/v6` file before rendering |
+| `--verdicts PATH` | Merge an `injudge.report/v7` file before rendering |
 
 ## Verdict Overlay
 
@@ -64,7 +64,7 @@ Each recall op is annotated in place:
 | `verdict` | The span's verdict on the span's first injection; `restated` on later identical deliveries (unjudged spans keep `unjudged`) |
 | `span_verdict` | The span's verdict on every injection — this is the coloring key |
 | `verdict_span` | The injudge span id |
-| `verdict_detail` | Confidence, analysis, evidence, per-memory usage, rubric, delivery cost, input regime, `auto` / `error` markers |
+| `verdict_detail` | Confidence, analysis, evidence, per-memory usage, rubric (both keyed by span-local entry id; `memory_labels` maps the ids back to display keys), delivery cost, input regime, `auto` / `error` markers |
 
 Recall nodes are colored by `span_verdict`:
 

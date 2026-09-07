@@ -40,12 +40,17 @@ Each `<path>` is a trajectory dir (containing `trajectory.jsonl`), a
 ## How it works
 
 injudge groups repeated identical injections into **spans**, has the judge
-model score every delivered memory on five signals (relevance, accuracy,
-novelty, influence, positive effect), and derives each span's verdict in
-code: any misused memory ⇒ **negative**, else any used ⇒ **positive**, else
-**neutral**. The mapping, worked examples, and aggregate formulas are in
-[Verdict derivation](doc/en/verdict-derivation.md). Long trajectories go
-through a chunked evidence scan; input is never truncated to fit the budget.
+model score every delivered memory entry on five signals (relevance,
+accuracy, novelty, influence, positive effect) under a stable span-local id,
+and derives each span's verdict in code: any misused memory ⇒ **negative**,
+else any used ⇒ **positive**, else **neutral**. Judged evidence stays inside
+what the recorded placement actually exposed (clipped values are judged as
+their exposed prefix; undeterminable exposure is marked unverified), and
+acted-on influence claims must carry action-step anchors inside the
+memory's footprint window. The mapping, worked examples, and aggregate
+formulas are in [Verdict derivation](doc/en/verdict-derivation.md). Long
+trajectories go through a chunked evidence scan; input is never truncated
+to fit the budget.
 
 ## Input contract
 

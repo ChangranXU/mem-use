@@ -18,10 +18,13 @@ The counting rules:
   LLM-judged spans only (a rule-judged auto-neutral span carries a
   placeholder "unclear" per memory, the same exclusion the rubric rollup and
   confidence apply); first_value/last_value surface value drift across those
-  spans. A key delivered under several identities in one op is judged once
-  (the contract is one entry per key) but tallies under EACH of its
-  (namespace, item) identities.
-- rubric signal rates are over judge-scored memory-deliveries (span × key)
+  spans. The rubric is keyed by span-local entry ids, and each entry maps to
+  exactly ONE (namespace, item) identity of its own delivery — the judge
+  contract scores every delivered entry independently, so a key delivered
+  under several identities tallies under each of them. An entry with no
+  recorded identity (no item_id, no key) has no pair to join on: it tallies
+  span-scoped, never merged across spans.
+- rubric signal rates are over judge-scored memory-deliveries (span × entry)
   of judged spans only; null signals never dilute a rate. positive_effect is
   rated over the influential only (it is null by contract otherwise), and
   accuracy is reported as the three-way split
@@ -33,12 +36,17 @@ The counting rules:
   deliveries, including restated ones — they really cost tokens) is charged
   to its verdict class; the neutral+negative total is budget spent on
   injections that did not help. The wasted-token share divides that total
-  by the judged classes' tokens only — the same judged-only rule as rates.
+  by the judged classes' tokens only — the same judged-only rule as rates —
+  and is a SPAN-LEVEL non-beneficial-delivery proxy: a neutral span's
+  referenced memories count as wasted, a positive span's ignored memories
+  count as productive, and a mixed bundle is charged wholly to its verdict,
+  so it never reads as per-memory truth.
 """
 
 from __future__ import annotations
 
 from injudge.judge import _ACCURACY, RUBRIC_SIGNALS
+from injudge.model import stamped_entry_id
 from injudge.steps import _mixed_sum, _token_share
 from memgraph.annotations import item_key, namespace_of
 
@@ -49,50 +57,75 @@ _BUCKETS = ("[0,0.5)", "[0.5,0.8)", "[0.8,1.0]")
 # counts, never rate denominators)
 _COUNTED = (*_VERDICTS, "error", "unjudged")
 
-# A zero negative rate must never read as "harmless" on its own: a system
-# flooding irrelevant-but-ignored memories scores negative 0 and all neutral
-# while wasting most of the injected budget. When the negative rate is 0 but
-# the wasted-token share is high, the headline carries this caveat naming
-# both known coarsenesses (the span-level proxy and the verdict asymmetry).
+# The wasted-token share is a SPAN-LEVEL non-beneficial-delivery proxy, and
+# a high share must never read as measured harm — the caveat rides the
+# headline whenever the share is high, zero-negative or not (a few negative
+# spans do not make the proxy per-memory truth, and its coarse bundle
+# charging is just as present then).
 _HIGH_WASTE_SHARE = 0.5
-ZERO_NEGATIVE_CAVEAT = (
-    "negative-span rate 0 with a high wasted-token share reads as 'ignored, "
-    "not cleared of harm': wasted_token_share is a span-level proxy (a neutral "
-    "span's referenced memories count as wasted; a positive span's ignored "
-    "memories count as productive), and the verdict rule is asymmetric "
-    "(ignored garbage judges neutral; only acted-on influence with no_effect "
-    "or harmed judges negative)"
+WASTE_SHARE_CAVEAT = (
+    "wasted_token_share is a span-level non-beneficial-delivery proxy: a "
+    "neutral span's referenced memories count as wasted, a positive span's "
+    "ignored memories count as productive, and a mixed bundle is charged "
+    "wholly to its verdict — a high share reads as 'most injected budget "
+    "not shown beneficial', never as measured harm; and the verdict rule is "
+    "asymmetric (ignored garbage judges neutral; only acted-on influence "
+    "with no_effect or harmed judges negative)"
 )
 
 
-def _key_identities(op: dict) -> dict[str, list[tuple[str | None, str]]]:
-    """key -> the (namespace, item) identities it is delivered under within
-    one op, in delivery order. The rubric and usage records speak in bare
-    keys (the judge contract is one entry per key); this resolves each back
-    to its item-level identity. A key delivered under several items in one
-    op (a multi-item delivery the judge scored jointly) maps to them all, so
-    the joint judgment tallies under EACH of its (namespace, item)
-    identities — never a phantom identity-less one."""
-    by_key: dict[str, list[tuple[str | None, str]]] = {}
-    for m in op.get("memories") or []:
-        key = m.get("key")
-        if not key:
+def _entry_records(op: dict) -> dict[str, tuple[tuple[str | None, str] | None, dict]]:
+    """entry id -> (identity, memory record) for one operation: the report's
+    memories list carries each delivered entry stamped with its span-local
+    id, so a rubric entry resolves to exactly the (namespace, item) identity
+    of ITS delivery — never a key-based guess that would conflate two
+    identities sharing one display key. A hand-edited record without the
+    stamp falls back to the id's position (m2 → the second entry), and an
+    unresolvable id gets _entry_identity's degrade (the identity it names,
+    else the span-scoped fallback)."""
+    mems = op.get("memories") or []
+    if not isinstance(mems, list):
+        mems = []
+    out: dict[str, tuple[tuple[str | None, str] | None, dict]] = {}
+    for i, m in enumerate(mems):
+        if not isinstance(m, dict):
             continue
+        entry_id = stamped_entry_id(m, i)
+        ident = None
         item = item_key(m)
-        if not item:
-            continue
-        ident = (namespace_of(m), item)
-        idents = by_key.setdefault(key, [])
-        if ident not in idents:
-            idents.append(ident)
-    return by_key
+        if item:
+            ident = (namespace_of(m), item)
+        out[entry_id] = (ident, m)
+    return out
 
 
-def _idents_of(identities: dict[str, list[tuple[str | None, str]]], key: str) -> list[tuple[str | None, str]]:
-    """The identities one judged key tallies under: the ones the op recorded
-    for it, else the bare (no-namespace, key) pair — an identity-less
-    delivery still tallies under its key."""
-    return identities.get(key) or [(None, key)]
+def _entry_identity(
+    records: dict[str, tuple[tuple[str | None, str] | None, dict]],
+    entry_id: str,
+    operation_id: str,
+) -> tuple[str | None, str]:
+    """The identity one judged entry tallies under: its own delivery's
+    (namespace, item) pair. An entry id resolving to no stamped record (a
+    hand-edited artifact) still tallies under the identity it NAMES when it
+    unambiguously spells one delivered entry's item half (a key-keyed edit:
+    with no item_id recorded the key IS the identity). Anything else — an
+    identity-less delivery (no item_id and no key: a redacted/anonymous
+    ref), an ambiguous spelling — has no pair to join on, and the
+    span-local entry id is unique only within its own span, so the fallback
+    scopes it by the producing operation: two spans' keyless m1 entries are
+    not known to be the same memory and must never merge into one rollup
+    cell."""
+    ident = records.get(entry_id, (None, {}))[0]
+    if ident is not None:
+        return ident
+    named = {
+        ident
+        for ident, _m in records.values()
+        if ident is not None and ident[1] == entry_id
+    }
+    if len(named) == 1:
+        return next(iter(named))
+    return None, f"{operation_id}:{entry_id}"
 
 
 def _bucket_value(v: object) -> str:
@@ -128,10 +161,10 @@ def _rubric_rollup(operations: list[dict]) -> dict:
     for op in operations:
         if op.get("verdict") not in _VERDICTS or op.get("auto"):
             continue  # error/unjudged/rule-judged spans: rubric untrusted or placeholder
-        identities = _key_identities(op)
-        for key, signals in (op.get("rubric") or {}).items():
+        records = _entry_records(op)
+        for entry_id, signals in (op.get("rubric") or {}).items():
             if all((signals.get(s) or {}).get("value") is None for s in RUBRIC_SIGNALS):
-                # all-null entry: the judge never returned this key (a
+                # all-null entry: the judge never returned this memory (a
                 # coverage gap, warned about at assembly) — not a judged
                 # delivery, and its nulls must not enter the distributions
                 continue
@@ -139,15 +172,20 @@ def _rubric_rollup(operations: list[dict]) -> dict:
             for s in RUBRIC_SIGNALS:
                 b = _bucket_value((signals.get(s) or {}).get("value"))
                 counts[s][b] = counts[s].get(b, 0) + 1
-            idents = _idents_of(identities, key)
-            for ident in idents:
-                key_of.setdefault(ident, key)
+            ident = _entry_identity(records, entry_id, op["operation_id"])
+            key_of.setdefault(ident, records.get(entry_id, (None, {}))[1].get("key") or entry_id)
+            # one delivery may carry several versions of an item (several
+            # rubric entries, one identity): the triage lists name each
+            # producing span ONCE per identity — they are provenance, while
+            # the per-entry counts above are the judgment counts
             if (signals.get("accuracy") or {}).get("value") == "contradicted":
-                for ident in idents:
-                    contradicted.setdefault(ident, []).append(op["operation_id"])
+                hits = contradicted.setdefault(ident, [])
+                if op["operation_id"] not in hits:
+                    hits.append(op["operation_id"])
             if (signals.get("relevance") or {}).get("value") is False:
-                for ident in idents:
-                    irrelevant.setdefault(ident, []).append(op["operation_id"])
+                hits = irrelevant.setdefault(ident, [])
+                if op["operation_id"] not in hits:
+                    hits.append(op["operation_id"])
         for entry in (op.get("memory_usage") or {}).values():
             r = entry.get("reason")
             if r:
@@ -266,29 +304,43 @@ def aggregate(operations: list[dict], n_injections: int, n_trajectories: int | N
         llm_judged += 1
         if op.get("pe_pairing_corrections"):
             pe_corrected += 1
-        identities = _key_identities(op)
+        records = _entry_records(op)
         # identity -> the display key it rode in on (for the roll records)
-        key_of = {ident: key for key, idents in identities.items() for ident in idents}
-        values: dict[tuple[str | None, str], object] = {}
-        for m in op.get("memories") or []:
-            item = item_key(m)
-            if item:
-                values[(namespace_of(m), item)] = m.get("value")
-        for key, entry in (op.get("memory_usage") or {}).items():
-            for ident in _idents_of(identities, key):
-                roll = usage_roll.get(ident)
-                if roll is None:
-                    roll = usage_roll[ident] = {
-                        "key": key_of.get(ident, key),
-                        "tallies": dict.fromkeys(_USAGES, 0),
-                        "spans": [],
-                        "first_value": values.get(ident),
-                        "last_value": values.get(ident),
-                    }
-                u = entry.get("usage")
-                roll["tallies"][u if u in roll["tallies"] else "unclear"] += 1
+        key_of = {
+            ident: m.get("key") or entry_id
+            for entry_id, (ident, m) in records.items()
+            if ident is not None
+        }
+        # one delivery may carry several versions of an item, in delivery
+        # order: the identity's first-seen value here is its FIRST version's
+        # and its last-seen its LAST version's — a single last-write-wins map
+        # would source first_value from a version the identity's first
+        # delivery never showed (and could fabricate or mask a value drift)
+        first_values: dict[tuple[str | None, str], object] = {}
+        last_values: dict[tuple[str | None, str], object] = {}
+        for entry_id, (ident, m) in records.items():
+            if ident is not None:
+                first_values.setdefault(ident, m.get("value"))
+                last_values[ident] = m.get("value")
+        for entry_id, entry in (op.get("memory_usage") or {}).items():
+            ident = _entry_identity(records, entry_id, op["operation_id"])
+            roll = usage_roll.get(ident)
+            if roll is None:
+                roll = usage_roll[ident] = {
+                    "key": key_of.get(ident, entry_id),
+                    "tallies": dict.fromkeys(_USAGES, 0),
+                    "spans": [],
+                    "first_value": first_values.get(ident),
+                    "last_value": last_values.get(ident),
+                }
+            u = entry.get("usage")
+            roll["tallies"][u if u in roll["tallies"] else "unclear"] += 1
+            # the span is named once per op however many versions of the
+            # identity the delivery carried (the roll's spans are provenance,
+            # not a judgment count — the tallies count those per entry)
+            if op["operation_id"] not in roll["spans"]:
                 roll["spans"].append(op["operation_id"])
-                roll["last_value"] = values.get(ident)
+            roll["last_value"] = last_values.get(ident)
     for v in _VERDICTS:
         out[v] = counts[v]
         out["mean_confidence_by_verdict"][v] = (
@@ -312,7 +364,10 @@ def aggregate(operations: list[dict], n_injections: int, n_trajectories: int | N
         }
     # headline: the pre-registered numbers for cross-system claims; the
     # wasted-token share follows the same judged-only rule as the rates —
-    # error/unjudged cost is a count, never a denominator
+    # error/unjudged cost is a count, never a denominator. The share's
+    # numerator and denominator ride along named: a bare percentage next to
+    # the all-class total has read as per-memory wasted-token truth, which a
+    # span-level bundle charge is not
     byv = out["cost"]["approx_tokens_by_verdict"]
     judged_tok = sum(byv[v] for v in _VERDICTS)
     wasted = byv["negative"] + byv["neutral"]
@@ -320,16 +375,21 @@ def aggregate(operations: list[dict], n_injections: int, n_trajectories: int | N
         "judged_spans": denom,
         "positive_span_rate": out["rates"]["positive"],
         "negative_span_rate": out["rates"]["negative"],
+        "wasted_tokens": wasted,
+        "judged_tokens": judged_tok,
         "wasted_token_share": _token_share(wasted, judged_tok),
     }
+    other_tok = byv["error"] + byv["unjudged"]
+    if other_tok:
+        # the share's missing class, visible beside it: error/unjudged spans
+        # really spent these tokens and no rate counts them
+        out["headline"]["error_unjudged_tokens"] = other_tok
     share = out["headline"]["wasted_token_share"]
-    if counts["negative"] == 0 and share is not None and share > _HIGH_WASTE_SHARE:
-        # the COUNT, never the rounded rate: past ~20k judged spans a single
-        # negative span rounds the rate to 0.0 and the rate test would stamp
-        # the caveat on a run that HAS a negative span. An all-ignored flood
-        # scores negative 0 while wasting most of the budget — the rate must
-        # never present alone as "harmless"
-        out["headline"]["caveat"] = ZERO_NEGATIVE_CAVEAT
+    if share is not None and share > _HIGH_WASTE_SHARE:
+        # the proxy's limitations do not vanish when a few negative spans
+        # exist — the caveat rides every high-share headline (see
+        # WASTE_SHARE_CAVEAT), never only the zero-negative one
+        out["headline"]["caveat"] = WASTE_SHARE_CAVEAT
     return out
 
 
@@ -363,7 +423,8 @@ def policy_rollup(trajectories: list[dict], validation: list[dict] | None = None
             validation.append({"level": "warn", "msg": msg})
     n_searches = sum(b.get("n_searches") or 0 for b in blocks)
     share = _token_share(est_billed, prompt)
-    return {
+    n_extractions = sum(b.get("n_extractions") or 0 for b in blocks)
+    out = {
         "n_injections": n_inj,
         "n_steps": n_steps,
         "injection_density": round(n_inj / n_steps, 4) if n_steps else None,
@@ -378,4 +439,12 @@ def policy_rollup(trajectories: list[dict], validation: list[dict] | None = None
         "injected_token_share": share,
         # annotation-mode total (None when no trajectory recorded searches)
         "n_searches": n_searches or None,
+        # memory-system extraction reliability, rolled up over the run like
+        # the per-trajectory policy records carry it: a generation failure is
+        # the memory system's own quality dimension, separate from the judge's
+        # error spans (None when no trajectory recorded generations)
+        "n_extractions": n_extractions or None,
+        **({"extraction_failures": sum(b.get("extraction_failures") or 0 for b in blocks)}
+           if n_extractions else {}),
     }
+    return out

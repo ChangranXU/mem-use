@@ -26,14 +26,14 @@ flowchart TD
 
 ## 评分信号
 
-每条投递记忆独立打分。note 引用步骤流中的 step 与 seq。
+每个投递条目在其区间本地 id（`m1`、`m2`……按投递顺序）下独立评分：两个条目可能共用一个显示键——不同的已存记忆，或同次投递的两个版本——绝不折叠为一次评判。note 引用步骤流中的 step 与 seq。录制允许时，每个条目还带**曝光标记**，标明 placement 实际向 agent 展示了其值的哪一部分；评审只评判已曝光的内容，绝不评判未展示的后缀。
 
 | 信号 | 类型 | 问题 |
 |---|---|---|
 | `relevance` | bool | 注入点上，记忆是否与任务及 agent 当前子目标主题相关？依据区间首步之前的步骤判断。 |
 | `accuracy` | enum | `corroborated`（有可观察证据为真）/ `uncontradicted`（无从判断）/ `contradicted`（有可观察证据为假）。 |
 | `novelty` | enum | `novel`（任务陈述与注入前步骤中都未出现）/ `confirming`（敲定 agent 明确表达过的疑点）/ `redundant`（早已确立，无疑点）。任务陈述与 agent 的初始上下文与 agent 自己的注入前回合一律视为已在对话中。 |
-| `influence` | enum | `none` / `referenced`（仅被提及）/ `acted_on`（影响了后续命令、编辑或测试）/ `decisive`（被明确归功的转向）。足迹是后续行为：从区间首步起算，以该记忆下一次被重投递处为界（重投递即取代；从未被重投递则无上界；其他记忆的重投递只收窄其自身窗口）。回声规则：agent 在区间之前已宣布、推理出或已应用的方向，不能归功于事后再投递的记忆——即使结果动作落在足迹窗口内。 |
+| `influence` | enum | `none` / `referenced`（仅被提及）/ `acted_on`（影响了后续命令、编辑或测试）/ `decisive`（被明确归功的转向）。足迹是后续行为：从区间首步起算，以该记忆下一次被重投递处为界（重投递即取代；从未被重投递则无上界；其他记忆的重投递只收窄其自身窗口）。回声规则：agent 在区间之前已宣布、推理出或已应用的方向，不能归功于事后再投递的记忆——即使结果动作落在足迹窗口内。另有两条约束：上下文（搜索查询、任务陈述、步骤流本身、黄金答案）不是记忆内容；`acted_on`/`decisive` 要求一个**被改变的动作**，而非继续执行注入前已确立的计划。acted-on 或 decisive 断言必须携带**锚点**——足迹出现的 agent 步骤号，且落在该条目的窗口内。 |
 | `positive_effect` | enum 或 null | `improved` / `no_effect` / `harmed`。仅当 influence 为 `acted_on` 或 `decisive` 时非空。 |
 
 {% hint style="warning" %}
@@ -57,12 +57,19 @@ flowchart TD
 
 ## 组装
 
-`_assemble_verdict` 把形状合法的评审对象变成内部记录。JSON schema 表达不了的语义检查在这里完成：
+语义检查分两层，都在代码里完成。
 
-1. **每个 key 一条。** 同一次投递中同一 key 的多个版本折叠成一行评分（记警告）。没有 key 的记忆不进评分与使用记录；其投递成本仍计入。
-2. **覆盖。** 评审数组中缺失的区间 key 会得到全空信号并记警告。区间内带 key 的记忆一条都未被覆盖时，立即记 `error` 判定——这是模型质量信号，不是推导出的 neutral。评审数组中的未知 key 会被丢弃。完全不含 key 记忆的区间不是错误：记警告并推导为 neutral，因为没有可打分对象。
-3. **配对。** `positive_effect` 仅在 `influence` 为 `acted_on` 或 `decisive` 时适用。该情况下缺少 effect 会使 usage 为 `unclear`（记警告）。influence 为 `none` 或 `referenced` 时仍给出的 effect 会被强制改为 `null`（记警告）。
-4. **使用、原因、判定。** `_derive_usage` 为每条记忆打标签；`_footprint_reason` 只对 `ignored` 运行；`derive_verdict` 读取使用标签。置信度被夹到 `[0, 1]`。
+**尝试循环内**（`_verdict_semantics`，经契约的 validate 钩子）——违反属于模型错误，任何 tier 都一样（约束解码无法知道本区间的 id 与窗口），因此走有界的纠正重试；耗尽预算即为 `error` 判定，绝不留下静默不完整的判定：
+
+1. **精确 id 覆盖。** 答案为每个投递条目的区间本地 id 恰好各给一条——缺失条目是未作答的评判，未知条目是噪声，两者都不被接受。
+2. **动作锚点。** `acted_on`/`decisive` 的断言至少给出一个锚点步骤，且所有锚点都落在该条目的足迹窗口内（区间首步起，至下一次重投递减一；从未被重投递则至步骤流的最后一步——超出步骤流末尾的步骤是幻觉，不是证据）。区间首步之前的锚点与其他越界锚点一样被拒绝，对任何条目都如此：注入前证据可以支持 novelty 或 accuracy 的 **note**，但永远不能作为锚点——锚点是 influence 证据。
+
+**组装时**（`_assemble_verdict`），作用于已验证的对象：
+
+3. **配对。** `positive_effect` 仅在 `influence` 为 `acted_on` 或 `decisive` 时适用。该情况下 effect 为 null 是评分规则允许的不确定性出口（证据无法判定方向）：usage 推导为 `unclear` 并记录在案，但不算配对纠正。influence 为 `none` 或 `referenced` 时仍给出的 effect 会被强制改为 `null`（记警告并计入配对纠正）。
+4. **使用、原因、判定。** `_derive_usage` 为每个条目打标签；`_footprint_reason` 只对 `ignored` 运行；`derive_verdict` 读取使用标签。置信度被夹到 `[0, 1]`。
+
+完全不含投递记忆的区间不是错误：记警告并推导为 neutral，因为没有可打分对象。
 
 仅供展示的字段（`analysis`、证据 claim）会被复制并打码。畸形的证据列表会连同警告被丢弃，不使区间失败。
 
@@ -134,6 +141,6 @@ return "neutral"
 |---|---|---|---|
 | 没有可归属的 agent 步骤 | `neutral`，`auto: no_subsequent_turn` | 无 | 占位的空评分与 `unclear` 使用。不计入评分比率、使用汇总与置信度。在判定率中计为已评判的 **neutral**。 |
 | `--limit` 截断或 `--dry-run` | `unjudged` | 无 | 只计数。不是比率分母。 |
-| 覆盖缺口、契约失败或尝试耗尽 | `error` | 已尝试 | 只计数。保留原始文本。不会被改写成 neutral。 |
+| 覆盖/锚点违反且纠正重试耗尽、契约失败 | `error` | 已尝试 | 只计数。保留原始文本。不会被改写成 neutral。 |
 
 这些标签如何计入 `summary.json` 的比率、成本与汇总，见[产物](artifacts.md#数字如何推导)。

@@ -1439,7 +1439,7 @@ def test_multiple_generations_and_lanes_in_tool_config(tmp_path):
 
 
 def verdict_report(run_id, span_id, entries, verdict="neutral"):
-    """Minimal injudge.report/v6 fixture.
+    """Minimal injudge.report/v7 fixture.
 
     entries: list of (seq, step, role) covering the span's injections. The
     report-side trajectory id ("T99") deliberately differs from the graph's
@@ -1530,6 +1530,42 @@ def test_apply_verdicts_joins_by_run_id_and_seq(tmp_path):
     # loaded path set missing it must still render the span's analysis
     assert second["verdict_detail"]["analysis"] == "agent never touched the injected keys"
     assert graph["tool"]["verdicts"] == "injudge.json"
+
+
+def test_apply_verdicts_carries_memory_labels(tmp_path):
+    """v7 rubric/usage key on span-local entry ids: the merge carries the
+    id → display-key map off the report's stamped memories so the popover
+    renders "m1 (key_a)", never a bare id; an unstamped (hand-edited) record
+    falls back to the positional id, an unkeyed entry labels itself."""
+    from memgraph.verdicts import apply_verdicts
+
+    b = (TrajBuilder().agent_turn(with_task=True).agent_turn()
+         .recall().recall())
+    b.write(tmp_path / "t1", run_id="run-1")
+    graph = load_and_build([tmp_path])
+    recalls = [o for o in graph["ops"] if o["kind"] == "recall"]
+    report = verdict_report("run-1", "T99:S1",
+                            [(recalls[0]["seq"], recalls[0]["step"], "first"),
+                             (recalls[1]["seq"], recalls[1]["step"], "restated")])
+    report["operations"][0]["memories"] = [
+        {"key": "key_a", "id": "m1"},
+        {"id": "m2"},          # no key: labels itself by id
+        {"key": "key_c"},      # no stamp: falls back to the positional id
+    ]
+    apply_verdicts(graph, report)
+    detail = recalls[0]["verdict_detail"]
+    assert detail["memory_labels"] == {"m1": "key_a", "m2": "m2", "m3": "key_c"}
+
+
+def test_render_html_verdict_detail_resolves_memory_labels():
+    """The popover template resolves the span-local ids through
+    verdict_detail.memory_labels (the rubric/usage no longer key on display
+    keys) — a bare "m1" chip would be a regression to unreadable output."""
+    from memgraph.html import render_html
+
+    html = render_html({"trajectories": [], "ops": [], "memories": [],
+                        "edges": [], "validation": []})
+    assert "d.memory_labels||{}" in html
 
 
 def test_dot_path_run_id_stays_joinable(tmp_path, monkeypatch):
@@ -1914,11 +1950,11 @@ def test_load_verdict_report_requires_injudge_schema(tmp_path):
         load_verdict_report(bad)
     # older artifact versions are rejected, not adapted
     bad.write_text(json.dumps({"tool": {"schema": "injudge.report/v5"}}), encoding="utf-8")
-    with pytest.raises(SystemExit, match="injudge.report/v6"):
+    with pytest.raises(SystemExit, match="injudge.report/v7"):
         load_verdict_report(bad)
     good = tmp_path / "good.json"
-    good.write_text(json.dumps({"tool": {"schema": "injudge.report/v6"}}), encoding="utf-8")
-    assert load_verdict_report(good)["tool"]["schema"] == "injudge.report/v6"
+    good.write_text(json.dumps({"tool": {"schema": "injudge.report/v7"}}), encoding="utf-8")
+    assert load_verdict_report(good)["tool"]["schema"] == "injudge.report/v7"
 
 
 def test_render_html_with_verdicts_embeds_them(tmp_path):

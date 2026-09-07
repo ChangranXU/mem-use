@@ -26,14 +26,14 @@ flowchart TD
 
 ## Rubric Signals
 
-Each delivered memory is scored independently. Notes cite step and seq numbers from the stream.
+Each delivered ENTRY is scored independently under its span-local id (`m1`, `m2`, … in delivery order): two entries may share a display key — distinct stored memories, or two versions in one delivery — and they are never collapsed into one judgment. Notes cite step and seq numbers from the stream. Where the recording shows it, each entry also carries an **exposure marker** stating what of its value the placement actually showed the agent; the judge scores that exposure, never an unseen suffix.
 
 | Signal | Type | Question |
 |---|---|---|
 | `relevance` | bool | Is the memory topically related to the task and to the agent's current subgoal at the injection point? Judged from the steps before the span's first step. |
 | `accuracy` | enum | `corroborated` (observable evidence it is right) / `uncontradicted` (no evidence either way) / `contradicted` (observable evidence it is wrong). |
 | `novelty` | enum | `novel` (substance appeared neither in the task statement nor the pre-injection steps) / `confirming` (settles an open doubt the agent had articulated) / `redundant` (already established, no open doubt). The task statement and the agent's initial context count as already-in-conversation, exactly like the agent's own pre-injection turns. |
-| `influence` | enum | `none` / `referenced` (mentioned only) / `acted_on` (shaped a later command, edit, or test) / `decisive` (explicitly credited with a pivot). Footprint is subsequent behavior: from the span's first step onward, bounded where that memory is next re-delivered (a re-delivery supersedes; never re-delivered = unbounded; another memory's re-delivery bounds only its own window). The echo rule: a direction the agent had already announced, reasoned out, or applied before the span cannot be credited to a memory delivered afterward — even when the resulting action lands inside the window. |
+| `influence` | enum | `none` / `referenced` (mentioned only) / `acted_on` (shaped a later command, edit, or test) / `decisive` (explicitly credited with a pivot). Footprint is subsequent behavior: from the span's first step onward, bounded where that memory is next re-delivered (a re-delivery supersedes; never re-delivered = unbounded; another memory's re-delivery bounds only its own window). The echo rule: a direction the agent had already announced, reasoned out, or applied before the span cannot be credited to a memory delivered afterward — even when the resulting action lands inside the window. Two further bindings: context (the search query, the task statement, the step stream, the golden answer) is not memory content, and `acted_on`/`decisive` require a CHANGED action, not continuation of an already-established plan. An acted-on or decisive claim must carry **anchors** — the agent-step numbers where the footprint appears, inside that entry's window. |
 | `positive_effect` | enum or null | `improved` / `no_effect` / `harmed`. Non-null only when influence is `acted_on` or `decisive`. |
 
 {% hint style="warning" %}
@@ -57,12 +57,19 @@ The final task result, when discernible, may raise or lower confidence. It canno
 
 ## Assembly
 
-`_assemble_verdict` turns a shape-valid judge object into the internal record. Semantic checks that a JSON schema cannot express happen here:
+Two layers of semantic checking apply, both in code:
 
-1. **One entry per key.** Several versions of one key in a single delivery collapse to one rubric row (warned). Memories with no key are excluded from the rubric and from usage; their delivery cost still counts.
-2. **Coverage.** A span key absent from the judge array gets nulled signals and a warning. Zero coverage of the span's keyed memories is an immediate `error` verdict — a model-quality signal, not a derived neutral. Unknown keys in the judge array are dropped. A span that delivers no keyed memories at all is not an error: it derives neutral with a warning, since there is nothing to score.
-3. **Pairing.** `positive_effect` applies only when `influence` is `acted_on` or `decisive`. A missing effect in that case leaves usage `unclear` (warned). An effect set while influence is `none` or `referenced` is coerced to `null` (warned).
-4. **Usage, reason, verdict.** `_derive_usage` labels each memory; `_footprint_reason` runs only for `ignored`; `derive_verdict` reads the usage labels. Confidence is clamped to `[0, 1]`.
+**Inside the attempt loop** (`_verdict_semantics`, via the contract's validate hook) — a violation is a model error at every tier (constrained decoding cannot know this span's ids or windows), so it takes the bounded corrective retry; exhaustion is an `error` verdict, never a silently partial one:
+
+1. **Exact id coverage.** The answer carries exactly one entry per delivered entry's span-local id — a missing entry is an unanswered judgment, an unknown one is noise, and neither stands.
+2. **Action anchors.** An `acted_on`/`decisive` claim cites at least one anchor step, and every cited anchor lies inside that entry's footprint window (from the span's first step to its next re-delivery − 1, or to the step stream's final step when it is never re-delivered — a step past the stream's end is a hallucination, not evidence). An anchor before the span's first step is rejected like any other out-of-window anchor, on every entry: pre-injection evidence may back a novelty or accuracy **note**, but never an anchor — anchors are influence evidence.
+
+**At assembly** (`_assemble_verdict`), on the validated object:
+
+3. **Pairing.** `positive_effect` applies only when `influence` is `acted_on` or `decisive`. A null effect in that case is the rubric's sanctioned uncertainty route (the direction could not be determined on the evidence): usage derives `unclear` and the occurrence is logged, but it is not a pairing correction. An effect set while influence is `none` or `referenced` is coerced to `null` (warned, counted as a pairing correction).
+4. **Usage, reason, verdict.** `_derive_usage` labels each entry; `_footprint_reason` runs only for `ignored`; `derive_verdict` reads the usage labels. Confidence is clamped to `[0, 1]`.
+
+A span that delivers no memories at all is not an error: it derives neutral with a warning, since there is nothing to score.
 
 Display-only fields (`analysis`, evidence claims) are copied and credential-masked. A malformed evidence list is dropped with a warning; it does not fail the span.
 
@@ -134,6 +141,6 @@ Each row is one span. Memories not listed are absent.
 |---|---|---|---|
 | No attributed agent step | `neutral`, `auto: no_subsequent_turn` | none | Placeholder null rubric and `unclear` usage. Excluded from rubric rates, usage tallies, and confidence. Counts as judged **neutral** in verdict rates. |
 | `--limit` cutoff or `--dry-run` | `unjudged` | none | Count only. Not a rate denominator. |
-| Coverage gap, contract failure, or exhausted attempts | `error` | attempted | Count only. Raw text kept. Not coerced to neutral. |
+| Coverage/anchor violation after exhausted attempts, contract failure | `error` | attempted | Count only. Raw text kept. Not coerced to neutral. |
 
 How these labels become the rates, costs, and tallies in `summary.json` is documented in [Artifacts](artifacts.md#how-the-numbers-are-derived).

@@ -17,6 +17,25 @@ def step_range(first: int, last: int) -> str:
     return f"steps {first}–{last}" if first != last else f"step {first}"
 
 
+def memory_id(index: int) -> str:
+    """The judge contract's span-local memory id: one stable id per DELIVERED
+    ENTRY ("m1", "m2", … in delivery order), mapped to the entry's portable
+    identity and exposure. Display keys stay labels only — two entries may
+    share one key (distinct identities, or two versions in one delivery),
+    and the rubric must never collapse them into one judgment."""
+    return f"m{index + 1}"
+
+
+def stamped_entry_id(memory: object, index: int) -> str:
+    """One delivered entry's span-local id off its stamped record (the report
+    stamps every memories entry with it), with the positional fallback for a
+    hand-edited record that lost its stamp (m2 → the second entry): the one
+    degrade rule every reader of the stamped ids shares — injudge's usage
+    rollups and memgraph's verdict merge — never a key-based guess."""
+    entry_id = memory.get("id") if isinstance(memory, dict) else None
+    return entry_id if isinstance(entry_id, str) and entry_id else memory_id(index)
+
+
 @dataclass
 class ToolExec:
     """One tool execution inside an agent step.
@@ -75,9 +94,19 @@ class InjectionSpan:
     span in the same trajectory (first span: all keys are new). The diff
     compares (namespace, item) identities — memory identity is the pair, so
     a delivery switching stores or items is a change — but speaks in
-    distinct bare keys (the judge contract's vocabulary): a key whose item
-    identity changed appears in BOTH lists (its old identity left, its new
-    one arrived).
+    distinct bare keys (labels): a key whose item identity changed appears
+    in BOTH lists (its old identity left, its new one arrived).
+    `previous_keys` labels the identities delivered in an earlier span —
+    ANY earlier span, not only the immediately previous one: a gap
+    re-delivery is still content the agent already saw (the novelty
+    baseline beyond the task statement) — and `changed_keys` labels
+    identities whose RECORDED VALUE drifted against their last recorded
+    earlier delivery — membership alone would hide a same-identity value
+    change. `memory_exposure` carries, per delivered entry, what the
+    placement actually showed of the canonical value (full / clipped with
+    the exposed prefix length / unknown — memgraph.annotations.exposure_state),
+    merged across the span's deliveries: the judge scores the exposure,
+    never an unseen suffix.
     `seq_first`/`seq_last` bracket the span's ops (min/max event seq); a
     truncated-tail op merged across newer spans can make the range overlap
     a neighbor's.
@@ -88,17 +117,17 @@ class InjectionSpan:
     the placement recorded no content). `position`/`total` locate the span
     among the trajectory's spans (0/0 when built directly, not via
     group_spans). `memory_windows` bounds each delivered memory's judged
-    footprint window individually: rubric display key (the bare memory key;
-    unkeyed memories are unjudged and carry no entry) → the window's last
-    step, the first later re-delivery starting strictly after this span's
-    last delivery step, minus one (a re-delivery supersedes — from then on
-    the memory's influence is the newer span's to claim), or None when none
-    qualifies: overlapping re-deliveries are skipped, not terminal, so the
-    memory is unbounded only when no cleanly separated re-delivery exists.
-    The strict > keeps the bound from ever cutting the span's own delivery
-    steps. One key shared by several identities (the rubric's per-key
-    collapse) keeps the earliest bound. Empty when built directly, not via
-    group_spans.
+    footprint window individually, keyed by the entry's span-local id
+    (memory_id; every delivered entry carries one) → the window's last
+    step, the first later re-delivery of that ENTRY'S (namespace, item)
+    identity starting strictly after this span's last delivery step, minus
+    one (a re-delivery supersedes — from then on the memory's influence is
+    the newer span's to claim), or None when none qualifies: overlapping
+    re-deliveries are skipped, not terminal, so the memory is unbounded
+    only when no cleanly separated re-delivery exists. The strict > keeps
+    the bound from ever cutting the span's own delivery steps. An entry
+    with no portable identity can never be re-delivery-matched and stays
+    unbounded. Empty when built directly, not via group_spans.
     """
 
     id: str  # f"{traj_id}:S{n}"
@@ -111,9 +140,12 @@ class InjectionSpan:
     n_injections: int = 0
     fingerprint: str = ""  # sha1 over the portable memory-set identity
     memories: list[dict] = field(default_factory=list)  # shared delivered set
+    memory_exposure: list[dict] = field(default_factory=list)  # per entry, exposure_state
     step_gaps: list[int] = field(default_factory=list)
     new_keys: list[str] = field(default_factory=list)
     removed_keys: list[str] = field(default_factory=list)
+    previous_keys: list[str] = field(default_factory=list)
+    changed_keys: list[str] = field(default_factory=list)
     queries: list[str] = field(default_factory=list)
     placement_kind: str | None = None
     placement_head: str | None = None

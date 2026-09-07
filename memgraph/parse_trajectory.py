@@ -52,6 +52,7 @@ from memgraph.annotations import (
     AnnotatedOperation,
     build_annotation_index,
     content_chars,
+    exposure_state,
     is_int,
     item_key,
     operation_extraction_step,
@@ -574,20 +575,28 @@ def _recall_op_from_delivery(
     # session bindings — the same per-session resolver the session task uses
     # (no bindings resolves nothing)
     locator_lanes = index.binds.get(payload.get("trace_session_id"), {})
+    # the placement's full text, resolved once: the capped opening excerpt
+    # below and the per-entry exposure both read it — the annotation's
+    # canonical values are what the delivery REFERENCES, the placement is
+    # what the agent actually saw (a bridge may clip a rendered line to its
+    # recall budget while the ref keeps the full value)
+    placement_text = (
+        resolved_content_text(placement.get("content"), events, locator_lanes, slots)
+        if placement is not None
+        else None
+    )
+    op.exposure = [exposure_state(m.get("value"), placement_text) for m in op.memories]
     if placement is not None:
         # how the injection was presented (injudge's span header): the
         # protocol's placement kind plus a capped excerpt of the delivered
-        # block's opening, resolved like the query below — a redacted/locator
-        # placement records no content here, so no excerpt
+        # block's opening — a redacted/locator placement records no content
+        # here, so no excerpt
         kind = placement.get("kind")
         if isinstance(kind, str) and kind:
             op.placement_kind = kind
-        head = resolved_content_text(
-            placement.get("content"), events, locator_lanes, slots
-        )
-        if head:
-            op.placement_head = head[:_PLACEMENT_HEAD_CAP] + (
-                "…" if len(head) > _PLACEMENT_HEAD_CAP else ""
+        if placement_text:
+            op.placement_head = placement_text[:_PLACEMENT_HEAD_CAP] + (
+                "…" if len(placement_text) > _PLACEMENT_HEAD_CAP else ""
             )
     if search is not None and search.kind == "search":
         # the same resolution rule as the session task: inline text, or a

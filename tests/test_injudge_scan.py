@@ -50,6 +50,7 @@ from injudge.scan import (
     _step_tokens,
     resolve_scan,
     scan_knobs,
+    scan_span,
 )
 from annotated_fixtures import AnnotatedBuilder as TrajBuilder
 from annotated_fixtures import cure_ref
@@ -60,18 +61,32 @@ REF_A = cure_ref("key_a", "Use xarray/core/variable.py apply_ufunc carefully",
 GOOD = json.dumps({
     "memories": [
         {
-            "key": "key_a",
+            "id": "m1",
             "relevance": {"value": True, "note": "task is about this bug"},
             "accuracy": {"value": "corroborated", "note": "consistent with the file at step 2"},
             "novelty": {"value": "novel", "note": "agent had not seen this before"},
+            # step 3 sits inside every consumer span's window: the streams
+            # carry ≥3 steps and no GOOD-fed span is re-delivery-bounded
+            # below 3 (the bounded cases build their own answers)
             "influence": {"value": "acted_on", "note": "agent grepped it at step 3"},
             "positive_effect": {"value": "improved", "note": "saved exploration"},
+            "anchors": [3],
         },
     ],
-    "analysis": "key_a guided the search at step 3.",
+    "analysis": "m1 (key_a) guided the search at step 3.",
     "evidence": [{"claim": "grep for the file", "steps": [3], "seqs": [44]}],
     "confidence": 0.8,
 })
+
+
+def _good_answer(step: int) -> str:
+    """GOOD re-anchored at `step`: the anchor-window contract runs on
+    stubbed calls too, so a canned answer must cite a step inside its
+    consumer span's footprint window (e.g. 4 for _span_steps, whose span
+    starts at step 4)."""
+    payload = json.loads(GOOD)
+    payload["memories"][0]["anchors"] = [step]
+    return json.dumps(payload)
 
 EVIDENCE = json.dumps({
     "none": False,
@@ -94,6 +109,39 @@ class FakeResponse:
         return False
 
 
+def auto_good(req) -> dict:
+    """A conforming one-entry scoring answer for whatever span the request
+    carries: the entry id and anchor step are read from the request's judge
+    input, so the same stub serves any single-memory span."""
+    user = ""
+    try:
+        body = json.loads(req.data.decode())
+        for m in body.get("messages") or []:
+            if m.get("role") == "user" and not user:
+                user = m.get("content") or ""
+    except (ValueError, AttributeError):
+        pass
+    ids = re.findall(r"(?m)^- \[(m\d+)\] ", user) or ["m1"]
+    consumed = re.search(r"consumed at (?:agent )?steps? (\d+)", user)
+    return {"choices": [{"message": {"content": json.dumps({
+        "memories": [
+            {
+                "id": mid,
+                "relevance": {"value": True, "note": "topical"},
+                "accuracy": {"value": "corroborated", "note": "matches the steps"},
+                "novelty": {"value": "novel", "note": "new"},
+                "influence": {"value": "acted_on", "note": "shaped the action"},
+                "positive_effect": {"value": "improved", "note": "saved work"},
+                "anchors": [int(consumed.group(1)) if consumed else 1],
+            }
+            for mid in ids
+        ],
+        "analysis": "auto",
+        "evidence": [],
+        "confidence": 0.8,
+    })}}]}
+
+
 def http_error(code, detail=b"bad request"):
     return HTTPError("http://x", code, "err", {}, BytesIO(detail))
 
@@ -101,7 +149,7 @@ def http_error(code, detail=b"bad request"):
 def judge_stub(record, payload=None):
     def _open(req, timeout=None):
         record.append(json.loads(req.data.decode()))
-        return FakeResponse(payload or {"choices": [{"message": {"content": GOOD}}]})
+        return FakeResponse(payload or auto_good(req))
 
     return _open
 
@@ -248,7 +296,7 @@ def test_length_rejection_falls_back_to_the_scan_path(monkeypatch, tmp_path):
             raise http_error(400, b"This model's maximum context length is "
                                   b"8192 tokens. However, your messages resulted "
                                   b"in 900000 tokens")
-        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
+        return FakeResponse({"choices": [{"message": {"content": _good_answer(4)}}]})
 
     monkeypatch.setattr("injudge.judge.urlopen", judge_open)
     monkeypatch.setattr("injudge.scan.urlopen", scan_stub(scan_record))
@@ -308,7 +356,7 @@ def test_length_rejection_with_pinned_format_still_falls_back(monkeypatch, tmp_p
         calls.append(req)
         if len(calls) == 1:
             raise http_error(400, b"prompt is too long: 900000 tokens maximum")
-        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
+        return FakeResponse({"choices": [{"message": {"content": _good_answer(4)}}]})
 
     monkeypatch.setattr("injudge.judge.urlopen", judge_open)
     monkeypatch.setattr("injudge.scan.urlopen", scan_stub([]))
@@ -332,7 +380,7 @@ def test_non_length_400_walks_the_tier_chain_without_fallback(monkeypatch, tmp_p
         judge_calls.append(json.loads(req.data.decode()))
         if len(judge_calls) == 1:
             raise http_error(400, b"unknown field response_format")
-        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
+        return FakeResponse({"choices": [{"message": {"content": _good_answer(4)}}]})
 
     monkeypatch.setattr("injudge.judge.urlopen", judge_open)
     monkeypatch.setattr("injudge.scan.urlopen", scan_stub(scan_record))
@@ -375,6 +423,19 @@ def test_scan_path_without_extraction_config_fails_fast(tmp_path):
     scan.extraction = None
     with pytest.raises(TypeError, match="extraction"):
         judge_span(span, steps, _judge_cfg(), [], traj.task, scan=scan)
+
+
+def test_scan_span_rejects_a_step_less_span(tmp_path):
+    """scan_span's precondition is an attributed span: a step-less one (no
+    agent turn classified — the CLI rule-judges it auto-neutral and
+    judge_span's gate never routes it here) has no injection point for the
+    pre/post split to bracket. A direct caller gets the precondition named,
+    never a TypeError on None arithmetic deep in _chunks."""
+    span, steps, traj = _span_steps(tmp_path)
+    span.step_first = span.step_last = None
+    with pytest.raises(ValueError, match="step_first"):
+        scan_span(span, steps, _judge_cfg(), _scan_cfg(), GoldInput(), [],
+                  traj.task, SYSTEM_PROMPT)
 
 
 # ------------------------------------------------------------------ the scan
@@ -527,11 +588,12 @@ def test_anchor_terms_keep_the_widest_window():
             {"key": "key_a", "value": "shared_term_x"},
             {"key": "key_b", "value": "shared_term_x"},
         ],
-        memory_windows={"key_a": 6, "key_b": None},
+        memory_windows={"m1": 6, "m2": None},
     )
     terms = dict(_anchor_terms(span))
+    # each entry's whole key carries its own entry-window
     assert terms["key_a"] == 6 and terms["key_b"] is None
-    assert terms["shared_term_x"] is None  # key_b's unbounded window wins
+    assert terms["shared_term_x"] is None  # m2's unbounded window wins
 
 
 def test_anchor_terms_capped():
@@ -811,6 +873,44 @@ def test_neighborhood_zero_keeps_only_the_injection_step(monkeypatch, tmp_path):
     assert "[step 3," not in neighborhood and "[step 5," not in neighborhood
 
 
+def test_neighborhood_stops_at_the_post_side_window_end(monkeypatch, tmp_path):
+    """The seam neighborhood is clamped at the same window end the chunks
+    stopped at: steps a re-delivery span claims never sit verbatim in THIS
+    span's scoring input while the chunk header's footprint windows assign
+    them to the newer span."""
+    ref_b = cure_ref("key_b", "an unrelated note")
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.recall(REF_A)  # step 2 — the judged span
+    for _ in range(5):
+        b.agent_turn()  # steps 3-7
+    b.recall(ref_b)  # step 8: unrelated content
+    b.agent_turn().agent_turn()  # steps 9,10
+    b.recall(REF_A)  # step 11: A re-delivered → the first span's window ends at 10
+    b.agent_turn().agent_turn()  # steps 12,13 — the re-delivery span's ground
+    d = b.write(tmp_path / "t1")
+    from memgraph.parse_trajectory import parse_trajectory
+    from injudge.steps import build_step_stream
+    from injudge.spans import group_spans
+
+    warnings = []
+    traj, ops, events = parse_trajectory(d, warnings)
+    steps = build_step_stream(events, traj.memory_lanes, warnings)
+    spans = group_spans([op for op in ops if op.kind == "recall"], traj.id)
+    span = spans[0]
+    assert span.memory_windows == {"m1": 10}
+    judge_record, scan_record = [], []
+    monkeypatch.setattr("injudge.judge.urlopen", judge_stub(judge_record))
+    monkeypatch.setattr("injudge.scan.urlopen", scan_stub(scan_record))
+    # step_first=2 with n=9 would reach step 11 unclamped — past the window
+    verdict = judge_span(span, steps, _judge_cfg(), [], traj.task,
+                         scan=_scan_cfg(neighborhood=9))
+    assert verdict["verdict"] == "positive"
+    user = judge_record[0]["messages"][1]["content"]
+    neighborhood = user.split("INJECTION NEIGHBORHOOD (verbatim)")[1]
+    assert "[step 10," in neighborhood
+    assert "[step 11," not in neighborhood
+
+
 def test_chunks_partition_the_step_stream(tmp_path):
     """Every step lands in exactly one chunk, split at step_first; the step
     cap and the token cap each cut, and a single step over the token cap is
@@ -854,14 +954,14 @@ def test_chunks_cut_the_post_side_at_the_footprint_windows(tmp_path):
     spans = group_spans([op for op in ops if op.kind == "recall"], traj.id)
     assert len(spans) == 3
     span = spans[0]
-    assert span.memory_windows == {"key_a": 10}
+    assert span.memory_windows == {"m1": 10}
     chunks = _chunks(steps, span, _scan_cfg(), traj.task)
     # step 11 is the re-delivery span's window, never scanned for this span
     assert [s.step for c in chunks for s in c.steps] == list(range(1, 11))
-    assert "Footprint windows: key_a — steps 2–10 (re-delivered from step 11" \
+    assert "Footprint windows: m1 (key_a) — steps 2–10 (re-delivered from step 11" \
            in chunks[0].header
     # one unbounded memory among the deliveries runs the post side to the end
-    span.memory_windows = {"key_a": 10, "key_b": None}
+    span.memory_windows = {"m1": 10, "m2": None}
     chunks = _chunks(steps, span, _scan_cfg(), traj.task)
     assert [s.step for c in chunks for s in c.steps] == list(range(1, 12))
 
@@ -890,7 +990,7 @@ def test_chunk_anchors_respect_each_memorys_own_window(tmp_path):
     steps = build_step_stream(events, traj.memory_lanes, warnings)
     spans = group_spans([op for op in ops if op.kind == "recall"], traj.id)
     span = spans[0]
-    assert span.memory_windows == {"key_a": 6, "key_b": None}
+    assert span.memory_windows == {"m1": 6, "m2": None}
     chunks = _chunks(steps, span, _scan_cfg(), traj.task)
     # key_b is unbounded: the post side runs to the end of the stream
     assert [s.step for c in chunks for s in c.steps] == list(range(1, 10))
@@ -925,11 +1025,13 @@ def test_chunk_cap_counts_the_anchor_block(tmp_path):
     assert len(spans) == 1
     span = spans[0]
     # five steps echo the three path terms; sizing the steps alone would cut
-    # only [1-3]/[4-8], whose REAL bodies (~530 tokens) would blow the 500 cap
+    # only pre[1-3]/post[4-8], whose REAL bodies (header + anchors + steps)
+    # would blow the 500 cap — the anchors are what forces the earlier cuts
     scan = _scan_cfg(chunk_steps=100, chunk_tokens=500)
     chunks = _chunks(steps, span, scan, traj.task)
     assert [(c.side, c.steps[0].step, c.steps[-1].step) for c in chunks] == [
-        ("pre", 1, 2), ("pre", 3, 3), ("post", 4, 6), ("post", 7, 8),
+        ("pre", 1, 1), ("pre", 2, 2), ("pre", 3, 3),
+        ("post", 4, 6), ("post", 7, 8),
     ]
     assert sum(len(c.anchors) for c in chunks) == 15  # 5 echo steps x 3 terms
     for c in chunks:
@@ -1127,6 +1229,9 @@ def test_scan_api_key_masked_in_successful_evidence_items(monkeypatch, tmp_path)
         line = next(x for x in body["messages"][1]["content"].splitlines()
                     if "cited command" in x)
         payload = json.loads(GOOD)
+        # this fixture's span starts at step 4: re-anchor the canned answer
+        # inside its window (the test's subject is the masking, not anchors)
+        payload["memories"][0]["anchors"] = [4]
         payload["analysis"] = f"the input said: {line}"
         return FakeResponse({"choices": [{"message": {"content": json.dumps(payload)}}]})
 
@@ -1635,7 +1740,7 @@ def test_cli_scan_path_end_to_end(monkeypatch, tmp_path):
     )
     assert rc == 0
     artifact = json.loads((out / "injudge-report.json").read_text())
-    assert artifact["tool"]["schema"] == "injudge.report/v6"
+    assert artifact["tool"]["schema"] == "injudge.report/v7"
     op = artifact["operations"][0]
     assert op["verdict"] == "positive"
     assert op["input"]["path"] == "scan" and op["input"]["chunks"] == 4
@@ -1922,7 +2027,7 @@ def test_prompt_files_fully_substituted():
     assert "GOLDEN ANSWER" not in SYSTEM_PROMPT
     assert '"improved"|"no_effect"|"harmed"|null' in GOLD_SYSTEM_PROMPT
     # the answer contract and the binding rules are shared verbatim
-    assert "memories must contain exactly one entry per delivered memory key." in GOLD_SYSTEM_PROMPT
+    assert "memories must contain exactly one entry per delivered memory id, no more and" in GOLD_SYSTEM_PROMPT
     # the input description is shared verbatim too, and honest about BOTH
     # input shapes — the scan path's evidence pack never reads as the
     # COMPLETE step stream (the judge's absence judgments rest on it)
@@ -2406,26 +2511,23 @@ def test_summary_pass_recovers_reasoning_content(monkeypatch, tmp_path):
 
 # ------------------------------------------------------- span-level parallelism
 
+# a one-entry-per-span conforming answer: each of _two_span_run's spans
+# delivers a single memory (m1), so the same body serves both
 GOOD_BOTH = json.dumps({
     "memories": [
         {
-            "key": "key_a",
+            "id": "m1",
             "relevance": {"value": True, "note": "task is about this bug"},
             "accuracy": {"value": "corroborated", "note": "consistent with the file at step 2"},
             "novelty": {"value": "novel", "note": "agent had not seen this before"},
             "influence": {"value": "acted_on", "note": "agent grepped it at step 3"},
             "positive_effect": {"value": "improved", "note": "saved exploration"},
-        },
-        {
-            "key": "key_b",
-            "relevance": {"value": True, "note": "related"},
-            "accuracy": {"value": "uncontradicted", "note": "plausible"},
-            "novelty": {"value": "novel", "note": "new"},
-            "influence": {"value": "acted_on", "note": "shaped the next command"},
-            "positive_effect": {"value": "improved", "note": "saved a detour"},
+            # step 3 is inside both spans' unbounded windows (their first
+            # steps are 2 and 3): one conforming body serves either span
+            "anchors": [3],
         },
     ],
-    "analysis": "both memories guided the fix.",
+    "analysis": "the delivered memory guided the fix.",
     "evidence": [],
     "confidence": 0.8,
 })
@@ -2660,10 +2762,7 @@ def test_judge_and_scan_parallel_combined(monkeypatch, tmp_path):
         scan_record.append(json.loads(req.data.decode()))
         return FakeResponse({"choices": [{"message": {"content": EVIDENCE}}]})
 
-    monkeypatch.setattr(
-        "injudge.judge.urlopen",
-        judge_stub(judge_record, {"choices": [{"message": {"content": GOOD_BOTH}}]}),
-    )
+    monkeypatch.setattr("injudge.judge.urlopen", judge_stub(judge_record, None))
     monkeypatch.setattr("injudge.scan.urlopen", _scan_open)
     out = tmp_path / "out"
     rc = injudge_main.main(
@@ -2680,3 +2779,30 @@ def test_judge_and_scan_parallel_combined(monkeypatch, tmp_path):
     assert all(o["input"]["path"] == "scan" and o["input"]["chunks"] >= 2 for o in ops)
     assert len(scan_record) == sum(o["input"]["chunks"] for o in ops)
     assert live["max"] >= 2  # extraction calls across the two spans overlapped
+
+
+def test_anchor_terms_seed_only_the_exposed_prefix():
+    """F1 binding on the scan path: a clipped entry's anchor terms come
+    from the exposed prefix only — the unshown suffix was never in front of
+    the agent, so a term found there is not this span's evidence."""
+    from injudge.model import InjectionSpan
+
+    span = InjectionSpan(
+        id="T1:S1", traj="T1",
+        memories=[{"key": "k", "value": "src/alpha.py plus a distinctive_suffix"}],
+        memory_exposure=[
+            {"state": "clipped", "exposed_chars": len("src/alpha.py"),
+             "value_chars": len("src/alpha.py plus a distinctive_suffix")},
+        ],
+        memory_windows={"m1": None},
+    )
+    terms = dict(_anchor_terms(span))
+    assert terms["src/alpha.py"] is None
+    assert "distinctive_suffix" not in terms
+    # an unknown-exposure entry keeps its full value as the term source
+    span.memory_exposure = [
+        {"state": "unknown", "exposed_chars": None,
+         "value_chars": len(span.memories[0]["value"])},
+    ]
+    terms = dict(_anchor_terms(span))
+    assert terms["src/alpha.py"] is None and terms["distinctive_suffix"] is None

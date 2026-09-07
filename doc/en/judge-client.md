@@ -20,6 +20,8 @@ The client walks a conformance tier chain — **structured** (constrained decodi
 - A length/context-window rejection (413, or a signed 400/422 body) never walks the chain: a scoring call fails as "too long" at the branch entry and the span falls back to the chunked scan path once, marked `length_fallback` (see [Scoring input](scoring-input.md#guardrails)).
 - Pin a tier with `OUTPUT_FORMAT`. With a tier pinned there is no chain, so a 400/422 fails the span — recorded; the run continues.
 
+Span-relative checks live on top of the tier chain: the scoring contract validates exact id coverage and action-anchor windows **inside the attempt loop**. A shape-valid answer that fails them is a model error at every tier (constrained decoding cannot know this span's ids or windows) — it takes the corrective retry, and exhaustion is a visible `error`, never a silently partial verdict.
+
 ## Retries and Failure Handling
 
 Transient failures — 429/5xx, transport errors, empty content — share `MAX_ATTEMPTS` with backoff and honor a declared `Retry-After`.
@@ -34,3 +36,5 @@ Transient failures — 429/5xx, transport errors, empty content — share `MAX_A
 {% hint style="warning" %}
 Endpoint credentials are sent only to the judge endpoint. They never appear in artifacts, reports, logs, or error messages. Endpoint output that echoes the request is masked before any of its text is kept.
 {% endhint %}
+
+Redirects are refused outright: a 301/302/303 would have the stdlib's redirect handler forward the `Authorization` / `x-api-key` header to any `Location` — another host, or an HTTPS→HTTP downgrade — so a 3xx surfaces as a request failure recorded on the span (no tier walk, no retry, no knob) and the credential's destination stays the configured endpoint. A report's `tool.config` manifest records the resolved settings for reproducibility, sanitized to `scheme://host[:port][/path]` — never the key, never a URL's userinfo or query string.

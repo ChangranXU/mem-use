@@ -77,7 +77,10 @@ class MemoryOp:
         linked search operation, `content_chars`/`binding_status` from the
         placement record, plus the internal `placement_kind`/`placement_head`
         (how the injection was presented; injudge's span header — never
-        serialized into the graph artifact).
+        serialized into the graph artifact) and `exposure` (per delivered
+        entry: what the placement actually showed of the canonical value —
+        annotations.exposure_state; the refs keep their canonical identity,
+        the exposure records what the agent could have seen).
     """
 
     id: str  # e.g. "T1:E2" / "T1:R1"
@@ -109,6 +112,11 @@ class MemoryOp:
     # redacted/locator placements, which record no content)
     placement_kind: str | None = None
     placement_head: str | None = None
+    # per-delivered-entry placement exposure (internal like placement_head;
+    # injudge's span carries the merged form): annotations.exposure_state
+    # records {"state": full|clipped|unknown, "exposed_chars", "value_chars"}
+    # — the canonical value was NOT necessarily what the agent saw
+    exposure: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         d = {

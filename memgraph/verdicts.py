@@ -1,6 +1,6 @@
 """Merge injudge verdicts into the graph for rendering.
 
-`apply_verdicts` joins an `injudge.report/v6` artifact onto a
+`apply_verdicts` joins an `injudge.report/v7` artifact onto a
 loaded graph by (run_id, op seq) — robust to the two tools assigning different
 T-numbers when run on different path sets — and annotates each recall op in
 place:
@@ -11,7 +11,10 @@ place:
 - `span_verdict`: the span's verdict on every one of its injections, first
   or restated (the role-independent outcome, for coloring);
 - `verdict_detail` (every injection of an annotated span): confidence,
-  analysis, evidence, memory_usage, rubric, delivery_cost, auto, error,
+  analysis, evidence, memory_usage, rubric, memory_labels (the span-local
+  entry id → display key map off the report's stamped memories — rubric and
+  usage key on the ids; the popover renders the labels beside them),
+  delivery_cost, auto, error,
   input (the budget-gate regime record — full/scan path, gold marker,
   over-budget marker — present on gate spans only) — the span's record,
   stamped on each of its ops so a loaded path set missing the "first"
@@ -30,10 +33,31 @@ from pathlib import Path
 from memgraph.annotations import is_int
 
 from injudge import REPORT_SCHEMA
+from injudge.model import stamped_entry_id
+
+
+def _memory_labels(span: dict) -> dict[str, str]:
+    """span-local entry id → display label for one report operation, off its
+    stamped memories list: the rubric and memory_usage key on the span-local
+    ids (display keys are labels), and the popover needs this map to render
+    the two together. A hand-edited record without the stamp falls back to
+    the id's position (m2 → the second entry — injudge's own rollup rule);
+    an entry without a string key labels itself by id."""
+    labels: dict[str, str] = {}
+    mems = span.get("memories")
+    if not isinstance(mems, list):
+        return labels
+    for i, m in enumerate(mems):
+        if not isinstance(m, dict):
+            continue
+        entry_id = stamped_entry_id(m, i)
+        key = m.get("key")
+        labels[entry_id] = key if isinstance(key, str) and key else entry_id
+    return labels
 
 
 def load_verdict_report(path: Path) -> dict:
-    """Read and sanity-check an injudge.report/v6 artifact."""
+    """Read and sanity-check an injudge.report/v7 artifact."""
     try:
         report = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError, RecursionError) as e:
@@ -267,6 +291,10 @@ def apply_verdicts(graph: dict, report: dict, source: str = "") -> None:
                 "evidence": span.get("evidence") or [],
                 "memory_usage": span.get("memory_usage") or {},
                 "rubric": span.get("rubric"),
+                # rubric/usage key on span-local entry ids: the id → display
+                # key map off the report's stamped memories, so the popover
+                # renders "m1 (key_a)", never a bare id
+                "memory_labels": _memory_labels(span),
                 "delivery_cost": span.get("delivery_cost"),
                 "auto": span.get("auto"),
                 "error": span.get("error"),

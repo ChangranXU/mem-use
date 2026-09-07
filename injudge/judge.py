@@ -75,10 +75,19 @@ with one deliberate exception: an empty-content answer that finished
 normally (a server-side quirk) gets a fresh draw of the
 identical request after a backoff (a truncated one takes the budget rule
 above), and on openai-chat a complete verdict drafted into
-`reasoning_content` is recovered instead. Parsing is strict: anything out
-of contract, or a rubric covering none of the span's memories, becomes
-verdict "error" with the raw text kept — it is NEVER silently coerced to
-neutral, because that would pollute the neutral rate with judge failures.
+`reasoning_content` is recovered instead. Parsing is strict, and the
+contract keys each rubric entry by the SPAN-LOCAL memory id (m1, m2, … per
+delivered entry — display keys are labels, so two entries sharing a key are
+judged independently): id coverage and action-anchor windows are semantic
+checks the attempt loop corrects (a shape-valid but semantically wrong
+answer takes the bounded corrective retry; exhaustion becomes verdict
+"error" with the raw text kept — it is NEVER silently coerced to neutral,
+because that would pollute the neutral rate with judge failures. An
+out-of-contract shape fails the same way at parse time.) The judged input
+grounds every memory to its recorded placement exposure: a value the
+placement clipped is shown to the judge as the exposed prefix only, and an
+exposure that cannot be determined is marked unverified — the judged
+evidence never exceeds what the agent could have seen.
 """
 
 from __future__ import annotations
@@ -89,18 +98,17 @@ import math
 import re
 import threading
 import time
-from collections import Counter
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from email.utils import parsedate_to_datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.error import HTTPError
 from urllib.parse import quote, quote_plus
-from urllib.request import Request, urlopen  # module-level: tests monkeypatch urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-from injudge.model import AgentStep, InjectionSpan, step_range
+from injudge.model import AgentStep, InjectionSpan, memory_id, step_range
 from injudge.prompts import load_prompt
 from memgraph.annotations import is_int
 
@@ -125,6 +133,31 @@ class JudgeError(Exception):
         super().__init__(message)
         self.input: dict | None = None
         self.too_long = False
+
+
+class _NoRedirectHandler(HTTPRedirectHandler):
+    """Reject every redirect on a judge call: the request carries the
+    credential headers (`Authorization` / `x-api-key`), and the stdlib's
+    redirect handler would forward them to ANY location — another host, or
+    an HTTPS→HTTP downgrade — with the credential in cleartext. Rejection
+    needs no policy knob: the configured endpoint answers directly or the
+    call fails on the 3xx (the walk's non-429/5xx/400-422 branch records it
+    per span and the run continues). Masking endpoint output cannot undo an
+    already-forwarded credential, so the redirect must never happen."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise HTTPError(req.full_url, code, msg, headers, fp)
+
+
+# module-level: tests monkeypatch urlopen (each module keeps its own symbol)
+_JUDGE_OPENER = build_opener(_NoRedirectHandler)
+
+
+def urlopen(req, timeout=None):
+    """The judge transport: the stdlib opener with redirects refused (see
+    _NoRedirectHandler) — the credential destination is the configured
+    endpoint, never a Location header's say-so."""
+    return _JUDGE_OPENER.open(req, timeout=timeout)
 
 
 def load_env(path: Path) -> dict[str, str]:
@@ -238,21 +271,30 @@ def _signal_schema(value: dict) -> dict:
 # memories map is an array of keyed entries). Declared once; consumed by the
 # structured-tier request builders and restated in SYSTEM_PROMPT (whose enum
 # lists are built from these constants, never repeated literally).
+# Entries key on the span-local memory id (injudge.model.memory_id), never
+# the display key: two delivered entries may share one key — distinct
+# identities, or two versions in one delivery — and the rubric must score
+# them independently. `anchors` are the structured action-step references an
+# acted-on/decisive influence claim must carry; the span-relative checks
+# (exact id set, anchor windows) live in _verdict_semantics, where the
+# attempt loop can correct them — a schema cannot express "these exact ids,
+# this span's windows".
 VERDICT_SCHEMA = {
     "type": "object", "additionalProperties": False,
     "required": ["memories", "analysis", "evidence", "confidence"],
     "properties": {
         "memories": {"type": "array", "items": {
             "type": "object", "additionalProperties": False,
-            "required": ["key", *_SIGNALS],
+            "required": ["id", *_SIGNALS, "anchors"],
             "properties": {
-                "key": {"type": "string"},
+                "id": {"type": "string"},
                 "relevance": _signal_schema({"type": "boolean"}),
                 "accuracy": _signal_schema({"type": "string", "enum": list(_ACCURACY)}),
                 "novelty": _signal_schema({"type": "string", "enum": list(_NOVELTY)}),
                 "influence": _signal_schema({"type": "string", "enum": list(_INFLUENCE)}),
                 "positive_effect": _signal_schema(
                     {"type": ["string", "null"], "enum": [*_POS_EFFECT, None]}),
+                "anchors": {"type": "array", "items": {"type": "integer"}},
             },
         }},
         "analysis": {"type": "string"},
@@ -1053,10 +1095,38 @@ class GoldInput:
     correctness: dict[str, Any] | None = None
 
 
-def _memory_line(m: dict) -> str:
-    # The memory system's self-assessment (confidence, needs_verification)
-    # is withheld: every signal is judged from the step stream only.
-    return f"- [{m.get('memory_type')}] {m.get('key') or '(unkeyed)'}: {m.get('value')}"
+def _memory_line(m: dict, mid: str, exposure: dict | None) -> str:
+    """One delivered memory on a judge-bound input, labelled with its
+    span-local id and grounded to what the placement actually exposed. The
+    memory system's self-assessment (confidence, needs_verification) is
+    withheld: every signal is judged from the step stream only. Exposure
+    markers keep the judged evidence inside what the agent could have seen:
+    a clipped entry carries ONLY the exposed prefix — the unshown remainder
+    is not the agent's to use and not the judge's to credit — and an
+    unverified one says so instead of implying full visibility. No exposure
+    record at all (a span built directly) shows the canonical value bare."""
+    label = f"- [{mid}] [{m.get('memory_type')}] {m.get('key') or '(unkeyed)'}"
+    value = m.get("value")
+    if exposure is None:
+        return f"{label}: {value}"
+    state = exposure.get("state")
+    if state == "clipped" and isinstance(value, str):
+        shown = exposure.get("exposed_chars") or 0
+        total = exposure.get("value_chars")
+        return (
+            f"{label}: {value[:shown]}…\n"
+            f"  [EXPOSED CLIP — only the first {shown} of {total} chars of this "
+            "value were shown to the agent; judge only the exposed prefix above, "
+            "never the unshown remainder]"
+        )
+    if state == "unknown":
+        return (
+            f"{label}: {value}\n"
+            "  [EXPOSURE UNVERIFIED — the recorded placement does not carry this "
+            "value verbatim, so what the agent saw (transformed, clipped, or "
+            "whole) cannot be determined; do not treat the value as fully shown]"
+        )
+    return f"{label}: {value}"
 
 
 def _cmd_of(args: dict | str) -> str:
@@ -1197,11 +1267,10 @@ def _echo_overlap_warnings(
         pre |= words
     if not pre:
         return
-    for m in span.memories:
+    for i, m in enumerate(span.memories):
+        mid = memory_id(i)
         key = m.get("key")
-        if not key:
-            continue
-        signals = rubric.get(key)
+        signals = rubric.get(mid)
         if not signals or (signals.get("novelty") or {}).get("value") != "novel":
             continue
         value = m.get("value")
@@ -1213,10 +1282,10 @@ def _echo_overlap_warnings(
         overlap = len(words & pre) / len(words)
         if overlap >= _ECHO_MIN_OVERLAP:
             warnings.append(
-                f"{span.id}: {key}.novelty judged 'novel' but {overlap:.0%} of the "
-                "value's words already appear in the task statement or the "
-                "pre-injection steps — a possible same-episode echo (the judged "
-                "novelty stands; review the span)"
+                f"{span.id}: {mid} ({key or 'unkeyed'}).novelty judged 'novel' but "
+                f"{overlap:.0%} of the value's words already appear in the task "
+                "statement or the pre-injection steps — a possible same-episode "
+                "echo (the judged novelty stands; review the span)"
             )
 
 
@@ -1267,33 +1336,60 @@ def _render_span_header(span: InjectionSpan, task: str | None, memories_note: st
         parts.append(f"NOTE: the memory was NOT delivered at steps {span.step_gaps}.")
     if span.new_keys:
         parts.append(f"New memories vs the previous span: {span.new_keys}.")
+    if span.previous_keys:
+        # the novelty baseline beyond the task statement: these keys were
+        # already delivered in an earlier span of this trajectory
+        parts.append(
+            f"Delivered in an earlier span (not new): {span.previous_keys}."
+        )
+    if span.changed_keys:
+        parts.append(
+            f"Same memory, changed value vs its last earlier delivery: {span.changed_keys}."
+        )
     if span.removed_keys:
         parts.append(f"Removed vs the previous span: {span.removed_keys}.")
     if span.step_first is not None and any(
         end is not None for end in span.memory_windows.values()
     ):
-        # footprint windows at the rubric's per-KEY granularity (identities
-        # sharing one display key merge to the earliest bound — spans.py's
-        # rubric collapse): each key is judged up to its next re-delivery
-        # (later steps belong to the re-delivery span); a key never
-        # re-delivered keeps the rest of the stream, and one key's bound
-        # never caps a co-delivered key's window. Stated only when at least
-        # one memory is bounded (all-unbounded keeps the stream label's open
-        # wording). The shared header carries it, so the scan path's chunk
-        # headers state the same bounds to extraction.
+        # footprint windows at the per-ENTRY granularity (span-local ids —
+        # identities sharing one display key keep their own bounds): each
+        # delivered memory is judged up to its next re-delivery (later steps
+        # belong to the re-delivery span); a memory never re-delivered keeps
+        # the rest of the stream, and one memory's bound never caps a
+        # co-delivered memory's window. Stated only when at least one memory
+        # is bounded (all-unbounded keeps the stream label's open wording).
+        # The shared header carries it, so the scan path's chunk headers
+        # state the same bounds to extraction.
         frags = []
-        for key, end in span.memory_windows.items():
+        for i, m in enumerate(span.memories):
+            mid = memory_id(i)
+            end = span.memory_windows.get(mid)
+            label = m.get("key") or "(unkeyed)"
             if end is not None:
                 frags.append(
-                    f"{key} — {step_range(span.step_first, end)} (re-delivered "
-                    f"from step {end + 1}; later steps belong to that span)"
+                    f"{mid} ({label}) — {step_range(span.step_first, end)} "
+                    f"(re-delivered from step {end + 1}; later steps belong to that span)"
                 )
             else:
-                frags.append(f"{key} — steps {span.step_first} onward (never re-delivered)")
+                frags.append(
+                    f"{mid} ({label}) — steps {span.step_first} onward (never re-delivered)"
+                )
         parts.append("Footprint windows: " + "; ".join(frags) + ".")
     parts.append(memories_note)
-    parts.extend(_memory_line(m) for m in span.memories)
+    parts.extend(
+        _memory_line(m, memory_id(i), exp)
+        for i, (m, exp) in enumerate(_zip_exposure(span))
+    )
     return "\n".join(parts)
+
+
+def _zip_exposure(span: InjectionSpan) -> Iterable[tuple[dict, dict | None]]:
+    """(memory, exposure) pairs for a span's delivered entries; a length
+    mismatch or an absent exposure list yields None records — the canonical
+    value then shows bare, exactly like a directly-built span."""
+    exposure = span.memory_exposure
+    for i, m in enumerate(span.memories):
+        yield m, exposure[i] if i < len(exposure) else None
 
 
 def _gold_blocks(gold: GoldInput | None) -> str:
@@ -1457,7 +1553,9 @@ def _strict_parse(text: str) -> tuple[dict | None, str | None]:
     subset — the memories array structure, the rubric values, and
     confidence; extra properties pass (only the constrained tiers reject
     them). Display-only fields (notes, analysis, evidence) are not
-    shape-checked here.
+    shape-checked here. The span-relative semantics (the exact expected id
+    set, anchor windows) are _verdict_semantics' — a different failure
+    class with its own handling in the attempt loop.
     """
     obj, error = _json_parse(text)
     if error is not None:
@@ -1471,18 +1569,24 @@ def _strict_parse(text: str) -> tuple[dict | None, str | None]:
     for entry in memories:
         if not isinstance(entry, dict):
             return None, "has a memories entry that is not an object"
-        key = entry.get("key")
-        if not isinstance(key, str) or not key:
-            return None, "has a memories entry without a non-empty string 'key'"
-        if key in seen:
-            return None, f"has a duplicate memories entry for key {key!r}"
-        seen.add(key)
+        entry_id = entry.get("id")
+        if not isinstance(entry_id, str) or not entry_id:
+            return None, "has a memories entry without a non-empty string 'id'"
+        if entry_id in seen:
+            return None, f"has a duplicate memories entry for id {entry_id!r}"
+        seen.add(entry_id)
+        anchors = entry.get("anchors")
+        if not isinstance(anchors, list):
+            return None, f"has {entry_id}.anchors not as an array"
+        # a JSON `true` must not pass for 1 — anchors name agent steps
+        if any(not is_int(a) for a in anchors):
+            return None, f"has {entry_id}.anchors with a non-integer step"
         for signal in _SIGNALS:
             sig = entry.get(signal)
             if not isinstance(sig, dict) or "value" not in sig:
-                return None, f"has {key}.{signal} not as a value/note object"
+                return None, f"has {entry_id}.{signal} not as a value/note object"
             if not _valid_value(signal, sig["value"]):
-                return None, f"has {key}.{signal} value {sig['value']!r} outside the contract"
+                return None, f"has {entry_id}.{signal} value {sig['value']!r} outside the contract"
     confidence = obj.get("confidence")
     if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
         return None, "has no numeric confidence"
@@ -1494,6 +1598,74 @@ def _strict_parse(text: str) -> tuple[dict | None, str | None]:
         # arbitrary-precision, always finite (a huge int still clamps later).
         return None, "has a non-finite confidence"
     return obj, None
+
+
+def _verdict_semantics(
+    obj: dict, span: InjectionSpan, last_step: int | None
+) -> str | None:
+    """The span-relative contract checks a JSON schema cannot express:
+    coverage (the answer carries EXACTLY one entry per delivered memory's
+    span-local id — a missing entry is an unanswered judgment, an unknown
+    one is noise, and neither may stand) and action anchors (an acted-on or
+    decisive influence claim cites its footprint steps, inside the
+    entry's own footprint window and never past the end of the step stream
+    — `last_step`, the stream's final step number; a step past it is a
+    hallucination, not evidence; a reference that names no step is not
+    evidence of influence). `last_step` is a required argument (None only
+    when the caller holds no step stream at all): an omitted bound would
+    leave a never-re-delivered memory's window open past the stream's end,
+    accepting hallucinated anchors. Returns the
+    violation, or None when the answer is complete. These run INSIDE the
+    attempt loop (via _CallContract's validate hook), so a violation takes
+    the bounded corrective path — and exhaustion stays an error, never a
+    silently partial verdict. They are semantic, never format-field proof:
+    constrained decoding cannot know this span's ids or windows, so a
+    violation at the structured tier is a model error like any other, not a
+    free tier discovery."""
+    expected = {memory_id(i) for i in range(len(span.memories))}
+    answered = {e["id"] for e in obj["memories"]}
+    if answered != expected:
+        missing = sorted(expected - answered)
+        unknown = sorted(answered - expected)
+        # name BOTH halves when both exist: the corrective round must fix
+        # everything in one answer, not discover the other half next attempt
+        detail = "; ".join(
+            ([f"missing {missing}"] if missing else [])
+            + ([f"carrying unknown {unknown}"] if unknown else [])
+        )
+        return (
+            f"covers ids {sorted(answered)} but the span delivers exactly "
+            f"{sorted(expected)} ({detail})"
+        )
+    if span.step_first is None:
+        return None  # no step stream to anchor against
+    for entry in obj["memories"]:
+        entry_id = entry["id"]
+        anchors = entry["anchors"]
+        end = span.memory_windows.get(entry_id)
+        out_of_window = [
+            a
+            for a in anchors
+            if a < span.step_first
+            or (end is not None and a > end)
+            or (last_step is not None and a > last_step)
+        ]
+        if out_of_window:
+            bound = (
+                f"step {end}" if end is not None
+                else f"step {last_step}" if last_step is not None
+                else "the stream's end"
+            )
+            return (
+                f"cites {entry_id} at step(s) {out_of_window} outside its "
+                f"footprint window (starts at step {span.step_first}, ends at {bound})"
+            )
+        if entry["influence"]["value"] in _ACTED and not anchors:
+            return (
+                f"claims {entry_id} influence {entry['influence']['value']!r} "
+                "without action anchors (the agent steps where the footprint appears)"
+            )
+    return None
 
 
 def _derive_usage(signals: dict) -> str:
@@ -1618,87 +1790,72 @@ def _assemble_verdict(
     in code.
 
     These are the semantic checks a JSON schema cannot express, not format
-    tolerance: coverage (a span key absent from the array gets nulled
-    signals + a warning; zero coverage is an immediate error verdict — a
-    model-quality signal, never retried), the positive_effect↔influence
-    pairing correction, unknown-key drop, and the confidence range clamp.
-    """
+    tolerance: the positive_effect↔influence pairing correction and the
+    confidence range clamp. Id coverage and anchor windows are the attempt
+    loop's (_verdict_semantics) — an answer reaching this point already
+    carries exactly one entry per delivered memory id, so the missing-entry
+    and unknown-id branches below are the direct-caller degrade, never a
+    live path. Every
+    delivered ENTRY is judged — two entries sharing one display key stay
+    two entries (distinct span-local ids), never collapsed."""
     verdict = blank_verdict()
-    entries = {e["key"]: e for e in obj["memories"]}
-    raw_keys = [m.get("key") or "" for m in span.memories]
-    # the judge contract is one rubric entry per key, so a delivery carrying
-    # several versions of one key (distinct portable identities) collapses
-    # into a single entry — coverage counts distinct keys, and the collapse
-    # is warned about like every other semantic correction here
-    span_keys = list(dict.fromkeys(raw_keys))
-    delivered_counts = Counter(raw_keys)
-    for key in span_keys:
-        if key and delivered_counts[key] > 1:
-            warnings.append(
-                f"{span.id}: key {key!r} delivered in {delivered_counts[key]} "
-                "versions; judged once per key"
-            )
-    n_unkeyed = delivered_counts[""]
-    if n_unkeyed and any(span_keys):
-        # the judge contract keys rubric entries by memory key, so an
-        # unkeyed delivered memory can never be covered — surfaced like every
-        # other drop here, never silently absent from the verdict record
-        # (its delivery cost still counts in the span's deterministic cost)
+    entries = {e["id"]: e for e in obj["memories"]}
+    unknown = sorted(
+        set(entries) - {memory_id(i) for i in range(len(span.memories))}
+    )
+    if unknown:
+        # direct-caller noise, dropped like the missing-entry degrade —
+        # never silently; the ids are endpoint output, so mask like every
+        # other echo path
         warnings.append(
-            f"{span.id}: {n_unkeyed} delivered "
-            f"{'memory' if n_unkeyed == 1 else 'memories'} with no key; "
-            "excluded from the rubric and usage records"
+            f"{span.id}: rubric entry for unknown id "
+            f"{_mask_key(repr(unknown), api_key)} dropped"
         )
-    for key in entries:
-        if key not in span_keys:
-            # the judge's own key is endpoint output (an echoed credential
-            # would land verbatim in the validation notes) — mask it
-            warnings.append(
-                f"{span.id}: rubric entry for unknown key "
-                f"{_mask_key(repr(key), api_key)} dropped"
-            )
-    covered = 0
-    for key in span_keys:
-        if not key:
-            continue
-        entry = entries.get(key)
+    for i, m in enumerate(span.memories):
+        mid = memory_id(i)
+        entry = entries.get(mid)
         if entry is None:
-            warnings.append(f"{span.id}: rubric missing memory {key!r}; signals nulled")
+            # unreachable through _scoring_call (coverage is enforced in the
+            # attempt loop); kept so a direct assembly call degrades, never
+            # KeyErrors — the entry is visibly unanswered, never invented
+            warnings.append(f"{span.id}: rubric missing memory {mid}; signals nulled")
             signals = {s: {"value": None, "note": ""} for s in _SIGNALS}
+            anchors: list[int] = []
         else:
-            covered += 1
             signals = {
                 s: {"value": entry[s]["value"],
                     "note": _mask_key(str(entry[s].get("note") or ""), api_key)}
                 for s in _SIGNALS
             }
+            anchors = entry.get("anchors")
+            anchors = anchors if isinstance(anchors, list) else []
         # positive_effect pairs with acted-on influence
         inf, pe = signals["influence"], signals["positive_effect"]
         if inf["value"] in _ACTED and pe["value"] is None:
+            # the rubric's sanctioned uncertainty route: acted-on influence
+            # whose direction the evidence could not determine (the contract
+            # invites the null) — usage derives unclear and the occurrence is
+            # logged, but nothing was coerced, so it is NOT a pairing
+            # correction and never counts against judge compliance
             warnings.append(
-                f"{span.id}: {key}.positive_effect required when influence is "
-                "acted_on/decisive; usage unclear for this memory"
+                f"{span.id}: {mid}.positive_effect undetermined while influence is "
+                f"{inf['value']!r}; usage unclear for this memory"
             )
-            verdict["pe_pairing_corrections"] += 1
         elif inf["value"] not in _ACTED and pe["value"] is not None:
             warnings.append(
-                f"{span.id}: {key}.positive_effect set while influence is "
+                f"{span.id}: {mid}.positive_effect set while influence is "
                 f"{inf['value']!r}; coerced to null"
             )
             pe["value"] = None
             verdict["pe_pairing_corrections"] += 1
-        verdict["rubric"][key] = signals
+        verdict["rubric"][mid] = {**signals, "anchors": anchors}
         usage = _derive_usage(signals)
         usage_entry = {"usage": usage, "evidence": _usage_evidence(signals)}
         if usage == "ignored":
             usage_entry["reason"] = _footprint_reason(signals)
-        verdict["memory_usage"][key] = usage_entry
-    if any(span_keys) and covered == 0:
-        return _error_verdict(
-            "judge rubric covers none of the span's memories", text, span,
-            warnings, api_key)
-    if not any(span_keys):
-        warnings.append(f"{span.id}: span delivers no parseable memories; rubric empty")
+        verdict["memory_usage"][mid] = usage_entry
+    if not span.memories:
+        warnings.append(f"{span.id}: span delivers no memories; rubric empty")
 
     verdict["verdict"] = derive_verdict(verdict["memory_usage"])
     verdict["confidence"] = _clamp_confidence(obj["confidence"], span.id, warnings)
@@ -1932,7 +2089,9 @@ def judge_span(
         user = render_user(span, steps, task, gold=gold)
         record = _input_record("full", gold) if scan is not None else None
         try:
-            verdict = _scoring_call(system, user, span, cfg, warnings)
+            verdict = _scoring_call(
+                system, user, span, cfg, warnings, steps[-1].step if steps else None
+            )
         except JudgeError as e:
             if not (e.too_long and scan is not None and span.step_first is not None):
                 # a gate span keeps its input record even when the scoring call
@@ -1971,11 +2130,18 @@ def judge_span(
 class _CallContract:
     """The vocabulary one contract-enforcing call walks the tier chain with:
     the output schema and request name the constrained tiers send, the
-    code-side conformance check, the corrective note a budget-consuming retry
+    code-side conformance check, the semantic validation a schema cannot
+    express (None when the call has none — extraction's free-text items have
+    no span-relative rules), the corrective note a budget-consuming retry
     appends, and the message spellings — the extraction walk (injudge.scan)
     names its SCAN_* knobs where the scoring walk names the scoring ones.
     The POLICY — the tier chain, the free degrades, the truncation gate, the
-    attempt budget — lives once in _contract_call."""
+    attempt budget — lives once in _contract_call.
+
+    A semantic violation is its own failure class: it is never proof the
+    endpoint ignored a format field (constrained decoding cannot enforce
+    span-relative rules), so it never degrades a tier for free — it takes
+    the bounded corrective retry like a model error."""
 
     schema: dict[str, Any]
     name: str
@@ -1984,6 +2150,7 @@ class _CallContract:
     label: str  # "judge" | "extraction": the failure messages' subject
     pin_env: str  # OUTPUT_FORMAT | SCAN_OUTPUT_FORMAT
     budget_hint: str  # "increase max_tokens" | "increase SCAN_MAX_TOKENS"
+    validate: Callable[[Any], str | None] | None = None
 
 
 class _CallFailed(Exception):
@@ -2106,6 +2273,12 @@ def _contract_call(
     smaller path — it fails the chunk like any other request rejection). With the
     output format pinned there is no chain to walk, so a 400/422 fails the
     call naming the pin.
+    A contract whose `validate` hook rejects a SHAPE-valid answer (the
+    scoring call's id coverage and action-anchor windows) fails the SEMANTIC
+    contract, never the format one: it takes the budget-consuming corrective
+    retry at the working tier like a model error — even at the structured
+    tier, where constrained decoding cannot know this span's ids or windows —
+    and exhaustion stays a visible failure, never a silently partial verdict.
     Out-of-contract OUTPUT that proves the endpoint
     ignored the format field — any violation the contract's parse checks at
     the structured tier (an out-of-range confidence is not among them: the
@@ -2289,6 +2462,11 @@ def _contract_call(
                     )
             if text is not None:
                 obj, error = contract.parse(text)
+                semantic = False  # the violation, when one fired, is span-relative
+                if obj is not None and contract.validate is not None:
+                    error = contract.validate(obj)
+                    if error is not None:
+                        obj, semantic = None, True
                 if obj is not None:
                     # the tier produced a conforming answer — only now is it
                     # proven to work, so only now is the run memo updated (a
@@ -2329,17 +2507,21 @@ def _contract_call(
                 # and inside the contract's unbounded integer fields, so a
                 # strict endpoint can legitimately produce one — a model error
                 # at this tier too, never proof the field was ignored (the
-                # same classification the json tier's rule gives it). At the
-                # json tier only invalid JSON proves it: JSON mode guarantees
-                # valid JSON, never schema conformance, so a valid-but-
-                # wrong-shape answer is a model error, not an endpoint
-                # property — degrading would only weaken enforcement for no
-                # reason. A rescued reasoning_content draft never passed
-                # through the format channel at all, so its violation proves
-                # nothing either.
+                # same classification the json tier's rule gives it). A
+                # SEMANTIC violation (coverage, anchors) proves nothing at any
+                # tier: constrained decoding cannot enforce span-relative
+                # rules, so even a strict structured endpoint can answer
+                # schema-valid but semantically wrong. At the json tier only
+                # invalid JSON proves it: JSON mode guarantees valid JSON,
+                # never schema conformance, so a valid-but-wrong-shape answer
+                # is a model error, not an endpoint property — degrading would
+                # only weaken enforcement for no reason. A rescued
+                # reasoning_content draft never passed through the format
+                # channel at all, so its violation proves nothing either.
                 if (
                     nxt is not None
                     and not rescued
+                    and not semantic
                     and (
                         (tier == "structured" and error != _DIGIT_LIMIT_ERROR)
                         or error == _NOT_JSON_ERROR
@@ -2414,6 +2596,7 @@ def _scoring_call(
     span: InjectionSpan,
     cfg: JudgeConfig,
     warnings: list[str],
+    last_step: int | None,
 ) -> dict:
     """Score one prepared (system, user) judge input through the shared
     contract walk (VERDICT_SCHEMA), then assemble the verdict.
@@ -2435,8 +2618,19 @@ def _scoring_call(
         {"role": "system", "content": system},
         {"role": "user", "content": user},
     ]
+    # the span-relative checks (exact id coverage, anchor windows) ride the
+    # walk as the contract's validate hook: a shape-valid but semantically
+    # wrong answer takes the corrective path inside the attempt loop, where
+    # the remaining budget can still fix it. `last_step` (the stream's final
+    # step number) bounds the anchors of a never-re-delivered memory, whose
+    # window is otherwise the open "rest of the stream" — a required
+    # argument, so no caller drops the bound by omission (None only when the
+    # caller holds no step stream at all)
+    contract = replace(
+        _VERDICT_CALL, validate=lambda obj: _verdict_semantics(obj, span, last_step)
+    )
     try:
-        obj, text = _contract_call(cfg, messages, _VERDICT_CALL, warnings, span.id, urlopen)
+        obj, text = _contract_call(cfg, messages, contract, warnings, span.id, urlopen)
     except _CallFailed as e:
         if e.kind == "answer":
             return _error_verdict(
@@ -2463,16 +2657,15 @@ def auto_verdict_no_subsequent_turn(span: InjectionSpan) -> dict:
         "no agent turn classified in the run; no downstream footprint can exist"
     )
     verdict["rubric"] = {
-        m["key"]: {
-            s: {"value": None, "note": "no subsequent turn"} for s in _SIGNALS
+        memory_id(i): {
+            **{s: {"value": None, "note": "no subsequent turn"} for s in _SIGNALS},
+            "anchors": [],
         }
-        for m in span.memories
-        if m.get("key")
+        for i in range(len(span.memories))
     }
     verdict["memory_usage"] = {
-        m["key"]: {"usage": "unclear", "evidence": "no subsequent turn"}
-        for m in span.memories
-        if m.get("key")
+        memory_id(i): {"usage": "unclear", "evidence": "no subsequent turn"}
+        for i in range(len(span.memories))
     }
     verdict["auto"] = "no_subsequent_turn"
     return verdict

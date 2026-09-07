@@ -122,9 +122,9 @@ _TEMPLATE = r"""<!DOCTYPE html>
     </div>
     <div class="group" id="legend-verdicts" style="display:none">
       <h4>▼ verdicts <span>— injudge outcome per injection span</span></h4>
-      <div class="item"><svg width="14" height="14"><path d="M7,12 L2,2 L12,2 Z" fill="#2e9e5b"/></svg><span><b>positive</b> — the injection measurably helped later work</span></div>
-      <div class="item"><svg width="14" height="14"><path d="M7,12 L2,2 L12,2 Z" fill="#d64545"/></svg><span><b>negative</b> — it measurably hurt</span></div>
-      <div class="item"><svg width="14" height="14"><path d="M7,12 L2,2 L12,2 Z" fill="#98a2b3"/></svg><span><b>neutral</b> — no observable footprint</span></div>
+      <div class="item"><svg width="14" height="14"><path d="M7,12 L2,2 L12,2 Z" fill="#2e9e5b"/></svg><span><b>positive</b> — a memory was used and improved later work (LLM judge assessment)</span></div>
+      <div class="item"><svg width="14" height="14"><path d="M7,12 L2,2 L12,2 Z" fill="#d64545"/></svg><span><b>negative</b> — a memory was acted on without benefit (judge assessment; not proven harm)</span></div>
+      <div class="item"><svg width="14" height="14"><path d="M7,12 L2,2 L12,2 Z" fill="#98a2b3"/></svg><span><b>neutral</b> — no demonstrated footprint (includes referenced-but-unacted)</span></div>
       <div class="item"><svg width="14" height="14"><path d="M7,12 L2,2 L12,2 Z" fill="#e2a93b"/></svg><span><b>error</b> — judge failed (excluded from rates)</span></div>
       <div class="item"><svg width="14" height="14"><path d="M7,12 L2,2 L12,2 Z" fill="#3567d6"/></svg><span>blue = not judged (no verdicts merged)</span></div>
       <div class="note">click a recall node for the judge's analysis, cited evidence, and per-memory usage</div>
@@ -173,7 +173,7 @@ const memById=Object.fromEntries(G.memories.map(m=>[memId(m),m]));
 // display text for a memory id: the registered memory's bare key (the item
 // identity itself only when the memory is not in the registry)
 const dispKey=id=>{const m=memById[id]; return m?m.key:keyOf(id);};
-// Bare-key contexts (injudge rubric keys, namespace-less deletion targets)
+// Bare-key contexts (injudge memory labels, namespace-less deletion targets)
 // link only when exactly one loaded memory carries the key — never guess.
 // Null-prototype maps: memory keys are trajectory-controlled, so a key like
 // "__proto__" must count and link as data, never touch the prototype.
@@ -607,10 +607,12 @@ function memChip(id,sign,label){
   return `<span class="chip memlink" data-mem="${esc(id)}" title="select memory">${sign||""}${esc(label||dispKey(id))}</span>`;
 }
 // a bare key links only when it names exactly one loaded memory (an ambiguous
-// or unknown key renders as plain text, never a wrong link)
-function chipForKey(key,sign){
-  const id=idByKey[key];
-  return id? memChip(id,sign,key) : `<span class="chip">${sign||""}${esc(key)}</span>`;
+// or unknown key renders as plain text, never a wrong link); `text` is the
+// display label when it differs from the looked-up key (an injudge span-local
+// id chip showing its memory's key)
+function chipForKey(key,sign,text){
+  const id=idByKey[key], label=text||key;
+  return id? memChip(id,sign,label) : `<span class="chip">${sign||""}${esc(label)}</span>`;
 }
 function bindMemLinks(){
   detail.querySelectorAll(".memlink").forEach(el=>el.addEventListener("click",ev=>{
@@ -710,18 +712,26 @@ function showOp(opId){
         h+=`<div class="mrow"><div><span class="chip" style="color:${VD_COLOR[v]||"var(--muted)"}">${esc(v)}</span>${d.confidence!=null?`<span class="meta">conf ${esc(d.confidence)}</span>`:""}<span class="meta">${esc(x.verdict_span)}</span>${d.auto?`<span class="meta">auto: ${esc(d.auto)}</span>`:""}${dcTxt}${inpTxt}</div>`;
         if(d.error) h+=`<div class="flagbox">judge error: ${esc(d.error)}</div>`;
         if(d.analysis) h+=`<div class="vline" style="white-space:normal">${esc(d.analysis)}</div>`;
+        // the rubric/usage key on span-local entry ids (m1, m2, …): render
+        // each with its display label off the stamped memories map
+        const mLabels=d.memory_labels||{};
         if(d.rubric&&Object.keys(d.rubric).length){
           // per-memory rubric marks: R(elevance) A(ccuracy) N(ovelty)
           // I(nfluence) P(ositive effect)
+          const idChip=mid=>{
+            const lab=typeof mLabels[mid]==="string"&&mLabels[mid]&&mLabels[mid]!==mid? mLabels[mid] : null;
+            return chipForKey(lab||mid,"",lab? `${mid} (${lab})` : mid);
+          };
           for(const [mk,sig] of Object.entries(d.rubric))
-            h+=`<div class="vline">${chipForKey(mk)} ${sigCell(sig,"relevance","R")} ${sigCell(sig,"accuracy","A")} ${sigCell(sig,"novelty","N")} ${sigCell(sig,"influence","I")} ${sigCell(sig,"positive_effect","P")}</div>`;
+            h+=`<div class="vline">${idChip(mk)} ${sigCell(sig,"relevance","R")} ${sigCell(sig,"accuracy","A")} ${sigCell(sig,"novelty","N")} ${sigCell(sig,"influence","I")} ${sigCell(sig,"positive_effect","P")}</div>`;
         }
         // a hand-edited verdicts artifact can carry null/non-object entries
         // or non-array step lists — skip them like any other drifted datum,
         // never dead-panel the op on a TypeError
         for(const [k,u] of Object.entries(d.memory_usage||{})){
           if(!u||typeof u!=="object") continue;
-          h+=`<div class="vline" title="${esc(u.evidence||"")}">${esc(k)} → ${esc(u.usage)}${u.reason?` <span class="meta">(${esc(u.reason)})</span>`:""}</div>`;
+          const lab=typeof mLabels[k]==="string"&&mLabels[k]&&mLabels[k]!==k? ` (${mLabels[k]})` : "";
+          h+=`<div class="vline" title="${esc(u.evidence||"")}">${esc(k)}${esc(lab)} → ${esc(u.usage)}${u.reason?` <span class="meta">(${esc(u.reason)})</span>`:""}</div>`;
         }
         for(const evv of (Array.isArray(d.evidence)?d.evidence:[])){
           if(!evv||typeof evv!=="object") continue;

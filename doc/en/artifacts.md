@@ -1,5 +1,5 @@
 ---
-description: "injudge.report/v6, injudge.summary/v3, every field, and how every rate is counted."
+description: "injudge.report/v7, injudge.summary/v4, every field, and how every rate is counted."
 icon: box-archive
 ---
 
@@ -11,8 +11,8 @@ injudge writes all artifacts to the output folder (`-o DIR`, default `output/`).
 
 | File | Schema | Role |
 |---|---|---|
-| `injudge-report.json` | `injudge.report/v6` | Runtime judging record. Rewritten after every trajectory so a crash keeps completed work. Feed it to memgraph with `--verdicts`. |
-| `summary.json` | `injudge.summary/v3` | Final statistics set: counts, rates, and a narrative-free span index. |
+| `injudge-report.json` | `injudge.report/v7` | Runtime judging record. Rewritten after every trajectory so a crash keeps completed work. Feed it to memgraph with `--verdicts`. |
+| `summary.json` | `injudge.summary/v4` | Final statistics set: counts, rates, and a narrative-free span index. |
 | `memgraph-verdicts.html` | — | Only with `--html` (off by default): memgraph with recall nodes colored by span verdict. |
 
 memgraph's `--json` artifact is `{tool, trajectories, ops, memories, edges, validation}` — the same dict embedded in the HTML. See [memgraph](memgraph.md#graph-model).
@@ -48,11 +48,11 @@ $$
 \mathrm{rates}[v] = \frac{\mathrm{count}[v]}{\mathrm{positive} + \mathrm{negative} + \mathrm{neutral}}
 $$
 
-`headline.judged_spans` is that denominator. `headline.wasted_token_share` is the injected-token cost of neutral and negative spans as a share of judged spans' cost: budget spent on injections that did not help. The headline always presents the span rates and the wasted-token share together — a zero negative rate alone misreads an ignored flood as "harmless"; when the negative rate is 0 but the wasted share is high (> 0.5), `headline.caveat` names both known coarsenesses (the span-level proxy, and the verdict asymmetry: ignored garbage is neutral; only acted-on influence with no effect or harm is negative).
+`headline.judged_spans` is that denominator. `headline.wasted_token_share` is the injected-token cost of neutral and negative spans as a share of judged spans' cost — a **span-level non-beneficial-delivery proxy**: a neutral span's referenced memories count as wasted, a positive span's ignored memories count as productive, and a mixed bundle is charged wholly to its verdict, so the share's numerator and denominator (`wasted_tokens` / `judged_tokens`) ride along named, the excluded error/unjudged tokens surface as `error_unjudged_tokens` when non-zero, and whenever the share is high (> 0.5) `headline.caveat` restates both coarsenesses — the proxy and the verdict asymmetry (ignored garbage is neutral; only acted-on influence with no effect or harm is negative). A caveat on a high share never disappears just because a few negative spans exist.
 
 ### Rubric Rates
 
-The population is judge-scored deliveries (`span × key`) on LLM-judged spans. An all-null coverage-gap row is skipped; null signal values never enter a denominator.
+The population is judge-scored deliveries (`span × delivered entry`, keyed by the entry's span-local id) on LLM-judged spans. An all-null coverage-gap row is skipped; null signal values never enter a denominator.
 
 | Rate | Numerator | Denominator | Reads as |
 |---|---|---|---|
@@ -66,11 +66,11 @@ The population is judge-scored deliveries (`span × key`) on LLM-judged spans. A
 
 ### Triage Lists
 
-`inaccurate_keys` collects identities whose `accuracy` was `contradicted`; `irrelevant_keys` collects identities whose `relevance` was `false`. Each entry carries the span ids that produced it. A key delivered under several `(namespace, item)` identities in one op is tallied under each of them.
+`inaccurate_keys` collects identities whose `accuracy` was `contradicted`; `irrelevant_keys` collects identities whose `relevance` was `false`. Each entry carries the span ids that produced it. Every delivered entry maps to exactly one `(namespace, item)` identity of its own delivery, so a key delivered under several identities tallies under each of them. An entry with no recorded identity (no `item_id`, no key — e.g. a redacted anonymous ref) has no pair to join on: it tallies span-scoped (its `item_id` records the operation and span-local id), so two spans' identity-less entries never merge.
 
 ### Per-Memory Usage
 
-Tallies merge by `(namespace, item)` over LLM-judged spans only. A joint judgment on a multi-item delivery counts under each identity. `value_drift` is true when both the first and last *recorded* values exist and differ; a redacted (unrecorded) end is not drift.
+Tallies merge by `(namespace, item)` over LLM-judged spans only. A joint judgment on a multi-item delivery counts under each identity. `value_drift` is true when both the first and last *recorded* values exist and differ; a redacted (unrecorded) end is not drift. Identity-less entries tally span-scoped, as in the triage lists above.
 
 ### Delivery Cost and Policy
 
@@ -88,7 +88,7 @@ Overall only: gated spans carrying an `input` record are counted in `input_paths
 
 ## summary.json Fields
 
-Top level: `tool.schema`, `generated_at`, `overall` (all trajectories combined), `trajectories` (per-trajectory blocks with the same statistics plus a span index). Each trajectory carries `instance_id` / `model` / `adapter` when recorded.
+Top level: `tool.schema`, `tool.judge_model`, `tool.config` (the resolved, secret-free judge/scan configuration the run judged with — never the API key, never a URL's userinfo or query), `generated_at`, `overall` (all trajectories combined), `trajectories` (per-trajectory blocks with the same statistics plus a span index). Each trajectory carries `instance_id` / `model` / `adapter` when recorded.
 
 Per aggregate block (`overall` and each trajectory):
 
@@ -102,8 +102,9 @@ Per aggregate block (`overall` and each trajectory):
 | `rates` | Verdict shares over judged spans (omitted when nothing was judged) |
 | `headline.judged_spans` | The rate denominator (the whole `headline` is omitted when this is 0) |
 | `headline.positive_span_rate` / `negative_span_rate` | The verdict rates, always presented together with the wasted-token share |
-| `headline.wasted_token_share` | Neutral + negative injected-token cost as a share of judged spans' cost |
-| `headline.caveat` | Only when the negative rate is 0 but the wasted share is high (> 0.5): names the span-level proxy coarseness and the verdict asymmetry |
+| `headline.wasted_token_share` | Neutral + negative injected-token cost as a share of judged spans' cost, with `wasted_tokens` / `judged_tokens` named beside it |
+| `headline.error_unjudged_tokens` | The token bucket no rate or share counts (written only when non-zero) |
+| `headline.caveat` | Whenever the wasted share is high (> 0.5), zero-negative or not: names the span-level proxy coarseness and the verdict asymmetry |
 | `rubric.deliveries` | Judge-scored memory deliveries; the whole `rubric` is omitted when this is 0 |
 | `rubric.counts` / `rubric.rates` | Per-signal value distributions and projected rates |
 | `rubric.no_footprint_reasons` | Why ignored memories left no footprint: `irrelevant` / `redundant` / `confirming_ignored` / `ignored_novel` (omitted when empty) |
@@ -117,7 +118,7 @@ Per aggregate block (`overall` and each trajectory):
 | `n_trajectories` | Overall only |
 | `memory_usage` | Per-memory usage tallies: `key` + non-zero `tallies`, plus `value_drift: true` when recorded content changed across spans. Labels are defined in [Verdict derivation](verdict-derivation.md#usage-labels). |
 | `low_confidence` | Span ids with confidence `< 0.5` (only when non-empty) |
-| `policy` | Delivery policy: `n_injections`, `n_steps`, `injection_density` (injections per agent step), `restated_ratio`, `est_injected_tokens`, `prompt_tokens_total` (billed usage), `injected_token_share`, `n_searches`, and per trajectory `n_extractions` / `extraction_failures` (generations recorded vs flagged as failed/incomplete — extraction reliability). Overall also has `est_injected_tokens_billed` — the share's numerator when only some trajectories have usage records. |
+| `policy` | Delivery policy: `n_injections`, `n_steps`, `injection_density` (injections per agent step), `restated_ratio`, `est_injected_tokens`, `prompt_tokens_total` (billed usage), `injected_token_share`, `n_searches`, and `n_extractions` / `extraction_failures` (generations recorded vs flagged as failed/incomplete — extraction reliability; rolled up overall too, separate from the judge's error spans). Overall also has `est_injected_tokens_billed` — the share's numerator when only some trajectories have usage records. |
 
 ## Span Index
 
@@ -133,6 +134,6 @@ Each trajectory's `spans` is a narrative-free index into the report:
 
 ## Report-Only Fields
 
-`injudge-report.json` additionally carries, per operation: `memories` (full recorded refs), rubric notes, `analysis`, `evidence`, `step_gaps`, `new_keys` / `removed_keys`, `auto`, `error`, `judge_raw`, `pe_pairing_corrections` (when any), and `input` on gated spans (`path`: `full` or `scan`, plus scan counters, `"gold"`, `"over_budget"`, and `"length_fallback"` when they apply — the latter marks a full-text send the endpoint rejected as too long, rerouted to the scan path). A span whose judging failed unexpectedly keeps a re-derived `{path, gold?}` record without scan counters, so the regime tallies still include it.
+`injudge-report.json` additionally carries, per operation: `memories` (full recorded refs, each stamped with its span-local `id`), `memory_exposure` (per entry: whether the placement showed the value `full`, `clipped` to a prefix of N chars, or `unknown`), `memory_windows` (per entry id: the footprint-window end step the entry's action `anchors` were validated against — `null` when the entry was never re-delivered, so its bound was the step stream's end; omitted when no agent turn classified), rubric notes and each entry's action `anchors`, `analysis`, `evidence`, `step_gaps`, `new_keys` / `removed_keys` / `previous_keys` / `changed_keys`, `auto`, `error`, `judge_raw`, `pe_pairing_corrections` (when any), and `input` on gated spans (`path`: `full` or `scan`, plus scan counters, `"gold"`, `"over_budget"`, and `"length_fallback"` when they apply — the latter marks a full-text send the endpoint rejected as too long, rerouted to the scan path). A span whose judging failed unexpectedly keeps a re-derived `{path, gold?}` record without scan counters, so the regime tallies still include it.
 
 The `injections` array lists every raw delivery with its span, `role` (`first` or `restated`), `verdict`, `content_chars`, and its `op_id` / `seq` / `step`.

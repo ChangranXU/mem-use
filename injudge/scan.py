@@ -8,11 +8,15 @@ evidence pack the existing scoring call (judge._scoring_call) reads. The
 chunks partition the step stream — split at the span's step_first into
 pre-injection and post-injection sides, every step lands in exactly one
 chunk (up to the footprint windows: the post side stops at the largest
-per-key window end when every KEYED delivered memory is re-delivered
-later — those steps are the newer spans' to claim; an unkeyed memory,
-unjudged and carrying no window, never holds the post side open), and
+per-entry window end when every delivered memory is re-delivered
+later — those steps are the newer spans' to claim; an entry whose window
+stays open, whether never re-delivered or identity-less and untrackable
+by re-delivery, holds the post side open to the stream's end, so no
+delayed footprint is dropped), and
 chunks never receive another chunk's text (the seam-neighborhood verbatim
-is scoring-input only, attached at assembly).
+is scoring-input only, attached at assembly — and clamped at the same
+window end, so steps a re-delivery span claims never leak into this span's
+scoring input).
 
 Failure policy: a chunk with no usable record after its attempt budget
 fails the SPAN — an error verdict naming the chunk, no further chunks
@@ -42,7 +46,6 @@ from collections.abc import Iterable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, replace
 from functools import lru_cache
-from urllib.request import urlopen  # module-level: tests monkeypatch urlopen
 
 from injudge.judge import (
     API_FORMATS,
@@ -82,8 +85,9 @@ from injudge.judge import (
     _substitute_enums,
     _system_tokens,
     count_tokens,
+    urlopen,  # module-level: tests monkeypatch urlopen (redirect-refusing)
 )
-from injudge.model import AgentStep, InjectionSpan
+from injudge.model import AgentStep, InjectionSpan, memory_id
 from injudge.prompts import load_prompt
 
 # The chunk-level contract: ONE JSON object, a none flag plus the evidence
@@ -259,6 +263,23 @@ def _chunk_header(span: InjectionSpan, task: str | None) -> str:
     return _render_span_header(span, task, _EXTRACTION_MEMORIES_NOTE)
 
 
+def _post_end(span: InjectionSpan, n_steps: int) -> int:
+    """The step the span's post side stops at (a step number, = the exclusive
+    steps-list index by the ordinal invariant): the stream's end, or the
+    largest per-entry window end when EVERY delivered memory is re-delivered
+    later — those steps are the newer spans' to claim, and scanning them for
+    this span's footprint would be pure waste. A single open window — a
+    never-re-delivered memory, or an identity-less one (untrackable by
+    re-delivery, its window always None) — keeps the post side open to the
+    end: its delayed footprint could sit anywhere past the bound, and
+    dropping those steps would be the silent coverage gap the scan exists to
+    prevent. The chunker and the seam neighborhood share this bound."""
+    ends = [end for end in span.memory_windows.values() if end is not None]
+    if span.memory_windows and len(ends) == len(span.memory_windows):
+        return min(n_steps, max(ends))
+    return n_steps
+
+
 def _chunks(
     steps: list[AgentStep], span: InjectionSpan, cfg: ScanConfig, task: str | None
 ) -> list[_Chunk]:
@@ -272,18 +293,15 @@ def _chunks(
     split pretends to enforce (the endpoint then rejects the chunk and the
     whole span degrades to an error verdict).
     The chunks PARTITION the step stream up to the footprint windows — every
-    step lands in exactly one chunk, except that the post side stops at the
-    largest per-key window end when EVERY keyed memory is re-delivered
-    later (those steps are the newer spans' to claim — scanning them for this
-    span's footprint would be pure waste; a single unbounded keyed memory
-    runs the post side to the end, and an unkeyed memory — unjudged, carrying
-    no window — never holds the post side open). Where the per-key windows
-    differ, the union range stands (a later-bounded co-delivered key still
-    claims those steps) and each key's bound rides the chunk header and
-    binds the anchors (_anchor_terms), so the earlier-bounded key is not
-    double-credited here. The windows are per display KEY, never per
-    identity: identities sharing one key merge to the earliest bound
-    (spans.py's rubric collapse — the judge contract scores per bare key).
+    step lands in exactly one chunk, except that the post side stops at
+    _post_end (the largest window end when every delivered memory is
+    re-delivered later). Where the per-entry windows
+    differ, the union range stands (a later-bounded co-delivered memory still
+    claims those steps) and each entry's bound rides the chunk header and
+    binds the anchors (_anchor_terms), so the earlier-bounded memory is not
+    double-credited here. The windows are per delivered ENTRY (span-local
+    ids), never per display key: identities sharing one key keep their own
+    bounds.
     SCAN_NEIGHBORHOOD steps are never duplicated
     into a neighboring chunk (their verbatim text is scoring-input only). A
     single step whose measured chunk body already exceeds the cap is its own
@@ -298,15 +316,7 @@ def _chunks(
     texts = _step_texts(steps)
     renders = _step_renders(steps)
     out: list[_Chunk] = []
-    post_end = len(steps)
-    ends = [end for end in span.memory_windows.values() if end is not None]
-    if span.memory_windows and len(ends) == len(span.memory_windows):
-        # every keyed delivered memory is re-delivered later (the windows
-        # hold keyed entries only — an unkeyed memory is unjudged and never
-        # holds the post side open): the span's footprint ends at the
-        # largest window end (step numbering rides the ordinal invariant —
-        # window end E is steps index E)
-        post_end = min(post_end, max(ends))
+    post_end = _post_end(span, len(steps))
     # the side split rides the ordinal invariant directly (steps[i].step ==
     # i + 1 — build_step_stream's construction), never two filtered copies
     # of the steps list per overflowing span
@@ -383,36 +393,37 @@ def _anchor_terms(span: InjectionSpan) -> list[tuple[str, int | None]]:
     term at _MAX_ANCHOR_TERM_CHARS (truncated prefixes dedupe together). The
     raw stream is lazy and stops AT the cap — bounding this scan work is the
     cap's point.
-    Every term carries the footprint-window end of its memory's display key
-    (None = unbounded; the windows are the per-key merged ones — identities
-    sharing one key carry the earliest bound): a hit PAST the window is the
-    re-delivering span's evidence, never this span's — the per-key windows
-    the chunk header states bind the anchors too, or the pre-filled items
-    would double-credit a memory whose re-delivery already superseded it.
-    A term shared by several memories keeps the widest window (it stays live
-    while any of them is in-window) — within the capped prefix: a stream cut
-    between two co-delivered memories drops the later memory's wider claim
-    on an already-kept term, which under-fills anchors past the narrower
-    window but never over-claims (extraction reads the full chunk text
-    regardless, and the header states the true windows). An unkeyed memory
-    has no window entry, so its terms stay unbounded."""
+    A CLIPPED entry seeds anchors from its exposed prefix only (the unshown
+    suffix was never in front of the agent, so a hit in it is not this
+    span's evidence); an unknown-exposure entry keeps its full value.
+    Every term carries the footprint-window end of its ENTRY (None =
+    unbounded; the windows are per span-local entry id): a hit PAST the
+    window is the re-delivering span's evidence, never this span's — the
+    per-entry windows the chunk header states bind the anchors too, or the
+    pre-filled items would double-credit a memory whose re-delivery already
+    superseded it. A term shared by several memories keeps the widest window
+    (it stays live while any of them is in-window) — within the capped
+    prefix: a stream cut between two co-delivered memories drops the later
+    memory's wider claim on an already-kept term, which under-fills anchors
+    past the narrower window but never over-claims (extraction reads the
+    full chunk text regardless, and the header states the true windows)."""
 
     def raws() -> Iterable[tuple[str, int | None]]:
-        for m in span.memories:
+        for i, m in enumerate(span.memories):
+            end = span.memory_windows.get(memory_id(i))
             key = m.get("key")
-            end = (
-                span.memory_windows.get(key)
-                if isinstance(key, str) and key
-                else None
-            )
             if isinstance(key, str) and key.strip():
                 yield key.strip(), end
             value = m.get("value")
-            if isinstance(value, str):
-                for match in _ANCHOR_WORD.finditer(value):
-                    w = match.group()
-                    if "/" in w or "::" in w or len(w) >= 8:
-                        yield w, end
+            if not isinstance(value, str):
+                continue
+            exposure = span.memory_exposure[i] if i < len(span.memory_exposure) else None
+            if exposure is not None and exposure.get("state") == "clipped":
+                value = value[: exposure.get("exposed_chars") or 0]
+            for match in _ANCHOR_WORD.finditer(value):
+                w = match.group()
+                if "/" in w or "::" in w or len(w) >= 8:
+                    yield w, end
 
     ends: dict[str, int | None] = {}  # term -> the widest window claiming it
     for raw, end in raws():
@@ -904,6 +915,17 @@ def scan_span(
     path). The verdict's `input` records the scan path and its counters; a
     span failing mid-scan records the counters accumulated so far, and a
     scoring-call failure carries the record on the raised JudgeError."""
+    if span.step_first is None:
+        # judge_span's gate and the CLI's routing never send a step-less span
+        # here (no agent turn classified — no injection point for the
+        # pre/post split or the seam neighborhood to bracket); a direct
+        # caller gets the precondition named, never a TypeError on
+        # None arithmetic deep in _chunks
+        raise ValueError(
+            f"scan_span needs an attributed span: {span.id} has step_first "
+            "None (no agent turn classified) — rule-judge it auto-neutral "
+            "or take the fit path instead"
+        )
     if scan.extraction is None:
         # a dry-run ScanConfig carries no extraction client (only the knobs
         # its overflow preview reads): the scan path makes paid extraction
@@ -963,7 +985,10 @@ def scan_span(
     n = scan.neighborhood
     # the ordinal invariant again (steps[i].step == i + 1): the seam
     # neighborhood is one slice, never a filtered pass over the whole stream
-    near = steps[max(0, span.step_first - 1 - n) : span.step_first + n]
+    # — clamped at the same window end the chunks stopped at, so steps a
+    # re-delivery span claims never sit verbatim in THIS span's scoring
+    # input while the header's footprint windows assign them elsewhere
+    near = steps[max(0, span.step_first - 1 - n) : min(span.step_first + n, _post_end(span, len(steps)))]
     user = _assemble_scan_user(header, pre_blocks, post_blocks, near, gold)
     ev_text = "\n\n".join(pre_blocks + post_blocks)
     record["chunks"] = len(extracted)
@@ -1013,7 +1038,10 @@ def scan_span(
         if over_budget:
             record["over_budget"] = True
     try:
-        verdict = _scoring_call(system, user, span, scoring_cfg, warnings)
+        verdict = _scoring_call(
+            system, user, span, scoring_cfg, warnings,
+            steps[-1].step if steps else None,
+        )
     except JudgeError as e:
         # the paid scan's record rides the failure like the failed chunk's
         # diagnostics ride ExtractError, so __main__ can stamp it on the

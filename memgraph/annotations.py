@@ -671,6 +671,48 @@ def content_chars(ref: Any) -> int | None:
     return len(text) if text is not None else None
 
 
+# A shorter occurring prefix is coincidence-grade (a shared opening word),
+# not evidence the placement carried the value: below this the exposure
+# reads unknown rather than clipped.
+_EXPOSURE_MIN_PREFIX = 8
+
+
+def exposure_state(value: Any, placement_text: str | None) -> dict:
+    """What the recorded placement actually exposed of one delivered
+    memory's canonical value — the content-grounding half of a delivery,
+    kept apart from the MemoryRef's canonical identity (never a digest
+    overwrite).
+
+    Adapter-free by construction: it compares the portable value against
+    the exact placement text, never a bridge's line format or truncation
+    marker vocabulary. `full` — the value occurs verbatim in the placement
+    (a trailing framing cut after it changes nothing). `clipped` — the
+    placement carries only a proper prefix of the value (a delivery budget
+    cutting the rendered line); `exposed_chars` is the longest occurring
+    prefix, and only that prefix may be credited to the injection.
+    `unknown` — neither holds: a redacted/locator placement (no text), a
+    valueless ref, or a renderer that transformed the value. Exposure is
+    then undeterminable from the recording and must never be assumed full.
+    """
+    value_chars = len(value) if isinstance(value, str) else None
+    if not isinstance(value, str) or not isinstance(placement_text, str):
+        return {"state": "unknown", "exposed_chars": None, "value_chars": value_chars}
+    if not value or value in placement_text:
+        return {"state": "full", "exposed_chars": len(value), "value_chars": len(value)}
+    # longest occurring prefix by binary search: prefix membership is
+    # monotone (a longer occurring prefix implies every shorter one occurs)
+    lo, hi = 0, len(value) - 1
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if value[:mid] in placement_text:
+            lo = mid
+        else:
+            hi = mid - 1
+    if lo >= _EXPOSURE_MIN_PREFIX:
+        return {"state": "clipped", "exposed_chars": lo, "value_chars": len(value)}
+    return {"state": "unknown", "exposed_chars": None, "value_chars": len(value)}
+
+
 def _cure_ext(holder: Any) -> dict[str, Any]:
     """The extensions.cure projection of one payload/ref; {} when absent —
     or corrupt: a truthy non-dict `extensions` on a hand-edited artifact

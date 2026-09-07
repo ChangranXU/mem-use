@@ -16,6 +16,11 @@
      redundant/late;
    - novel: the substance appeared neither in the task statement nor in the
      pre-injection steps.
-   The note must cite the pre-injection step or the task statement the tier
-   rests on. Judge from the recorded task statement and the agent's steps
-   only.
+   The note must cite what the tier rests on: the task statement (it has no
+   step number — naming it as the task statement is the correct citation) or
+   the specific pre-injection step. When the header says a memory was
+   delivered in an earlier span, or carries the same key with a changed
+   value, that history is part of the baseline: a re-delivery of what an
+   earlier span already delivered is not novel on content the agent had
+   already seen, while a changed value may be. Judge from the recorded task
+   statement, the span history, and the agent's steps only.

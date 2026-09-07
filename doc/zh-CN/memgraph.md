@@ -51,7 +51,7 @@ JSON 产物——嵌在 HTML 里的是同一个 dict——的形状是：
 |---|---|
 | `-o PATH` | HTML 输出路径（默认 `memory-graph.html`） |
 | `--json PATH` | 同时写出机器可读的图产物 |
-| `--verdicts PATH` | 渲染前合并一份 `injudge.report/v6` 文件 |
+| `--verdicts PATH` | 渲染前合并一份 `injudge.report/v7` 文件 |
 
 ## 判定叠加
 
@@ -64,7 +64,7 @@ JSON 产物——嵌在 HTML 里的是同一个 dict——的形状是：
 | `verdict` | 区间首次注入上的区间判定；后续相同投递为 `restated`（unjudged 区间保持 `unjudged`） |
 | `span_verdict` | 该区间在每一次注入上的判定——着色依据 |
 | `verdict_span` | injudge 区间 id |
-| `verdict_detail` | 置信度、分析、证据、逐记忆使用、评分、投递成本、输入路径，以及 `auto` / `error` 标记 |
+| `verdict_detail` | 置信度、分析、证据、逐记忆使用、评分（两者均以区间本地条目 id 键控，`memory_labels` 把 id 映射回显示键）、投递成本、输入路径，以及 `auto` / `error` 标记 |
 
 召回节点按 `span_verdict` 着色：
 

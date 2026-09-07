@@ -1,19 +1,25 @@
-"""Report assembly: the `injudge.report/v6` JSON artifact, the statistics-only
-`injudge.summary/v3` distillation, and the stdout summary.
+"""Report assembly: the `injudge.report/v7` JSON artifact, the statistics-only
+`injudge.summary/v4` distillation, and the stdout summary.
 
 The runtime artifact's output contract: per operation
 {operation_id, kind, seq, payload_summary, verdict, confidence, evidence[]}
-plus the rubric that produced the verdict (per-memory relevance / accuracy /
-novelty / influence / positive_effect with notes), the judge's analysis,
-the input record on budget-gate spans ({"path": "full"|"scan", ...} with the
-scan counters, the gold-regime marker, the over-budget-send marker, and the
-length-fallback marker when a too-long full-text send was rerouted to the
-scan path), the per-span pairing-correction count,
+plus the rubric that produced the verdict (per delivered ENTRY, keyed by its
+span-local memory id — relevance / accuracy / novelty / influence /
+positive_effect with notes, plus the entry's action anchors), the judge's
+analysis, the per-entry placement exposure record (what the agent could
+actually see of each canonical value) and the per-entry footprint window
+bounds the anchors were validated against, the input record on budget-gate spans
+({"path": "full"|"scan", ...} with the scan counters, the gold-regime
+marker, the over-budget-send marker, and the length-fallback marker when a
+too-long full-text send was rerouted to the scan path), the per-span
+pairing-correction count,
 the deterministic delivery-cost and delivery-policy accounting, and per-run
 aggregates (verdict rates, rubric distributions, headline numbers, the
 input-path, gold-regime and over-budget-send counts) over all
 audited trajectories — the artifact used to claim one memory system or
-configuration is better than another.
+configuration is better than another. The tool block carries the resolved,
+secret-free judge configuration so the run is reproducible from its own
+artifact.
 
 The summary artifact is the final statistics set of the run: the combined
 overall aggregate, and per trajectory the trajectory-level aggregate plus a
@@ -34,10 +40,10 @@ from datetime import datetime, timezone
 
 from util import print_safe, print_validation
 
-from injudge import REPORT_SCHEMA
+from injudge import REPORT_SCHEMA, SUMMARY_SCHEMA
 from injudge.aggregate import aggregate, policy_rollup
 from injudge.judge import _ACCURACY, _NOVELTY
-from injudge.model import InjectionSpan, step_range
+from injudge.model import InjectionSpan, memory_id, step_range
 
 
 def payload_summary(span: InjectionSpan) -> str:
@@ -72,10 +78,27 @@ def operation_record(span: InjectionSpan, verdict: dict, delivery_cost: dict) ->
            if span.step_first is not None else {}),
         "n_injections": span.n_injections,
         "payload_summary": payload_summary(span),
-        "memories": span.memories,
+        # every delivered entry stamped with its span-local id — the rubric
+        # and memory_usage keys below join positionally back onto this list
+        "memories": [
+            {**m, "id": memory_id(i)} for i, m in enumerate(span.memories)
+        ],
+        # what the recorded placement actually showed of each entry's value
+        # (full / clipped prefix / unknown): the canonical values above are
+        # what the delivery REFERENCES, these are what the agent could see
+        **({"memory_exposure": span.memory_exposure} if span.memory_exposure else {}),
+        # the per-entry footprint window ends the action anchors were
+        # validated against (null = never re-delivered, so bounded by the
+        # step stream's end) — recorded so the enforced bounds stay
+        # auditable from the artifact; omitted like `steps` when no agent
+        # turn ever classified (no window bounds anything there)
+        **({"memory_windows": span.memory_windows}
+           if span.step_first is not None and span.memory_windows else {}),
         "step_gaps": span.step_gaps,
         "new_keys": span.new_keys,
         "removed_keys": span.removed_keys,
+        "previous_keys": span.previous_keys,
+        "changed_keys": span.changed_keys,
         "verdict": verdict.get("verdict"),
         "confidence": verdict.get("confidence"),
         "rubric": verdict.get("rubric") or {},
@@ -188,7 +211,16 @@ def _rubric_line(rub: dict) -> str | None:
             f"{v} {nov.get(v, 0) / n_nov:.0%}" for v in _NOVELTY
         )
     if rates.get("positive_effect") is not None:
-        txt += f"; of the influential, improved {rates['positive_effect']:.0%}"
+        # the exact population, never a bare percentage: "of the influential"
+        # has read as every referenced entry when the rate is judged effects
+        # only (improved / (improved + no_effect + harmed))
+        pe = (rub.get("counts") or {}).get("positive_effect") or {}
+        improved = pe.get("improved", 0)
+        judged_effects = sum(pe.get(v, 0) for v in ("improved", "no_effect", "harmed"))
+        txt += (
+            f"; positive_effect improved {rates['positive_effect']:.0%} "
+            f"({improved} of {judged_effects} judged effects)"
+        )
     return txt
 
 
@@ -202,7 +234,19 @@ def _headline_line(headline: dict) -> str | None:
         f" (n={headline['judged_spans']} judged spans)"
     )
     if headline.get("wasted_token_share") is not None:
-        txt += f", wasted-token share {headline['wasted_token_share']:.0%}"
+        # the denominator is the judged classes' injected tokens, not the
+        # all-class total printed above — label both sides so the share
+        # never reads as per-memory truth
+        txt += (
+            f", wasted-token share {headline['wasted_token_share']:.0%} "
+            f"(neutral+negative ≈{headline.get('wasted_tokens', 0):,} of "
+            f"≈{headline.get('judged_tokens', 0):,} judged-class injected tokens)"
+        )
+        if headline.get("error_unjudged_tokens"):
+            txt += (
+                f"; ≈{headline['error_unjudged_tokens']:,} error/unjudged tokens "
+                "in no denominator"
+            )
     return txt
 
 
@@ -405,6 +449,15 @@ def _slim_aggregate(a: dict) -> dict:
         }
         if headline.get("wasted_token_share") is not None:
             h["wasted_token_share"] = headline["wasted_token_share"]
+            # the share's named numerator/denominator (and the excluded
+            # error/unjudged class): a bare share next to the all-class
+            # total has read as per-memory truth
+            if headline.get("wasted_tokens") is not None:
+                h["wasted_tokens"] = headline["wasted_tokens"]
+            if headline.get("judged_tokens") is not None:
+                h["judged_tokens"] = headline["judged_tokens"]
+            if headline.get("error_unjudged_tokens"):
+                h["error_unjudged_tokens"] = headline["error_unjudged_tokens"]
         if headline.get("caveat"):
             h["caveat"] = headline["caveat"]
         out["headline"] = h
@@ -468,16 +521,21 @@ def _summary_span_index(op: dict) -> dict:
 
 
 def build_summary(artifact: dict) -> dict:
-    """The `injudge.summary/v3` artifact: the final statistics set of a run —
+    """The `injudge.summary/v4` artifact: the final statistics set of a run —
     the combined overall aggregate, and per trajectory the trajectory-level
     aggregate plus a narrative-free span index. The report artifact stays the
     judging record (rubric notes, analysis, judge_raw, the validation log);
-    the summary is for reading and comparing numbers."""
+    the summary is for reading and comparing numbers. The judge identity
+    (model + resolved, secret-free config) rides the tool block so a summary
+    never presents rates whose judge configuration is unrecoverable."""
     spans_by_traj: dict[str, list[dict]] = {}
     for op in artifact["operations"]:
         spans_by_traj.setdefault(op["traj"], []).append(_summary_span_index(op))
+    tool = dict(artifact.get("tool") or {})
     return {
-        "tool": {"name": "injudge", "schema": "injudge.summary/v3"},
+        "tool": {"name": "injudge", "schema": SUMMARY_SCHEMA, **{
+            k: v for k, v in tool.items() if k not in ("name", "schema")
+        }},
         "generated_at": artifact["generated_at"],
         "overall": _slim_aggregate(artifact["aggregates"]["overall"]),
         "trajectories": [
@@ -513,14 +571,29 @@ def print_summary(artifact: dict) -> int:
     cost = agg.get("cost") or {}
     if cost.get("approx_tokens_total"):
         byv = cost.get("approx_tokens_by_verdict") or {}
-        print_safe(
-            f"  delivery cost: ≈{cost['approx_tokens_total']:,} injected tokens "
-            f"(+{byv.get('positive', 0):,} −{byv.get('negative', 0):,} ○{byv.get('neutral', 0):,})"
+        judged = (
+            f"+{byv.get('positive', 0):,} −{byv.get('negative', 0):,} "
+            f"○{byv.get('neutral', 0):,}"
         )
+        extra = []
+        if byv.get("error"):
+            extra.append(f"!{byv['error']:,} error")
+        if byv.get("unjudged"):
+            extra.append(f"?{byv['unjudged']:,} unjudged")
+        line = (
+            f"  delivery cost: ≈{cost['approx_tokens_total']:,} injected tokens "
+            f"({judged} judged-class"
+        )
+        if extra:
+            # the buckets the rates and shares exclude stay visible beside
+            # them — an all-class total minus a judged-class denominator has
+            # read as though every token were judged
+            line += f"; {' '.join(extra)} in no rate or share"
+        print_safe(line + ")")
     if (txt := _headline_line(agg.get("headline") or {})) is not None:
         print_safe(f"  {txt}")
-        # the wasted-token share never reads alone: a zero negative rate with
-        # a high wasted share gets its caveat stated outright
+        # the wasted-token share never reads alone: a high share carries
+        # its proxy caveat stated outright
         caveat = (agg.get("headline") or {}).get("caveat")
         if caveat:
             print_safe(f"  caveat: {caveat}")
