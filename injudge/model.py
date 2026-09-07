@@ -78,13 +78,17 @@ class AgentStep:
 
 @dataclass
 class InjectionSpan:
-    """A maximal run of recall injections delivering identical content.
+    """A maximal run of recall injections delivering identical content under
+    the same treatment.
 
     The judged unit: consecutive recall ops (in agent-step order) whose
-    canonical memory set is identical collapse into one span. Non-first
+    canonical memory set, delivered order, placement presentation, and
+    per-entry exposure are all identical collapse into one span. Non-first
     injections in the span are "restated" — re-deliveries of content already
     in front of the agent — and roll up here rather than being judged
-    individually.
+    individually. A re-delivery whose exposure or presentation CHANGED is a
+    new treatment and starts a new span (merging it would lend the later
+    delivery's wider exposure to anchors that predate it).
 
     `step_first`/`step_last` are None only when every op is unattributed (no
     agent turn ever classified in the run — a memory-only or pre-first-response
@@ -103,9 +107,11 @@ class InjectionSpan:
     identities whose RECORDED VALUE drifted against their last recorded
     earlier delivery — membership alone would hide a same-identity value
     change. `memory_exposure` carries, per delivered entry, what the
-    placement actually showed of the canonical value (full / clipped with
-    the exposed prefix length / unknown — memgraph.annotations.exposure_state),
-    merged across the span's deliveries: the judge scores the exposure,
+    placement actually showed of the canonical value (full /
+    whitespace-normalized full (prose-safe values only) / clipped with the
+    exposed prefix length / unknown — memgraph.annotations.exposure_state),
+    identical across the span's deliveries by construction (a changed
+    exposure splits the span): the judge scores the exposure,
     never an unseen suffix.
     `seq_first`/`seq_last` bracket the span's ops (min/max event seq); a
     truncated-tail op merged across newer spans can make the range overlap
@@ -128,6 +134,27 @@ class InjectionSpan:
     the bound from ever cutting the span's own delivery steps. An entry
     with no portable identity can never be re-delivery-matched and stays
     unbounded. Empty when built directly, not via group_spans.
+    `memory_window_starts` holds the one exception to the default window
+    start (the span's first step): when a LATER span starts at an earlier
+    carrier's last delivery step (a same-step delivery collision), the
+    recording carries no causal order within the step, so the shared step
+    is allocated once under a first-carrier rule — the earlier span keeps
+    it, and this span's window for that entry opens at the step after.
+    Only the bumped entries appear here.
+    `same_step_bound` (the step, or None) marks the other half of the same
+    exception: a LATER span
+    starting at this span's last delivery step (two memory blocks placed in
+    one call, or a declared step collision) that also carries one of this
+    span's entries would leave that memory's window open in both spans — one
+    memory, two windows, the same action creditable twice — so the entry's
+    still-open window closes at that step inclusive (the steps beyond are
+    the later carrier's to claim). The collision is named in the run's
+    validation notes.
+    `previous_partial_keys` qualifies `previous_keys`: the identities whose
+    every EARLIER delivery was clipped or exposure-unverifiable, so the
+    "delivered in an earlier span (not new)" cue cannot mean the agent saw
+    the whole substance — this delivery may be the first to expose the
+    suffix.
     """
 
     id: str  # f"{traj_id}:S{n}"
@@ -146,9 +173,12 @@ class InjectionSpan:
     removed_keys: list[str] = field(default_factory=list)
     previous_keys: list[str] = field(default_factory=list)
     changed_keys: list[str] = field(default_factory=list)
+    previous_partial_keys: list[str] = field(default_factory=list)
     queries: list[str] = field(default_factory=list)
     placement_kind: str | None = None
     placement_head: str | None = None
     position: int = 0
     total: int = 0
     memory_windows: dict[str, int | None] = field(default_factory=dict)
+    memory_window_starts: dict[str, int] = field(default_factory=dict)
+    same_step_bound: int | None = None

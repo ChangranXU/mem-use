@@ -548,7 +548,12 @@ def main(argv: list[str] | None = None) -> int:
             validation.append({"level": "warn", "msg": f"{run_id}: {w}"})
         recall_ops = [op for op in ops if op.kind == "recall"]
         ops_by_id = {op.id: op for op in recall_ops}
-        spans = group_spans(recall_ops, t.id)
+        span_warnings: list[str] = []
+        spans = group_spans(recall_ops, t.id, span_warnings)
+        # the span pass's notes (same-step delivery collisions bounding
+        # footprint windows) surface like every other structural finding
+        for w in span_warnings:
+            validation.append({"level": "warn", "msg": f"{run_id}: {w}"})
         # placement-exposure summary: the fidelity boundary between the
         # canonical values and what the agent actually saw — one note per
         # trajectory (per-span detail rides each operation's
@@ -565,7 +570,24 @@ def main(argv: list[str] | None = None) -> int:
             for exp in span.memory_exposure
             if exp.get("state") == "unknown"
         )
+        normalized_entries = sum(
+            1
+            for span in spans
+            for exp in span.memory_exposure
+            if exp.get("state") == "full_normalized"
+        )
         total_entries = sum(len(span.memories) for span in spans)
+        if normalized_entries:
+            validation.append(
+                {
+                    "level": "info",
+                    "msg": f"{run_id}: {normalized_entries} of {total_entries} span "
+                           "memory entries were exposed whole only up to "
+                           "whitespace/markdown-escape normalization (the placement "
+                           "re-wrapped or escaped the value); the judge treats them "
+                           "as fully shown",
+                }
+            )
         if clipped_entries:
             validation.append(
                 {

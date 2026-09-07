@@ -1,5 +1,5 @@
 ---
-description: "injudge.report/v7, injudge.summary/v4, every field, and how every rate is counted."
+description: "injudge.report/v8, injudge.summary/v5, every field, and how every rate is counted."
 icon: box-archive
 ---
 
@@ -11,8 +11,8 @@ injudge writes all artifacts to the output folder (`-o DIR`, default `output/`).
 
 | File | Schema | Role |
 |---|---|---|
-| `injudge-report.json` | `injudge.report/v7` | Runtime judging record. Rewritten after every trajectory so a crash keeps completed work. Feed it to memgraph with `--verdicts`. |
-| `summary.json` | `injudge.summary/v4` | Final statistics set: counts, rates, and a narrative-free span index. |
+| `injudge-report.json` | `injudge.report/v8` | Runtime judging record. Rewritten after every trajectory so a crash keeps completed work. Feed it to memgraph with `--verdicts`. |
+| `summary.json` | `injudge.summary/v5` | Final statistics set: counts, rates, and a narrative-free span index. |
 | `memgraph-verdicts.html` | — | Only with `--html` (off by default): memgraph with recall nodes colored by span verdict. |
 
 memgraph's `--json` artifact is `{tool, trajectories, ops, memories, edges, validation}` — the same dict embedded in the HTML. See [memgraph](memgraph.md#graph-model).
@@ -33,7 +33,8 @@ The mapping from rubric signals to usage labels and span verdicts is in [Rubric 
 
 | Population | Members |
 |---|---|
-| Judged spans | `positive` + `negative` + `neutral`. Includes rule-judged auto-neutral spans. Denominator for verdict rates. |
+| Judged spans | `positive` + `negative` + `neutral`. Denominator for verdict rates. |
+| `unassessable` | Rule-judged auto-neutral spans (no agent turn classified — no downstream is observable). Count only, with their delivery cost in their own token bucket: observation missingness is not a measured null, so they sit in no directional denominator and outside the wasted-token share. `headline.unassessable_spans` / `unassessable_tokens` name them when non-zero. |
 | LLM-judged spans | Judged spans with no `auto` marker. Population for rubric rates, usage tallies, and confidence. |
 | `error` / `unjudged` | Counts only. Never a rate denominator. |
 | Restated injections | Rolled into their span. Counted in `n_injections` and delivery cost. Absent from rates. |
@@ -48,7 +49,7 @@ $$
 \mathrm{rates}[v] = \frac{\mathrm{count}[v]}{\mathrm{positive} + \mathrm{negative} + \mathrm{neutral}}
 $$
 
-`headline.judged_spans` is that denominator. `headline.wasted_token_share` is the injected-token cost of neutral and negative spans as a share of judged spans' cost — a **span-level non-beneficial-delivery proxy**: a neutral span's referenced memories count as wasted, a positive span's ignored memories count as productive, and a mixed bundle is charged wholly to its verdict, so the share's numerator and denominator (`wasted_tokens` / `judged_tokens`) ride along named, the excluded error/unjudged tokens surface as `error_unjudged_tokens` when non-zero, and whenever the share is high (> 0.5) `headline.caveat` restates both coarsenesses — the proxy and the verdict asymmetry (ignored garbage is neutral; only acted-on influence with no effect or harm is negative). A caveat on a high share never disappears just because a few negative spans exist.
+`headline.judged_spans` is that denominator. `headline.wasted_token_share` is the injected-token cost of neutral and negative spans as a share of judged spans' cost — a **span-level non-beneficial-delivery proxy**: a neutral span's referenced memories count as wasted, a positive span's ignored memories count as productive, and a mixed bundle is charged wholly to its verdict, so the share's numerator and denominator (`wasted_tokens` / `judged_tokens`) ride along named, the excluded error/unjudged tokens surface as `error_unjudged_tokens` when non-zero (unassessable tokens likewise as `unassessable_tokens`), and `headline.caveat` always rides a reported share, restating both coarsenesses — the proxy and the verdict asymmetry (ignored garbage is neutral; only acted-on influence with no effect or harm is negative). The caveat never disappears just because the share is low or a few negative spans exist.
 
 ### Rubric Rates
 
@@ -103,8 +104,9 @@ Per aggregate block (`overall` and each trajectory):
 | `headline.judged_spans` | The rate denominator (the whole `headline` is omitted when this is 0) |
 | `headline.positive_span_rate` / `negative_span_rate` | The verdict rates, always presented together with the wasted-token share |
 | `headline.wasted_token_share` | Neutral + negative injected-token cost as a share of judged spans' cost, with `wasted_tokens` / `judged_tokens` named beside it |
-| `headline.error_unjudged_tokens` | The token bucket no rate or share counts (written only when non-zero) |
-| `headline.caveat` | Whenever the wasted share is high (> 0.5), zero-negative or not: names the span-level proxy coarseness and the verdict asymmetry |
+| `headline.error_unjudged_tokens` | The error/unjudged token bucket no rate or share counts (written only when non-zero) |
+| `headline.unassessable_spans` / `unassessable_tokens` | Rule-judged no-subsequent-turn spans and their delivery cost (written only when non-zero); in no directional denominator |
+| `headline.caveat` | On every reported wasted share: names the span-level proxy coarseness and the verdict asymmetry |
 | `rubric.deliveries` | Judge-scored memory deliveries; the whole `rubric` is omitted when this is 0 |
 | `rubric.counts` / `rubric.rates` | Per-signal value distributions and projected rates |
 | `rubric.no_footprint_reasons` | Why ignored memories left no footprint: `irrelevant` / `redundant` / `confirming_ignored` / `ignored_novel` (omitted when empty) |
@@ -134,6 +136,6 @@ Each trajectory's `spans` is a narrative-free index into the report:
 
 ## Report-Only Fields
 
-`injudge-report.json` additionally carries, per operation: `memories` (full recorded refs, each stamped with its span-local `id`), `memory_exposure` (per entry: whether the placement showed the value `full`, `clipped` to a prefix of N chars, or `unknown`), `memory_windows` (per entry id: the footprint-window end step the entry's action `anchors` were validated against — `null` when the entry was never re-delivered, so its bound was the step stream's end; omitted when no agent turn classified), rubric notes and each entry's action `anchors`, `analysis`, `evidence`, `step_gaps`, `new_keys` / `removed_keys` / `previous_keys` / `changed_keys`, `auto`, `error`, `judge_raw`, `pe_pairing_corrections` (when any), and `input` on gated spans (`path`: `full` or `scan`, plus scan counters, `"gold"`, `"over_budget"`, and `"length_fallback"` when they apply — the latter marks a full-text send the endpoint rejected as too long, rerouted to the scan path). A span whose judging failed unexpectedly keeps a re-derived `{path, gold?}` record without scan counters, so the regime tallies still include it.
+`injudge-report.json` additionally carries, per operation: `memories` (full recorded refs, each stamped with its span-local `id`), `memory_exposure` (per entry: whether the placement showed the value `full`, `full_normalized` — whole, but only up to whitespace-run or markdown-escape normalization —, `clipped` to a prefix of N chars, or `unknown` — unverifiable, so the canonical value is withheld from the judge input; prose-unsafe values (quotes, backslashes, line structure) compare verbatim only), `memory_windows` (per entry id: the footprint-window end step the entry's action `anchors` were validated against — `null` when the entry was never re-delivered, so its bound was the step stream's end; a same-step delivery collision closes a still-open window at the span's own last delivery step; omitted when no agent turn classified), `memory_window_starts` (only when a same-step collision bumped an entry: its window opens after the shared step the earlier carrier owns), rubric notes and each entry's action `anchors`, `analysis`, `evidence`, `step_gaps`, `new_keys` / `removed_keys` / `previous_keys` / `changed_keys`, `auto`, `error`, `judge_raw`, `pe_pairing_corrections` (when any), and `input` on gated spans (`path`: `full` or `scan`, plus scan counters, `"gold"`, `"over_budget"`, and `"length_fallback"` when they apply — the latter marks a full-text send the endpoint rejected as too long, rerouted to the scan path). A span whose judging failed unexpectedly keeps a re-derived `{path, gold?}` record without scan counters, so the regime tallies still include it.
 
 The `injections` array lists every raw delivery with its span, `role` (`first` or `restated`), `verdict`, `content_chars`, and its `op_id` / `seq` / `step`.

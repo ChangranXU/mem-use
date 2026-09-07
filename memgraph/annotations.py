@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -676,6 +677,32 @@ def content_chars(ref: Any) -> int | None:
 # reads unknown rather than clipped.
 _EXPOSURE_MIN_PREFIX = 8
 
+# Presentation-only normalizations for exposure matching: an adapter that
+# re-wraps lines or backslash-escapes markdown punctuation renders the
+# value's whole content without ever carrying it verbatim, and an
+# exact-match-only compare would read every such delivery `unknown` — a
+# systematic under-attribution for that adapter. Collapsing whitespace runs
+# and stripping markdown escapes recovers the exposure as
+# `full_normalized`; content that only matches after a real transformation
+# (emphasis wrapping, truncation mid-value) stays unknown.
+# The normalization is prose-safe ONLY: inside a quoted string a collapsed
+# whitespace run or a stripped backslash changes semantics (`s = "a  b"` vs
+# `s = "a b"`, `grep "a\.b"` vs `grep "a.b"`), and a newline/indent join
+# breaks indentation-sensitive content — none of that is a justified
+# rendering-aware mapping, so a value carrying quotes, backslashes, or line
+# structure compares VERBATIM ONLY (a mismatch then reads unknown, never a
+# fabricated full_normalized).
+_EXPOSURE_WS = re.compile(r"\s+")
+_EXPOSURE_ESCAPE = re.compile(r"\\(?=[^A-Za-z0-9])")
+_EXPOSURE_PROSE_UNSAFE = re.compile(r'[\n\r\t\\"\']')
+
+
+def _exposure_norm(text: str) -> str:
+    """The presentation-normalized form both sides of the exposure compare
+    use after the verbatim check fails: whitespace runs collapsed to one
+    space, markdown backslash-escapes removed."""
+    return _EXPOSURE_ESCAPE.sub("", _EXPOSURE_WS.sub(" ", text)).strip()
+
 
 def exposure_state(value: Any, placement_text: str | None) -> dict:
     """What the recorded placement actually exposed of one delivered
@@ -686,19 +713,35 @@ def exposure_state(value: Any, placement_text: str | None) -> dict:
     Adapter-free by construction: it compares the portable value against
     the exact placement text, never a bridge's line format or truncation
     marker vocabulary. `full` — the value occurs verbatim in the placement
-    (a trailing framing cut after it changes nothing). `clipped` — the
-    placement carries only a proper prefix of the value (a delivery budget
-    cutting the rendered line); `exposed_chars` is the longest occurring
-    prefix, and only that prefix may be credited to the injection.
-    `unknown` — neither holds: a redacted/locator placement (no text), a
-    valueless ref, or a renderer that transformed the value. Exposure is
-    then undeterminable from the recording and must never be assumed full.
+    (a trailing framing cut after it changes nothing). `full_normalized` —
+    the value occurs only after whitespace-run collapsing and
+    markdown-escape stripping (a renderer that re-wrapped or escaped it):
+    the whole content was shown, modulo presentation, and the judge is told
+    exactly that. The normalized compare is restricted to prose-safe values
+    — one carrying quotes, backslashes, or line structure compares verbatim
+    only, since collapsing/escape-stripping inside strings, regexes, or
+    indentation-sensitive content changes semantics rather than
+    presentation. `clipped` — the placement carries only a proper prefix of
+    the value (a delivery budget cutting the rendered line);
+    `exposed_chars` is the longest occurring prefix (compared verbatim — a
+    re-wrapped clip is indistinguishable from a transformed value), and
+    only that prefix may be credited to the injection. `unknown` — neither
+    holds: a redacted/locator placement (no text), a valueless ref, or a
+    renderer that transformed the value. Exposure is then undeterminable
+    from the recording and must never be assumed full.
     """
     value_chars = len(value) if isinstance(value, str) else None
     if not isinstance(value, str) or not isinstance(placement_text, str):
         return {"state": "unknown", "exposed_chars": None, "value_chars": value_chars}
     if not value or value in placement_text:
         return {"state": "full", "exposed_chars": len(value), "value_chars": len(value)}
+    if not _EXPOSURE_PROSE_UNSAFE.search(value) and (
+        _exposure_norm(value) in _exposure_norm(placement_text)
+    ):
+        # the whole RAW length stays the exposed count: the entire value
+        # was in front of the agent, only re-wrapped or escaped
+        return {"state": "full_normalized", "exposed_chars": len(value),
+                "value_chars": len(value)}
     # longest occurring prefix by binary search: prefix membership is
     # monotone (a longer occurring prefix implies every shorter one occurs)
     lo, hi = 0, len(value) - 1

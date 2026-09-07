@@ -220,6 +220,14 @@ def resolve_scan(env: dict[str, str], scoring: JudgeConfig) -> ScanConfig:
 # estimate like every count here, never exact billing.
 _LABEL_TOKENS = 70
 
+# A term occurring in most steps of the trajectory is a generic word of the
+# domain ("parameter", "function", the project's own name), not a pointer
+# to a memory's footprint: its [anchor] lines would fire almost everywhere
+# and seed extraction with noise. Terms whose document frequency (share of
+# the trajectory's steps whose text contains the term) exceeds this are
+# dropped before the chunk scan.
+_ANCHOR_MAX_DF = 0.25
+
 
 @lru_cache(maxsize=None)
 def _shell_tokens() -> int:
@@ -291,7 +299,9 @@ def _chunks(
     input-independent text — one [anchor] line per (term, step) hit, so a
     delivered value's words echoed across many steps can blow the cap the
     split pretends to enforce (the endpoint then rejects the chunk and the
-    whole span degrades to an error verdict).
+    whole span degrades to an error verdict). Terms over _ANCHOR_MAX_DF
+    document frequency are dropped up front: a word most steps carry is
+    domain vocabulary, not a footprint pointer.
     The chunks PARTITION the step stream up to the footprint windows — every
     step lands in exactly one chunk, except that the post side stops at
     _post_end (the largest window end when every delivered memory is
@@ -308,12 +318,23 @@ def _chunks(
     chunk and still enters extraction in full (no truncate-to-fit)."""
     header = _chunk_header(span, task)
     header_tokens = count_tokens(header) + _shell_tokens()
+    texts = _step_texts(steps)
     # (term, lowered term, window end) triples: the substring match rides
     # the lowered forms, the anchor line keeps the term's recorded casing,
     # and the window end binds each hit to this span's footprint
     terms = [(t, t.lower(), end) for t, end in _anchor_terms(span)]
+    if texts:
+        # the DF filter: a term in more than _ANCHOR_MAX_DF of the
+        # trajectory's steps is domain vocabulary, not this memory's
+        # footprint — dropping it keeps the anchor block from firing at
+        # nearly every step (the exact 0.25 product is representable, so
+        # the comparison stays integral)
+        terms = [
+            (t, low, end)
+            for t, low, end in terms
+            if sum(1 for tx in texts if low in tx) <= len(texts) * _ANCHOR_MAX_DF
+        ]
     step_tokens = _step_tokens(steps)
-    texts = _step_texts(steps)
     renders = _step_renders(steps)
     out: list[_Chunk] = []
     post_end = _post_end(span, len(steps))
@@ -377,11 +398,18 @@ _MAX_ANCHOR_TERMS = 64
 # substring check and the chunk text carries the full word.
 _MAX_ANCHOR_TERM_CHARS = 200
 
+# Identifier-shaped tokens (a path, dotted or snake_case name, a `::`
+# scope, a CamelCase symbol, a backticked word) discriminate a memory's
+# footprint far better than a plain long word of prose ("parameter",
+# "carefully"), which occurs in most steps of any coding trajectory: under
+# the term cap the identifier-shaped value words are collected first and
+# plain words fill what remains.
+_IDENTIFIER_SHAPE = re.compile(r"[_.:/`]|[a-z][A-Z]")
 
-# The value-word scan rides a lazy finditer (\S+ splits exactly like
-# str.split), so the count cap below truly bounds the work: a pasted-blob
-# value never materializes its whole word list before the cap stops the
-# stream.
+
+# The value-word scan rides finditer (\S+ splits exactly like str.split)
+# in one pass per memory; the per-term length cap below bounds each kept
+# term's size, and the count cap bounds the TERM list the chunks rescan.
 _ANCHOR_WORD = re.compile(r"\S+")
 
 
@@ -389,13 +417,16 @@ def _anchor_terms(span: InjectionSpan) -> list[tuple[str, int | None]]:
     """Each delivered memory's whole key, plus only those value words that
     look like a path or identifier (contain `/` or `::`) or are at least 8
     characters long — short plain words are never anchors. Capped at
-    _MAX_ANCHOR_TERMS (keys first, then value words in delivery order), each
-    term at _MAX_ANCHOR_TERM_CHARS (truncated prefixes dedupe together). The
-    raw stream is lazy and stops AT the cap — bounding this scan work is the
-    cap's point.
+    _MAX_ANCHOR_TERMS (keys first, then identifier-shaped value words in
+    delivery order, then the plain long words — under the cap the
+    identifier-shaped terms are the ones that discriminate), each
+    term at _MAX_ANCHOR_TERM_CHARS (truncated prefixes dedupe together).
     A CLIPPED entry seeds anchors from its exposed prefix only (the unshown
     suffix was never in front of the agent, so a hit in it is not this
-    span's evidence); an unknown-exposure entry keeps its full value.
+    span's evidence); an UNKNOWN-exposure entry seeds no value terms at all
+    — the placement never verified that value reached the agent, so seeding
+    evidence retrieval from it would let hidden text manufacture hits (the
+    judge never sees the value either; only the key label still anchors).
     Every term carries the footprint-window end of its ENTRY (None =
     unbounded; the windows are per span-local entry id): a hit PAST the
     window is the re-delivering span's evidence, never this span's — the
@@ -407,23 +438,32 @@ def _anchor_terms(span: InjectionSpan) -> list[tuple[str, int | None]]:
     memory's wider claim on an already-kept term, which under-fills anchors
     past the narrower window but never over-claims (extraction reads the
     full chunk text regardless, and the header states the true windows)."""
+    shaped: list[tuple[str, int | None]] = []  # identifier-shaped value words
+    plain: list[tuple[str, int | None]] = []  # plain ≥8-char value words
+    keys: list[tuple[str, int | None]] = []
+    for i, m in enumerate(span.memories):
+        end = span.memory_windows.get(memory_id(i))
+        key = m.get("key")
+        if isinstance(key, str) and key.strip():
+            keys.append((key.strip(), end))
+        value = m.get("value")
+        if not isinstance(value, str):
+            continue
+        exposure = span.memory_exposure[i] if i < len(span.memory_exposure) else None
+        state = exposure.get("state") if exposure is not None else None
+        if state == "unknown":
+            continue  # unverified exposure: the value may never have been shown
+        if state == "clipped":
+            value = value[: exposure.get("exposed_chars") or 0]
+        for match in _ANCHOR_WORD.finditer(value):
+            w = match.group()
+            if "/" in w or "::" in w or len(w) >= 8:
+                (shaped if _IDENTIFIER_SHAPE.search(w) else plain).append((w, end))
 
     def raws() -> Iterable[tuple[str, int | None]]:
-        for i, m in enumerate(span.memories):
-            end = span.memory_windows.get(memory_id(i))
-            key = m.get("key")
-            if isinstance(key, str) and key.strip():
-                yield key.strip(), end
-            value = m.get("value")
-            if not isinstance(value, str):
-                continue
-            exposure = span.memory_exposure[i] if i < len(span.memory_exposure) else None
-            if exposure is not None and exposure.get("state") == "clipped":
-                value = value[: exposure.get("exposed_chars") or 0]
-            for match in _ANCHOR_WORD.finditer(value):
-                w = match.group()
-                if "/" in w or "::" in w or len(w) >= 8:
-                    yield w, end
+        yield from keys
+        yield from shaped
+        yield from plain
 
     ends: dict[str, int | None] = {}  # term -> the widest window claiming it
     for raw, end in raws():
@@ -461,9 +501,9 @@ def _step_anchors(
     to the re-delivering span and is never pre-filled here (the pre side
     needs no branch: every bound sits at or past the span's own last
     delivery step, so a pre-side step can never pass one). Anchors seed
-    extraction and never replace it; they ride the merge like any other
-    evidence item — a `none` chunk carrying anchors still contributes
-    them."""
+    extraction and never replace it; they ride only the chunk user message,
+    never the scoring evidence pack — a chunk whose extraction is none
+    contributes no evidence, whatever its anchor lines."""
     seq_end = s.seq_end if s.seq_end is not None else "?"
     return [
         f'[anchor] "{term}" appears at step {s.step} '
@@ -662,7 +702,6 @@ def _summarize(
 def _cap_evidence(
     chunk: _Chunk,
     span: InjectionSpan,
-    anchors: list[str],
     items: list[str],
     cfg: JudgeConfig,
     evidence_tokens: int,
@@ -671,8 +710,13 @@ def _cap_evidence(
     """SCAN_EVIDENCE_TOKENS constrains the prompt only — code measures the
     assembled evidence list and NEVER truncates: an overrun earns one summary
     pass with the cap restated; still over (or the summary failed) → the
-    original over-long text is kept as-is."""
-    evidence = anchors + items
+    original over-long text is kept as-is. Only the EXTRACTED items ride
+    here: the chunk's [anchor] lines are lexical seeds that already rode the
+    chunk user message — forwarding them into the scoring evidence pack
+    would hand the judge dozens of bare lexical hits as if they were
+    findings, inflating `referenced` (and inviting `acted_on`) in the scan
+    regime relative to the fit regime."""
+    evidence = items
     text = "\n".join(f"- {i}" for i in evidence)
     if count_tokens(text) <= evidence_tokens:
         return evidence
@@ -729,7 +773,7 @@ def _extract_chunk(
     # answer is masked with the SCORING key only): mask the extraction key at
     # the source — the same 200-echo case the chunk-failure path masks
     items = [_mask_key(i, cfg.api_key) for i in items]
-    return _cap_evidence(chunk, span, chunk.anchors, items, cfg, evidence_tokens, warnings)
+    return _cap_evidence(chunk, span, items, cfg, evidence_tokens, warnings)
 
 
 def _extract_all(

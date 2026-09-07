@@ -1,5 +1,5 @@
-"""Report assembly: the `injudge.report/v7` JSON artifact, the statistics-only
-`injudge.summary/v4` distillation, and the stdout summary.
+"""Report assembly: the `injudge.report/v8` JSON artifact, the statistics-only
+`injudge.summary/v5` distillation, and the stdout summary.
 
 The runtime artifact's output contract: per operation
 {operation_id, kind, seq, payload_summary, verdict, confidence, evidence[]}
@@ -91,9 +91,14 @@ def operation_record(span: InjectionSpan, verdict: dict, delivery_cost: dict) ->
         # validated against (null = never re-delivered, so bounded by the
         # step stream's end) — recorded so the enforced bounds stay
         # auditable from the artifact; omitted like `steps` when no agent
-        # turn ever classified (no window bounds anything there)
+        # turn ever classified (no window bounds anything there).
+        # `memory_window_starts` carries the same-step collision exception:
+        # the entries whose window opens only AFTER the shared step the
+        # earlier carrier owns (empty unless a collision bumped one)
         **({"memory_windows": span.memory_windows}
            if span.step_first is not None and span.memory_windows else {}),
+        **({"memory_window_starts": span.memory_window_starts}
+           if span.step_first is not None and span.memory_window_starts else {}),
         "step_gaps": span.step_gaps,
         "new_keys": span.new_keys,
         "removed_keys": span.removed_keys,
@@ -233,6 +238,10 @@ def _headline_line(headline: dict) -> str | None:
         f"headline: negative-span rate {headline['negative_span_rate']:.0%}"
         f" (n={headline['judged_spans']} judged spans)"
     )
+    if headline.get("unassessable_spans"):
+        # assessability is a headline property: these spans held no
+        # observable downstream and sit in no directional denominator
+        txt += f", {headline['unassessable_spans']} unassessable (no subsequent turn)"
     if headline.get("wasted_token_share") is not None:
         # the denominator is the judged classes' injected tokens, not the
         # all-class total printed above — label both sides so the share
@@ -242,20 +251,22 @@ def _headline_line(headline: dict) -> str | None:
             f"(neutral+negative ≈{headline.get('wasted_tokens', 0):,} of "
             f"≈{headline.get('judged_tokens', 0):,} judged-class injected tokens)"
         )
+        excluded = []
         if headline.get("error_unjudged_tokens"):
-            txt += (
-                f"; ≈{headline['error_unjudged_tokens']:,} error/unjudged tokens "
-                "in no denominator"
-            )
+            excluded.append(f"≈{headline['error_unjudged_tokens']:,} error/unjudged")
+        if headline.get("unassessable_tokens"):
+            excluded.append(f"≈{headline['unassessable_tokens']:,} unassessable")
+        if excluded:
+            txt += f"; {' + '.join(excluded)} tokens in no denominator"
     return txt
 
 
 def _verdict_tally(a: dict) -> str:
     """The +N −N ○N per-trajectory verdict tally for the stdout summary, with
-    the error count marked when any."""
+    the error and unassessable counts marked when any."""
     return f"+{a['positive']} −{a['negative']} ○{a['neutral']}" + (
         f" !{a['error']}" if a["error"] else ""
-    )
+    ) + (f" ⊘{a['unassessable']}" if a.get("unassessable") else "")
 
 
 def _policy_line(pol: dict) -> str | None:
@@ -432,6 +443,7 @@ def _slim_aggregate(a: dict) -> dict:
         "neutral": a["neutral"],
         "error": a["error"],
         "unjudged": a["unjudged"],
+        "unassessable": a["unassessable"],
     }
     rates = a.get("rates") or {}
     if any(v is not None for v in rates.values()):
@@ -450,14 +462,18 @@ def _slim_aggregate(a: dict) -> dict:
         if headline.get("wasted_token_share") is not None:
             h["wasted_token_share"] = headline["wasted_token_share"]
             # the share's named numerator/denominator (and the excluded
-            # error/unjudged class): a bare share next to the all-class
-            # total has read as per-memory truth
+            # error/unjudged/unassessable classes): a bare share next to the
+            # all-class total has read as per-memory truth
             if headline.get("wasted_tokens") is not None:
                 h["wasted_tokens"] = headline["wasted_tokens"]
             if headline.get("judged_tokens") is not None:
                 h["judged_tokens"] = headline["judged_tokens"]
             if headline.get("error_unjudged_tokens"):
                 h["error_unjudged_tokens"] = headline["error_unjudged_tokens"]
+        if headline.get("unassessable_spans"):
+            h["unassessable_spans"] = headline["unassessable_spans"]
+            if headline.get("unassessable_tokens"):
+                h["unassessable_tokens"] = headline["unassessable_tokens"]
         if headline.get("caveat"):
             h["caveat"] = headline["caveat"]
         out["headline"] = h
@@ -521,7 +537,7 @@ def _summary_span_index(op: dict) -> dict:
 
 
 def build_summary(artifact: dict) -> dict:
-    """The `injudge.summary/v4` artifact: the final statistics set of a run —
+    """The `injudge.summary/v5` artifact: the final statistics set of a run —
     the combined overall aggregate, and per trajectory the trajectory-level
     aggregate plus a narrative-free span index. The report artifact stays the
     judging record (rubric notes, analysis, judge_raw, the validation log);
@@ -566,6 +582,7 @@ def print_summary(artifact: dict) -> int:
         f"+{agg['positive']} −{agg['negative']} ○{agg['neutral']}"
         + (f" !{agg['error']} error" if agg["error"] else "")
         + (f" ?{agg['unjudged']} unjudged" if agg["unjudged"] else "")
+        + (f" ⊘{agg.get('unassessable', 0)} unassessable" if agg.get("unassessable") else "")
         + rate_txt
     )
     cost = agg.get("cost") or {}
@@ -580,6 +597,8 @@ def print_summary(artifact: dict) -> int:
             extra.append(f"!{byv['error']:,} error")
         if byv.get("unjudged"):
             extra.append(f"?{byv['unjudged']:,} unjudged")
+        if byv.get("unassessable"):
+            extra.append(f"⊘{byv['unassessable']:,} unassessable")
         line = (
             f"  delivery cost: ≈{cost['approx_tokens_total']:,} injected tokens "
             f"({judged} judged-class"
@@ -592,8 +611,8 @@ def print_summary(artifact: dict) -> int:
         print_safe(line + ")")
     if (txt := _headline_line(agg.get("headline") or {})) is not None:
         print_safe(f"  {txt}")
-        # the wasted-token share never reads alone: a high share carries
-        # its proxy caveat stated outright
+        # the wasted-token share never reads alone: every reported share
+        # carries its proxy caveat stated outright
         caveat = (agg.get("headline") or {}).get("caveat")
         if caveat:
             print_safe(f"  caveat: {caveat}")

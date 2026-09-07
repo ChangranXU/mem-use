@@ -530,10 +530,14 @@ def test_failed_chunk_fails_the_span_and_starts_no_further_chunks(monkeypatch, t
     assert any("extraction chunk failed" in w for w in warnings)
 
 
-def test_none_chunks_omitted_anchor_only_blocks_kept(monkeypatch, tmp_path):
-    """A chunk whose extraction is none AND that carries no code anchors is
-    omitted entirely; a none chunk with anchors contributes just its anchor
-    items."""
+def test_none_chunks_contribute_nothing_anchors_stay_extraction_seeds(
+        monkeypatch, tmp_path):
+    """A chunk whose extraction is none contributes nothing to the evidence
+    pack — the pre-filled [anchor] lines are lexical SEEDS: they ride the
+    chunk user message only, never the scoring input, so a none chunk with
+    anchor hits adds no evidence (forwarding bare lexical hits as findings
+    would inflate `referenced` in the scan regime relative to the fit
+    regime)."""
     span, steps, traj = _span_steps(
         tmp_path, pre_results=["ok", "found apply_ufunc in variable.py already"]
     )
@@ -544,14 +548,19 @@ def test_none_chunks_omitted_anchor_only_blocks_kept(monkeypatch, tmp_path):
     verdict = judge_span(span, steps, _judge_cfg(), [], traj.task, scan=scan)
     assert verdict["verdict"] == "positive"
     user = judge_record[0]["messages"][1]["content"]
-    # the pre chunk [1–2] mentions the anchor terms; the other chunks are
-    # none without anchors and vanish from the pack
-    assert "PRE-INJECTION EVIDENCE\nstep 1 - step 2\nEvidence:\n- [anchor]" in user
-    assert 'apply_ufunc' in user
-    assert "step 3 - step 3" not in user
+    # every chunk extracted none: no evidence block survives, anchor hits or
+    # not — the anchors seeded the chunk requests only
+    assert "PRE-INJECTION EVIDENCE" not in user
     assert "POST-INJECTION EVIDENCE" not in user
-    assert verdict["input"]["none_chunks"] == 4
+    assert "[anchor]" not in user
+    assert verdict["input"]["none_chunks"] == 5
     assert verdict["input"]["chunks"] == 5
+    # the seeds did ride the chunk user messages (step 2's text hits the
+    # delivered value's identifier), under their lexical-pointer label
+    chunk_users = [b["messages"][1]["content"] for b in scan_record
+                   if not b["messages"][1]["content"].startswith("EVIDENCE ITEMS")]
+    assert any('[anchor] "apply_ufunc" appears at step 2' in u for u in chunk_users)
+    assert any("LEXICAL HITS" in u for u in chunk_users)
 
 
 def test_anchor_terms_and_hits():
@@ -971,15 +980,25 @@ def test_chunk_anchors_respect_each_memorys_own_window(tmp_path):
     union range (the later-bounded memory claims those steps), but the
     pre-filled anchors respect EACH memory's own bound: a hit past key_a's
     window is the re-delivering span's evidence, never pre-filled for this
-    span — while the unbounded co-delivered key_b keeps firing to the end."""
+    span — while the unbounded co-delivered key_b keeps firing to the end.
+    The echo steps stay under the anchor document-frequency cutoff, so the
+    key terms survive as anchors at all."""
     ref_b = cure_ref("key_b", "an unrelated note")
-    echo = "mentions key_a and key_b again"
-    b = TrajBuilder().agent_turn(with_task=True)
+    a_echo = "mentions key_a"
+    b_echo = "mentions key_b"
+    b = TrajBuilder().agent_turn(with_task=True)  # step 1
     b.recall([REF_A, ref_b])  # step 2 — the judged span
-    for _ in range(4):
-        b.agent_turn(result=echo)  # steps 3-6
+    b.agent_turn(result=a_echo)  # step 3
+    b.agent_turn(result="ok")  # step 4
+    b.agent_turn(result=a_echo)  # step 5
+    b.agent_turn(result="ok")  # step 6
     b.recall(REF_A)  # step 7: key_a re-delivered alone → its window ends at 6
-    b.agent_turn(result=echo).agent_turn(result=echo)  # steps 8,9
+    b.agent_turn(result=f"{a_echo} and {b_echo}")  # step 8
+    b.agent_turn(result="ok")  # step 9
+    b.agent_turn(result=b_echo)  # step 10
+    b.agent_turn(result=b_echo)  # step 11
+    b.agent_turn(result="ok")  # step 12
+    b.agent_turn(result="ok")  # step 13
     d = b.write(tmp_path / "t1")
     from memgraph.parse_trajectory import parse_trajectory
     from injudge.steps import build_step_stream
@@ -993,7 +1012,7 @@ def test_chunk_anchors_respect_each_memorys_own_window(tmp_path):
     assert span.memory_windows == {"m1": 6, "m2": None}
     chunks = _chunks(steps, span, _scan_cfg(), traj.task)
     # key_b is unbounded: the post side runs to the end of the stream
-    assert [s.step for c in chunks for s in c.steps] == list(range(1, 10))
+    assert [s.step for c in chunks for s in c.steps] == list(range(1, 14))
     anchors = [a for c in chunks for a in c.anchors]
     assert any('"key_a"' in a and "step 5" in a for a in anchors)  # in-window
     assert not any('"key_a"' in a and "step 8" in a for a in anchors)  # past the window
@@ -1003,16 +1022,18 @@ def test_chunk_anchors_respect_each_memorys_own_window(tmp_path):
 def test_chunk_cap_counts_the_anchor_block(tmp_path):
     """The chunk token cap sizes the WHOLE user body — header, metadata
     shell, rendered steps AND the anchor block: a delivered value's words
-    echoed across many steps emit one [anchor] line per hit, and the split
-    must cut before the delivered request would exceed SCAN_CHUNK_TOKENS
-    (an over-cap chunk is rejected by the endpoint and fails the span)."""
-    ref = cure_ref("key_a", "check src/alpha.py src/beta.py src/gamma.py")
-    echo = "found src/alpha.py src/beta.py src/gamma.py again"
-    b = TrajBuilder().agent_turn(with_task=True, result=echo)
-    b.agent_turn(result=echo)
+    echoed in a minority of steps (under the anchor document-frequency
+    cutoff) still emit one [anchor] line per hit, and the split must cut
+    before the delivered request would exceed SCAN_CHUNK_TOKENS (an
+    over-cap chunk is rejected by the endpoint and fails the span)."""
+    paths = " ".join(f"src/letter{i}.py" for i in range(5))
+    ref = cure_ref("key_a", f"check {paths}")
+    echo = f"found {paths} again"
+    b = TrajBuilder().agent_turn(with_task=True, result=echo)  # step 1 echoes
+    b.agent_turn(result=echo)  # step 2 echoes
     for _ in range(3):
-        b.agent_turn(result=echo)
-        b.recall(ref)
+        b.agent_turn(result="ok")
+        b.recall(ref)  # the span: deliveries at steps 4, 6, 8
     d = b.write(tmp_path / "t1")
     from memgraph.parse_trajectory import parse_trajectory
     from injudge.steps import build_step_stream
@@ -1024,19 +1045,75 @@ def test_chunk_cap_counts_the_anchor_block(tmp_path):
     spans = group_spans([op for op in ops if op.kind == "recall"], traj.id)
     assert len(spans) == 1
     span = spans[0]
-    # five steps echo the three path terms; sizing the steps alone would cut
-    # only pre[1-3]/post[4-8], whose REAL bodies (header + anchors + steps)
-    # would blow the 500 cap — the anchors are what forces the earlier cuts
+    # the two echo steps carry the five path terms each; sizing the steps
+    # alone would keep pre[2-3] together — the anchors are what force the
+    # per-step cuts
     scan = _scan_cfg(chunk_steps=100, chunk_tokens=500)
     chunks = _chunks(steps, span, scan, traj.task)
     assert [(c.side, c.steps[0].step, c.steps[-1].step) for c in chunks] == [
         ("pre", 1, 1), ("pre", 2, 2), ("pre", 3, 3),
-        ("post", 4, 6), ("post", 7, 8),
+        ("post", 4, 8),
     ]
-    assert sum(len(c.anchors) for c in chunks) == 15  # 5 echo steps x 3 terms
+    assert sum(len(c.anchors) for c in chunks) == 10  # 2 echo steps x 5 terms
     for c in chunks:
         # the REAL user body (what the endpoint receives) respects the cap
         assert count_tokens(_chunk_user(span, c)) <= 500
+
+
+def test_extraction_pre_side_asks_for_announced_intents():
+    """W6: the skip-anchor rule needs pre-injection announced intents; the
+    pre-side extraction guidance asks for them so a later skipped step has
+    its anchor collected."""
+    assert "announced plans or intents" in _extraction_prompt("pre", 4096)
+    assert "announced plans or intents" not in _extraction_prompt("post", 4096)
+
+
+def test_anchor_terms_drop_high_document_frequency(tmp_path):
+    """E3: a term occurring in more than _ANCHOR_MAX_DF of the trajectory's
+    steps is domain vocabulary, not a footprint pointer — its anchor lines
+    would fire at nearly every step and seed extraction with noise. Keys and
+    rare terms stay; the everywhere-term is dropped before the chunk scan."""
+    from injudge.model import AgentStep, InjectionSpan
+
+    everywhere = "everywhere_term"
+    rare = "rare_term_x"
+    steps = [
+        AgentStep(step=i, turn=i, seq_start=10 * i, content=f"echo {everywhere}")
+        for i in range(1, 9)
+    ]
+    steps[3].content += f" and {rare}"  # step 4 alone carries the rare term
+    span = InjectionSpan(
+        id="T1:S1", traj="T1", step_first=1, step_last=1,
+        memories=[{"key": "key_a", "value": f"{everywhere} {rare}"}],
+    )
+    chunks = _chunks(steps, span, _scan_cfg(chunk_steps=8), None)
+    anchors = [a for c in chunks for a in c.anchors]
+    assert not any(everywhere in a for a in anchors)  # 8/8 steps: dropped
+    assert any(f'"{rare}"' in a and "step 4" in a for a in anchors)
+
+
+def test_anchor_terms_prefer_identifier_shape_under_the_cap():
+    """E3: under the term cap the identifier-shaped value words are collected
+    first (paths, dotted/snake_case names, scopes, CamelCase, backticked
+    words) — plain long words of prose fill only what remains."""
+    from injudge.model import InjectionSpan
+
+    ident_words = ["src/alpha.py", "snake_case_name", "Dotted.name",
+                   "CamelCase", "`backtick`"]
+    plain_words = [f"plainword{i:03d}" for i in range(80)]
+    span = InjectionSpan(
+        id="T1:S1", traj="T1",
+        memories=[{"key": "blob_key",
+                   "value": " ".join([*ident_words, *plain_words])}],
+    )
+    terms = [t for t, _ in _anchor_terms(span)]
+    # every identifier-shaped term makes the cap; plain words fill the tail
+    for ident in ident_words:
+        assert ident in terms
+    assert "plainword000" in terms  # the first plain words fill the remainder
+    assert len(terms) == _MAX_ANCHOR_TERMS
+    n_plain = _MAX_ANCHOR_TERMS - 1 - len(ident_words)  # the key takes one slot
+    assert terms[-1] == f"plainword{n_plain - 1:03d}"
 
 
 def test_stream_render_memo_matches_fresh_renders(tmp_path):
@@ -1740,7 +1817,7 @@ def test_cli_scan_path_end_to_end(monkeypatch, tmp_path):
     )
     assert rc == 0
     artifact = json.loads((out / "injudge-report.json").read_text())
-    assert artifact["tool"]["schema"] == "injudge.report/v7"
+    assert artifact["tool"]["schema"] == "injudge.report/v8"
     op = artifact["operations"][0]
     assert op["verdict"] == "positive"
     assert op["input"]["path"] == "scan" and op["input"]["chunks"] == 4
@@ -2799,10 +2876,12 @@ def test_anchor_terms_seed_only_the_exposed_prefix():
     terms = dict(_anchor_terms(span))
     assert terms["src/alpha.py"] is None
     assert "distinctive_suffix" not in terms
-    # an unknown-exposure entry keeps its full value as the term source
+    # an unknown-exposure entry seeds NO value terms at all: the placement
+    # never verified the value reached the agent, so the hidden text must
+    # never seed evidence retrieval (only the key label still anchors)
     span.memory_exposure = [
         {"state": "unknown", "exposed_chars": None,
          "value_chars": len(span.memories[0]["value"])},
     ]
     terms = dict(_anchor_terms(span))
-    assert terms["src/alpha.py"] is None and terms["distinctive_suffix"] is None
+    assert terms == {"k": None}

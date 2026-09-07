@@ -1,5 +1,5 @@
 ---
-description: "injudge.report/v7、injudge.summary/v4、全部字段，以及每项比率如何计数。"
+description: "injudge.report/v8、injudge.summary/v5、全部字段，以及每项比率如何计数。"
 icon: box-archive
 ---
 
@@ -11,8 +11,8 @@ injudge 的全部产物写入输出目录（`-o DIR`，默认 `output/`）。
 
 | 文件 | Schema | 作用 |
 |---|---|---|
-| `injudge-report.json` | `injudge.report/v7` | 运行时评审记录。每条轨迹完成后重写，崩溃也保留已完成部分。用 `--verdicts` 喂给 memgraph。 |
-| `summary.json` | `injudge.summary/v4` | 最终统计集合：计数、比率，以及无叙述的区间索引。 |
+| `injudge-report.json` | `injudge.report/v8` | 运行时评审记录。每条轨迹完成后重写，崩溃也保留已完成部分。用 `--verdicts` 喂给 memgraph。 |
+| `summary.json` | `injudge.summary/v5` | 最终统计集合：计数、比率，以及无叙述的区间索引。 |
 | `memgraph-verdicts.html` | — | 仅在 `--html` 时产出（默认关闭）：召回节点按区间判定着色的 memgraph。 |
 
 memgraph 的 `--json` 产物是 `{tool, trajectories, ops, memories, edges, validation}`——与 HTML 内嵌的同一个 dict。见 [memgraph](memgraph.md#图模型)。
@@ -33,7 +33,8 @@ memgraph 的 `--json` 产物是 `{tool, trajectories, ops, memories, edges, vali
 
 | 总体 | 成员 |
 |---|---|
-| 已评判区间 | `positive` + `negative` + `neutral`。含规则判定的 auto-neutral 区间。判定率的分母。 |
+| 已评判区间 | `positive` + `negative` + `neutral`。判定率的分母。 |
+| `unassessable` | 规则判定的 auto-neutral 区间（没有任何 agent 回合被归类——无从观察后续）。只计数，其投递成本计入独立的 token 桶：观察缺失不等于测得的零效应，因此不进入任何方向性分母，也不计入浪费 token 份额。非零时由 `headline.unassessable_spans` / `unassessable_tokens` 标出。 |
 | LLM 已评判区间 | 无 `auto` 标记的已评判区间。评分比率、使用汇总与置信度的总体。 |
 | `error` / `unjudged` | 只计数。永远不是比率分母。 |
 | 重述注入 | 并入所属区间。计入 `n_injections` 与投递成本。不出现在比率中。 |
@@ -48,7 +49,7 @@ $$
 \mathrm{rates}[v] = \frac{\mathrm{count}[v]}{\mathrm{positive} + \mathrm{negative} + \mathrm{neutral}}
 $$
 
-`headline.judged_spans` 就是该分母。`headline.wasted_token_share` 是 neutral 与 negative 区间的注入 token 成本占已评判区间成本的份额——一个**区间级"无收益投递"代理**：neutral 区间被引用的记忆计入浪费，positive 区间被无视的记忆计入产出，混合捆绑整体按其判定计费；因此份额的分子与分母（`wasted_tokens` / `judged_tokens`）随行命名，被排除的 error/unjudged token 在非零时以 `error_unjudged_tokens` 呈现；且只要份额偏高（> 0.5），`headline.caveat` 就会重申两种已知的粗糙性（区间级代理，以及判定的不对称：被无视的垃圾是 neutral；只有 acted-on 且无效或有害才是 negative）——不会因为存在少量 negative 区间而消失。
+`headline.judged_spans` 就是该分母。`headline.wasted_token_share` 是 neutral 与 negative 区间的注入 token 成本占已评判区间成本的份额——一个**区间级"无收益投递"代理**：neutral 区间被引用的记忆计入浪费，positive 区间被无视的记忆计入产出，混合捆绑整体按其判定计费；因此份额的分子与分母（`wasted_tokens` / `judged_tokens`）随行命名，被排除的 error/unjudged token 在非零时以 `error_unjudged_tokens` 呈现（unassessable token 同理以 `unassessable_tokens` 呈现）；`headline.caveat` 随行于每一个报告的份额，重申两种已知的粗糙性（区间级代理，以及判定的不对称：被无视的垃圾是 neutral；只有 acted-on 且无效或有害才是 negative）——不会因为份额偏低或存在少量 negative 区间而消失。
 
 ### 评分比率
 
@@ -104,7 +105,8 @@ $$
 | `headline.positive_span_rate` / `negative_span_rate` | 判定率，始终与 wasted-token share 一起呈现 |
 | `headline.wasted_token_share` | neutral + negative 的注入 token 成本占已评判区间成本的份额，随行命名 `wasted_tokens` / `judged_tokens` |
 | `headline.error_unjudged_tokens` | 不进任何比率或份额分母的 token 桶（仅非零时写出） |
-| `headline.caveat` | 只要浪费份额偏高（> 0.5），无论 negative 率是否为 0：指明区间级代理的粗糙性与判定的不对称 |
+| `headline.unassessable_spans` / `unassessable_tokens` | 规则判定的无后续回合区间及其投递成本（仅非零时写出）；不进入任何方向性分母 |
+| `headline.caveat` | 随行于每一个报告的浪费份额：指明区间级代理的粗糙性与判定的不对称 |
 | `rubric.deliveries` | 被打分的记忆投递数；为 0 时整个 `rubric` 省略 |
 | `rubric.counts` / `rubric.rates` | 各信号的取值分布与投影比率 |
 | `rubric.no_footprint_reasons` | 被忽略记忆未留足迹的原因：`irrelevant` / `redundant` / `confirming_ignored` / `ignored_novel`（空时省略） |
@@ -134,6 +136,6 @@ $$
 
 ## 仅 Report 中的字段
 
-`injudge-report.json` 每个操作还带有：`memories`（完整已录制引用，每条标注其区间本地 `id`）、`memory_exposure`（逐条目：placement 对该值是 `full`、`clipped` 到 N 字符前缀，还是 `unknown`）、`memory_windows`（逐条目 id：该条目动作 `anchors` 校验所依据的足迹窗口结束步——从未被重投递时为 `null`，即其上界是步骤流末尾；无 agent 回合归类时省略）、评分 note 与各条目的动作 `anchors`、`analysis`、`evidence`、`step_gaps`、`new_keys` / `removed_keys` / `previous_keys` / `changed_keys`、`auto`、`error`、`judge_raw`、`pe_pairing_corrections`（若有），以及预算门区间上的 `input`（`path` 为 `full` 或 `scan`，外加扫描计数，适用时还有 `"gold"`、`"over_budget"`、`"length_fallback"`——后者标记因端点拒绝过长输入而改走扫描路径的全文发送）。评判意外失败的区间会保留不含扫描计数的再推导 `{path, gold?}` 记录，使路径计数仍包含该区间。`tool.config` 记录已解析、无密钥的评审/扫描配置（净化为 `scheme://host[:port][/path]`），便于从产物本身复现运行。
+`injudge-report.json` 每个操作还带有：`memories`（完整已录制引用，每条标注其区间本地 `id`）、`memory_exposure`（逐条目：placement 对该值是 `full`、`full_normalized`——整体载入但仅在空白符折叠 / markdown 转义剥离后匹配——、`clipped` 到 N 字符前缀，还是 `unknown`——无法核实，故评审输入中隐去规范值；含引号、反斜杠或换行结构的值只做逐字比对）、`memory_windows`（逐条目 id：该条目动作 `anchors` 校验所依据的足迹窗口结束步——从未被重投递时为 `null`，即其上界是步骤流末尾；同一步投递冲突会把仍开放的窗口闭合在该区间自己的末次投递步；无 agent 回合归类时省略）、评分 note 与各条目的动作 `anchors`、`analysis`、`evidence`、`step_gaps`、`new_keys` / `removed_keys` / `previous_keys` / `changed_keys`、`auto`、`error`、`judge_raw`、`pe_pairing_corrections`（若有），以及预算门区间上的 `input`（`path` 为 `full` 或 `scan`，外加扫描计数，适用时还有 `"gold"`、`"over_budget"`、`"length_fallback"`——后者标记因端点拒绝过长输入而改走扫描路径的全文发送）。评判意外失败的区间会保留不含扫描计数的再推导 `{path, gold?}` 记录，使路径计数仍包含该区间。`tool.config` 记录已解析、无密钥的评审/扫描配置（净化为 `scheme://host[:port][/path]`），便于从产物本身复现运行。
 
 `injections` 数组列出每一次原始投递及其所属区间、`role`（`first` 或 `restated`）、`verdict`、`content_chars`，以及 `op_id` / `seq` / `step`。

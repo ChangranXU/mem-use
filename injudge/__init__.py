@@ -24,10 +24,18 @@ from __future__ import annotations
 # per-entry memory_exposure record; new_keys/removed_keys gained
 # previous_keys/changed_keys; the tool block carries the resolved,
 # secret-free run config.
-REPORT_SCHEMA = "injudge.report/v7"
+# v8: rule-judged auto-neutral (no-subsequent-turn) spans tally as
+# `unassessable` in the aggregate counts/cost buckets — out of the
+# directional denominators and the wasted-token share (observation
+# missingness is not a measured null effect) — and the headline names
+# their span/token totals when non-zero.
+REPORT_SCHEMA = "injudge.report/v8"
 
 # The summary artifact's schema string (report.build_summary writes it).
 # v4 follows the v7 report: id-keyed span usage labels, headline
 # numerator/denominator fields, and the judge identity in the tool block.
-SUMMARY_SCHEMA = "injudge.summary/v4"
+# v5 follows the v8 report: the unassessable tally joins the verdict
+# counts, and the headline carries unassessable_spans/unassessable_tokens
+# when non-zero (the wasted-token caveat now rides every reported share).
+SUMMARY_SCHEMA = "injudge.summary/v5"
 

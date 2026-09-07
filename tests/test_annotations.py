@@ -265,7 +265,9 @@ def test_annotated_extract_turn_classification_matches_step_stream(tmp_path):
 def test_delivery_step_fallbacks(tmp_path):
     """No binding → declared main_step; neither → the most recently classified
     agent turn (the bridge commits a delivery after the carrying call's
-    response recorded, so the consuming turn has already classified)."""
+    response recorded, so the consuming turn has already classified). The
+    observed-turn fallback is an attribution ASSUMPTION, so each use of it is
+    named in the warnings — a reader can see how much of a run depends on it."""
     b = AnnotatedBuilder()
     b.agent_turn(with_task=True)
     sid1 = b.search(returned=[cure_ref("k1")])
@@ -278,7 +280,9 @@ def test_delivery_step_fallbacks(tmp_path):
     b.delivery(sid3, memories=[cure_ref("k1")])  # after the last turn → step 3
     _, ops, warnings = parse(b, tmp_path)
     assert [o.step for o in ops if o.kind == "recall"] == [2, 2, 3]
-    assert warnings == []
+    fallbacks = [w for w in warnings if "observed-turn fallback" in w]
+    assert len(fallbacks) == 2  # the declared-step delivery needs no assumption
+    assert "step 2" in fallbacks[0] and "step 3" in fallbacks[1]
 
 
 def test_delivery_declared_step_disagreement_warns_and_bound_wins(tmp_path):
@@ -310,8 +314,11 @@ def test_delivery_declared_step_out_of_bounds_falls_back(tmp_path):
 
 def test_delivery_bound_to_a_memory_lane_call_warns(tmp_path):
     """A delivery whose terminal_call_ref resolves to a MEMORY-lane turn has
-    no agent step to attribute through: the binding is unusable — warn, then
-    fall back to the declared step, never silently."""
+    no agent step to attribute through: the consumer is KNOWN but unobserved
+    (a memory-lane turn is no main-lane consumption evidence), so the
+    delivery stays unattributable with a warning — never reassigned to a
+    declared or most-recent step, which would make a pre-exposure action
+    eligible as downstream evidence."""
     b = AnnotatedBuilder()
     b.agent_turn(with_task=True)
     b.memory_turn()
@@ -320,7 +327,47 @@ def test_delivery_bound_to_a_memory_lane_call_warns(tmp_path):
     b.delivery(sid, memories=[cure_ref("k1")], bind=mem_call, main_step=1)
     _, ops, warnings = parse(b, tmp_path)
     (recall,) = [o for o in ops if o.kind == "recall"]
-    assert recall.step == 1  # the declared step, via the fallback
+    assert recall.step is None  # known but unobserved consumer — no fallback
+    assert any("not a classified agent turn" in w for w in warnings)
+
+
+def test_delivery_with_a_non_dict_memory_ref_never_crashes(tmp_path):
+    """R13 regression: a corrupt delivery carrying a bare string (not a
+    MemoryRef object) degrades to ref_to_memory's null-shaped entry with a
+    warning — the locator-resolution fallback must never reach `.get` on the
+    non-dict ref (an AttributeError would remove the whole trajectory from
+    the evaluation over one corrupt ref)."""
+    b = AnnotatedBuilder()
+    b.agent_turn(with_task=True)
+    sid = b.search(returned=[cure_ref("k1")])
+    b.agent_turn()
+    b.delivery(sid, memories=["not-a-ref", cure_ref("k2")], bind=b.last_call)
+    _, ops, warnings = parse(b, tmp_path)
+    (recall,) = [o for o in ops if o.kind == "recall"]
+    assert [m["key"] for m in recall.memories] == [None, "k2"]
+    assert recall.memories[0]["value"] is None
+    assert any("non-object memory ref" in w for w in warnings)
+
+
+def test_delivery_bound_to_a_truncated_turn_stays_unattributable(tmp_path):
+    """R5: turn 1 completed; turn 2 started but never produced an assistant
+    message (the recording was truncated mid-turn), and the delivery is
+    bound to turn 2's call. The consumer is KNOWN but its response was never
+    observed — the delivery must not fall back to step 1, or a pre-exposure
+    action becomes eligible as downstream evidence."""
+    b = AnnotatedBuilder()
+    b.agent_turn(with_task=True)
+    b.turn += 1
+    call_id = f"{b.turn:06d}-x"
+    b._emit("turn_start", turn=b.turn, call_id=call_id, proxy_source=b.main)
+    # truncated mid-turn: no message_end, no turn_end
+    sid = b.search(returned=[cure_ref("k1")])
+    b.delivery(sid, memories=[cure_ref("k1")],
+               bind={"call_sequence": b.turn, "call_id": call_id,
+                     "role_call_index": 1})
+    _, ops, warnings = parse(b, tmp_path)
+    (recall,) = [o for o in ops if o.kind == "recall"]
+    assert recall.step is None
     assert any("not a classified agent turn" in w for w in warnings)
 
 

@@ -32,15 +32,15 @@ flowchart TD
 |---|---|---|
 | `relevance` | bool | 注入点上，记忆是否与任务及 agent 当前子目标主题相关？依据区间首步之前的步骤判断。 |
 | `accuracy` | enum | `corroborated`（有可观察证据为真）/ `uncontradicted`（无从判断）/ `contradicted`（有可观察证据为假）。 |
-| `novelty` | enum | `novel`（任务陈述与注入前步骤中都未出现）/ `confirming`（敲定 agent 明确表达过的疑点）/ `redundant`（早已确立，无疑点）。任务陈述与 agent 的初始上下文与 agent 自己的注入前回合一律视为已在对话中。 |
-| `influence` | enum | `none` / `referenced`（仅被提及）/ `acted_on`（影响了后续命令、编辑或测试）/ `decisive`（被明确归功的转向）。足迹是后续行为：从区间首步起算，以该记忆下一次被重投递处为界（重投递即取代；从未被重投递则无上界；其他记忆的重投递只收窄其自身窗口）。回声规则：agent 在区间之前已宣布、推理出或已应用的方向，不能归功于事后再投递的记忆——即使结果动作落在足迹窗口内。另有两条约束：上下文（搜索查询、任务陈述、步骤流本身、黄金答案）不是记忆内容；`acted_on`/`decisive` 要求一个**被改变的动作**，而非继续执行注入前已确立的计划。acted-on 或 decisive 断言必须携带**锚点**——足迹出现的 agent 步骤号，且落在该条目的窗口内。 |
-| `positive_effect` | enum 或 null | `improved` / `no_effect` / `harmed`。仅当 influence 为 `acted_on` 或 `decisive` 时非空。 |
+| `novelty` | enum | `novel`（任务陈述与注入前步骤中都未出现）/ `confirming`（敲定 agent 明确表达过的疑点）/ `redundant`（早已确立，无疑点）。任务陈述与 agent 自己的注入前回合一律视为已在对话中。 |
+| `influence` | enum | `none` / `referenced`（仅被提及）/ `acted_on`（注入后的命令、编辑或测试用到了记忆所携带、且 agent 无法从已有信息推导出的内容，或 agent 明确引用了该记忆）/ `decisive`（该记忆改变了 agent 计划的方向——可论证的路线转变）。足迹是后续行为：从区间首步起算，以该记忆下一次被重投递处为界（重投递即取代；从未被重投递则无上界；其他记忆的重投递只收窄其自身窗口）。回声规则：agent 在区间之前已宣布、推理出或已应用的方向，不能归功于事后再投递的记忆——即使结果动作落在足迹窗口内。另有两条约束：上下文不是记忆内容，由来源的时间与角色判定——搜索查询、任务陈述与注入前步骤是 agent 在投递到达前已有的信息，黄金答案是 agent 从未见过的评测方专有核验材料，而注入后步骤恰是评判足迹的证据所在；`acted_on`/`decisive` 要求一个**被改变的动作**，而非继续执行注入前已确立的计划。`redundant` 的记忆仍可能被 acted on——当投递本身改变了动作（提醒恢复了已放弃的方向，或补足了计划缺少的执行细节）：novelty 与 influence 相互正交。acted-on 或 decisive 断言必须携带**锚点**——足迹出现的 agent 步骤号，且落在该条目的窗口内；塑形动作恰好发生在投递步本身的那次响应时，投递步也算锚点。 |
+| `positive_effect` | enum 或 null | `improved` / `no_effect` / `harmed`，以该记忆窗口内可观察的下游事件判断（`improved`：下游事件把收益系于记忆塑形的动作；`no_effect`：该动作没有产生可观察的下游变化；`harmed`：错误位置、错误线索、回退正确工作）。仅当 influence 为 `acted_on` 或 `decisive` 时非空。 |
 
 {% hint style="warning" %}
 `positive_effect = no_effect` 对记忆系统不利：上下文与注意力被占用，工作并未改善。仅从某动作缺失推断出的跳过，记为 `influence = none`；缺失本身不是证据。
 {% endhint %}
 
-判定规则刻意不对称：被无视的垃圾注入是 **neutral**（无足迹），只有 acted-on 且无效（或有害）才是 **negative**。因此 negative 率为零绝不能单独读作"无害"：报告中它始终与 wasted-token share 一起出现——后者本身是区间级代理（neutral 区间里被引用的记忆计为浪费；positive 区间里被无视的记忆计为有效），占比过高时还会给出明确警告（见[产物](artifacts.md#判定率)）。
+判定规则刻意不对称：被无视的垃圾注入是 **neutral**（无足迹），只有 acted-on 且无效（或有害）才是 **negative**。因此 negative 率为零绝不能单独读作"无害"：报告中它始终与 wasted-token share 一起出现——后者本身是区间级代理（neutral 区间里被引用的记忆计为浪费；positive 区间里被无视的记忆计为有效），每一个报告的份额都附带该警告（见[产物](artifacts.md#判定率)）。运行中完全没有可归类的 agent 回合、因而观察不到任何后续的区间，不经 LLM 直接规则判定，并作为 **unassessable**（观察缺失，而非测得的零效应）单独报告，不进入任何方向性分母。
 
 最终任务结果若可辨认，可以抬高或压低置信度，但不能单独决定任何信号。
 
@@ -63,11 +63,12 @@ flowchart TD
 
 1. **精确 id 覆盖。** 答案为每个投递条目的区间本地 id 恰好各给一条——缺失条目是未作答的评判，未知条目是噪声，两者都不被接受。
 2. **动作锚点。** `acted_on`/`decisive` 的断言至少给出一个锚点步骤，且所有锚点都落在该条目的足迹窗口内（区间首步起，至下一次重投递减一；从未被重投递则至步骤流的最后一步——超出步骤流末尾的步骤是幻觉，不是证据）。区间首步之前的锚点与其他越界锚点一样被拒绝，对任何条目都如此：注入前证据可以支持 novelty 或 accuracy 的 **note**，但永远不能作为锚点——锚点是 influence 证据。
+3. **信号正交。** novelty、accuracy、influence 与 effect 各自独立判定：任何跨信号组合都不构成契约违例。提醒效应（`redundant` + `acted_on`）、部分有误却促成了修复的记忆（`contradicted` + `improved`）、真正共享的足迹（两个条目携带相同内容，记入 shared 说明）都是可报告的状态，规则不得压制。另外 `influence` 为 `none` 时 `anchors` 必须为空（无足迹可引）；同一步投递冲突（后一区间在本区间末投递步上再次投递同一记忆）下，共享步骤归先投递方，后一区间的该条目窗口自共享步骤之后才开始——记录不含同一步内的因果顺序，因此该步骤按先 carrier 规则只计一次。
 
 **组装时**（`_assemble_verdict`），作用于已验证的对象：
 
-3. **配对。** `positive_effect` 仅在 `influence` 为 `acted_on` 或 `decisive` 时适用。该情况下 effect 为 null 是评分规则允许的不确定性出口（证据无法判定方向）：usage 推导为 `unclear` 并记录在案，但不算配对纠正。influence 为 `none` 或 `referenced` 时仍给出的 effect 会被强制改为 `null`（记警告并计入配对纠正）。
-4. **使用、原因、判定。** `_derive_usage` 为每个条目打标签；`_footprint_reason` 只对 `ignored` 运行；`derive_verdict` 读取使用标签。置信度被夹到 `[0, 1]`。
+4. **配对。** `positive_effect` 仅在 `influence` 为 `acted_on` 或 `decisive` 时适用。该情况下 effect 为 null 是评分规则允许的不确定性出口（证据无法判定方向）：usage 推导为 `unclear` 并记录在案，但不算配对纠正。influence 为 `none` 或 `referenced` 时仍给出的 effect 会被强制改为 `null`（记警告并计入配对纠正）。
+5. **使用、原因、判定。** `_derive_usage` 为每个条目打标签；`_footprint_reason` 只对 `ignored` 运行；`derive_verdict` 读取使用标签。置信度被夹到 `[0, 1]`。
 
 完全不含投递记忆的区间不是错误：记警告并推导为 neutral，因为没有可打分对象。
 

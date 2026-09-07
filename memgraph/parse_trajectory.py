@@ -326,6 +326,11 @@ def _delivery_step(
     response recorded, so the consuming turn has already classified (the
     next-agent-turn rule covers the no-classified-turn-yet case). Bound and
     declared values are cross-checked when both exist.
+    A KNOWN but unobserved consumer — the bound call's turn classified as a
+    memory/side-lane turn, or never classified at all (a truncated agent
+    turn) — is never reassigned to a declared or most-recent step: that
+    would make a pre-exposure action eligible as downstream evidence. The
+    delivery stays unattributable (step None) instead.
     """
     payload = event["payload"]
     declared = payload.get("main_step")
@@ -333,14 +338,13 @@ def _delivery_step(
     bound_turn = _bound_turn(table, event.get("terminal_call_ref"))
     bound_step = table.step_of_turn.get(bound_turn) if bound_turn is not None else None
     if bound_turn is not None and bound_step is None:
-        # the bound call's turn classified as a memory-lane turn or never
-        # classified at all (a truncated agent turn): the binding is unusable
-        # for step attribution — say so before falling back
         warnings.append(
             f"{run_id}: delivery {payload.get('delivery_id')}: the bound call's "
-            f"turn {bound_turn} is not a classified agent turn (memory-lane or "
-            "truncated); using the declared/observed-turn rule"
+            f"turn {bound_turn} is not a classified agent turn (memory/side-lane "
+            "or truncated); the consumer is known but unobserved, so the "
+            "delivery stays unattributable (no fallback to an earlier step)"
         )
+        return None
     if bound_step is not None:
         if declared is not None and declared != bound_step:
             warnings.append(
@@ -362,7 +366,17 @@ def _delivery_step(
     # classified agent turn, not the next one. Only when no agent turn has
     # classified yet (a deferred first response) is the consumer still upcoming.
     recent = table.step_most_recent(event["seq"])
-    return recent if recent is not None else table.step_after(event["seq"])
+    step = recent if recent is not None else table.step_after(event["seq"])
+    # the fallback is an attribution ASSUMPTION (the bridge commits the
+    # delivery after the carrying call's response): name it so a reader can
+    # see how much of a run depends on it
+    warnings.append(
+        f"{run_id}: delivery {payload.get('delivery_id')}: no call binding or "
+        f"declared main_step recorded; attributed to "
+        f"{'step ' + str(step) if step is not None else 'no classified step'} "
+        "by the observed-turn fallback"
+    )
+    return step
 
 
 def list_field(holder: dict[str, Any], key: str) -> list[Any]:
@@ -566,15 +580,31 @@ def _recall_op_from_delivery(
         binding_status=event.get("binding_status"),
         content_chars=content_chars(placement.get("content") if placement else None),
     )
+    # a trajectory_message locator resolves through the delivery's own
+    # session bindings — the same per-session resolver the session task uses
+    # (no bindings resolves nothing). Computed before the memories loop: a
+    # delivered value recorded as a locator (not inline text) resolves
+    # through it too — without this the entry's value reads None while the
+    # placement and query do resolve, and exposure grounding compares
+    # nothing (the judge would see an empty value for a delivered memory)
+    locator_lanes = index.binds.get(payload.get("trace_session_id"), {})
     for ref in list_field(payload, "memories"):
-        op.memories.append(ref_to_memory(ref))
+        if not isinstance(ref, dict):
+            # a corrupt non-object ref (a bare string, a number) degrades to
+            # ref_to_memory's null-shaped entry — never a crash on `.get`
+            warnings.append(
+                f"{run_id}: delivery {payload.get('delivery_id')} carries a "
+                "non-object memory ref; recorded as an empty entry"
+            )
+        memory = ref_to_memory(ref)
+        if memory.get("value") is None and isinstance(ref, dict):
+            memory["value"] = resolved_content_text(
+                ref.get("content"), events, locator_lanes, slots
+            )
+        op.memories.append(memory)
     search_id = payload.get("search_operation_id")
     op.search_operation_id = search_id if isinstance(search_id, str) else None
     search = index.operations.get(search_id) if isinstance(search_id, str) else None
-    # a trajectory_message locator resolves through the delivery's own
-    # session bindings — the same per-session resolver the session task uses
-    # (no bindings resolves nothing)
-    locator_lanes = index.binds.get(payload.get("trace_session_id"), {})
     # the placement's full text, resolved once: the capped opening excerpt
     # below and the per-entry exposure both read it — the annotation's
     # canonical values are what the delivery REFERENCES, the placement is

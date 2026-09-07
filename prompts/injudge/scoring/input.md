@@ -14,10 +14,7 @@ complete chunked scan of the whole stream, with the verbatim steps around
 the injection point attached.
 Steps before the span's first step are the pre-injection context (what the
 agent had done and planned when the injection arrived); steps from the
-span's first step onward are where the span's footprint, if any, appears —
-bounded PER MEMORY at that memory's next re-delivery (a re-delivery
-supersedes: later steps are the re-delivery span's window, so one memory's
-influence is never credited to two spans). An unrelated span delivering
-different memories bounds nothing; a memory never re-delivered keeps the
-rest of the stream, and one delivered memory's window ending never caps a
-co-delivered memory's window.
+span's first step onward are where the span's footprint, if any, appears.
+Each delivered memory's footprint window — stated in the span header and
+defined under signal 4 (influence) — bounds where that memory's influence
+may be claimed.

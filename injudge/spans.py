@@ -1,24 +1,36 @@
 """Group recall operations into injection spans — the judged unit.
 
 A span is a maximal run of recall ops (in agent-step order) delivering
-identical content: the same memory set under the recorder's portable
-identity (namespace, identity_scheme, version_id, content digest — what the
-gate's own `memory_identity` compares on), never adapter-native fields, so
-spanning works for any memory system recorded through the gate. One escape
-hatch: a memory no portable identity distinguishes (an operation-local
-version id over undigested content — legal for redacted/unavailable
-ContentRefs) fingerprints on its delivered (namespace, key, value) instead —
-the namespace keeps two stores' same-keyed deliveries apart (memory identity
-is the (namespace, item) pair). The triple degenerates to (namespace, key)
-when no value was recorded (redacted content records none), so distinct
-redacted contents under one (namespace, key) share a span —
-indistinguishable by construction: nothing was recorded that could tell
-them apart. Identical re-deliveries
+identical content under the SAME treatment: the same memory set in the same
+order under the recorder's portable identity (namespace, item, identity_scheme,
+version_id, content digest — what the gate's own `memory_identity` compares
+on, plus the recorded item identity, so two DISTINCT items that merely share
+a content digest never collapse into one span and lose a provenance), never
+adapter-native fields, so spanning works for any memory system recorded
+through the gate. One escape hatch: a memory no portable identity
+distinguishes (an operation-local version id over undigested content — legal
+for redacted/unavailable ContentRefs) fingerprints on its delivered
+(namespace, item, value) instead — the namespace keeps two stores' same-keyed
+deliveries apart (memory identity is the (namespace, item) pair). The triple
+degenerates to (namespace, item) when no value was recorded (redacted content
+records none), so distinct redacted contents under one (namespace, item)
+share a span — indistinguishable by construction: nothing was recorded that
+could tell them apart. Identical re-deliveries
 carry no new information, so they are judged once via their span; the
 non-first injections roll up as "restated".
 
+A re-delivery is only merged when it is the SAME treatment: identical content
+in the same order, the same placement presentation, and the same per-entry
+exposure. A clipped→full (or full→clipped) re-delivery, a re-ranked bundle,
+or a re-framed block is a NEW treatment and starts a new span instead —
+merging its wider exposure backward would let the judge read a suffix at a
+step whose anchors predate the delivery that first exposed it, and content-
+identical deliveries under different framing are not necessarily identical
+treatments.
+
 A gap in delivery steps does not break a span (the missing steps are
-recorded in `step_gaps` and surfaced to the judge); a content change does.
+recorded in `step_gaps` and surfaced to the judge); a content or treatment
+change does.
 Each delivered memory's judged footprint window is bounded individually at
 THAT memory's first re-delivery starting strictly after this span's
 deliveries end (`memory_windows`): a re-delivery supersedes,
@@ -26,12 +38,21 @@ so a memory delivered in two spans is never credited in both — while an
 unrelated span in between bounds nothing, an overlapping re-delivery
 (possible only from declared-back or corrupt steps) is skipped rather than
 terminal, and a co-delivered memory with no cleanly separated re-delivery
-keeps the rest of the stream.
+keeps the rest of the stream. The one bound a clean re-delivery never sets:
+a LATER span starting at this span's last delivery step (two memory blocks
+placed in one call, or a declared step collision) that also carries one of
+this span's entries. The collision step is then credited exactly ONCE under
+a first-carrier rule: this span's still-open window closes at that step
+inclusive (`same_step_bound`), the later span's window for the same entry
+opens only AFTER it (`memory_window_starts`), and the collision is noted in
+warnings — so one action at the shared step can never anchor both spans.
 A delivery carries no step only when no agent turn ever classified in the
-run (a memory-only or pre-first-response recording); such ops sort last and
+run (a memory-only or pre-first-response recording) or its bound consumer
+never completed a classified turn; such ops sort last and
 merge only into a matching-content span, and a span whose ops are ALL
 unattributed gets step_first/step_last = None and is auto-judged neutral
-without an LLM call (no downstream can exist).
+without an LLM call (no downstream can be observed — observation
+missingness, reported apart from measured neutrality in the aggregates).
 """
 
 from __future__ import annotations
@@ -45,61 +66,60 @@ from memgraph.annotations import item_key, namespace_of, version_identity
 from memgraph.model import MemoryOp
 
 
-# exposure merge rank: a delivery that exposed more wins — the span's
-# entries are the union of what its deliveries put in front of the agent
-_EXPOSURE_RANK = {"unknown": 0, "clipped": 1, "full": 2}
-
-
-def _merge_exposure(current: list[dict], newer: list[dict]) -> list[dict]:
-    """Element-wise merge of a span's per-entry exposure across its
-    re-deliveries: `full` if any delivery carried the value whole, else the
-    longest exposed prefix among the clipped ones, else unknown. `newer`
-    reaches here already aligned to the span's entry order
-    (_aligned_exposure), so the zip pairs the same memory; a length
-    mismatch (corrupt input) keeps the recorded wider list unchanged."""
-    if len(newer) != len(current):
-        return current
-    merged = []
-    for a, b in zip(current, newer):
-        if _EXPOSURE_RANK.get(b.get("state"), 0) > _EXPOSURE_RANK.get(a.get("state"), 0):
-            a, b = b, a
-        if a.get("state") == "clipped" and b.get("state") == "clipped":
-            n = max(a.get("exposed_chars") or 0, b.get("exposed_chars") or 0)
-            a = {**a, "exposed_chars": n}
-        merged.append(a)
-    return merged
-
-
 def _canon_entry(m: dict) -> str:
     """One delivered entry's portable identity string — the per-entry half
     of content_fingerprint's sorted comparison (the tuple semantics live on
-    its docstring). The exposure alignment keys on the SAME identity the
-    span grouping does, so the two can never disagree about which entries
-    are the same memory."""
+    its docstring). The treatment comparison (_same_treatment) keys on the
+    SAME identity the span grouping does, so the two can never disagree
+    about which entries are the same memory."""
     ns, scheme, version_id, digest = version_identity(m, withhold_local=True)
+    # the recorded item identity rides the comparison: two DISTINCT items
+    # that merely share a content digest (or a redacted (namespace, key))
+    # are two memories with two provenances — content equivalence may be
+    # unobservable, but recorded item distinctness is known and must never
+    # be erased by the grouping
+    item = item_key(m)
+    if (
+        item is not None
+        and not m.get("item_id")
+        and m.get("identity_strength") == "operation_local"
+        and item == m.get("version_id")
+    ):
+        # the display key here IS the operation-local version id (ref_key's
+        # last fallback when no item_id/key was recorded): withheld from the
+        # version tuple because it names nothing outside its own operation,
+        # it is no item identity either — letting it pose as one would split
+        # identical content re-delivered under fresh local ids into one span
+        # per delivery, the exact grouping the withhold exists to keep
+        item = None
     if version_id is not None or digest is not None:
-        ident = [ns, scheme, version_id, digest]
+        ident = [ns, item, scheme, version_id, digest]
     else:
-        ident = [m.get("namespace"), m.get("key"), m.get("value")]
+        ident = [namespace_of(m), item, m.get("value")]
     return json.dumps(ident, ensure_ascii=False)
 
 
 def content_fingerprint(op: MemoryOp) -> str:
     """sha1 over the portable delivered-set identity, robust to ordering.
 
-    Per memory: namespace / identity_scheme / version_id / content sha256 —
-    the gate's version-level tuple (annotations.version_identity, with the
-    operation-local version_id WITHHELD: it names nothing outside its own
-    operation, so the content digest alone carries the comparison; for the
-    stable strengths the version_id already names one content digest).
+    Per memory: namespace / item / identity_scheme / version_id / content
+    sha256 — the gate's version-level tuple (annotations.version_identity,
+    with the operation-local version_id WITHHELD: it names nothing outside
+    its own operation, so the content digest alone carries the comparison;
+    for the stable strengths the version_id already names one content
+    digest) PLUS the recorded item identity (item_id, else the display-key
+    fallback): a content digest names content, not an item, so two items
+    sharing one digest — or two redacted entries sharing one (namespace,
+    key) with distinct recorded item ids — are separate span memberships,
+    never one erased provenance.
     Scheme alone distinguishes NOTHING (it is constant across one store's
     memories), so a memory with neither a (withheld-adjusted) version_id
-    nor a content digest falls back to its delivered (namespace, key,
+    nor a content digest falls back to its delivered (namespace, item,
     value) — the namespace still separates two stores' same-keyed
     deliveries (the registry's (namespace, item) pair), while the triple
-    degenerates to (namespace, key) for redacted content (no value is ever
-    recorded), leaving distinct redacted contents under one (namespace,
-    key) indistinguishable and sharing one span.
+    degenerates to (namespace, item) for redacted content (no value is ever
+    recorded), leaving distinct redacted contents under one recorded item
+    identity indistinguishable and sharing one span.
     """
     blob = json.dumps(sorted(_canon_entry(m) for m in op.memories), ensure_ascii=False)
     # surrogatepass, like the gate's canonical digests: a lone surrogate (a
@@ -108,34 +128,42 @@ def content_fingerprint(op: MemoryOp) -> str:
     return hashlib.sha1(blob.encode("utf-8", "surrogatepass")).hexdigest()[:16]
 
 
-def _aligned_exposure(span: InjectionSpan, op: MemoryOp) -> list[dict] | None:
-    """op's per-entry exposure records re-ordered onto the span's memory
-    order. The fingerprint is order-INSENSITIVE (content_fingerprint
-    sorts), so a re-delivery may carry the identical set in a different
-    order (a query rewrite between identical deliveries re-ranks the
-    return), and a positional merge would lend one entry's exposure to
-    another — crediting a suffix that entry's placements never showed, the
-    exact canonical-vs-exposed mix-up the exposure record exists to
-    prevent. Duplicate identities are interchangeable here (the same value
-    against the same placement text yields the same record). None on a
-    corrupt mismatch — one fingerprint must carry one entry set; the span's
-    recorded exposure then stands unchanged."""
-    if len(op.exposure) != len(span.memories):
-        return None
-    by_ident: dict[str, list[dict]] = {}
-    for m, e in zip(op.memories, op.exposure):
-        by_ident.setdefault(_canon_entry(m), []).append(e)
-    aligned = []
-    for m in span.memories:
-        queue = by_ident.get(_canon_entry(m))
-        if not queue:
-            return None
-        aligned.append(queue.pop(0))
-    return aligned
+def _same_treatment(span: InjectionSpan, op: MemoryOp) -> bool:
+    """Whether merging `op` into `span` merges only a true re-delivery —
+    identical content under the same presentation and the same per-entry
+    exposure. Anything else is a NEW treatment and must start a new span:
+
+    - entry ORDER (the fingerprint is order-insensitive, but the delivered
+      order is presentation: a re-ranked bundle is not the same treatment);
+    - placement presentation (the protocol's kind plus the recorded opening
+      excerpt — a re-framed or re-positioned block is not the same
+      treatment);
+    - per-entry EXPOSURE (state and exposed length): merging a wider later
+      exposure backward would show the judge content the span's early
+      anchors predate — the clipped→full leak. A corrupt exposure record
+      (length mismatch) compares as "no contradiction": the op then merges
+      and the span's recorded exposure stands (never widened).
+    """
+    if [_canon_entry(m) for m in op.memories] != [_canon_entry(m) for m in span.memories]:
+        return False
+    if op.placement_kind != span.placement_kind or op.placement_head != span.placement_head:
+        return False
+    if not op.exposure or len(op.exposure) != len(span.memory_exposure):
+        return True
+    return all(a == b for a, b in zip(span.memory_exposure, op.exposure))
 
 
-def group_spans(recall_ops: list[MemoryOp], traj_id: str) -> list[InjectionSpan]:
-    """Maximal runs of identical-content recall ops, in (step, seq) order."""
+def group_spans(
+    recall_ops: list[MemoryOp], traj_id: str, warnings: list[str] | None = None
+) -> list[InjectionSpan]:
+    """Maximal runs of same-treatment recall ops, in (step, seq) order.
+
+    `warnings`, when given, receives the same-step delivery collision notes
+    (a later span delivering different content at this span's last delivery
+    step): the earlier span's still-open window for a memory the colliding
+    span also carries is then bounded at that step, and the colliding span's
+    window for that memory opens only after it — the shared step is credited
+    exactly once, and the bound is named."""
     ops = sorted(recall_ops, key=lambda o: (o.step is None, o.step or 0, o.seq))
     spans: list[InjectionSpan] = []
     steps_seen: list[list[int]] = []  # attributed steps per span, parallel to spans
@@ -150,8 +178,16 @@ def group_spans(recall_ops: list[MemoryOp], traj_id: str) -> list[InjectionSpan]
             # a truncated-tail re-delivery carries no step, so it cannot
             # break consecutiveness: it is a restated injection of the newest
             # matching span, wherever that span sits — never a spurious
-            # null-step span judged auto-neutral on its own
+            # null-step span judged auto-neutral on its own. Its exposure is
+            # never merged (its step is unknown, so nothing it showed can be
+            # time-bounded — the span keeps the exposure its attributed
+            # deliveries recorded, never widened backward)
             target = latest[fp]
+        if target is not None and op.step is not None and not _same_treatment(spans[target], op):
+            # identical content under a NEW treatment (exposure, order, or
+            # presentation changed): split — merging would lend the later
+            # delivery's exposure/presentation to anchors that predate it
+            target = None
         if target is not None:
             span = spans[target]
             span.op_ids.append(op.id)
@@ -162,13 +198,8 @@ def group_spans(recall_ops: list[MemoryOp], traj_id: str) -> list[InjectionSpan]
             # every op of the span
             span.seq_first = min(span.seq_first, op.seq)
             span.seq_last = max(span.seq_last, op.seq)
-            if op.exposure:
-                # align to the span's entry order first: the fingerprint is
-                # order-insensitive, so a re-ranked re-delivery must not lend
-                # one entry's exposure to another
-                aligned = _aligned_exposure(span, op)
-                if aligned is not None:
-                    span.memory_exposure = _merge_exposure(span.memory_exposure, aligned)
+            # a merged re-delivery is the same treatment by construction, so
+            # its exposure record equals the span's — nothing to merge
             if op.step is not None:
                 steps_seen[target].append(op.step)
             # the delivery context rides the span: distinct queries (a query
@@ -209,6 +240,12 @@ def group_spans(recall_ops: list[MemoryOp], traj_id: str) -> list[InjectionSpan]
     # a gap re-delivery (delivered in S1, absent in S2, back in S3) is
     # still content the agent already saw, so the baseline accumulates.
     seen: dict[tuple[str | None, str], object] = {}
+    # identities at least one earlier span exposed VERIFIABLY in full (the
+    # "delivered in an earlier span (not new)" cue is sound for them): a
+    # re-delivery whose every earlier exposure was clipped or unverifiable
+    # may carry genuinely new substance (the unshown suffix), so the cue is
+    # qualified for it (`previous_partial_keys`)
+    seen_full: set[tuple[str | None, str]] = set()
     entry_idents: list[list[tuple[str | None, str] | None]] = []  # per span: per entry identity (None = none)
     for span, steps in zip(spans, steps_seen):
         if steps:
@@ -257,6 +294,9 @@ def group_spans(recall_ops: list[MemoryOp], traj_id: str) -> list[InjectionSpan]
         # unrecorded, never a change
         redelivered = [i for i in cur if i in seen]
         span.previous_keys = list(dict.fromkeys(cur[i] for i in redelivered))
+        span.previous_partial_keys = list(
+            dict.fromkeys(cur[i] for i in redelivered if i not in seen_full)
+        )
         span.changed_keys = list(
             dict.fromkeys(
                 cur[i]
@@ -272,6 +312,14 @@ def group_spans(recall_ops: list[MemoryOp], traj_id: str) -> list[InjectionSpan]
         for ident, v in vals.items():
             if ident not in seen or v is not None:
                 seen[ident] = v
+        # and its exposure: one verified full exposure (verbatim or
+        # presentation-normalized) makes the "already seen in full" cue sound
+        # for every later span carrying the identity
+        for j, ident in enumerate(idents):
+            if ident is not None and j < len(span.memory_exposure) and (
+                span.memory_exposure[j].get("state") in ("full", "full_normalized")
+            ):
+                seen_full.add(ident)
         prev = cur
     # position among the trajectory's spans, and the per-memory judged
     # footprint windows: each delivered ENTRY's window ends where THAT
@@ -301,6 +349,12 @@ def group_spans(recall_ops: list[MemoryOp], traj_id: str) -> list[InjectionSpan]
         for ident in idents:
             if ident is not None:
                 carriers.setdefault(ident, []).append(j)
+    # attributed first steps by span index, ascending: the same-step
+    # collision lookup below walks these, never a per-span rescan
+    starts: dict[int, list[int]] = {}
+    for j, s in enumerate(spans):
+        if s.step_first is not None:
+            starts.setdefault(s.step_first, []).append(j)
     for i, span in enumerate(spans):
         span.position = i + 1
         span.total = len(spans)
@@ -322,5 +376,53 @@ def group_spans(recall_ops: list[MemoryOp], traj_id: str) -> list[InjectionSpan]
                             end = first - 1
                             break
             windows[memory_id(j)] = end
+        if span.step_last is not None:
+            # E7/R4: a later span starting AT this span's last delivery step
+            # (two memory blocks placed in one call, or a declared step
+            # collision) is never a re-delivery bound — the strict > guard
+            # refuses it — so when that later span ALSO delivers an entry of
+            # this span, the same memory would keep an open window in BOTH
+            # spans and one action at the shared step could anchor both. The
+            # recording carries no causal order within the step, so the step
+            # is allocated ONCE under a first-carrier rule: this span's
+            # still-open window for that entry closes at the span's own last
+            # delivery step (inclusive — the first exposure owns the shared
+            # step, exactly the supersession a cleanly separated re-delivery
+            # would set), and the later span's window for the same entry
+            # opens only AFTER it (`memory_window_starts`). A window already
+            # bounded by a clean re-delivery keeps its bound (the deferral
+            # past an overlapping declared-back re-delivery is deliberate),
+            # and an entry no colliding span carries keeps the rest of the
+            # stream (an unrelated span bounds nothing).
+            collisions = [j for j in starts.get(span.step_last, ()) if j > i]
+            closed = False
+            if collisions:
+                for j_pos, ident in enumerate(entry_idents[i]):
+                    mid = memory_id(j_pos)
+                    if ident is None or windows[mid] is not None:
+                        continue
+                    carriers_hit = [j for j in collisions if ident in entry_idents[j]]
+                    if not carriers_hit:
+                        continue
+                    windows[mid] = span.step_last
+                    closed = True
+                    for j in carriers_hit:
+                        for j_later, later_ident in enumerate(entry_idents[j]):
+                            if later_ident == ident:
+                                spans[j].memory_window_starts[memory_id(j_later)] = (
+                                    span.step_last + 1
+                                )
+            if closed:
+                span.same_step_bound = span.step_last
+                if warnings is not None:
+                    warnings.append(
+                        f"{span.id}: same-step delivery collision with later "
+                        f"span(s) {', '.join(spans[j].id for j in collisions)} at "
+                        f"step {span.step_last}; this span's still-open footprint "
+                        f"windows for the re-delivered memories are bounded at step "
+                        f"{span.step_last} and the colliding span's window for the "
+                        "same memory opens only after it, so one memory is never "
+                        "credited to two spans"
+                    )
         span.memory_windows = windows
     return spans

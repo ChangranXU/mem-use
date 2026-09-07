@@ -1,6 +1,6 @@
 """Merge injudge verdicts into the graph for rendering.
 
-`apply_verdicts` joins an `injudge.report/v7` artifact onto a
+`apply_verdicts` joins an `injudge.report/v8` artifact onto a
 loaded graph by (run_id, op seq) — robust to the two tools assigning different
 T-numbers when run on different path sets — and annotates each recall op in
 place:
@@ -57,7 +57,7 @@ def _memory_labels(span: dict) -> dict[str, str]:
 
 
 def load_verdict_report(path: Path) -> dict:
-    """Read and sanity-check an injudge.report/v7 artifact."""
+    """Read and sanity-check an injudge.report/v8 artifact."""
     try:
         report = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError, RecursionError) as e:

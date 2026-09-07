@@ -78,15 +78,21 @@ above), and on openai-chat a complete verdict drafted into
 `reasoning_content` is recovered instead. Parsing is strict, and the
 contract keys each rubric entry by the SPAN-LOCAL memory id (m1, m2, … per
 delivered entry — display keys are labels, so two entries sharing a key are
-judged independently): id coverage and action-anchor windows are semantic
-checks the attempt loop corrects (a shape-valid but semantically wrong
-answer takes the bounded corrective retry; exhaustion becomes verdict
+judged independently): id coverage and action-anchor windows (empty when
+influence is `none`) are
+semantic checks the attempt loop corrects (a shape-valid but semantically
+wrong answer takes the bounded corrective retry; exhaustion becomes verdict
 "error" with the raw text kept — it is NEVER silently coerced to neutral,
 because that would pollute the neutral rate with judge failures. An
-out-of-contract shape fails the same way at parse time.) The judged input
+out-of-contract shape fails the same way at parse time.) Novelty, accuracy,
+influence, and effect are ORTHOGONAL signals — a redundant memory can still
+change the action as a reminder, and refuted content can still have
+triggered the fix — so no cross-signal combination is a contract violation.
+The judged input
 grounds every memory to its recorded placement exposure: a value the
 placement clipped is shown to the judge as the exposed prefix only, and an
-exposure that cannot be determined is marked unverified — the judged
+exposure that cannot be determined is marked unverified (its canonical value
+withheld) — the judged
 evidence never exceeds what the agent could have seen.
 """
 
@@ -1098,14 +1104,20 @@ class GoldInput:
 def _memory_line(m: dict, mid: str, exposure: dict | None) -> str:
     """One delivered memory on a judge-bound input, labelled with its
     span-local id and grounded to what the placement actually exposed. The
-    memory system's self-assessment (confidence, needs_verification) is
-    withheld: every signal is judged from the step stream only. Exposure
+    memory system's self-assessment (confidence, needs_verification) AND its
+    type label are withheld: type names like `pitfall` or `procedure` prime
+    the judge toward specific effect stories, and every signal is judged
+    from the step stream only. Exposure
     markers keep the judged evidence inside what the agent could have seen:
     a clipped entry carries ONLY the exposed prefix — the unshown remainder
     is not the agent's to use and not the judge's to credit — and an
-    unverified one says so instead of implying full visibility. No exposure
+    unverified one WITHHOLDS the canonical value: a warning alone is not an
+    information boundary (hidden content would still prime the explanation
+    or the selection of supporting steps), so the judge scores only what the
+    step stream itself shows the agent had. The canonical value stays in the
+    report artifact, separated from the judge-visible evidence. No exposure
     record at all (a span built directly) shows the canonical value bare."""
-    label = f"- [{mid}] [{m.get('memory_type')}] {m.get('key') or '(unkeyed)'}"
+    label = f"- [{mid}] {m.get('key') or '(unkeyed)'}"
     value = m.get("value")
     if exposure is None:
         return f"{label}: {value}"
@@ -1119,19 +1131,33 @@ def _memory_line(m: dict, mid: str, exposure: dict | None) -> str:
             "value were shown to the agent; judge only the exposed prefix above, "
             "never the unshown remainder]"
         )
-    if state == "unknown":
+    if state == "full_normalized":
         return (
             f"{label}: {value}\n"
+            "  [EXPOSURE NORMALIZED — the placement carries this whole value up to "
+            "whitespace/markdown-escape differences only; treat it as shown in full]"
+        )
+    if state == "unknown":
+        return (
+            f"{label}: (value withheld — exposure unverified)\n"
             "  [EXPOSURE UNVERIFIED — the recorded placement does not carry this "
             "value verbatim, so what the agent saw (transformed, clipped, or "
-            "whole) cannot be determined; do not treat the value as fully shown]"
+            "whole) cannot be determined and the canonical value is withheld "
+            "from your input; credit only content the step stream itself shows "
+            "the agent had]"
         )
     return f"{label}: {value}"
 
 
 def _cmd_of(args: dict | str) -> str:
     if isinstance(args, dict) and isinstance(args.get("command"), str):
-        return args["command"]
+        rest = {k: v for k, v in args.items() if k != "command"}
+        if not rest:
+            return args["command"]
+        # the bare command alone under-specifies the action: the same
+        # `pytest` in another working directory or under another timeout is
+        # a different action — render every recorded argument
+        return f"{args['command']} (args: {json.dumps(rest, ensure_ascii=False)})"
     if isinstance(args, str):
         # the gate records the raw arguments string when it is not JSON —
         # show it as-is instead of double-encoding it
@@ -1149,13 +1175,23 @@ def _render_step(st: AgentStep) -> str:
         lines.append(f"content: {st.content}")
     for t in st.tools:
         lines.append(f"command: {t.name} — {_cmd_of(t.args)}")
+        # a late close (schema v6's turn-less late-result path) joins its
+        # initiating step by tool_call_id: name the actual availability seq,
+        # or the rendered order would present the result as known at this
+        # turn's range while later turns were really its first readers
+        late = (
+            t.seq_end is not None
+            and st.seq_end is not None
+            and t.seq_end > st.seq_end
+        )
+        avail = f", available from seq {t.seq_end} — after this turn's end" if late else ""
         if t.result is not None:
-            lines.append(f"result ({t.status or '?'}): {t.result}")
+            lines.append(f"result ({t.status or '?'}{avail}): {t.result}")
         elif t.status is not None:
             # the execution closed without a result (no_result/interrupted)
             # — the recorded close says why; "never observed" would claim
             # the run lost the outcome, which it did not
-            lines.append(f"result ({t.status}): (none recorded)")
+            lines.append(f"result ({t.status}{avail}): (none recorded)")
         else:
             lines.append("result: (never observed)")
     return "\n".join(lines)
@@ -1339,17 +1375,26 @@ def _render_span_header(span: InjectionSpan, task: str | None, memories_note: st
     if span.previous_keys:
         # the novelty baseline beyond the task statement: these keys were
         # already delivered in an earlier span of this trajectory
-        parts.append(
-            f"Delivered in an earlier span (not new): {span.previous_keys}."
-        )
+        line = f"Delivered in an earlier span (not new): {span.previous_keys}."
+        if span.previous_partial_keys:
+            # those earlier deliveries were only ever clipped or
+            # exposure-unverifiable: the "not new" cue cannot mean the agent
+            # saw the whole substance — this delivery may first expose it
+            line += (
+                f" Earlier placements of {span.previous_partial_keys} exposed the "
+                "value only partially or unverifiably, so their substance may not "
+                "have been fully seen before."
+            )
+        parts.append(line)
     if span.changed_keys:
         parts.append(
             f"Same memory, changed value vs its last earlier delivery: {span.changed_keys}."
         )
     if span.removed_keys:
         parts.append(f"Removed vs the previous span: {span.removed_keys}.")
-    if span.step_first is not None and any(
-        end is not None for end in span.memory_windows.values()
+    if span.step_first is not None and (
+        any(end is not None for end in span.memory_windows.values())
+        or span.memory_window_starts
     ):
         # footprint windows at the per-ENTRY granularity (span-local ids —
         # identities sharing one display key keep their own bounds): each
@@ -1357,22 +1402,46 @@ def _render_span_header(span: InjectionSpan, task: str | None, memories_note: st
         # belong to the re-delivery span); a memory never re-delivered keeps
         # the rest of the stream, and one memory's bound never caps a
         # co-delivered memory's window. Stated only when at least one memory
-        # is bounded (all-unbounded keeps the stream label's open wording).
-        # The shared header carries it, so the scan path's chunk headers
-        # state the same bounds to extraction.
+        # is bounded (all-unbounded keeps the stream label's open wording) —
+        # a same-step-collision start override bounds a window too, so it
+        # also brings the line. The shared header carries it, so the scan
+        # path's chunk headers state the same bounds to extraction.
         frags = []
         for i, m in enumerate(span.memories):
             mid = memory_id(i)
+            start = span.memory_window_starts.get(mid, span.step_first)
             end = span.memory_windows.get(mid)
             label = m.get("key") or "(unkeyed)"
-            if end is not None:
-                frags.append(
-                    f"{mid} ({label}) — {step_range(span.step_first, end)} "
-                    f"(re-delivered from step {end + 1}; later steps belong to that span)"
+            bump = ""
+            if start != span.step_first:
+                # a same-step delivery collision pushed this entry's window
+                # start past the span's first step: an earlier span's delivery
+                # of the SAME memory owns the shared step (first carrier),
+                # so this span cannot claim it
+                bump = (
+                    f" (also delivered at step {start - 1} — an earlier span's "
+                    "delivery of this same memory owns that shared step)"
                 )
+            if end is not None:
+                if span.same_step_bound == end and not bump:
+                    # the bound came from a same-step collision (a later
+                    # span delivered this memory at this span's last delivery
+                    # step), not from a cleanly separated re-delivery — saying
+                    # "re-delivered from step N" would name a step separation
+                    # the recording does not carry
+                    frags.append(
+                        f"{mid} ({label}) — {step_range(start, end)} "
+                        "(another span delivered this memory at this same step; "
+                        "steps beyond it are that span's to claim)"
+                    )
+                else:
+                    frags.append(
+                        f"{mid} ({label}) — {step_range(start, end)}{bump} "
+                        f"(re-delivered from step {end + 1}; later steps belong to that span)"
+                    )
             else:
                 frags.append(
-                    f"{mid} ({label}) — steps {span.step_first} onward (never re-delivered)"
+                    f"{mid} ({label}) — steps {start} onward{bump} (never re-delivered)"
                 )
         parts.append("Footprint windows: " + "; ".join(frags) + ".")
     parts.append(memories_note)
@@ -1606,12 +1675,20 @@ def _verdict_semantics(
     """The span-relative contract checks a JSON schema cannot express:
     coverage (the answer carries EXACTLY one entry per delivered memory's
     span-local id — a missing entry is an unanswered judgment, an unknown
-    one is noise, and neither may stand) and action anchors (an acted-on or
+    one is noise, and neither may stand), action anchors (an acted-on or
     decisive influence claim cites its footprint steps, inside the
     entry's own footprint window and never past the end of the step stream
     — `last_step`, the stream's final step number; a step past it is a
     hallucination, not evidence; a reference that names no step is not
-    evidence of influence). `last_step` is a required argument (None only
+    evidence of influence), and the anchor/influence shape the contract
+    states (anchors are empty when influence is `none` — there is no
+    footprint to cite). Novelty, accuracy, influence, and effect are
+    ORTHOGONAL signals and stay so here: a redundant memory can still act
+    as a reminder that changes an action, and refuted content can still
+    have triggered the diagnostic that found the fix — no cross-signal
+    combination is a shape contradiction, so none is rejected.
+    `last_step` is a
+    required argument (None only
     when the caller holds no step stream at all): an omitted bound would
     leave a never-re-delivered memory's window open past the stream's end,
     accepting hallucinated anchors. Returns the
@@ -1642,11 +1719,15 @@ def _verdict_semantics(
     for entry in obj["memories"]:
         entry_id = entry["id"]
         anchors = entry["anchors"]
+        # the window's start is the span's first step except under a
+        # same-step delivery collision, where an earlier span's delivery of
+        # the same memory owns the shared step (memory_window_starts)
+        start = span.memory_window_starts.get(entry_id, span.step_first)
         end = span.memory_windows.get(entry_id)
         out_of_window = [
             a
             for a in anchors
-            if a < span.step_first
+            if a < start
             or (end is not None and a > end)
             or (last_step is not None and a > last_step)
         ]
@@ -1658,12 +1739,21 @@ def _verdict_semantics(
             )
             return (
                 f"cites {entry_id} at step(s) {out_of_window} outside its "
-                f"footprint window (starts at step {span.step_first}, ends at {bound})"
+                f"footprint window (starts at step {start}, ends at {bound})"
             )
-        if entry["influence"]["value"] in _ACTED and not anchors:
+        influence = entry["influence"]["value"]
+        if influence in _ACTED and not anchors:
             return (
-                f"claims {entry_id} influence {entry['influence']['value']!r} "
+                f"claims {entry_id} influence {influence!r} "
                 "without action anchors (the agent steps where the footprint appears)"
+            )
+        if influence == "none" and anchors:
+            # the contract keeps anchors empty for none: a cited step claims
+            # a footprint the influence value denies
+            return (
+                f"claims {entry_id} influence 'none' but cites anchors "
+                f"{anchors} (no footprint, so no anchor — anchors stay empty "
+                "for none)"
             )
     return None
 
@@ -2648,13 +2738,20 @@ def _scoring_call(
 
 def auto_verdict_no_subsequent_turn(span: InjectionSpan) -> dict:
     """Rule-judged neutral: no agent turn ever classified in the run, so no
-    downstream footprint can exist. No judge ran, so there is
+    downstream footprint is observable in this recording. That is
+    observation missingness, not a measured null effect — the run may be
+    censored, the consumer unrecorded, or the delivery never reached an
+    agent turn — so the aggregates report these spans apart as
+    unassessable, never inside the directional-effect denominators or the
+    wasted-token share. No judge ran, so there is
     no confidence and the rubric is a null placeholder — the aggregates
     exclude both from the judged stats."""
     verdict = blank_verdict()
     verdict["verdict"] = "neutral"
     verdict["analysis"] = (
-        "no agent turn classified in the run; no downstream footprint can exist"
+        "no agent turn classified in the run; no downstream footprint is "
+        "observable in this recording (the run may be truncated, the consumer "
+        "unrecorded, or the delivery never reached an agent turn)"
     )
     verdict["rubric"] = {
         memory_id(i): {

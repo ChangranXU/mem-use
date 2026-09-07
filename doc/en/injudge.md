@@ -26,8 +26,8 @@ Each run writes into `-o DIR` (default `output/`):
 
 | File | Contents |
 |---|---|
-| `injudge-report.json` | The runtime judging record (`injudge.report/v7`), rewritten after every trajectory so a crash keeps completed work |
-| `summary.json` | The final statistics (`injudge.summary/v4`): counts, rates, per-memory usage |
+| `injudge-report.json` | The runtime judging record (`injudge.report/v8`), rewritten after every trajectory so a crash keeps completed work |
+| `summary.json` | The final statistics (`injudge.summary/v5`): counts, rates, per-memory usage |
 | `memgraph-verdicts.html` | Only with `--html`: memgraph with recall nodes colored by verdict |
 
 Delivery cost and delivery-policy metrics are computed deterministically from the recordings, not judged — see [Artifacts](artifacts.md#delivery-cost-and-policy). The full field reference lives there too.

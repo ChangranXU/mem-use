@@ -1,9 +1,9 @@
 3. novelty (@novelty@) — what did the agent already
    have when the injection arrived? The baseline is EVERYTHING already in
-   the conversation: the task statement (and anything in the agent's initial
-   context) counts as already-in-conversation just like the agent's own
-   pre-injection steps — a memory paraphrasing the issue text or the agent's
-   own earlier reasoning is NOT new. Judge the memory's substance against
+   the conversation: the task statement counts as already-in-conversation
+   just like the agent's own pre-injection steps — a memory paraphrasing
+   the issue text or the agent's own earlier reasoning is NOT new. Judge
+   the memory's substance against
    that baseline, by how it had been articulated:
    - confirming: the agent had articulated the substance as OPEN — a
      suspicion, hypothesis, hesitation, or an unverified assumption — and

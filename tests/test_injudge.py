@@ -716,16 +716,23 @@ def test_spans_window_defers_past_an_overlapping_redelivery(tmp_path):
     # is the first cleanly separated one → the bound is 8 − 1
     assert spans[0].memory_windows == {"m1": 7}
     # the last span's first step (8) does not clear the middle span's OWN
-    # last step (8): unbounded — a bound of 7 would cut its own delivery
-    assert spans[1].memory_windows == {"m1": None, "m2": None}
+    # last step (8): the re-delivery bound is refused — but the same-step
+    # collision closes the still-open window for A (the span the later
+    # carrier re-delivers) at the span's own last delivery step, exactly
+    # the supersession a cleanly separated re-delivery would have set; B,
+    # which no later span carries, keeps the rest of the stream
+    assert spans[1].memory_windows == {"m1": 8, "m2": None}
     assert spans[2].memory_windows == {"m1": None}
 
 
-def test_spans_window_unbounded_when_every_redelivery_overlaps(tmp_path):
-    """The all-overlapping case: every later re-delivery fails to start
-    strictly after this span's last delivery step, so none qualifies and
-    the memory keeps the rest of the stream — the skipped re-delivery
-    bounds nothing, and the window never cuts the span's own deliveries."""
+def test_spans_window_same_step_collision_closes_only_carried_entries(tmp_path):
+    """The all-overlapping case: every re-delivery fails to start strictly
+    after this span's last delivery step, so none qualifies as a bound — but
+    a later span STARTING at that step that also carries the entry's
+    identity would leave the same memory open in two spans (one action
+    creditable twice), so the still-open window closes at the span's own
+    last delivery step. An entry no same-step later span carries keeps the
+    rest of the stream: an unrelated span bounds nothing."""
     b = TrajBuilder().agent_turn(with_task=True)
     b.recall(REF_A)  # step 2
     b.recall(REF_A)  # step 3 — same content extends the span
@@ -733,14 +740,21 @@ def test_spans_window_unbounded_when_every_redelivery_overlaps(tmp_path):
     b.delivery(sid_b, memories=[REF_B], main_step=3)  # B declared at step 3
     sid_a = b.search(returned=[REF_A])
     b.delivery(sid_a, memories=[REF_A], main_step=3)  # A re-delivered at step 3
-    spans = group_spans(_recall_ops(b, tmp_path), "T1")
+    warnings: list[str] = []
+    spans = group_spans(_recall_ops(b, tmp_path), "T1", warnings)
     assert len(spans) == 3
     assert (spans[0].step_first, spans[0].step_last) == (2, 3)
     # the only re-delivery (step 3) is not strictly after the span's last
-    # delivery step (3): skipped, and nothing later qualifies — unbounded
-    assert spans[0].memory_windows == {"m1": None}
+    # delivery step (3): skipped as a bound, but the same-step collision
+    # (the later span carrying A starts at 3) closes the open window AT 3 —
+    # inclusive, so the span's own delivery steps stay creditable
+    assert spans[0].memory_windows == {"m1": 3}
+    assert spans[0].same_step_bound == 3
+    # B is delivered by no later span: the same-step spans bound nothing
+    # for it (an unrelated memory keeps the rest of the stream)
     assert spans[1].memory_windows == {"m1": None}
     assert spans[2].memory_windows == {"m1": None}
+    assert any("same-step delivery collision" in w for w in warnings)
 
 
 def test_spans_thread_the_delivery_context(tmp_path):
@@ -807,9 +821,12 @@ def test_spans_unattributed_tail(tmp_path):
     b = TrajBuilder().agent_turn(with_task=True)
     b.recall(REF_A)  # bound → step 2
     sid = b.search(returned=[REF_A])
-    b.delivery(sid, memories=[REF_A])  # unbound, undeclared → its consuming turn (2)
+    # unbound, undeclared → its consuming turn (2); the SAME treatment as
+    # the first delivery (identical content, placement, and exposure), so
+    # the trailing injection merges into the span
+    b.delivery(sid, memories=[REF_A],
+               content=f"- [insight] key_a: {REF_A['content']['text']}")
     spans = group_spans(_recall_ops(b, tmp_path), "T1")
-    # same content: the trailing injection merges into the span
     assert len(spans) == 1 and spans[0].n_injections == 2
     assert (spans[0].step_first, spans[0].step_last) == (2, 2)
     # no agent turn ever classified (a memory-only run): the delivery is
@@ -896,16 +913,26 @@ def test_fingerprint_ignores_order():
 
 def test_fingerprint_tracks_portable_identity_not_display_fields():
     """The fingerprint is the recorder's portable identity: adapter-native
-    display/metadata fields (key, value, confidence, ...) never enter it."""
+    display/metadata fields (value text beyond the digest, confidence, ...)
+    never enter it. The display key enters only as the item-identity
+    FALLBACK when no item_id was recorded — with the item id present, a key
+    rename is metadata churn; without it, a rename is indistinguishable
+    from a different item and must never merge."""
     class Op:
         pass
 
     a, b, c = Op(), Op(), Op()
-    a.memories = [_fp_entry("v1", "s1", key="k1", value="x", confidence=0.9)]
-    b.memories = [_fp_entry("v1", "s1", key="k1-renamed", value="y", confidence=0.5)]
-    c.memories = [_fp_entry("v2", "s2", key="k1", value="x", confidence=0.9)]
+    a.memories = [_fp_entry("v1", "s1", item_id="i1", key="k1", value="x", confidence=0.9)]
+    b.memories = [_fp_entry("v1", "s1", item_id="i1", key="k1-renamed", value="y", confidence=0.5)]
+    c.memories = [_fp_entry("v2", "s2", item_id="i1", key="k1", value="x", confidence=0.9)]
     assert content_fingerprint(a) == content_fingerprint(b)  # metadata churn
     assert content_fingerprint(a) != content_fingerprint(c)  # new version/content
+    # no item_id recorded: the key IS the fallback item identity, so the
+    # rename reads as another memory — never one erased provenance
+    d, e = Op(), Op()
+    d.memories = [_fp_entry("v1", "s1", key="k1", value="x")]
+    e.memories = [_fp_entry("v1", "s1", key="k1-renamed", value="x")]
+    assert content_fingerprint(d) != content_fingerprint(e)
 
 
 def test_fingerprint_unidentified_memory_falls_back_to_content():
@@ -999,6 +1026,57 @@ def test_fingerprint_fallback_keeps_the_namespace():
     a.memories = [redacted("k1", "store-a")]
     b.memories = [redacted("k1", "store-b")]
     assert content_fingerprint(a) != content_fingerprint(b)
+
+
+def test_fingerprint_distinct_item_ids_never_collapse():
+    """R6: two DISTINCT recorded items that merely share a content digest are
+    two memories with two provenances — content equivalence never erases a
+    recorded item distinctness; likewise two redacted entries sharing one
+    display key stay apart when distinct item ids were recorded."""
+
+    class Op:
+        pass
+
+    a, b = Op(), Op()
+    a.memories = [_fp_entry("loc-1", "same-digest", strength="operation_local",
+                            item_id="item-A", key="k1", value="x")]
+    b.memories = [_fp_entry("loc-2", "same-digest", strength="operation_local",
+                            item_id="item-B", key="k1", value="x")]
+    assert content_fingerprint(a) != content_fingerprint(b)
+
+    # redacted bodies, same key, distinct recorded item ids: not known to
+    # be the same memory — never one span judged once
+    c, d = Op(), Op()
+    c.memories = [{"key": "k1", "value": None, "namespace": "ns",
+                   "identity_scheme": "s", "identity_strength": "operation_local",
+                   "version_id": "op-v1", "content_sha256": None, "item_id": "item-A"}]
+    d.memories = [{"key": "k1", "value": None, "namespace": "ns",
+                   "identity_scheme": "s", "identity_strength": "operation_local",
+                   "version_id": "op-v2", "content_sha256": None, "item_id": "item-B"}]
+    assert content_fingerprint(c) != content_fingerprint(d)
+
+
+def test_fingerprint_operation_local_version_id_is_no_item_identity():
+    """R6 follow-up: with no item_id and no display key recorded, ref_key's
+    last fallback makes the "key" the operation-local version id itself —
+    which names nothing outside its own operation. It must not pose as an
+    item identity in the fingerprint, or identical content re-delivered
+    under fresh local ids would split into one span per delivery."""
+
+    def local_only(local_id, text):
+        return {"key": local_id, "value": text, "namespace": "ns",
+                "identity_scheme": "s", "identity_strength": "operation_local",
+                "version_id": local_id, "content_sha256": text}
+
+    class Op:
+        pass
+
+    a, b, c = Op(), Op(), Op()
+    a.memories = [local_only("note-0", "same")]
+    b.memories = [local_only("note-1", "same")]
+    c.memories = [local_only("note-2", "changed")]
+    assert content_fingerprint(a) == content_fingerprint(b)  # content groups
+    assert content_fingerprint(a) != content_fingerprint(c)
 
 
 # ---------------------------------------------------------------- verdict parsing
@@ -1567,7 +1645,7 @@ def test_summary_is_statistics_only():
         [{"level": "warn", "msg": "process note"}],
     )
     summary = build_summary(artifact)
-    assert summary["tool"]["schema"] == "injudge.summary/v4"
+    assert summary["tool"]["schema"] == "injudge.summary/v5"
     assert "validation" not in summary
     _assert_stats_only(summary)
     blob = json.dumps(summary)
@@ -1575,7 +1653,8 @@ def test_summary_is_statistics_only():
     ov = summary["overall"]
     assert set(ov["headline"]) == {"judged_spans", "positive_span_rate",
                                    "negative_span_rate", "wasted_token_share",
-                                   "wasted_tokens", "judged_tokens"}
+                                   "wasted_tokens", "judged_tokens",
+                                   "caveat"}
     assert ov["low_confidence"] == ["T1:S2"]
     # memory usage: bare tallies keyed by display key, drift marked, the two
     # identities sharing key "k" disambiguated with a short item_id suffix
@@ -1791,8 +1870,8 @@ def test_summary_value_drift_needs_two_recorded_values():
 def test_aggregate_usage_rollup_excludes_auto_neutral_spans():
     """Auto-neutral spans carry rule-judged placeholder "unclear" per memory:
     they must stay out of the per-memory usage rollup (the same LLM-judged
-    exclusion the rubric rollup and confidence apply), while their verdict
-    still counts as neutral."""
+    exclusion the rubric rollup and confidence apply), and their span tallies
+    as unassessable — observation missingness, never the neutral class."""
     auto = {**_op("T1:S1", "neutral", None,
                   {"k": {"usage": "unclear", "evidence": "no subsequent turn"}},
                   memories=[{"key": "k", "value": "v"}]),
@@ -1801,7 +1880,9 @@ def test_aggregate_usage_rollup_excludes_auto_neutral_spans():
                  {"k": {"usage": "ignored", "evidence": ""}},
                  memories=[{"key": "k", "value": "v"}])
     agg = aggregate([auto, judged], 2)
-    assert agg["neutral"] == 2
+    assert agg["neutral"] == 1
+    assert agg["unassessable"] == 1
+    assert agg["rates"]["neutral"] == 1.0  # the one assessable judged span
     (roll,) = agg["memory_usage"]
     assert roll["tallies"] == {"used": 0, "noted": 0, "ignored": 1,
                                "misused": 0, "unclear": 0}
@@ -2022,10 +2103,11 @@ def test_rubric_line_surfaces_the_novelty_distribution(capsys):
 
 def test_aggregate_confidence_excludes_auto_spans():
     """A rule-judged auto-neutral span carries no confidence (no judge ran):
-    it must not dilute the judged spans' per-class means or buckets."""
+    it must not dilute the judged spans' per-class means or buckets — and it
+    tallies as unassessable, not as a neutral verdict."""
     auto = {**_op("T1:S1", "neutral", None), "auto": "no_subsequent_turn"}
     agg = aggregate([auto, _op("T1:S2", "neutral", 0.3)], 2)
-    assert agg["neutral"] == 2  # auto spans still count as neutral verdicts
+    assert agg["neutral"] == 1 and agg["unassessable"] == 1
     assert agg["mean_confidence_by_verdict"]["neutral"] == 0.3
     assert agg["confidence_buckets"] == {"[0,0.5)": 1, "[0.5,0.8)": 0, "[0.8,1.0]": 0}
     assert agg["low_confidence"] == ["T1:S2"]
@@ -2091,10 +2173,48 @@ def test_aggregate_headline_metrics():
         "wasted_token_share": 0.75,
         "wasted_tokens": 300,
         "judged_tokens": 400,
-        # the share clears the proxy-caveat threshold with negatives present
+        # the proxy caveat rides every reported share
         "caveat": WASTE_SHARE_CAVEAT,
     }
     assert aggregate([], 0)["headline"]["wasted_token_share"] is None
+
+
+def test_aggregate_unassessable_spans_leave_every_directional_denominator():
+    """R5/R9: a rule-judged auto-neutral span is observation missingness, not
+    a measured null effect — it leaves the verdict-rate denominators, the
+    wasted-token share, and the judged-span headline count, and is reported
+    apart with its delivery cost (the assessable fraction stays readable)."""
+    auto = {**_op("T1:S1", "neutral", None,
+                  {"k": {"usage": "unclear", "evidence": "no subsequent turn"}},
+                  memories=[{"key": "k", "value": "v"}],
+                  cost={"deliveries": 1, "content_chars_total": 100,
+                        "approx_tokens_total": 25}),
+            "auto": "no_subsequent_turn"}
+    judged = _op("T1:S2", "positive", 0.9,
+                 {"k": {"usage": "used", "evidence": ""}},
+                 memories=[{"key": "k", "value": "v"}],
+                 cost={"deliveries": 1, "content_chars_total": 400,
+                       "approx_tokens_total": 100})
+    agg = aggregate([auto, judged], 2)
+    assert agg["positive"] == 1 and agg["neutral"] == 0
+    assert agg["unassessable"] == 1
+    assert agg["rates"]["positive"] == 1.0
+    assert agg["headline"]["judged_spans"] == 1
+    # the probe case from the re-review: an unobserved span's tokens are not
+    # wasted tokens — 0 of 100 judged-class tokens, not 25 of 25
+    assert agg["headline"]["wasted_token_share"] == 0.0
+    assert agg["headline"]["judged_tokens"] == 100
+    assert agg["headline"]["unassessable_spans"] == 1
+    assert agg["headline"]["unassessable_tokens"] == 25
+    assert agg["cost"]["approx_tokens_by_verdict"]["unassessable"] == 25
+    assert agg["cost"]["approx_tokens_by_verdict"]["neutral"] == 0
+    # the summary projection and stdout line carry the class too
+    artifact = build_artifact({}, [{"id": "T1", "run_id": "r"}],
+                              [auto, judged], [], {"T1": 2}, [])
+    slim = build_summary(artifact)["overall"]
+    assert slim["unassessable"] == 1
+    assert slim["headline"]["unassessable_spans"] == 1
+    assert slim["headline"]["unassessable_tokens"] == 25
 
 
 def test_headline_wasted_share_is_over_judged_cost_only():
@@ -2266,7 +2386,8 @@ def test_aggregate_cost_by_verdict():
     assert cost["content_chars_total"] == 1240
     assert cost["approx_tokens_total"] == 310
     assert cost["approx_tokens_by_verdict"] == {
-        "positive": 200, "negative": 0, "neutral": 100, "error": 10, "unjudged": 0}
+        "positive": 200, "negative": 0, "neutral": 100, "error": 10, "unjudged": 0,
+        "unassessable": 0}
 
 
 # ---------------------------------------------------------------- judge client
@@ -2305,9 +2426,17 @@ def _auto_verdict_body(req) -> dict:
         pass
     ids = re.findall(r"(?m)^- \[(m\d+)\] ", user)
     # the span's own consumption step: inside every footprint window by
-    # construction (windows never cut a span's delivery steps)
+    # construction (windows never cut a span's delivery steps) — except a
+    # same-step collision bump, where the header's Footprint windows line
+    # opens the entry's window AFTER the shared step ("m1 (key) — steps 4
+    # onward" / "m1 (key) — steps 4–6"); read that start when stated
     consumed = re.search(r"consumed at (?:agent )?steps? (\d+)", user)
     anchor_step = int(consumed.group(1)) if consumed else 1
+    window_starts = {
+        m: int(n)
+        for m, n in re.findall(
+            r"(\bm\d+) \([^)]*\) — steps? (\d+)(?:–\d+| onward)", user)
+    }
     entries = []
     for i, mid in enumerate(ids):
         acted = i == 0
@@ -2324,7 +2453,7 @@ def _auto_verdict_body(req) -> dict:
                 {"value": "improved", "note": "saved work"} if acted
                 else {"value": None, "note": "n/a"}
             ),
-            "anchors": [anchor_step] if acted else [],
+            "anchors": [window_starts.get(mid, anchor_step)] if acted else [],
         })
     return {"choices": [{"message": {"content": json.dumps({
         "memories": entries,
@@ -2432,9 +2561,16 @@ def test_echo_overlap_warning_flags_a_novel_echo(monkeypatch):
         "review the span)"
     ]
 
-    # a redundant call is the judge applying the rule — no guard warning
+    # a redundant call is the judge applying the rule — no guard warning.
+    # The answer must stay coherent: novelty redundant pairs with influence
+    # none/referenced (the redundant⇒not-acted_on dependency is enforced in
+    # the attempt loop)
     payload = json.loads(GOOD)
-    _good_entries(payload)["m1"]["novelty"]["value"] = "redundant"
+    entry = _good_entries(payload)["m1"]
+    entry["novelty"]["value"] = "redundant"
+    entry["influence"]["value"] = "none"
+    entry["positive_effect"]["value"] = None
+    entry["anchors"] = []
     mutant = {"choices": [{"message": {"content": json.dumps(payload)}}]}
     monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory([], payload=mutant))
     warnings = []
@@ -2495,11 +2631,10 @@ def test_pe_pairing_corrections_counted_and_aggregated(tmp_path):
                                                             {"deliveries": 0})
 
 
-def test_headline_high_waste_carries_the_caveat(capsys):
-    """A flood of ignored memories wasting most of the budget carries the
-    proxy caveat whether the negative rate is zero or not (a few negatives
-    do not make the share per-memory truth): the headline binds the metrics
-    and states the caveat in the aggregate, the summary projection, and the
+def test_headline_wasted_share_always_carries_the_caveat(capsys):
+    """The wasted-token share is a span-level proxy whatever its value: the
+    caveat rides every reported share (a low share's coarse bundle charging
+    is just as present), in the aggregate, the summary projection, and the
     stdout summary."""
     ops = [
         _op("T1:S1", "neutral", 0.9,
@@ -2518,10 +2653,10 @@ def test_headline_high_waste_carries_the_caveat(capsys):
     print_summary(artifact)
     assert "caveat: wasted_token_share" in capsys.readouterr().out
 
-    # a low wasted share needs no caveat
+    # a low wasted share carries the same caveat
     ops[0]["delivery_cost"] = {"deliveries": 1, "content_chars_total": 400,
                                "approx_tokens_total": 40}
-    assert "caveat" not in aggregate(ops, 2)["headline"]
+    assert "caveat" in aggregate(ops, 2)["headline"]
 
 
 def test_render_user_single_step_span_says_step_not_steps():
@@ -2934,7 +3069,7 @@ def test_echoed_key_in_a_200_answer_never_reaches_judge_raw(monkeypatch):
 def test_echoed_key_in_a_conforming_verdict_never_reaches_the_artifact(monkeypatch):
     """A 200 verdict is endpoint output too: the key echoed into its
     analysis, evidence claims, or per-signal notes would land verbatim in
-    injudge.report/v7 — mask it in every copied field, not just judge_raw."""
+    injudge.report/v8 — mask it in every copied field, not just judge_raw."""
     key = "sk-secret+key"
     obj = json.loads(GOOD)
     obj["analysis"] = f"the agent saw {key} in the injection"
@@ -4884,7 +5019,7 @@ def test_cli_end_to_end_mocked_judge(monkeypatch, tmp_path):
                             "-o", str(out), "--env", str(_env(tmp_path))])
     assert rc == 0
     artifact = json.loads((out / "injudge-report.json").read_text())
-    assert artifact["tool"]["schema"] == "injudge.report/v7"
+    assert artifact["tool"]["schema"] == "injudge.report/v8"
     assert artifact["tool"]["judge_model"] == "judge-m"
     assert len(artifact["operations"]) == 1
     op = artifact["operations"][0]
@@ -4927,15 +5062,17 @@ def test_cli_end_to_end_mocked_judge(monkeypatch, tmp_path):
     assert len(record) == 1  # one judge call for one span
     # the summary artifact: the statistics-only distillation (v2)
     summary = json.loads((out / "summary.json").read_text())
-    assert summary["tool"]["schema"] == "injudge.summary/v4"
+    assert summary["tool"]["schema"] == "injudge.summary/v5"
     assert "validation" not in summary  # the process log stays in the report
     _assert_stats_only(summary)
     ov = summary["overall"]
     assert ov["positive"] == 1 and ov["rates"]["positive"] == 1.0
-    # the slim headline binds the span rates to the wasted-token share
+    # the slim headline binds the span rates to the wasted-token share (the
+    # proxy caveat rides every reported share)
     assert ov["headline"] == {"judged_spans": 1, "positive_span_rate": 1.0,
                               "negative_span_rate": 0.0, "wasted_token_share": 0.0,
-                              "wasted_tokens": 0, "judged_tokens": chars // 4}
+                              "wasted_tokens": 0, "judged_tokens": chars // 4,
+                              "caveat": WASTE_SHARE_CAVEAT}
     # judge compliance: no pairing corrections were needed (the stubbed judge
     # honors the positive_effect↔influence contract)
     assert ov["judge_compliance"] == {"pe_pairing_corrected_spans": 0,
@@ -5847,57 +5984,56 @@ def test_exposure_state_full_clipped_unknown():
         "state"] == "unknown"
 
 
-def test_span_exposure_merges_to_the_widest_delivery(tmp_path):
-    """A span's exposure is the union of what its deliveries exposed: any
-    full delivery wins, else the longest clipped prefix — the judge never
-    scores less than the agent could have seen."""
+def test_span_exposure_change_splits_the_span(tmp_path):
+    """R2: a re-delivery whose exposure CHANGED is a new treatment and starts
+    a new span — merging the wider later exposure backward would let the
+    judge read a suffix at steps whose anchors predate its first exposure.
+    Only an identical-exposure re-delivery merges."""
     value = REF_A["content"]["text"]
     b = TrajBuilder().agent_turn(with_task=True)
     b.recall(REF_A, content=value[:14])  # clipped short
-    b.recall(REF_A, content=value[:22])  # clipped longer
-    (span,) = group_spans(_recall_ops(b, tmp_path), "T1")
-    assert span.memory_exposure == [
-        {"state": "clipped", "exposed_chars": 22, "value_chars": len(value)}
+    b.recall(REF_A, content=value[:14])  # identical treatment: merges
+    b.recall(REF_A, content=value[:22])  # wider clip: a NEW treatment
+    b.recall(REF_A, content=f"- [insight] key_a: {value}")  # full: again new
+    b.recall(REF_A, content=value[:30])  # full→clipped: also a new treatment
+    spans = group_spans(_recall_ops(b, tmp_path), "T1")
+    assert len(spans) == 4
+    assert spans[0].n_injections == 2
+    assert [s.memory_exposure for s in spans] == [
+        [{"state": "clipped", "exposed_chars": 14, "value_chars": len(value)}],
+        [{"state": "clipped", "exposed_chars": 22, "value_chars": len(value)}],
+        [{"state": "full", "exposed_chars": len(value), "value_chars": len(value)}],
+        [{"state": "clipped", "exposed_chars": 30, "value_chars": len(value)}],
     ]
-    b.recall(REF_A, content=f"- [insight] key_a: {value}")  # delivered whole
-    (span,) = group_spans(_recall_ops(b, tmp_path), "T1")
-    assert span.memory_exposure == [
-        {"state": "full", "exposed_chars": len(value), "value_chars": len(value)}
-    ]
+    # the earlier span never claims steps the wider delivery owns: each
+    # entry's window ends where its next (differently-exposed) delivery starts
+    assert spans[0].memory_windows["m1"] == spans[1].step_first - 1
+    assert spans[1].memory_windows["m1"] == spans[2].step_first - 1
 
 
-def test_span_exposure_aligns_across_a_reordered_redelivery(tmp_path):
-    """The span fingerprint is order-insensitive, so a re-delivery re-ranked
-    by a query rewrite can list the identical set in a different order: the
-    exposure merge aligns by the entry's portable identity, never by
-    position — a positional zip would lend one entry's exposure to another
-    and could credit a suffix that entry's placements never showed."""
+def test_span_exposure_reordered_redelivery_splits(tmp_path):
+    """A re-delivery re-ranked by a query rewrite lists the identical set in
+    a different ORDER — presentation, hence a new treatment: the span never
+    merges it, so no entry can inherit another entry's exposure (or a wider
+    later exposure) across the reorder."""
     va, vb = REF_A["content"]["text"], REF_B["content"]["text"]
     b = TrajBuilder().agent_turn(with_task=True)
-    # delivery 1: [A, B] — A whole, B clipped; delivery 2: the identical
-    # set reordered — B whole, A clipped
     b.recall([REF_A, REF_B],
              content=f"- [insight] key_a: {va}\n- [bug] key_b: {vb[:14]}…")
     b.recall([REF_B, REF_A], query="the same bug, re-ranked",
              content=f"- [bug] key_b: {vb}\n- [insight] key_a: {va[:14]}…")
-    (span,) = group_spans(_recall_ops(b, tmp_path), "T1")
-    assert [m["key"] for m in span.memories] == ["key_a", "key_b"]
-    # each entry keeps its OWN widest exposure: both were shown whole once
-    assert span.memory_exposure == [
+    spans = group_spans(_recall_ops(b, tmp_path), "T1")
+    assert len(spans) == 2
+    assert [m["key"] for m in spans[0].memories] == ["key_a", "key_b"]
+    assert [m["key"] for m in spans[1].memories] == ["key_b", "key_a"]
+    # each span keeps exactly what ITS delivery exposed — nothing merges
+    assert spans[0].memory_exposure == [
         {"state": "full", "exposed_chars": len(va), "value_chars": len(va)},
-        {"state": "full", "exposed_chars": len(vb), "value_chars": len(vb)},
+        {"state": "clipped", "exposed_chars": 14, "value_chars": len(vb)},
     ]
-    # and the never-fully-shown case stays clipped: A is clipped in BOTH
-    # deliveries even though B's full record shares A's position in one
-    b = TrajBuilder().agent_turn(with_task=True)
-    b.recall([REF_A, REF_B],
-             content=f"- [bug] key_b: {vb}\n- [insight] key_a: {va[:14]}…")
-    b.recall([REF_B, REF_A], query="the same bug, re-ranked",
-             content=f"- [bug] key_b: {vb}\n- [insight] key_a: {va[:18]}…")
-    (span,) = group_spans(_recall_ops(b, tmp_path), "T1")
-    assert span.memory_exposure == [
-        {"state": "clipped", "exposed_chars": 18, "value_chars": len(va)},
+    assert spans[1].memory_exposure == [
         {"state": "full", "exposed_chars": len(vb), "value_chars": len(vb)},
+        {"state": "clipped", "exposed_chars": 14, "value_chars": len(va)},
     ]
 
 
@@ -5918,6 +6054,107 @@ def test_render_user_grounds_memories_to_their_exposure():
     # a span built without exposure records keeps the canonical rendering
     span.memory_exposure = []
     assert "[EXPOSURE" not in render_user(span, steps)
+
+
+def test_exposure_state_full_normalized_for_presentation_only_rendering():
+    """W8: an adapter that re-wraps lines or backslash-escapes markdown
+    punctuation renders the value's whole content without ever carrying it
+    verbatim — the exposure reads full_normalized (the whole RAW length
+    exposed), never unknown; genuinely transformed content still does."""
+    from memgraph.annotations import exposure_state
+
+    value = "use python zipfile when the unzip binary is missing"
+    space = value.index(" ")
+    rewrapped = f"## notes\n- [t] k: {value[:space]}\n  {value[space:]}"
+    assert exposure_state(value, rewrapped) == {
+        "state": "full_normalized", "exposed_chars": len(value),
+        "value_chars": len(value),
+    }
+    escaped = "- [t] k: use python zipfile when the unzip \\*binary\\* is missing"
+    assert exposure_state("use python zipfile when the unzip *binary* is missing",
+                          escaped)["state"] == "full_normalized"
+    # emphasis wrapping ADDS content the value does not carry: still a real
+    # transformation, still not a whole-value exposure (the diverging opening
+    # leaves no ≥8-char verbatim prefix either, so it reads unknown)
+    emphasized = "- [t] k: use **python zipfile** when the unzip binary is missing"
+    assert exposure_state(value, emphasized)["state"] == "unknown"
+    # a re-wrapped CLIP does not become full_normalized (the suffix is
+    # missing whatever the whitespace) and stays the raw-prefix clip
+    assert exposure_state(value, f"- [t] k: {value[:20]}\n  {value[20:26]}…")[
+        "state"
+    ] == "clipped"
+
+
+def test_span_exposure_normalized_full_is_its_own_treatment(tmp_path):
+    """A re-wrapped whole value (full_normalized) is a different treatment
+    from a clipped or a verbatim-full delivery: each starts a new span and
+    keeps its own exposure record — no exposure ever merges across them."""
+    value = REF_A["content"]["text"]
+    space = value.index(" ")
+    rewrapped = f"- [t] k: {value[:space]}\n{value[space:]}"
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.recall(REF_A, content=f"- [t] k: {value[:14]}…")  # clipped
+    b.recall(REF_A, content=rewrapped)  # whole, re-wrapped
+    b.recall(REF_A, content=f"- [t] k: {value}")  # verbatim whole
+    spans = group_spans(_recall_ops(b, tmp_path), "T1")
+    assert [s.memory_exposure[0]["state"] for s in spans] == [
+        "clipped", "full_normalized", "full",
+    ]
+
+
+def test_render_user_marks_a_normalized_full_exposure():
+    """The full_normalized marker tells the judge the placement carried the
+    whole value up to whitespace/escape differences — treat it as shown in
+    full, unlike an unverified exposure."""
+    span, steps = _judge_input_fixture()
+    span.memory_exposure = [
+        {"state": "full_normalized", "exposed_chars": 1, "value_chars": 1},
+        {"state": "unknown", "exposed_chars": None, "value_chars": 1},
+    ]
+    user = render_user(span, steps)
+    assert "[EXPOSURE NORMALIZED" in user
+    assert "treat it as shown in full" in user
+    assert "[EXPOSURE UNVERIFIED" in user
+
+
+def test_render_user_withholds_the_memory_type_label():
+    """W9: type labels (`pitfall`, `procedure`, `insight`) prime the judge
+    toward specific effect stories — the judge input carries the span-local
+    id and display key only, like the already-withheld confidence."""
+    span, steps = _judge_input_fixture()
+    user = render_user(span, steps)
+    assert "- [m1] key_a: v" in user
+    assert "- [m2] key_b: w" in user
+    assert "[insight]" not in user and "[bug]" not in user
+
+
+def test_delivered_locator_value_resolves_against_the_stream(tmp_path):
+    """E8: a delivered memory whose value is recorded as a trajectory_message
+    locator resolves against the event stream through the delivery's session
+    bindings — the same resolver the placement and query use — so the judge
+    sees the delivered text and exposure grounding has a value to compare,
+    never a None."""
+    locator_ref = {
+        "version_id": "ns:loc00000000001", "identity_strength": "native_stable",
+        "identity_scheme": "cure-sqlite-row-version-v1",
+        "item_id": "item-key_loc", "namespace": "ns",
+        "content": {"availability": "trajectory_message",
+                    "locator": {"logical_role": "main", "msg_index": 1}},
+        "extensions": {"cure": {"store_id": 1, "memory_type": "insight",
+                                "key": "key_loc", "confidence": 0.9,
+                                "review_status": "approved",
+                                "needs_verification": False}},
+    }
+    b = TrajBuilder().agent_turn(with_task=True)  # msg 1 on MAIN carries TASK
+    b.recall(locator_ref, content=TASK)  # the placement shows the resolved text
+    warnings: list[str] = []
+    traj, ops, events = parse_trajectory(b.write(tmp_path / "t1"), warnings)
+    op = next(o for o in ops if o.kind == "recall")
+    assert op.memories[0]["value"] == TASK  # resolved, not None
+    assert op.exposure[0]["state"] == "full"  # the resolved value grounds
+    steps = build_step_stream(events, traj.memory_lanes, [])
+    (span,) = group_spans([op], traj.id)
+    assert "key_loc" in render_user(span, steps)
 
 
 def test_cli_records_exposure_and_notes_clipped_deliveries(monkeypatch, tmp_path):
@@ -5952,6 +6189,51 @@ def test_cli_records_exposure_and_notes_clipped_deliveries(monkeypatch, tmp_path
     cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
     judge_span(span, [], cfg, [])  # no steps: no anchors required
     assert value[10:] not in record[0]["messages"][1]["content"]
+
+
+def test_cli_notes_the_same_step_collision_and_normalized_exposure(
+        monkeypatch, tmp_path):
+    """The run's validation log carries the span pass's findings: a
+    same-step delivery collision that bounded a footprint window is named
+    (E7), and a placement that exposed a value whole only up to
+    whitespace/escape normalization gets its own count (W8) instead of
+    inflating the undeterminable-exposure note."""
+    value = REF_A["content"]["text"]
+    space = value.index(" ")
+    # t1: the same-step collision (A at steps 2–3; B and A declared at 3),
+    # with one more turn so the colliding span's post-collision window is
+    # non-empty (its m1 window opens at step 4)
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.recall(REF_A)
+    b.recall(REF_A)
+    sid_b = b.search(returned=[REF_B])
+    b.delivery(sid_b, memories=[REF_B], main_step=3)
+    sid_a = b.search(returned=[REF_A])
+    b.delivery(sid_a, memories=[REF_A], main_step=3)
+    b.agent_turn()
+    _write_run(tmp_path / "runs", "t1", b)
+    # t2: a placement that re-wraps the value — whole, but not verbatim
+    b2 = TrajBuilder().agent_turn(with_task=True)
+    b2.recall(REF_A, content=f"- [t] k: {value[:space]}\n  {value[space:]}")
+    _write_run(tmp_path / "runs", "t2", b2)
+    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory([]))
+    out = tmp_path / "out"
+    rc = injudge_main.main([str(tmp_path / "runs"),
+                            "-o", str(out), "--env", str(_env(tmp_path))])
+    assert rc == 0
+    artifact = json.loads((out / "injudge-report.json").read_text())
+    msgs = [v["msg"] for v in artifact["validation"]]
+    collision = [m for m in msgs if "same-step delivery collision" in m]
+    assert len(collision) == 1 and "t1" in collision[0]
+    normalized = [m for m in msgs if "whitespace/markdown-escape normalization" in m]
+    assert len(normalized) == 1 and "t2" in normalized[0] and "1 of 1" in normalized[0]
+    # the re-wrapped delivery is no longer miscounted as undeterminable
+    assert not any("undeterminable placement exposure" in m and "t2" in m
+                   for m in msgs)
+    op1 = next(o for o in artifact["operations"] if o["traj"].endswith("1"))
+    assert op1["memory_windows"] == {"m1": 3}
+    op2 = next(o for o in artifact["operations"] if o["traj"].endswith("2"))
+    assert op2["memory_exposure"][0]["state"] == "full_normalized"
 
 
 def test_operation_record_carries_the_anchor_window_bounds():
@@ -6097,6 +6379,28 @@ def test_pre_span_and_out_of_window_anchors_are_rejected(monkeypatch):
     assert verdict["verdict"] == "error" and "footprint window" in verdict["error"]
 
 
+def test_same_step_collision_anchor_goes_to_the_first_carrier(monkeypatch):
+    """R4 closure: under a same-step delivery collision the shared step is
+    allocated ONCE — the earlier span's window closes on it inclusive and
+    the colliding span's window for that entry opens only after it
+    (memory_window_starts). An acted-on claim by the LATER span anchored at
+    the shared step is a contract violation, corrected in the loop; a
+    stubborn answer errors naming the bumped start."""
+    span, steps = _judge_input_fixture()
+    span.step_first = span.step_last = 2  # this span's delivery at step 2…
+    span.memory_window_starts = {"m1": 3}  # …but an earlier carrier owns step 2
+    collided = json.dumps({"memories": [
+        {"id": "m1", **_signals(inf="acted_on", pe="improved"), "anchors": [2]},
+        {"id": "m2", **_signals(), "anchors": []},
+    ], "analysis": "", "evidence": [], "confidence": 0.9})
+    _open, _calls = _semantic_answers(collided)
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
+    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", max_attempts=2)
+    verdict = judge_span(span, steps, cfg, [])
+    assert verdict["verdict"] == "error"
+    assert "starts at step 3" in verdict["error"]
+
+
 def test_anchor_past_the_stream_end_is_rejected(monkeypatch):
     """A never-re-delivered memory's window is the stream's end, and the
     stream's end is a real number: an anchor citing a step past the last
@@ -6180,6 +6484,94 @@ def test_scoring_prompts_state_the_evidence_rules():
         assert "one entry per delivered memory id" in prompt
         assert "Anchors outside the memory's window are rejected" in prompt
     assert "an exposure marker bounds what" in MEMORIES_NOTE
+
+
+def test_redundant_acted_on_is_accepted_orthogonal_signals(monkeypatch):
+    """R8: novelty redundant with acted-on influence is NOT a contradiction —
+    an already-established substance can still change the action as a
+    reminder (restoring a dropped direction, or supplying execution detail
+    the established plan lacked). Novelty, influence, and effect are
+    orthogonal signals: no cross-signal combination takes a corrective
+    retry, so the answer is accepted on the first draw."""
+    answer = json.dumps({"memories": [
+        {"id": "m1", **_signals(nov="redundant", inf="acted_on", pe="no_effect"),
+         "anchors": [2]},
+        {"id": "m2", **_signals(), "anchors": []},
+    ], "analysis": "", "evidence": [], "confidence": 0.9})
+    _open, calls = _semantic_answers(answer)
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
+    span, steps = _judge_input_fixture()
+    warnings: list[str] = []
+    verdict = judge_span(span, steps, JudgeConfig("http://x", "k", "m"), warnings)
+    assert verdict["verdict"] == "negative"  # acted_on + no_effect → misused
+    assert len(calls) == 1  # no corrective retry: the combination stands
+    assert warnings == []
+
+
+def test_contradicted_improved_is_accepted_orthogonal_signals(monkeypatch):
+    """R8: accuracy contradicted with positive_effect improved is NOT a
+    contradiction — refuted content can still have triggered the diagnostic
+    that found the fix (accuracy is about factual content, consequence about
+    what happened after using it). Accepted on the first draw, and the
+    derived verdict follows the rubric."""
+    answer = json.dumps({"memories": [
+        {"id": "m1", **_signals(acc="contradicted", inf="acted_on", pe="improved"),
+         "anchors": [2]},
+        {"id": "m2", **_signals(), "anchors": []},
+    ], "analysis": "", "evidence": [], "confidence": 0.9})
+    _open, calls = _semantic_answers(answer)
+    monkeypatch.setattr("injudge.judge.urlopen", _open)
+    span, steps = _judge_input_fixture()
+    verdict = judge_span(span, steps, JudgeConfig("http://x", "k", "m"), [])
+    assert verdict["verdict"] == "positive"
+    assert len(calls) == 1
+
+
+def test_footprint_window_header_names_a_same_step_collision_bound():
+    """E7: a window bounded by a same-step collision must not be presented as
+    a re-delivery bound — the header names the collision instead of citing a
+    step separation the recording does not carry."""
+    span, steps = _judge_input_fixture()
+    span.step_first = span.step_last = 2
+    span.memory_windows = {"m1": 2, "m2": 2}
+    span.same_step_bound = 2
+    user = render_user(span, steps)
+    assert "another span delivered this memory at this same step" in user
+    assert "re-delivered from step" not in user
+    # without the collision marker the same bound reads as the re-delivery
+    # bound it records
+    span.same_step_bound = None
+    assert "re-delivered from step 3" in render_user(span, steps)
+
+
+def test_scoring_prompts_drop_the_contradictory_clauses():
+    """E1/E2/E4/§3.1/W17/R7/R8: the assembled prompts no longer forbid the
+    delivery-step anchor, describe a no_effect state the influence rule
+    excludes, tell the judge how a label scores, define acted_on by a
+    counterfactual, set a novelty baseline against context the judge never
+    sees, treat the golden answer as something the agent had, forbid the
+    post-injection steps as evidence, or state the mis-specified
+    cross-signal implications (redundant⇒never acted_on, contradicted⇒never
+    improved, shared substance⇒credit neither)."""
+    for prompt in (SYSTEM_PROMPT, GOLD_SYSTEM_PROMPT):
+        assert "not the delivery step" not in prompt
+        assert "a skip that saves nothing" not in prompt
+        assert "counts AGAINST" not in prompt
+        assert "would likely have differed without it" not in prompt
+        assert "anything in the agent's initial context" not in prompt
+        assert "echo trap this rubric exists to refuse" not in prompt
+        # R8: novelty/accuracy/uptake/consequence stay orthogonal
+        assert "by this rule" not in prompt
+        assert "never improved" not in prompt
+        assert "NEITHER" not in prompt
+        # R7: source time and role, not textual overlap anywhere — the gold
+        # is evaluator-only and the post-injection steps are the evidence
+        assert "what the agent and you both already had" not in prompt
+        assert "evaluator-only" in prompt
+        # and the fixes stand: the delivery step anchors its own response's
+        # shaped action, and effects rest on observable downstream events
+        assert "the span's delivery step counts" in prompt
+        assert "no observable downstream" in prompt
 
 
 # ------------------------------------------------------------- stdout honesty

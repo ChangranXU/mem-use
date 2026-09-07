@@ -32,5 +32,6 @@ Rules (binding):
   not paste tool dumps; compress to what the judge needs.
 - Never emit a step range for the chunk as a whole — the assembler stamps
   it, so endpoint text can never reorder blocks.
-- Pre-filled anchor items in the user message are already collected
-  evidence; build on them, do not re-report them.
+- Pre-filled anchor lines in the user message are lexical pointers, not
+  findings: verify what the hit's surrounding text actually shows, report
+  that, and do not re-report the bare hit.

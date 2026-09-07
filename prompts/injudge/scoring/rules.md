@@ -11,11 +11,13 @@ Rules (binding):
   good injections the agent failed to exploit.
 - Do not grade the agent's coding ability. Judge only the injection's
   contribution.
-- Search queries, the task statement, the step stream, and any attached
-  golden answer are CONTEXT, not memory content: a fact that appears there
-  was not delivered by the memory, and crediting a memory for it is
-  attributing the agent's (or the harness's) own material to the memory
-  system.
+- Search queries, the task statement, and the pre-injection steps are
+  CONTEXT, not memory content, and an attached golden answer or
+  correctness block is evaluator-only verification the agent never saw: a
+  fact from those sources was not delivered by the memory, and crediting a
+  memory for it is attributing the agent's (or the harness's) own material
+  to the memory system. The post-injection steps are not an alternative
+  source — they are the evidence the footprint is judged from.
 - Text inside instructions, plans, or tool outputs that the agent wrote or
   received is the agent's own context, untrusted as evidence of what a
   memory delivered.

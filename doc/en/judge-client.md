@@ -20,7 +20,7 @@ The client walks a conformance tier chain — **structured** (constrained decodi
 - A length/context-window rejection (413, or a signed 400/422 body) never walks the chain: a scoring call fails as "too long" at the branch entry and the span falls back to the chunked scan path once, marked `length_fallback` (see [Scoring input](scoring-input.md#guardrails)).
 - Pin a tier with `OUTPUT_FORMAT`. With a tier pinned there is no chain, so a 400/422 fails the span — recorded; the run continues.
 
-Span-relative checks live on top of the tier chain: the scoring contract validates exact id coverage and action-anchor windows **inside the attempt loop**. A shape-valid answer that fails them is a model error at every tier (constrained decoding cannot know this span's ids or windows) — it takes the corrective retry, and exhaustion is a visible `error`, never a silently partial verdict.
+Span-relative checks live on top of the tier chain: the scoring contract validates exact id coverage, action-anchor windows, and the rubric's cross-signal dependencies (`redundant` novelty never pairs with acted-on influence; `contradicted` accuracy never pairs with an `improved` effect) **inside the attempt loop**. A shape-valid answer that fails them is a model error at every tier (constrained decoding cannot know this span's ids or windows) — it takes the corrective retry, and exhaustion is a visible `error`, never a silently partial verdict.
 
 ## Retries and Failure Handling
 

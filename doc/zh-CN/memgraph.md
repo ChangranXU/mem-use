@@ -51,7 +51,7 @@ JSON 产物——嵌在 HTML 里的是同一个 dict——的形状是：
 |---|---|
 | `-o PATH` | HTML 输出路径（默认 `memory-graph.html`） |
 | `--json PATH` | 同时写出机器可读的图产物 |
-| `--verdicts PATH` | 渲染前合并一份 `injudge.report/v7` 文件 |
+| `--verdicts PATH` | 渲染前合并一份 `injudge.report/v8` 文件 |
 
 ## 判定叠加
 
