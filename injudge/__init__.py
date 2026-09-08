@@ -1,6 +1,6 @@
 """injudge — verdicts for recall-injection operations in gate trajectories.
 
-Judges each recall injection's causal footprint in the agent's SUBSEQUENT
+Judges each recall injection's observable footprint in the agent's SUBSEQUENT
 behavior: the verdict comes from downstream influence, never from the
 final task result alone; "no footprint" ⇒ neutral. Injections with
 identical delivered content are grouped into spans and judged once per
@@ -18,13 +18,10 @@ from __future__ import annotations
 # (injudge/report.py) and the reader (memgraph/verdicts.py) so a bump can
 # never land on one side only and surface at read time. Tests pin the
 # literal deliberately — a bump must update them (see AGENTS.md).
-# injudge.report/v8: rubric/memory_usage key on span-local entry ids
-# (m1, m2, …) stamped on each memories entry; rule-judged auto-neutral
-# (no-subsequent-turn) spans tally as `unassessable` in the aggregate
-# counts/cost buckets — out of the directional denominators and the
-# wasted-token share (observation missingness is not a measured null
-# effect) — and the headline names their span/token totals when non-zero.
-REPORT_SCHEMA = "injudge.report/v8"
+# injudge.report/v9: tool.config.scan drops the per-chunk evidence-token
+# limit. input.evidence_tokens remains the measured evidence size; the
+# rubric, entry ids, verdicts and unassessable accounting are unchanged.
+REPORT_SCHEMA = "injudge.report/v9"
 
 # injudge.summary/v5: the unassessable tally joins the verdict counts,
 # and the headline carries unassessable_spans/unassessable_tokens when

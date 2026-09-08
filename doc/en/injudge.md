@@ -26,7 +26,7 @@ Each run writes into `-o DIR` (default `output/`):
 
 | File | Contents |
 |---|---|
-| `injudge-report.json` | The runtime judging record (`injudge.report/v8`), rewritten after every trajectory so a crash keeps completed work |
+| `injudge-report.json` | The runtime judging record (`injudge.report/v9`), rewritten after every trajectory so a crash keeps completed work |
 | `summary.json` | The final statistics (`injudge.summary/v5`): counts, rates, per-memory usage |
 | `memgraph-verdicts.html` | Only with `--html`: memgraph with recall nodes colored by verdict |
 

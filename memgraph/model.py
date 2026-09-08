@@ -75,7 +75,7 @@ class MemoryOp:
     kind == "recall": one delivered memory injection (a memory_delivery
         event) — `memories` from its MemoryRefs, `query`/`matched` from the
         linked search operation, `content_chars`/`binding_status` from the
-        placement record, plus the internal `placement_kind`/`placement_head`
+        placement record, plus the internal `placement_kind`/`placement_text`
         (how the injection was presented; injudge's span header — never
         serialized into the graph artifact) and `exposure` (per delivered
         entry: what the placement actually showed of the canonical value —
@@ -101,18 +101,17 @@ class MemoryOp:
     # recall payload
     memories: list[dict] = field(default_factory=list)
     search_operation_id: str | None = None  # linked search operation
-    query: str | None = None  # exact search query text (capped preview)
+    query: str | None = None  # exact recorded search query text
     matched: int | None = None  # memories the search matched (the protocol's
     # matched_count — may exceed the returned top-k subset it falls back to)
     content_chars: int | None = None  # placement content size
     binding_status: str | None = None  # delivery cursor-binding status
     # how the injection was presented (internal — injudge's span header;
     # never serialized into the graph artifact): the protocol's placement
-    # kind plus a capped excerpt of the delivered block's opening (None for
-    # redacted/locator placements, which record no content)
+    # kind and full resolved placement text (None when unavailable)
     placement_kind: str | None = None
-    placement_head: str | None = None
-    # per-delivered-entry placement exposure (internal like placement_head;
+    placement_text: str | None = None
+    # per-delivered-entry placement exposure (internal like placement_text;
     # injudge's span carries the merged form): annotations.exposure_state
     # records {"state": full|clipped|unknown, "exposed_chars", "value_chars"}
     # — the canonical value was NOT necessarily what the agent saw

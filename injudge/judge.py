@@ -324,10 +324,12 @@ class JudgeConfig:
     api_key: str
     model: str
     api: str = "openai-chat"  # one of API_FORMATS
-    timeout: float = 120.0
-    max_attempts: int = 5  # generation tries per span at the working tier; tier discovery is free
+    # Long-context prefill and reasoning can take minutes.
+    timeout: float = 300.0
+    max_attempts: int = 5  # tier discovery is free
     temperature: float = 0.0
-    max_tokens: int = 24000  # reasoning models burn most of it on reasoning_content
+    # Includes reasoning on endpoints that share the completion budget.
+    max_tokens: int = 65536
     thinking: str | None = None  # enabled | disabled | None (provider default)
     thinking_effort: str | None = None  # one of EFFORTS
     thinking_budget: int | None = None  # anthropic extended-thinking budget_tokens
@@ -502,6 +504,8 @@ def resolve_config(
         cfg.temperature = temperature
     if (env_max_attempts := _int_config(env, "MAX_ATTEMPTS")) is not None:
         cfg.max_attempts = env_max_attempts
+    if (env_max_tokens := _int_config(env, "MAX_TOKENS")) is not None:
+        cfg.max_tokens = env_max_tokens
     cfg.output_format = _enum_config(env, "OUTPUT_FORMAT", OUTPUT_FORMATS)
     if timeout is not None:
         cfg.timeout = timeout
@@ -1067,9 +1071,9 @@ def count_tokens(text: str) -> int:
 
     The ONE ruler for the budget gate, chunking, and evidence measurement —
     they never use two. The judge model's real tokenizer may differ: this is
-    a routing estimate, not exact billing (the JUDGE_INPUT_TOKENS default
-    converts the old character tier at the cookbook rule of 1 token ≈ 4
-    characters). Special-token spellings in trajectory text (<|endoftext|>
+    a routing estimate, not exact billing (an underestimated request
+    can be rejected for length and fall back to the chunked scan path).
+    Special-token spellings in trajectory text (<|endoftext|>
     & co.) are ordinary text here, never parse errors."""
     global _ENCODING
     if _ENCODING is None:
@@ -1105,9 +1109,9 @@ def _memory_line(m: dict, mid: str, exposure: dict | None) -> str:
     """One delivered memory on a judge-bound input, labelled with its
     span-local id and grounded to what the placement actually exposed. The
     memory system's self-assessment (confidence, needs_verification) AND its
-    type label are withheld: type names like `pitfall` or `procedure` prime
-    the judge toward specific effect stories, and every signal is judged
-    from the step stream only. Exposure
+    annotation-only type label are withheld: type names like `pitfall` or
+    `procedure` can prime an effect story. Text actually present in the
+    delivered placement is retained as observed, not filtered by vocabulary. Exposure
     markers keep the judged evidence inside what the agent could have seen:
     a clipped entry carries ONLY the exposed prefix — the unshown remainder
     is not the agent's to use and not the judge's to credit — and an
@@ -1353,21 +1357,15 @@ def _render_span_header(span: InjectionSpan, task: str | None, memories_note: st
                if span.position > 1 else ".")
         )
     if span.queries:
-        # the recorded search query(ies) that produced the injection — the
-        # delivery context the relevance/novelty calls were made against
-        shown = "; ".join(f'"{q}"' for q in span.queries[:2])
-        more = f" (+{len(span.queries) - 2} more)" if len(span.queries) > 2 else ""
+        # Retrieval provenance is not necessarily part of the main agent's
+        # context. Keep every query; the request budget handles size.
+        shown = "; ".join(f'"{q}"' for q in span.queries)
         noun = "query" if len(span.queries) == 1 else "queries (distinct, per injection)"
-        parts.append(f"Search {noun} that produced the injection: {shown}{more}")
-    if span.placement_kind or span.placement_head:
-        # how the injection was presented, from the recorded placement: the
-        # protocol's placement kind plus a capped excerpt of the delivered
-        # block's opening (the framing the agent actually saw). A redacted or
-        # locator placement records no content — the excerpt stays absent.
-        desc = f"Presentation: {span.placement_kind}" if span.placement_kind else "Presentation:"
-        if span.placement_head:
-            desc += f'{";" if span.placement_kind else ""} the delivered block opens with: "{span.placement_head}"'
-        parts.append(desc + ".")
+        parts.append(f"Search {noun} that produced the injection: {shown}")
+    if span.placement_kind or span.placement_text:
+        parts.append(f"Presentation: {span.placement_kind or '(kind unrecorded)'}.")
+        if span.placement_text:
+            parts.append(f"DELIVERED PLACEMENT (verbatim):\n{span.placement_text}")
     if span.step_gaps:
         parts.append(f"NOTE: the memory was NOT delivered at steps {span.step_gaps}.")
     if span.new_keys:

@@ -118,9 +118,9 @@ class InjectionSpan:
     truncated-tail op merged across newer spans can make the range overlap
     a neighbor's.
     `queries` is the distinct recorded search queries that produced the
-    span's injections (in delivery order); `placement_kind`/`placement_head`
+    span's injections (in delivery order); `placement_kind`/`placement_text`
     describe how the injections were presented (the protocol's placement
-    kind and a capped excerpt of the delivered block's opening; None when
+    kind and full resolved placement text; None when
     the placement recorded no content). `position`/`total` locate the span
     among the trajectory's spans (0/0 when built directly, not via
     group_spans). `memory_windows` bounds each delivered memory's judged
@@ -177,7 +177,7 @@ class InjectionSpan:
     previous_partial_keys: list[str] = field(default_factory=list)
     queries: list[str] = field(default_factory=list)
     placement_kind: str | None = None
-    placement_head: str | None = None
+    placement_text: str | None = None
     position: int = 0
     total: int = 0
     memory_windows: dict[str, int | None] = field(default_factory=dict)

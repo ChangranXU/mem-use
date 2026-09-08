@@ -1,5 +1,5 @@
 ---
-description: "injudge.report/v8, injudge.summary/v5, every field, and how every rate is counted."
+description: "injudge.report/v9, injudge.summary/v5, every field, and how every rate is counted."
 icon: box-archive
 ---
 
@@ -11,7 +11,7 @@ injudge writes all artifacts to the output folder (`-o DIR`, default `output/`).
 
 | File | Schema | Role |
 |---|---|---|
-| `injudge-report.json` | `injudge.report/v8` | Runtime judging record. Rewritten after every trajectory so a crash keeps completed work. Feed it to memgraph with `--verdicts`. |
+| `injudge-report.json` | `injudge.report/v9` | Runtime judging record. Rewritten after every trajectory so a crash keeps completed work. Feed it to memgraph with `--verdicts`. |
 | `summary.json` | `injudge.summary/v5` | Final statistics set: counts, rates, and a narrative-free span index. |
 | `memgraph-verdicts.html` | — | Only with `--html` (off by default): memgraph with recall nodes colored by span verdict. |
 
@@ -139,3 +139,5 @@ Each trajectory's `spans` is a narrative-free index into the report:
 `injudge-report.json` additionally carries, per operation: `memories` (full recorded refs, each stamped with its span-local `id`), `memory_exposure` (per entry: whether the placement showed the value `full`, `full_normalized` — whole, but only up to whitespace-run or markdown-escape normalization —, `clipped` to a prefix of N chars, or `unknown` — unverifiable, so the canonical value is withheld from the judge input; prose-unsafe values (quotes, backslashes, line structure) compare verbatim only), `memory_windows` (per entry id: the footprint-window end step the entry's action `anchors` were validated against — `null` when the entry was never re-delivered, so its bound was the step stream's end; a same-step delivery collision closes a still-open window at the span's own last delivery step; omitted when no agent turn classified), `memory_window_starts` (only when a same-step collision bumped an entry: its window opens after the shared step the earlier carrier owns), rubric notes and each entry's action `anchors`, `analysis`, `evidence`, `step_gaps`, `new_keys` / `removed_keys` / `previous_keys` / `changed_keys`, `auto`, `error`, `judge_raw`, `pe_pairing_corrections` (when any), and `input` on gated spans (`path`: `full` or `scan`, plus scan counters, `"gold"`, `"over_budget"`, and `"length_fallback"` when they apply — the latter marks a full-text send the endpoint rejected as too long, rerouted to the scan path). A span whose judging failed unexpectedly keeps a re-derived `{path, gold?}` record without scan counters, so the regime tallies still include it.
 
 The `injections` array lists every raw delivery with its span, `role` (`first` or `restated`), `verdict`, `content_chars`, and its `op_id` / `seq` / `step`.
+
+`injudge.report/v9` removes `tool.config.scan.evidence_tokens` (the per-chunk compression limit). Per-operation `input.evidence_tokens` remains the measured evidence-pack size. The rubric and `injudge.summary/v5` are unchanged; only the current report schema is accepted.

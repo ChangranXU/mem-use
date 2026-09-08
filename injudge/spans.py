@@ -123,8 +123,8 @@ def _same_treatment(span: InjectionSpan, op: MemoryOp) -> bool:
 
     - entry ORDER (the fingerprint is order-insensitive, but the delivered
       order is presentation: a re-ranked bundle is not the same treatment);
-    - placement presentation (the protocol's kind plus the recorded opening
-      excerpt — a re-framed or re-positioned block is not the same
+    - placement presentation (the protocol's kind plus the full recorded
+      text — a re-framed or re-positioned block is not the same
       treatment);
     - per-entry EXPOSURE (state and exposed length): merging a wider later
       exposure backward would show the judge content the span's early
@@ -134,7 +134,7 @@ def _same_treatment(span: InjectionSpan, op: MemoryOp) -> bool:
     """
     if [_canon_entry(m) for m in op.memories] != [_canon_entry(m) for m in span.memories]:
         return False
-    if op.placement_kind != span.placement_kind or op.placement_head != span.placement_head:
+    if op.placement_kind != span.placement_kind or op.placement_text != span.placement_text:
         return False
     if not op.exposure or len(op.exposure) != len(span.memory_exposure):
         return True
@@ -206,8 +206,8 @@ def _merge_spans(
                 span.queries.append(op.query)
             if span.placement_kind is None:
                 span.placement_kind = op.placement_kind
-            if span.placement_head is None:
-                span.placement_head = op.placement_head
+            if span.placement_text is None:
+                span.placement_text = op.placement_text
             continue
         latest[fp] = len(spans)
         spans.append(
@@ -225,7 +225,7 @@ def _merge_spans(
                 memory_exposure=list(op.exposure),
                 queries=[op.query] if op.query else [],
                 placement_kind=op.placement_kind,
-                placement_head=op.placement_head,
+                placement_text=op.placement_text,
             )
         )
         steps_seen.append([op.step] if op.step is not None else [])

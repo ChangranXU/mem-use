@@ -1,4 +1,4 @@
-"""Report assembly: the `injudge.report/v8` JSON artifact, the statistics-only
+"""Report assembly: the `injudge.report/v9` JSON artifact, the statistics-only
 `injudge.summary/v5` distillation, and the stdout summary.
 
 The runtime artifact's output contract: per operation

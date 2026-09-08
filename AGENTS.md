@@ -6,7 +6,7 @@ mem-eval scores memory-system quality from schema-v6 gate trajectories
 - **memgraph** renders every memory operation and its relationships as a
   self-contained HTML/JSON graph.
 - **injudge** scores each recall injection's subsequent influence with an
-  LLM rubric and writes `injudge.report/v8`, which memgraph can overlay
+  LLM rubric and writes `injudge.report/v9`, which memgraph can overlay
   with `--verdicts`.
 
 An injection is judged by its influence on later agent turns. The final
@@ -72,7 +72,7 @@ memgraph/model.py          # Trajectory / MemoryOp / MemoryUnit / Edge
 memgraph/parse_trajectory.py  # trajectory.jsonl → ops; shared step rule
 memgraph/graph.py          # path discovery, cross-trajectory linking, validation
 memgraph/html.py           # self-contained HTML (template + embedded graph JSON)
-memgraph/verdicts.py       # merge injudge.report/v8 onto recall ops
+memgraph/verdicts.py       # merge injudge.report/v9 onto recall ops
 memgraph/__main__.py       # python3 -m memgraph
 injudge/__init__.py        # REPORT_SCHEMA / SUMMARY_SCHEMA (writer + memgraph reader)
 injudge/model.py           # AgentStep / ToolExec / InjectionSpan
@@ -83,7 +83,7 @@ injudge/scan.py            # overflow path: chunks, evidence extraction, assembl
 injudge/gold.py            # golden-answer / correctness sidecars and CLI joins
 injudge/prompts.py         # loads prompts/ (never inline prompts in code)
 injudge/aggregate.py       # verdict counts/rates, per-memory usage roll-ups
-injudge/report.py          # injudge.report/v8 + injudge.summary/v5 + stdout
+injudge/report.py          # injudge.report/v9 + injudge.summary/v5 + stdout
 injudge/__main__.py        # python3 -m injudge
 prompts/                   # every LLM prompt, grouped by tool/purpose
 doc/                       # GitBook: LANGS.md + en/ + zh-CN/, each with SUMMARY.md
@@ -360,7 +360,7 @@ The HTML colors rewrite markers by each marker's own `on_memory_lane` flag,
 computed at parse time against the final lane set. Do not prune a field
 from one consumer only.
 
-**injudge** writes `injudge.report/v8` (`{tool, generated_at, trajectories,
+**injudge** writes `injudge.report/v9` (`{tool, generated_at, trajectories,
 operations, injections, aggregates, validation}`), rewritten after every
 trajectory so a crash keeps completed work.
 

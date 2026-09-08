@@ -1,5 +1,5 @@
 ---
-description: "injudge.report/v8、injudge.summary/v5、全部字段，以及每项比率如何计数。"
+description: "injudge.report/v9、injudge.summary/v5、全部字段，以及每项比率如何计数。"
 icon: box-archive
 ---
 
@@ -11,7 +11,7 @@ injudge 的全部产物写入输出目录（`-o DIR`，默认 `output/`）。
 
 | 文件 | Schema | 作用 |
 |---|---|---|
-| `injudge-report.json` | `injudge.report/v8` | 运行时评审记录。每条轨迹完成后重写，崩溃也保留已完成部分。用 `--verdicts` 喂给 memgraph。 |
+| `injudge-report.json` | `injudge.report/v9` | 运行时评审记录。每条轨迹完成后重写，崩溃也保留已完成部分。用 `--verdicts` 喂给 memgraph。 |
 | `summary.json` | `injudge.summary/v5` | 最终统计集合：计数、比率，以及无叙述的区间索引。 |
 | `memgraph-verdicts.html` | — | 仅在 `--html` 时产出（默认关闭）：召回节点按区间判定着色的 memgraph。 |
 
@@ -139,3 +139,5 @@ $$
 `injudge-report.json` 每个操作还带有：`memories`（完整已录制引用，每条标注其区间本地 `id`）、`memory_exposure`（逐条目：placement 对该值是 `full`、`full_normalized`——整体载入但仅在空白符折叠 / markdown 转义剥离后匹配——、`clipped` 到 N 字符前缀，还是 `unknown`——无法核实，故评审输入中隐去规范值；含引号、反斜杠或换行结构的值只做逐字比对）、`memory_windows`（逐条目 id：该条目动作 `anchors` 校验所依据的足迹窗口结束步——从未被重投递时为 `null`，即其上界是步骤流末尾；同一步投递冲突会把仍开放的窗口闭合在该区间自己的末次投递步；无 agent 回合归类时省略）、评分 note 与各条目的动作 `anchors`、`analysis`、`evidence`、`step_gaps`、`new_keys` / `removed_keys` / `previous_keys` / `changed_keys`、`auto`、`error`、`judge_raw`、`pe_pairing_corrections`（若有），以及预算门区间上的 `input`（`path` 为 `full` 或 `scan`，外加扫描计数，适用时还有 `"gold"`、`"over_budget"`、`"length_fallback"`——后者标记因端点拒绝过长输入而改走扫描路径的全文发送）。评判意外失败的区间会保留不含扫描计数的再推导 `{path, gold?}` 记录，使路径计数仍包含该区间。`tool.config` 记录已解析、无密钥的评审/扫描配置（净化为 `scheme://host[:port][/path]`），便于从产物本身复现运行。
 
 `injections` 数组列出每一次原始投递及其所属区间、`role`（`first` 或 `restated`）、`verdict`、`content_chars`，以及 `op_id` / `seq` / `step`。
+
+`injudge.report/v9` 删除 `tool.config.scan.evidence_tokens`（单块压缩上限）。逐操作的 `input.evidence_tokens` 仍表示证据包实际大小。评分规则结构与 `injudge.summary/v5` 不变；仅接受当前报告 schema。

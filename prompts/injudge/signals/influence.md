@@ -25,15 +25,15 @@
      action's absence is none — absence alone is never evidence.
    A mention is not proof of influence: the agent may have known or found
    the fact on its own (check novelty and the pre-injection steps).
-   Context is not memory content, and a source's time and role decide what
-   is an alternative explanation: the search query that produced the
-   injection, the task statement, and the PRE-injection steps are what the
-   agent already had when the delivery arrived — a fact established THERE
-   is never a fact this memory delivered. An attached golden answer is
-   evaluator-only verification the agent never saw, and the post-injection
-   steps are not an alternative source either — they are exactly where the
-   footprint is judged. Credit a memory only for
-   content its delivered entry (within its exposure marker) carries.
+   Context is not memory content. The recorded task, pre-injection steps,
+   and tool outputs already available before an action are alternative
+   sources. A later result cannot explain an earlier choice; a later action
+   may follow an intervening discovery rather than the memory. Search
+   queries may originate in a memory or side lane: a query alone never
+   establishes what the main agent knew. Keys are item labels, not extra
+   delivered claims. Golden answers are evaluator-only verification.
+   Credit only content actually shown in the delivered placement or the
+   entry's exposure-grounded value, not metadata or an unseen suffix.
    Changed action, not continuation: acted_on/decisive require a step that
    DIFFERS from the course already established before the injection. A
    patch already applied, a test already passing, an analysis or plan
@@ -45,7 +45,11 @@
    direction, or execution detail the established plan lacked — so judge
    the footprint on its own evidence, whatever the novelty call. The `anchors`
    you give must be the post-injection steps
-   where that changed action happened, inside this memory's window; steps
+   where that changed action or decision happened, inside this memory's
+   window. An in-window decision may anchor credit when later execution
+   substantiates it; a plan that never materializes is not acted_on merely
+   because it was announced. Later outcomes may confirm or refute that
+   action's consequence, but cannot supply a new out-of-window anchor. Steps
    before the span's first step may support a novelty or accuracy judgment,
    never an influence claim.
    Echo rule: a direction the agent had already announced, reasoned out, or

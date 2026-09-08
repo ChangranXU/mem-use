@@ -139,7 +139,6 @@ def _run_manifest(
             "chunk_steps": scan.chunk_steps,
             "chunk_tokens": scan.chunk_tokens,
             "neighborhood": scan.neighborhood,
-            "evidence_tokens": scan.evidence_tokens,
         }
         ext = scan.extraction
         if ext is not None:
@@ -373,16 +372,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--env", type=Path, default=None,
                     help=f".env path (default: {_DEFAULT_ENV})")
     ap.add_argument("--timeout", type=float, default=None,
-                    help="judge request timeout seconds (default 120)")
+                    help="judge request timeout seconds (default 300)")
     ap.add_argument("--max-attempts", type=int, default=None,
                     help="generation tries per judged span at the working tier — "
                     "transport failures and out-of-contract answers share the "
                     "budget; tier discovery is free (default: MAX_ATTEMPTS "
                     "from .env, else 5)")
     ap.add_argument("--judge-max-tokens", type=int, default=None,
-                    help="judge response budget (default 24000; reasoning models need "
-                    "headroom — it is a cap, not a reservation: billing is on tokens "
-                    "actually generated)")
+                    help="judge response budget (default: MAX_TOKENS from .env, else "
+                    "65536; reasoning models need headroom — it is a cap, not a "
+                    "reservation: billing is on tokens actually generated)")
     ap.add_argument(
         "--dry-run",
         action="store_true",

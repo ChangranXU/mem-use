@@ -770,7 +770,7 @@ def test_spans_thread_the_delivery_context(tmp_path):
     assert span.queries == ["the dtype bug", "the dtype bug, narrowed"]
     assert span.placement_kind == "prompt_message"
     # recall's default placement renders the delivered values in full
-    assert span.placement_head == (
+    assert span.placement_text == (
         "- [insight] key_a: Use xarray/core/variable.py apply_ufunc carefully"
     )
 
@@ -783,19 +783,23 @@ def test_render_user_carries_the_delivery_context():
     span.position, span.total = 2, 3
     span.queries = ["the dtype bug", "the narrowed dtype bug", "a third rewrite"]
     span.placement_kind = "prompt_message"
-    span.placement_head = "## CURE Memory Policy"
+    span.placement_text = "## CURE Memory Policy"
     user = render_user(span, steps)
     assert "This is span 2 of 3 in the trajectory; earlier spans already " \
            "delivered memories before it." in user
     assert 'Search queries (distinct, per injection) that produced the ' \
-           'injection: "the dtype bug"; "the narrowed dtype bug" (+1 more)' in user
-    assert 'Presentation: prompt_message; the delivered block opens with: ' \
-           '"## CURE Memory Policy".' in user
+           'injection: "the dtype bug"; "the narrowed dtype bug"; "a third rewrite"' in user
+    assert 'Presentation: prompt_message.' in user
+    assert 'DELIVERED PLACEMENT (verbatim):\n## CURE Memory Policy' in user
+    # Every query survives, even past the old preview-count cap.
+    span.queries = [f"rewrite {i}" for i in range(9)]
+    user = render_user(span, steps)
+    assert '"rewrite 7"; "rewrite 8"' in user
     # a single query reads in the singular, and an unrecorded placement
     # (redacted/locator) adds no presentation line at all
     span.queries = ["the dtype bug"]
     span.placement_kind = None
-    span.placement_head = None
+    span.placement_text = None
     user = render_user(span, steps)
     assert 'Search query that produced the injection: "the dtype bug"' in user
     assert "Presentation:" not in user
@@ -890,7 +894,7 @@ def test_spans_seq_range_brackets_every_op(tmp_path):
             self.exposure = []
             self.query = None
             self.placement_kind = None
-            self.placement_head = None
+            self.placement_text = None
     (merged,) = group_spans([_Op("R1", 2, 90), _Op("R2", 3, 40)], "T1")
     assert (merged.seq_first, merged.seq_last) == (40, 90)
 
@@ -3067,7 +3071,7 @@ def test_echoed_key_in_a_200_answer_never_reaches_judge_raw(monkeypatch):
 def test_echoed_key_in_a_conforming_verdict_never_reaches_the_artifact(monkeypatch):
     """A 200 verdict is endpoint output too: the key echoed into its
     analysis, evidence claims, or per-signal notes would land verbatim in
-    injudge.report/v8 — mask it in every copied field, not just judge_raw."""
+    injudge.report/v9 — mask it in every copied field, not just judge_raw."""
     key = "sk-secret+key"
     obj = json.loads(GOOD)
     obj["analysis"] = f"the agent saw {key} in the injection"
@@ -4794,9 +4798,15 @@ def test_resolve_config_output_format_and_max_attempts():
     base = {"BASE_URL": "http://b", "API_KEY": "k", "MODEL": "m"}
     cfg = resolve_config(base)
     assert cfg.output_format is None and cfg.max_attempts == 5
+    assert cfg.max_tokens == 65536  # the built-in response budget
     assert cfg.learned_tier == "structured"
     cfg = resolve_config({**base, "OUTPUT_FORMAT": "JSON", "MAX_ATTEMPTS": "3"})
     assert cfg.output_format == "json" and cfg.max_attempts == 3
+    # MAX_TOKENS tunes the response budget from the .env; the CLI flag shadows it
+    assert resolve_config({**base, "MAX_TOKENS": "32768"}).max_tokens == 32768
+    assert resolve_config({**base, "MAX_TOKENS": "32768"}, max_tokens=4096).max_tokens == 4096
+    with pytest.raises(SystemExit, match="MAX_TOKENS"):
+        resolve_config({**base, "MAX_TOKENS": "many"})
     with pytest.raises(SystemExit, match="OUTPUT_FORMAT"):
         resolve_config({**base, "OUTPUT_FORMAT": "yaml"})
     with pytest.raises(SystemExit, match="MAX_ATTEMPTS"):
@@ -5017,7 +5027,7 @@ def test_cli_end_to_end_mocked_judge(monkeypatch, tmp_path):
                             "-o", str(out), "--env", str(_env(tmp_path))])
     assert rc == 0
     artifact = json.loads((out / "injudge-report.json").read_text())
-    assert artifact["tool"]["schema"] == "injudge.report/v8"
+    assert artifact["tool"]["schema"] == "injudge.report/v9"
     assert artifact["tool"]["judge_model"] == "judge-m"
     assert len(artifact["operations"]) == 1
     op = artifact["operations"][0]
@@ -6478,7 +6488,7 @@ def test_scoring_prompts_state_the_evidence_rules():
         assert "Context is not memory content" in prompt
         assert "Changed action, not continuation" in prompt
         assert "naming it as the task statement is the correct citation" in prompt
-        assert "CONTEXT, not memory content" in prompt
+        assert "Search queries are retrieval" in prompt
         assert "one entry per delivered memory id" in prompt
         assert "Anchors outside the memory's window are rejected" in prompt
     assert "an exposure marker bounds what" in MEMORIES_NOTE
@@ -6670,3 +6680,22 @@ def test_safe_endpoint_survives_a_bad_port():
     assert _safe("https://judge.local:8443/v1?token=x") == "https://judge.local:8443/v1"
     assert _safe("https://user:pw@[::1]:8443/v1") == "https://[::1]:8443/v1"
     assert _safe("https://user:pw@judge.local") == "https://judge.local"
+
+
+def test_long_delivery_framing_is_not_merged_or_hidden(tmp_path):
+    """A framing change after the old preview cap is a different treatment."""
+    opening = REF_A['content']['text'] + '\n' + 'context ' * 400
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.recall(REF_A, content=opening + 'Follow this advice.', query='q' * 350 + 'FIRST_TAIL')
+    b.recall(REF_A, content=opening + 'Do not follow this advice.', query='q' * 350 + 'SECOND_TAIL')
+    spans = group_spans(_recall_ops(b, tmp_path), 'T1')
+    assert len(spans) == 2
+    user = render_user(spans[1], [])
+    assert opening + 'Do not follow this advice.' in user
+    assert 'SECOND_TAIL' in user
+
+
+def test_all_recorded_queries_reach_the_judge():
+    span, steps = _judge_input_fixture()
+    span.queries = [f'query {i}' for i in range(12)]
+    assert all(f'"{q}"' in render_user(span, steps) for q in span.queries)

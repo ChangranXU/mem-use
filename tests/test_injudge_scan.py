@@ -199,7 +199,7 @@ def _span_steps(tmp_path, n_post=3, pre_results=("ok", "ok")):
 def _scan_cfg(**kw):
     base = dict(
         input_tokens=1500, parallel=1, chunk_steps=2, chunk_tokens=1000,
-        neighborhood=1, evidence_tokens=1000,
+        neighborhood=1,
     )
     base.update(kw)
     return ScanConfig(
@@ -697,50 +697,6 @@ def test_step_texts_memo_matches_fresh_renders(tmp_path):
     assert _step_texts(steps) == texts  # a miss recomputes the same values
 
 
-def test_evidence_cap_is_a_hint_never_a_truncation(monkeypatch, tmp_path):
-    """SCAN_EVIDENCE_TOKENS constrains the extraction prompt only; an overrun
-    earns ONE summary pass, and a still-over summary keeps the original
-    over-long text as-is (no slicing, no '(truncated)')."""
-    span, steps, traj = _span_steps(tmp_path)
-    long_item = "evidence " * 60 + "at step 4"
-    over = json.dumps({"none": False, "items": [long_item]})
-    still_over = json.dumps({"none": False, "items": ["compressed " * 40 + "at step 4"]})
-    judge_record, scan_record = [], []
-    monkeypatch.setattr("injudge.judge.urlopen", judge_stub(judge_record))
-    monkeypatch.setattr(
-        "injudge.scan.urlopen", scan_stub(scan_record, chunk_answer=over,
-                                          summary_answer=still_over)
-    )
-    scan = _scan_cfg(evidence_tokens=30)
-    verdict = judge_span(span, steps, _judge_cfg(), [], traj.task, scan=scan)
-    assert verdict["verdict"] == "positive"
-    # the extraction prompt carried the cap as a hint
-    assert "within 30 tokens" in scan_record[0]["messages"][0]["content"]
-    # one summary pass per over-cap chunk, then the ORIGINAL text is kept
-    summary_calls = [
-        b for b in scan_record
-        if b["messages"][-1]["content"].startswith("EVIDENCE ITEMS to compress")
-    ]
-    assert len(summary_calls) == 5
-    user = judge_record[0]["messages"][1]["content"]
-    assert long_item in user and "compressed " not in user  # kept as-is
-
-
-def test_evidence_cap_summary_success_replaces_the_items(monkeypatch, tmp_path):
-    span, steps, traj = _span_steps(tmp_path)
-    over = json.dumps({"none": False, "items": ["evidence " * 60 + "at step 4"]})
-    ok = json.dumps({"none": False, "items": ["short summary at step 4"]})
-    judge_record, scan_record = [], []
-    monkeypatch.setattr("injudge.judge.urlopen", judge_stub(judge_record))
-    monkeypatch.setattr(
-        "injudge.scan.urlopen", scan_stub(scan_record, chunk_answer=over,
-                                          summary_answer=ok)
-    )
-    scan = _scan_cfg(evidence_tokens=30)
-    verdict = judge_span(span, steps, _judge_cfg(), [], traj.task, scan=scan)
-    assert verdict["verdict"] == "positive"
-    user = judge_record[0]["messages"][1]["content"]
-    assert "short summary at step 4" in user and "evidence evidence" not in user
 
 
 def test_assembled_user_over_budget_summary_then_sent_as_is(monkeypatch, tmp_path):
@@ -833,41 +789,6 @@ def test_summary_hint_reserves_the_reassembly_overhead(monkeypatch, tmp_path):
     assert "SCANNED EVIDENCE (compressed" in user
 
 
-def test_evidence_cap_hint_reserves_the_bullet_overhead(monkeypatch, tmp_path):
-    """The chunk evidence cap's summary hint reserves the "- " bullet each
-    returned item is re-measured with (cap 30, one item → hint 28): an
-    on-target summary passes the re-check instead of being discarded for the
-    re-assembly overhead."""
-    span, steps, traj = _span_steps(tmp_path)
-    over = json.dumps({"none": False, "items": ["evidence " * 60 + "at step 4"]})
-    judge_record, scan_record = [], []
-
-    def _open(req, timeout=None):
-        body = json.loads(req.data.decode())
-        scan_record.append(body)
-        if body["messages"][-1]["content"].startswith("EVIDENCE ITEMS to compress"):
-            hint = int(re.search(
-                r"within (\d+) tokens", body["messages"][0]["content"]
-            ).group(1))
-            answer = json.dumps({"none": False, "items": [_on_target_item(hint, "note ")]})
-            return FakeResponse({"choices": [{"message": {"content": answer}}]})
-        return FakeResponse({"choices": [{"message": {"content": over}}]})
-
-    monkeypatch.setattr("injudge.judge.urlopen", judge_stub(judge_record))
-    monkeypatch.setattr("injudge.scan.urlopen", _open)
-    scan = _scan_cfg(evidence_tokens=30)
-    verdict = judge_span(span, steps, _judge_cfg(), [], traj.task, scan=scan)
-    assert verdict["verdict"] == "positive"
-    summary_calls = [
-        b for b in scan_record
-        if b["messages"][-1]["content"].startswith("EVIDENCE ITEMS to compress")
-    ]
-    assert len(summary_calls) == 5
-    # the reserve is visible in the hint: cap 30 minus the one item's bullet
-    assert all("within 28 tokens" in b["messages"][0]["content"] for b in summary_calls)
-    user = judge_record[0]["messages"][1]["content"]
-    assert "note note" in user and "evidence evidence" not in user  # replaced, not kept
-
 
 def test_neighborhood_zero_keeps_only_the_injection_step(monkeypatch, tmp_path):
     span, steps, traj = _span_steps(tmp_path)
@@ -882,11 +803,8 @@ def test_neighborhood_zero_keeps_only_the_injection_step(monkeypatch, tmp_path):
     assert "[step 3," not in neighborhood and "[step 5," not in neighborhood
 
 
-def test_neighborhood_stops_at_the_post_side_window_end(monkeypatch, tmp_path):
-    """The seam neighborhood is clamped at the same window end the chunks
-    stopped at: steps a re-delivery span claims never sit verbatim in THIS
-    span's scoring input while the chunk header's footprint windows assign
-    them to the newer span."""
+def test_neighborhood_preserves_results_after_the_attribution_window(monkeypatch, tmp_path):
+    """A later outcome is visible without extending the action-credit window."""
     ref_b = cure_ref("key_b", "an unrelated note")
     b = TrajBuilder().agent_turn(with_task=True)
     b.recall(REF_A)  # step 2 — the judged span
@@ -917,7 +835,7 @@ def test_neighborhood_stops_at_the_post_side_window_end(monkeypatch, tmp_path):
     user = judge_record[0]["messages"][1]["content"]
     neighborhood = user.split("INJECTION NEIGHBORHOOD (verbatim)")[1]
     assert "[step 10," in neighborhood
-    assert "[step 11," not in neighborhood
+    assert "[step 11," in neighborhood
 
 
 def test_chunks_partition_the_step_stream(tmp_path):
@@ -939,11 +857,8 @@ def test_chunks_partition_the_step_stream(tmp_path):
     assert all(len(c.steps) == 1 for c in chunks) and len(chunks) == 8
 
 
-def test_chunks_cut_the_post_side_at_the_footprint_windows(tmp_path):
-    """When EVERY delivered memory is re-delivered later, the post side stops
-    at the largest per-memory window end — later steps are the re-delivery
-    span's to claim — and the chunk header states the per-memory bounds to
-    extraction. A single unbounded memory runs the post side to the end."""
+def test_chunks_keep_the_same_evidence_horizon_as_full_scoring(tmp_path):
+    """Even fully bounded bundles keep later outcomes in the evidence view."""
     ref_b = cure_ref("key_b", "an unrelated note")
     b = TrajBuilder().agent_turn(with_task=True)
     b.recall(REF_A)  # step 2 — the judged span
@@ -965,8 +880,8 @@ def test_chunks_cut_the_post_side_at_the_footprint_windows(tmp_path):
     span = spans[0]
     assert span.memory_windows == {"m1": 10}
     chunks = _chunks(steps, span, _scan_cfg(), traj.task)
-    # step 11 is the re-delivery span's window, never scanned for this span
-    assert [s.step for c in chunks for s in c.steps] == list(range(1, 11))
+    # Later outcomes remain observable; action attribution still stops at 10.
+    assert [s.step for c in chunks for s in c.steps] == list(range(1, 12))
     assert "Footprint windows: m1 (key_a) — steps 2–10 (re-delivered from step 11" \
            in chunks[0].header
     # one unbounded memory among the deliveries runs the post side to the end
@@ -1064,8 +979,8 @@ def test_extraction_pre_side_asks_for_announced_intents():
     """W6: the skip-anchor rule needs pre-injection announced intents; the
     pre-side extraction guidance asks for them so a later skipped step has
     its anchor collected."""
-    assert "announced plans or intents" in _extraction_prompt("pre", 4096)
-    assert "announced plans or intents" not in _extraction_prompt("post", 4096)
+    assert "announced plans or intents" in _extraction_prompt("pre")
+    assert "announced plans or intents" not in _extraction_prompt("post")
 
 
 def test_anchor_terms_drop_high_document_frequency(tmp_path):
@@ -1148,8 +1063,8 @@ def test_step_tokens_memo_matches_fresh_counts(tmp_path):
 def test_scan_knobs_defaults_and_validation():
     knobs = scan_knobs({})
     assert knobs == {
-        "input_tokens": 50000, "parallel": 4, "chunk_steps": 8,
-        "chunk_tokens": 20000, "neighborhood": 2, "evidence_tokens": 4096,
+        "input_tokens": 800000, "parallel": 4, "chunk_steps": 0,
+        "chunk_tokens": 400000, "neighborhood": 2,
     }
     assert scan_knobs({"SCAN_NEIGHBORHOOD": "0"})["neighborhood"] == 0  # 0 is legal here
     with pytest.raises(SystemExit, match="JUDGE_INPUT_TOKENS"):
@@ -1161,11 +1076,9 @@ def test_scan_knobs_defaults_and_validation():
 
 
 def test_scan_knobs_unset_chunk_tokens_scales_with_the_budget():
-    """An unset SCAN_CHUNK_TOKENS derives from JUDGE_INPUT_TOKENS (half,
-    capped at the 20000 default): lowering the input budget below the baked
-    default must not abort the run naming a knob the operator never set —
-    the < budget rule binds only a value actually set."""
+    """Chunk sizing scales both down and up with the configured allowance."""
     assert scan_knobs({"JUDGE_INPUT_TOKENS": "30000"})["chunk_tokens"] == 15000
+    assert scan_knobs({"JUDGE_INPUT_TOKENS": "800000"})["chunk_tokens"] == 400000
     knobs = scan_knobs({"JUDGE_INPUT_TOKENS": "1000"})
     assert knobs["chunk_tokens"] == 500 < knobs["input_tokens"]
     # the derived default never zeroes out on a degenerate tiny budget
@@ -1196,7 +1109,7 @@ def test_resolve_scan_inherits_and_overrides():
     assert ext.model == "scan-m" and ext.base_url == "http://scan"
     assert ext.api_key == "sk-scan" and ext.thinking == "enabled"
     assert ext.max_tokens == 4096 and ext.output_format == "json"
-    assert scoring.model == "m" and scoring.max_tokens == 24000  # untouched
+    assert scoring.model == "m" and scoring.max_tokens == 65536  # untouched
 
 
 def test_resolve_scan_validation_names_keys_never_values():
@@ -1331,7 +1244,7 @@ def test_scan_api_key_masked_in_summary_items(monkeypatch, tmp_path):
     """The compression pass is extraction endpoint output too: its items are
     masked with the extraction key before they join the scoring input."""
     span, steps, traj = _span_steps(tmp_path)
-    over = json.dumps({"none": False, "items": ["evidence " * 60 + "at step 4"]})
+    over = json.dumps({"none": False, "items": ["evidence " * 400 + "at step 4"]})
     summarized = json.dumps({
         "none": False, "items": ["compressed by sk-extraction-secret at step 4"]
     })
@@ -1341,7 +1254,7 @@ def test_scan_api_key_masked_in_summary_items(monkeypatch, tmp_path):
         "injudge.scan.urlopen",
         scan_stub(scan_record, chunk_answer=over, summary_answer=summarized),
     )
-    scan = _scan_cfg(evidence_tokens=30)
+    scan = _scan_cfg(input_tokens=count_tokens(SYSTEM_PROMPT) + 420)
     scan.extraction.api_key = "sk-extraction-secret"
     verdict = judge_span(span, steps, _judge_cfg(), [], traj.task, scan=scan)
     assert verdict["verdict"] == "positive"
@@ -1350,34 +1263,6 @@ def test_scan_api_key_masked_in_summary_items(monkeypatch, tmp_path):
     assert "sk-extraction-secret" not in json.dumps(judge_record)
 
 
-def test_empty_summary_is_a_failed_pass_keeps_the_original(monkeypatch, tmp_path):
-    """A summary pass answering {"none": true, "items": []} is in-contract, but
-    a zero-item answer is not a compression of over-cap evidence — it is the
-    coverage dropped whole. It counts as a failed pass: the original over-long
-    text is kept, never replaced by nothing."""
-    span, steps, traj = _span_steps(tmp_path)
-    long_item = "evidence " * 60 + "at step 4"
-    over = json.dumps({"none": False, "items": [long_item]})
-    judge_record, scan_record = [], []
-    monkeypatch.setattr("injudge.judge.urlopen", judge_stub(judge_record))
-    monkeypatch.setattr(
-        "injudge.scan.urlopen",
-        scan_stub(scan_record, chunk_answer=over, summary_answer=NONE),
-    )
-    scan = _scan_cfg(evidence_tokens=30)
-    warnings = []
-    verdict = judge_span(span, steps, _judge_cfg(), warnings, traj.task, scan=scan)
-    assert verdict["verdict"] == "positive"
-    summary_calls = [
-        b for b in scan_record
-        if b["messages"][-1]["content"].startswith("EVIDENCE ITEMS to compress")
-    ]
-    assert len(summary_calls) == 5  # each over-cap chunk earned its one pass
-    user = judge_record[0]["messages"][1]["content"]
-    assert long_item in user  # the original evidence, not the empty "compression"
-    assert sum("returned zero items" in w for w in warnings) == 5
-    assert verdict["input"]["none_chunks"] == 0  # no chunk lost its evidence
-
 
 def test_summary_pass_bug_surfaces_never_swallowed(monkeypatch, tmp_path):
     """The one-shot summary keeps the over-long original on any ENDPOINT
@@ -1385,7 +1270,7 @@ def test_summary_pass_bug_surfaces_never_swallowed(monkeypatch, tmp_path):
     exception — must propagate, never be downgraded to a routine warning
     that hides it behind the kept original."""
     span, steps, traj = _span_steps(tmp_path)
-    over = json.dumps({"none": False, "items": ["evidence " * 60 + "at step 4"]})
+    over = json.dumps({"none": False, "items": ["evidence " * 400 + "at step 4"]})
 
     def _open(req, timeout=None):
         body = json.loads(req.data.decode())
@@ -1395,7 +1280,7 @@ def test_summary_pass_bug_surfaces_never_swallowed(monkeypatch, tmp_path):
 
     monkeypatch.setattr("injudge.judge.urlopen", judge_stub([]))
     monkeypatch.setattr("injudge.scan.urlopen", _open)
-    scan = _scan_cfg(evidence_tokens=30)  # over-cap evidence earns the summary pass
+    scan = _scan_cfg(input_tokens=count_tokens(SYSTEM_PROMPT) + 420)  # over-budget assembly earns the summary pass
     with pytest.raises(RuntimeError, match="bug"):
         judge_span(span, steps, _judge_cfg(), [], traj.task, scan=scan)
 
@@ -1817,7 +1702,7 @@ def test_cli_scan_path_end_to_end(monkeypatch, tmp_path):
     )
     assert rc == 0
     artifact = json.loads((out / "injudge-report.json").read_text())
-    assert artifact["tool"]["schema"] == "injudge.report/v8"
+    assert artifact["tool"]["schema"] == "injudge.report/v9"
     op = artifact["operations"][0]
     assert op["verdict"] == "positive"
     assert op["input"]["path"] == "scan" and op["input"]["chunks"] == 4
@@ -1908,7 +1793,7 @@ def test_dry_run_without_env_uses_the_baked_defaults(monkeypatch, tmp_path, caps
     assert rc == 0
     out = capsys.readouterr().out
     assert "COMPLETE AGENT STEP STREAM" in out
-    assert "INPUT OVERFLOW" not in out  # the 50000 default fits the fixture
+    assert "INPUT OVERFLOW" not in out  # the 800000 default fits the fixture
 
 
 def test_dry_run_unreadable_env_uses_the_baked_defaults(monkeypatch, tmp_path, capsys):
@@ -2094,7 +1979,7 @@ def test_prompt_files_fully_substituted():
     constants and no @-token left; the gold regime shares the five signals,
     the enums, and the answer contract, differing only in guidance."""
     for prompt in (SYSTEM_PROMPT, GOLD_SYSTEM_PROMPT,
-                   _extraction_prompt("pre", 100), _extraction_prompt("post", 100)):
+                   _extraction_prompt("pre"), _extraction_prompt("post")):
         assert "@" not in prompt
         for values in (("corroborated", "uncontradicted", "contradicted"),
                        ("novel", "confirming", "redundant"),
@@ -2116,11 +2001,10 @@ def test_prompt_files_fully_substituted():
     assert "NOTE: the above is an evidence summary" in load_prompt(
         "injudge/scoring/scan_note")
     # extraction: the plain signal definitions, never the gold guidance
-    pre = _extraction_prompt("pre", 100)
+    pre = _extraction_prompt("pre")
     assert "NOT the judge" in pre and "GOLDEN ANSWER" not in pre
-    assert "within 100 tokens" in pre
     assert "PRE-injection" in pre
-    assert "POST-injection" in _extraction_prompt("post", 100)
+    assert "POST-injection" in _extraction_prompt("post")
 
 
 def test_parallel_extraction_assembles_in_chunk_order(monkeypatch, tmp_path):
@@ -2560,9 +2444,9 @@ def test_summary_pass_recovers_reasoning_content(monkeypatch, tmp_path):
     so it recovers the same openai-chat reasoning-model quirk the chunk walk
     recovers (the answer drafted into reasoning_content with empty content):
     the compressed items read back instead of the pass silently no-oping on
-    the model class most likely to overflow the evidence cap."""
+    the model class most likely to overflow the scoring budget."""
     span, steps, traj = _span_steps(tmp_path)
-    over = json.dumps({"none": False, "items": ["evidence " * 60 + "at step 4"]})
+    over = json.dumps({"none": False, "items": ["evidence " * 400 + "at step 4"]})
     slim = json.dumps({"none": False, "items": ["short summary at step 4"]})
     judge_record = []
 
@@ -2577,13 +2461,13 @@ def test_summary_pass_recovers_reasoning_content(monkeypatch, tmp_path):
 
     monkeypatch.setattr("injudge.judge.urlopen", judge_stub(judge_record))
     monkeypatch.setattr("injudge.scan.urlopen", _open)
-    scan = _scan_cfg(evidence_tokens=30)
+    scan = _scan_cfg(input_tokens=count_tokens(SYSTEM_PROMPT) + 420)
     warnings = []
     verdict = judge_span(span, steps, _judge_cfg(), warnings, traj.task, scan=scan)
     assert verdict["verdict"] == "positive"
     user = judge_record[0]["messages"][1]["content"]
     assert "short summary at step 4" in user and "evidence evidence" not in user
-    assert sum("extraction answer read from reasoning_content" in w for w in warnings) == 5
+    assert sum("extraction answer read from reasoning_content" in w for w in warnings) == 1
 
 
 # ------------------------------------------------------- span-level parallelism
@@ -2885,3 +2769,29 @@ def test_anchor_terms_seed_only_the_exposed_prefix():
     ]
     terms = dict(_anchor_terms(span))
     assert terms == {"k": None}
+
+
+def test_fitting_extracted_evidence_is_not_compressed(monkeypatch, tmp_path):
+    """An oversized step triggers scan, not arbitrary loss in its evidence."""
+    span, steps, traj = _span_steps(tmp_path, pre_results=('dump ' * 60000, 'ok'))
+    item = 'evidence ' * 1500 + 'KEEP_THE_CONTRADICTING_TAIL at step 4'
+    answer = json.dumps({'none': False, 'items': [item]})
+    slim = json.dumps({'none': False, 'items': ['shortened at step 4']})
+    judge_record, scan_record = [], []
+    monkeypatch.setattr('injudge.judge.urlopen', judge_stub(judge_record))
+    monkeypatch.setattr('injudge.scan.urlopen', scan_stub(scan_record, answer, slim))
+    verdict = judge_span(span, steps, _judge_cfg(), [], traj.task,
+                         scan=_scan_cfg(input_tokens=50000))
+    assert verdict['input']['path'] == 'scan'
+    assert 'over_budget' not in verdict['input']
+    assert item in judge_record[0]['messages'][1]['content']
+    assert not any(b['messages'][-1]['content'].startswith('EVIDENCE ITEMS to compress')
+                   for b in scan_record)
+
+
+def test_generous_chunk_budget_has_no_implicit_step_or_token_ceiling(tmp_path):
+    span, steps, traj = _span_steps(tmp_path, n_post=24)
+    scan = ScanConfig(extraction=None, **scan_knobs({'JUDGE_INPUT_TOKENS': '800000'}))
+    assert scan.chunk_tokens == 400000
+    chunks = _chunks(steps, span, scan, traj.task)
+    assert [(c.side, len(c.steps)) for c in chunks] == [('pre', 3), ('post', len(steps) - 3)]

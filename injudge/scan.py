@@ -5,32 +5,14 @@ When the verbatim scoring input does not fit the judge budget
 read in chunks instead of truncated: each chunk EXTRACTS EVIDENCE ONLY
 (never five-signal values, never a span verdict), and code assembles the
 evidence pack the existing scoring call (judge._scoring_call) reads. The
-chunks partition the step stream — split at the span's step_first into
-pre-injection and post-injection sides, every step lands in exactly one
-chunk (up to the footprint windows: the post side stops at the largest
-per-entry window end when every delivered memory is re-delivered
-later — those steps are the newer spans' to claim; an entry whose window
-stays open, whether never re-delivered or identity-less and untrackable
-by re-delivery, holds the post side open to the stream's end, so no
-delayed footprint is dropped), and
-chunks never receive another chunk's text (the seam-neighborhood verbatim
-is scoring-input only, attached at assembly — and clamped at the same
-window end, so steps a re-delivery span claims never leak into this span's
-scoring input).
+chunks partition the entire step stream, split at the injection point.
+Attribution windows bound action credit, not observation: later steps may
+confirm or refute an earlier action's consequence, just as on the full path.
 
-Failure policy: a chunk with no usable record after its attempt budget
-fails the SPAN — an error verdict naming the chunk, no further chunks
-started, in-flight results discarded; never a silent coverage gap ("no
-dropped delayed use" is the whole point of the scan), and one bad chunk
-never takes the run down. Over-cap evidence and an over-budget assembled
-user each get ONE LLM summary pass against the max-token hint; still over
-(or the summary fails — an empty items list counts: it dropped the coverage
-instead of compressing it) → the original text is kept, never truncated.
-The evidence-cap case lands in the run's warnings (SCAN_EVIDENCE_TOKENS
-constrains the prompt only — an evidence overrun that still fits the input
-budget is no over-budget send); the assembled-user case goes out as-is with
-`over_budget` recorded on the operation's input record — never a silent
-over-budget send.
+A failed extraction fails the span, never silently drops a chunk. Only an
+over-budget assembled scoring request earns one evidence-compression pass.
+If that fails or still does not fit, retain the original evidence and mark
+`over_budget`; never truncate. The header, neighborhood and gold stay intact.
 
 Cost shape: extraction is PER SPAN — each span's split and prompt differ,
 so a trajectory with N overflowing spans pays N full passes through the
@@ -121,35 +103,24 @@ class ScanConfig:
     extraction: JudgeConfig | None
     input_tokens: int  # JUDGE_INPUT_TOKENS: the scoring-request token cap
     parallel: int  # SCAN_PARALLEL: concurrent extraction calls (1 = serial)
-    chunk_steps: int  # SCAN_CHUNK_STEPS: max agent steps per chunk
+    chunk_steps: int  # SCAN_CHUNK_STEPS: optional step cap; 0 = token-only
     chunk_tokens: int  # SCAN_CHUNK_TOKENS: one chunk's user-body cap
     neighborhood: int  # SCAN_NEIGHBORHOOD: verbatim seam steps around step_first
-    evidence_tokens: int  # SCAN_EVIDENCE_TOKENS: one chunk's evidence cap hint
 
 
 def scan_knobs(env: dict[str, str]) -> dict:
-    """The budget/chunking keys, validated exactly like the scoring keys:
-    unset → default, an illegal value fails fast naming the key (never the
-    value). Dry-run reads the same knobs (from a readable .env, else the
-    baked defaults) to preview chunk counts. An unset SCAN_CHUNK_TOKENS
-    derives from the input budget (half, capped at the 20000 default), so
-    lowering JUDGE_INPUT_TOKENS never aborts the run on a knob the operator
-    never set; the < JUDGE_INPUT_TOKENS rule binds only a value actually
-    set."""
+    """One home for live and dry-run budgets; unset chunk size scales with
+    the scoring allowance instead of imposing a second context ceiling."""
     neighborhood = _int_config(env, "SCAN_NEIGHBORHOOD", minimum=0)
-    input_tokens = _int_config(env, "JUDGE_INPUT_TOKENS") or 50_000
+    chunk_steps = _int_config(env, "SCAN_CHUNK_STEPS", minimum=0)
+    input_tokens = _int_config(env, "JUDGE_INPUT_TOKENS") or 800_000
     chunk_tokens = _int_config(env, "SCAN_CHUNK_TOKENS")
     knobs = {
         "input_tokens": input_tokens,
         "parallel": _int_config(env, "SCAN_PARALLEL") or 4,
-        "chunk_steps": _int_config(env, "SCAN_CHUNK_STEPS") or 8,
-        "chunk_tokens": (
-            chunk_tokens
-            if chunk_tokens is not None
-            else min(20_000, max(1, input_tokens // 2))
-        ),
+        "chunk_steps": chunk_steps if chunk_steps is not None else 0,
+        "chunk_tokens": chunk_tokens if chunk_tokens is not None else max(1, input_tokens // 2),
         "neighborhood": neighborhood if neighborhood is not None else 2,
-        "evidence_tokens": _int_config(env, "SCAN_EVIDENCE_TOKENS") or 4_096,
     }
     if knobs["parallel"] > MAX_PARALLEL:
         raise SystemExit(f"error: SCAN_PARALLEL must be at most {MAX_PARALLEL}")
@@ -266,51 +237,15 @@ def _chunk_header(span: InjectionSpan, task: str | None) -> str:
     return _render_span_header(span, task, _EXTRACTION_MEMORIES_NOTE)
 
 
-def _post_end(span: InjectionSpan, n_steps: int) -> int:
-    """The step the span's post side stops at (a step number, = the exclusive
-    steps-list index by the ordinal invariant): the stream's end, or the
-    largest per-entry window end when EVERY delivered memory is re-delivered
-    later — those steps are the newer spans' to claim, and scanning them for
-    this span's footprint would be pure waste. A single open window — a
-    never-re-delivered memory, or an identity-less one (untrackable by
-    re-delivery, its window always None) — keeps the post side open to the
-    end: its delayed footprint could sit anywhere past the bound, and
-    dropping those steps would be the silent coverage gap the scan exists to
-    prevent. The chunker and the seam neighborhood share this bound."""
-    ends = [end for end in span.memory_windows.values() if end is not None]
-    if span.memory_windows and len(ends) == len(span.memory_windows):
-        return min(n_steps, max(ends))
-    return n_steps
-
-
 def _chunks(
     steps: list[AgentStep], span: InjectionSpan, cfg: ScanConfig, task: str | None
 ) -> list[_Chunk]:
-    """Split at span.step_first into pre/post sides, then cut each side into
-    chunks of at most SCAN_CHUNK_STEPS steps with an extraction user body
-    of at most SCAN_CHUNK_TOKENS. The body is the header + the fixed
-    metadata/labels shell + this chunk's rendered steps + its anchor block
-    (see _chunk_user): the anchors are counted because they are
-    input-independent text — one [anchor] line per (term, step) hit, so a
-    delivered value's words echoed across many steps can blow the cap the
-    split pretends to enforce (the endpoint then rejects the chunk and the
-    whole span degrades to an error verdict). Terms over _ANCHOR_MAX_DF
-    document frequency are dropped up front: a word most steps carry is
-    domain vocabulary, not a footprint pointer.
-    The chunks PARTITION the step stream up to the footprint windows — every
-    step lands in exactly one chunk, except that the post side stops at
-    _post_end (the largest window end when every delivered memory is
-    re-delivered later). Where the per-entry windows
-    differ, the union range stands (a later-bounded co-delivered memory still
-    claims those steps) and each entry's bound rides the chunk header and
-    binds the anchors (_anchor_terms), so the earlier-bounded memory is not
-    double-credited here. The windows are per delivered ENTRY (span-local
-    ids), never per display key: identities sharing one key keep their own
-    bounds.
-    SCAN_NEIGHBORHOOD steps are never duplicated
-    into a neighboring chunk (their verbatim text is scoring-input only). A
-    single step whose measured chunk body already exceeds the cap is its own
-    chunk and still enters extraction in full (no truncate-to-fit)."""
+    """Partition the complete stream, without clipping a step. Token-sized
+    chunks keep connected actions together; an explicit step cap can further
+    subdivide them. A single oversized step is sent intact, so a request
+    fault is visible instead of becoming an incomplete-evidence verdict.
+    The header, shell and lexical pointers all count toward the user budget.
+    """
     header = _chunk_header(span, task)
     header_tokens = count_tokens(header) + _shell_tokens()
     texts = _step_texts(steps)
@@ -332,13 +267,12 @@ def _chunks(
     step_tokens = _step_tokens(steps)
     renders = _step_renders(steps)
     out: list[_Chunk] = []
-    post_end = _post_end(span, len(steps))
     # the side split rides the ordinal invariant directly (steps[i].step ==
     # i + 1 — build_step_stream's construction), never two filtered copies
     # of the steps list per overflowing span
     for side, side_idx in (
         ("pre", range(span.step_first - 1)),
-        ("post", range(span.step_first - 1, post_end)),
+        ("post", range(span.step_first - 1, len(steps))),
     ):
         groups: list[tuple[list[AgentStep], list[str], list[str]]] = []
         cur: list[AgentStep] = []
@@ -356,7 +290,7 @@ def _chunks(
             if s_anchors:
                 s_tokens += count_tokens("\n".join(f"- {a}" for a in s_anchors))
             if cur and (
-                len(cur) >= cfg.chunk_steps
+                (cfg.chunk_steps > 0 and len(cur) >= cfg.chunk_steps)
                 or header_tokens + cur_tokens + s_tokens > cfg.chunk_tokens
             ):
                 groups.append((cur, cur_anchors, cur_texts))
@@ -538,17 +472,16 @@ _SUMMARIZE_PROMPT = load_prompt("injudge/extraction/summarize").replace(
 
 
 @lru_cache(maxsize=None)
-def _extraction_prompt(side: str, evidence_tokens: int) -> str:
+def _extraction_prompt(side: str) -> str:
     """The chunk-extraction system prompt: the shared five-signal
     definitions (the plain regime's — extraction is never gold-aware) as
     "what counts as evidence in this chunk", narrowed by the side guidance.
     The schema-constrained tiers come first, so the evidence arrives in the
-    most reliable, easiest-to-parse shape. Assembled once per (side, cap) —
+    most reliable, easiest-to-parse shape. Assembled once per side —
     a chunk run asks for it per chunk."""
     text = load_prompt("injudge/extraction/system")
     text = _fill_signals(text, "plain")
     text = text.replace("@side_guidance@", load_prompt(f"injudge/extraction/side_{side}"))
-    text = text.replace("@evidence_tokens@", str(evidence_tokens))
     text = text.replace("@shape@", _EXTRACTION_SHAPE)
     return _substitute_enums(text)
 
@@ -693,68 +626,20 @@ def _summarize(
     return [_mask_key(i, cfg.api_key) for i in items]
 
 
-def _cap_evidence(
-    chunk: _Chunk,
-    span: InjectionSpan,
-    items: list[str],
-    cfg: JudgeConfig,
-    evidence_tokens: int,
-    warnings: list[str],
-) -> list[str]:
-    """SCAN_EVIDENCE_TOKENS constrains the prompt only — code measures the
-    assembled evidence list and NEVER truncates: an overrun earns one summary
-    pass with the cap restated; still over (or the summary failed) → the
-    original over-long text is kept as-is. Only the EXTRACTED items ride
-    here: the chunk's [anchor] lines are lexical seeds that already rode the
-    chunk user message — forwarding them into the scoring evidence pack
-    would hand the judge dozens of bare lexical hits as if they were
-    findings, inflating `referenced` (and inviting `acted_on`) in the scan
-    regime relative to the fit regime."""
-    evidence = items
-    text = "\n".join(f"- {i}" for i in evidence)
-    if count_tokens(text) <= evidence_tokens:
-        return evidence
-    what = f"{span.id}: extraction ({chunk.side} {chunk.step_range})"
-    hint = evidence_tokens - _BULLET_TOKENS * len(evidence)
-    if hint <= 0:
-        # the bullet prefixes alone would meet the cap (thousands of items):
-        # no useful compression hint remains — keep the original (the
-        # scan-level summary pass still gets its chance on the whole pack)
-        warnings.append(
-            f"{what}: evidence over {evidence_tokens} tokens across "
-            f"{len(evidence)} items (no room for a compression hint); kept "
-            "the over-long original"
-        )
-        return evidence
-    summarized = _summarize(text, hint, cfg, warnings, what)
-    if summarized is not None and count_tokens(
-        "\n".join(f"- {i}" for i in summarized)
-    ) <= evidence_tokens:
-        return summarized
-    if summarized is not None:
-        warnings.append(
-            f"{what}: evidence still over {evidence_tokens} tokens after the "
-            "summary pass; kept the over-long original"
-        )
-    return evidence
-
-
 def _extract_chunk(
     chunk: _Chunk,
     span: InjectionSpan,
     cfg: JudgeConfig,
-    evidence_tokens: int,
     warnings: list[str],
 ) -> list[str]:
-    """One chunk's final evidence items (anchors folded in, the evidence cap
-    applied) through the shared conformance walk (judge._contract_call — the
+    """One chunk's evidence items through the shared conformance walk (judge._contract_call — the
     same tier chain, rejection/truncation/corrective-retry rules and the
     same openai-chat reasoning_content rescue the scoring call uses); the
     output contract is EXTRACTION_SCHEMA, never VERDICT_SCHEMA. The walk's
     _CallFailed becomes this chunk's ExtractError."""
     where = f"{span.id}: extraction ({chunk.side} {chunk.step_range})"
     messages = [
-        {"role": "system", "content": _extraction_prompt(chunk.side, evidence_tokens)},
+        {"role": "system", "content": _extraction_prompt(chunk.side)},
         {"role": "user", "content": _chunk_user(span, chunk)},
     ]
     try:
@@ -767,7 +652,7 @@ def _extract_chunk(
     # answer is masked with the SCORING key only): mask the extraction key at
     # the source — the same 200-echo case the chunk-failure path masks
     items = [_mask_key(i, cfg.api_key) for i in items]
-    return _cap_evidence(chunk, span, items, cfg, evidence_tokens, warnings)
+    return items
 
 
 def _extract_all(
@@ -795,7 +680,7 @@ def _extract_all(
         for i, chunk in enumerate(chunks):
             try:
                 done[i] = _extract_chunk(
-                    chunk, span, ext, scan.evidence_tokens, warnings
+                    chunk, span, ext, warnings
                 )
             except ExtractError as e:
                 raise _ChunkFailed(chunk, e, done) from e
@@ -809,7 +694,7 @@ def _extract_all(
             cfg = tls.cfg = replace(ext)
         chunk_warnings: list[str] = []
         try:
-            items = _extract_chunk(chunk, span, cfg, scan.evidence_tokens, chunk_warnings)
+            items = _extract_chunk(chunk, span, cfg, chunk_warnings)
         except ExtractError as e:
             # the failed chunk's accumulated diagnostics (tier degrades,
             # masking notes) ride the exception — the serial path merges them
@@ -1021,12 +906,9 @@ def scan_span(
     ]
     none_chunks = sum(1 for _, items in extracted if not items)
     n = scan.neighborhood
-    # the ordinal invariant again (steps[i].step == i + 1): the seam
-    # neighborhood is one slice, never a filtered pass over the whole stream
-    # — clamped at the same window end the chunks stopped at, so steps a
-    # re-delivery span claims never sit verbatim in THIS span's scoring
-    # input while the header's footprint windows assign them elsewhere
-    near = steps[max(0, span.step_first - 1 - n) : min(span.step_first + n, _post_end(span, len(steps)))]
+    # The neighborhood is an additional verbatim view, not an evidence
+    # horizon. Later results remain visible even after a re-delivery.
+    near = steps[max(0, span.step_first - 1 - n) : span.step_first + n]
     user = _assemble_scan_user(header, pre_blocks, post_blocks, near, gold)
     ev_text = "\n\n".join(pre_blocks + post_blocks)
     record["chunks"] = len(extracted)

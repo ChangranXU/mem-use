@@ -1439,7 +1439,7 @@ def test_multiple_generations_and_lanes_in_tool_config(tmp_path):
 
 
 def verdict_report(run_id, span_id, entries, verdict="neutral"):
-    """Minimal injudge.report/v8 fixture.
+    """Minimal injudge.report/v9 fixture.
 
     entries: list of (seq, step, role) covering the span's injections. The
     report-side trajectory id ("T99") deliberately differs from the graph's
@@ -1953,11 +1953,11 @@ def test_load_verdict_report_requires_injudge_schema(tmp_path):
         load_verdict_report(bad)
     # older artifact versions are rejected, not adapted
     bad.write_text(json.dumps({"tool": {"schema": "injudge.report/v5"}}), encoding="utf-8")
-    with pytest.raises(SystemExit, match="injudge.report/v8"):
+    with pytest.raises(SystemExit, match="injudge.report/v9"):
         load_verdict_report(bad)
     good = tmp_path / "good.json"
-    good.write_text(json.dumps({"tool": {"schema": "injudge.report/v8"}}), encoding="utf-8")
-    assert load_verdict_report(good)["tool"]["schema"] == "injudge.report/v8"
+    good.write_text(json.dumps({"tool": {"schema": "injudge.report/v9"}}), encoding="utf-8")
+    assert load_verdict_report(good)["tool"]["schema"] == "injudge.report/v9"
 
 
 def test_render_html_with_verdicts_embeds_them(tmp_path):

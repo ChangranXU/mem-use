@@ -18,3 +18,10 @@ span's first step onward are where the span's footprint, if any, appears.
 Each delivered memory's footprint window — stated in the span header and
 defined under signal 4 (influence) — bounds where that memory's influence
 may be claimed.
+
+The recorded step stream is not a complete reconstruction of every system
+or user message the agent saw. Missing initial context, earlier memory
+contents, or extracted evidence is not proof that the agent lacked a fact.
+When the record cannot establish a signal, use null with a specific note,
+not a forced novelty or influence label. Search queries and item keys are
+metadata, not proof of main-agent knowledge or delivered content.

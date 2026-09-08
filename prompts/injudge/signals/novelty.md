@@ -14,8 +14,9 @@
      the task statement said it, the agent stated it as fact, had decided or
      applied it, or tool results had already shown it. The delivery was
      redundant/late;
-   - novel: the substance appeared neither in the task statement nor in the
-     pre-injection steps.
+   - novel: the available baseline supports that the substance was new to
+     the agent. Mere absence from an incomplete transcript or evidence
+     summary is not enough; use null when novelty cannot be established.
    The note must cite what the tier rests on: the task statement (it has no
    step number — naming it as the task statement is the correct citation) or
    the specific pre-injection step. When the header says a memory was

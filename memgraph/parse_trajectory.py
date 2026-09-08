@@ -65,11 +65,6 @@ from memgraph.annotations import (
 )
 from memgraph.model import MemoryOp, Trajectory
 
-_QUERY_CAP = 300  # recall-op query previews are informational; keep artifacts lean
-# the framing excerpt of a delivered block (the opening the agent actually
-# saw) shown to the judge — informational like the query preview
-_PLACEMENT_HEAD_CAP = 160
-
 # The bridge's memory-action contract is add/update/delete (memory-bridge
 # AGENTS.md): a delete change's before-refs leave the active store and graph
 # as the deletions. create/update after-refs ARE read (merged with the end
@@ -605,8 +600,8 @@ def _recall_op_from_delivery(
     search_id = payload.get("search_operation_id")
     op.search_operation_id = search_id if isinstance(search_id, str) else None
     search = index.operations.get(search_id) if isinstance(search_id, str) else None
-    # the placement's full text, resolved once: the capped opening excerpt
-    # below and the per-entry exposure both read it — the annotation's
+    # the placement's full text, resolved once: the presentation
+    # and the per-entry exposure both read it — the annotation's
     # canonical values are what the delivery REFERENCES, the placement is
     # what the agent actually saw (a bridge may clip a rendered line to its
     # recall budget while the ref keeps the full value)
@@ -617,17 +612,13 @@ def _recall_op_from_delivery(
     )
     op.exposure = [exposure_state(m.get("value"), placement_text) for m in op.memories]
     if placement is not None:
-        # how the injection was presented (injudge's span header): the
-        # protocol's placement kind plus a capped excerpt of the delivered
-        # block's opening — a redacted/locator placement records no content
-        # here, so no excerpt
+        # Compare and show the whole presentation: a changed instruction at
+        # the end of a long block must not merge into an earlier treatment.
         kind = placement.get("kind")
         if isinstance(kind, str) and kind:
             op.placement_kind = kind
         if placement_text:
-            op.placement_head = placement_text[:_PLACEMENT_HEAD_CAP] + (
-                "…" if len(placement_text) > _PLACEMENT_HEAD_CAP else ""
-            )
+            op.placement_text = placement_text
     if search is not None and search.kind == "search":
         # the same resolution rule as the session task: inline text, or a
         # trajectory_message locator against this event stream — the
@@ -636,7 +627,7 @@ def _recall_op_from_delivery(
             search.start["payload"].get("query"), events, locator_lanes, slots
         )
         if query is not None:
-            op.query = query[:_QUERY_CAP] + ("…" if len(query) > _QUERY_CAP else "")
+            op.query = query
         if search.end is not None:
             end_payload = search.end["payload"]
             # the protocol's own match count first: `returned` is the top-k

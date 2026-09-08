@@ -25,7 +25,7 @@ uv run -m injudge <paths> --dry-run --limit 3
 
 | 文件 | 内容 |
 |---|---|
-| `injudge-report.json` | 运行时评审记录（`injudge.report/v8`），每条轨迹后重写，崩溃也保留已完成部分 |
+| `injudge-report.json` | 运行时评审记录（`injudge.report/v9`），每条轨迹后重写，崩溃也保留已完成部分 |
 | `summary.json` | 最终统计（`injudge.summary/v5`）：计数、比率、逐记忆使用 |
 | `memgraph-verdicts.html` | 仅在 `--html` 时产出：召回节点按判定着色的 memgraph |
 

@@ -6,8 +6,9 @@
    repair, verification, and avoiding a demonstrated dead end can improve
    the work without appearing in the gold patch, and matching the patch is
    not by itself proof the memory caused the action. Judge by the
-   observable downstream events inside the memory's footprint window, never
-   by what would otherwise have happened. Saved effort needs the
+   observable consequences of actions anchored inside the memory's footprint
+   window, including later results tied to those actions; never infer what
+   would otherwise have happened. Saved effort needs the
    observable anchor from influence (announced intent or explicit credit,
    cited in the note) plus the step's absence afterward.
    improved = a downstream event ties the benefit to the memory-shaped
