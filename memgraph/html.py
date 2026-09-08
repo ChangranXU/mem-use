@@ -704,9 +704,9 @@ function showOp(opId){
         // understatement separately). A missing deliveries count renders "?",
         // never an empty blank.
         const dcTxt=typeof dc.approx_tokens_total==="number"?`<span class="meta">delivered ${esc(dc.deliveries==null?"?":dc.deliveries)}× ≈${esc(dc.approx_tokens_total.toLocaleString())} tokens</span>`:"";
-        // the budget-gate regime record (injudge v5): which evidence regime
-        // judged the span — the path is artifact text, escaped like every
-        // datum; the markers only select static suffixes
+        // the budget-gate regime record: which evidence regime judged the
+        // span — the path is artifact text, escaped like every datum; the
+        // markers only select static suffixes
         const inp=d.input||{};
         const inpTxt=inp.path?`<span class="meta">input: ${esc(inp.path)}${inp.gold?" · gold":""}${inp.over_budget?" · over budget":""}${inp.length_fallback?" · length fallback":""}</span>`:"";
         h+=`<div class="mrow"><div><span class="chip" style="color:${VD_COLOR[v]||"var(--muted)"}">${esc(v)}</span>${d.confidence!=null?`<span class="meta">conf ${esc(d.confidence)}</span>`:""}<span class="meta">${esc(x.verdict_span)}</span>${d.auto?`<span class="meta">auto: ${esc(d.auto)}</span>`:""}${dcTxt}${inpTxt}</div>`;
@@ -789,9 +789,13 @@ function mount(keepScroll){
     for(const o of G.ops){
       if(o.kind!=="recall"||!o.verdict_span||seenS.has(o.verdict_span)) continue;
       seenS.add(o.verdict_span);
-      const v=o.span_verdict||"unjudged"; vc[v]=(vc[v]||0)+1;
+      // auto-neutral is unassessable in the overlay count, matching the
+      // report aggregate — not ○neutral
+      const v=(o.verdict_detail||{}).auto?"unassessable":(o.span_verdict||"unjudged");
+      vc[v]=(vc[v]||0)+1;
     }
     vdStats=` · verdicts +${vc.positive||0}/−${vc.negative||0}/○${vc.neutral||0}`
+      +(vc.unassessable?` ⊘${vc.unassessable}`:"")
       +(vc.error?` !${vc.error}`:"")+(vc.unjudged?` ?${vc.unjudged}`:"");
   }
   document.getElementById("stats").textContent=

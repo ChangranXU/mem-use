@@ -1584,10 +1584,10 @@ def test_load_prompt_missing_file_fails_fast():
 
 def test_aggregate_memory_value_drift():
     ops = [
-        _op("T1:S1", "neutral", 0.9, {"k": {"usage": "ignored", "evidence": ""}},
-            memories=[{"key": "k", "value": "v1"}]),
-        _op("T1:S2", "positive", 0.9, {"k": {"usage": "used", "evidence": ""}},
-            memories=[{"key": "k", "value": "v2"}]),
+        _op("T1:S1", "neutral", 0.9, {"m1": {"usage": "ignored", "evidence": ""}},
+            memories=[{"id": "m1", "key": "k", "value": "v1"}]),
+        _op("T1:S2", "positive", 0.9, {"m1": {"usage": "used", "evidence": ""}},
+            memories=[{"id": "m1", "key": "k", "value": "v2"}]),
     ]
     (roll,) = aggregate(ops, 2)["memory_usage"]
     assert roll["first_value"] == "v1" and roll["last_value"] == "v2"
@@ -1840,10 +1840,10 @@ def test_aggregate_last_value_is_the_literal_latest_value():
     """A later delivery recording no value (redacted content) must show as
     the latest value: keeping the previous non-null one would hide drift."""
     ops = [
-        _op("T1:S1", "neutral", 0.9, {"k": {"usage": "ignored", "evidence": ""}},
-            memories=[{"key": "k", "value": "v1"}]),
-        _op("T1:S2", "neutral", 0.9, {"k": {"usage": "ignored", "evidence": ""}},
-            memories=[{"key": "k", "value": None}]),
+        _op("T1:S1", "neutral", 0.9, {"m1": {"usage": "ignored", "evidence": ""}},
+            memories=[{"id": "m1", "key": "k", "value": "v1"}]),
+        _op("T1:S2", "neutral", 0.9, {"m1": {"usage": "ignored", "evidence": ""}},
+            memories=[{"id": "m1", "key": "k", "value": None}]),
     ]
     (roll,) = aggregate(ops, 2)["memory_usage"]
     assert roll["first_value"] == "v1" and roll["last_value"] is None
@@ -1855,10 +1855,10 @@ def test_summary_value_drift_needs_two_recorded_values():
     marker means the RECORDED content changed, so both compared ends must be
     recorded values. The report's raw first/last stay the literal record."""
     ops = [
-        _op("T1:S1", "neutral", 0.9, {"k": {"usage": "ignored", "evidence": ""}},
-            memories=[{"key": "k", "value": "v1"}]),
-        _op("T1:S2", "neutral", 0.9, {"k": {"usage": "ignored", "evidence": ""}},
-            memories=[{"key": "k", "value": None}]),
+        _op("T1:S1", "neutral", 0.9, {"m1": {"usage": "ignored", "evidence": ""}},
+            memories=[{"id": "m1", "key": "k", "value": "v1"}]),
+        _op("T1:S2", "neutral", 0.9, {"m1": {"usage": "ignored", "evidence": ""}},
+            memories=[{"id": "m1", "key": "k", "value": None}]),
     ]
     artifact = build_artifact({}, [{"id": "T1", "run_id": "r"}], ops, [], {"T1": 2}, [])
     (roll,) = artifact["aggregates"]["overall"]["memory_usage"]
@@ -1873,12 +1873,12 @@ def test_aggregate_usage_rollup_excludes_auto_neutral_spans():
     exclusion the rubric rollup and confidence apply), and their span tallies
     as unassessable — observation missingness, never the neutral class."""
     auto = {**_op("T1:S1", "neutral", None,
-                  {"k": {"usage": "unclear", "evidence": "no subsequent turn"}},
-                  memories=[{"key": "k", "value": "v"}]),
+                  {"m1": {"usage": "unclear", "evidence": "no subsequent turn"}},
+                  memories=[{"id": "m1", "key": "k", "value": "v"}]),
             "auto": "no_subsequent_turn"}
     judged = _op("T1:S2", "neutral", 0.9,
-                 {"k": {"usage": "ignored", "evidence": ""}},
-                 memories=[{"key": "k", "value": "v"}])
+                 {"m1": {"usage": "ignored", "evidence": ""}},
+                 memories=[{"id": "m1", "key": "k", "value": "v"}])
     agg = aggregate([auto, judged], 2)
     assert agg["neutral"] == 1
     assert agg["unassessable"] == 1
@@ -1894,13 +1894,13 @@ def test_aggregate_usage_rollup_excludes_error_and_unjudged_spans():
     shared with the rubric rollup): an error/unjudged span's usage entries —
     should a record ever carry them — are not judge-scored and must not
     tally."""
-    err = _op("T1:S1", "error", usage={"k": {"usage": "used", "evidence": ""}},
-              memories=[{"key": "k", "value": "v"}])
+    err = _op("T1:S1", "error", usage={"m1": {"usage": "used", "evidence": ""}},
+              memories=[{"id": "m1", "key": "k", "value": "v"}])
     unjudged = _op("T1:S2", "unjudged",
-                   usage={"k": {"usage": "used", "evidence": ""}},
-                   memories=[{"key": "k", "value": "v"}])
-    judged = _op("T1:S3", "neutral", 0.9, {"k": {"usage": "ignored", "evidence": ""}},
-                 memories=[{"key": "k", "value": "v"}])
+                   usage={"m1": {"usage": "used", "evidence": ""}},
+                   memories=[{"id": "m1", "key": "k", "value": "v"}])
+    judged = _op("T1:S3", "neutral", 0.9, {"m1": {"usage": "ignored", "evidence": ""}},
+                 memories=[{"id": "m1", "key": "k", "value": "v"}])
     agg = aggregate([err, unjudged, judged], 3)
     assert agg["error"] == 1 and agg["unjudged"] == 1
     (roll,) = agg["memory_usage"]
@@ -2052,35 +2052,33 @@ def test_aggregate_identity_less_entries_never_merge_across_spans():
         (None, "T1:S1:m1"), (None, "T1:S2:m1")}
 
 
-def test_aggregate_unstamped_entry_named_by_key_joins_its_identity():
-    """The hand-edit degrade: a usage entry keyed by a display key (no
-    stamped id on the memories) tallies under the delivered identity whose
-    item half it spells — across spans (with no item_id recorded the key IS
-    the identity), and into the memory's own namespace, never a phantom
-    namespace-less row."""
+def test_aggregate_usage_keys_only_on_stamped_ids():
+    """Rubric/usage key on span-local ids: a display-key-keyed usage entry
+    (the pre-v7 shape) does not join the delivered identity — it tallies
+    span-scoped, never as if an older writer still ran."""
     ops = [
         _op("T1:S1", "neutral", 0.9, {"k": {"usage": "ignored", "evidence": ""}},
-            memories=[{"key": "k", "value": "v1", "namespace": "nsA"}]),
+            memories=[{"id": "m1", "key": "k", "value": "v1", "namespace": "nsA"}]),
         _op("T1:S2", "positive", 0.9, {"k": {"usage": "used", "evidence": ""}},
+            memories=[{"id": "m1", "key": "k", "value": "v2", "namespace": "nsA"}]),
+    ]
+    rolls = aggregate(ops, 2)["memory_usage"]
+    assert {(r["namespace"], r["item_id"]) for r in rolls} == {
+        (None, "T1:S1:k"), (None, "T1:S2:k")}
+
+
+def test_aggregate_unstamped_memories_are_skipped():
+    """An unstamped memories entry is not reconstructed as mN from position:
+    usage keyed by m1 then has no pair and scopes per span."""
+    ops = [
+        _op("T1:S1", "positive", 0.9, {"m1": {"usage": "used", "evidence": ""}},
+            memories=[{"key": "k", "value": "v1", "namespace": "nsA"}]),
+        _op("T1:S2", "neutral", 0.9, {"m1": {"usage": "ignored", "evidence": ""}},
             memories=[{"key": "k", "value": "v2", "namespace": "nsA"}]),
     ]
-    (roll,) = aggregate(ops, 2)["memory_usage"]
-    assert (roll["namespace"], roll["item_id"]) == ("nsA", "k")
-    assert roll["tallies"]["used"] == 1 and roll["tallies"]["ignored"] == 1
-    assert roll["first_value"] == "v1" and roll["last_value"] == "v2"
-
-
-def test_aggregate_unstamped_entry_ambiguous_across_namespaces_scopes_per_span():
-    """A key-keyed entry spelling TWO delivered identities' item half (one
-    key, two stores) names neither: it tallies span-scoped rather than
-    conflating two stores' memories."""
-    ops = [
-        _op("T1:S1", "positive", 0.9, {"k": {"usage": "used", "evidence": ""}},
-            memories=[{"key": "k", "value": "v1", "namespace": "nsA"},
-                      {"key": "k", "value": "v2", "namespace": "nsB"}]),
-    ]
-    (roll,) = aggregate(ops, 1)["memory_usage"]
-    assert (roll["namespace"], roll["item_id"]) == (None, "T1:S1:k")
+    rolls = aggregate(ops, 2)["memory_usage"]
+    assert {(r["namespace"], r["item_id"]) for r in rolls} == {
+        (None, "T1:S1:m1"), (None, "T1:S2:m1")}
 
 
 def test_rubric_line_surfaces_the_novelty_distribution(capsys):
@@ -2185,14 +2183,14 @@ def test_aggregate_unassessable_spans_leave_every_directional_denominator():
     wasted-token share, and the judged-span headline count, and is reported
     apart with its delivery cost (the assessable fraction stays readable)."""
     auto = {**_op("T1:S1", "neutral", None,
-                  {"k": {"usage": "unclear", "evidence": "no subsequent turn"}},
-                  memories=[{"key": "k", "value": "v"}],
+                  {"m1": {"usage": "unclear", "evidence": "no subsequent turn"}},
+                  memories=[{"id": "m1", "key": "k", "value": "v"}],
                   cost={"deliveries": 1, "content_chars_total": 100,
                         "approx_tokens_total": 25}),
             "auto": "no_subsequent_turn"}
     judged = _op("T1:S2", "positive", 0.9,
-                 {"k": {"usage": "used", "evidence": ""}},
-                 memories=[{"key": "k", "value": "v"}],
+                 {"m1": {"usage": "used", "evidence": ""}},
+                 memories=[{"id": "m1", "key": "k", "value": "v"}],
                  cost={"deliveries": 1, "content_chars_total": 400,
                        "approx_tokens_total": 100})
     agg = aggregate([auto, judged], 2)

@@ -72,7 +72,7 @@ memgraph/model.py          # Trajectory / MemoryOp / MemoryUnit / Edge
 memgraph/parse_trajectory.py  # trajectory.jsonl → ops; shared step rule
 memgraph/graph.py          # path discovery, cross-trajectory linking, validation
 memgraph/html.py           # self-contained HTML (template + embedded graph JSON)
-memgraph/verdicts.py       # merge injudge.report/v7 onto recall ops
+memgraph/verdicts.py       # merge injudge.report/v8 onto recall ops
 memgraph/__main__.py       # python3 -m memgraph
 injudge/__init__.py        # REPORT_SCHEMA / SUMMARY_SCHEMA (writer + memgraph reader)
 injudge/model.py           # AgentStep / ToolExec / InjectionSpan
@@ -83,7 +83,7 @@ injudge/scan.py            # overflow path: chunks, evidence extraction, assembl
 injudge/gold.py            # golden-answer / correctness sidecars and CLI joins
 injudge/prompts.py         # loads prompts/ (never inline prompts in code)
 injudge/aggregate.py       # verdict counts/rates, per-memory usage roll-ups
-injudge/report.py          # injudge.report/v7 + injudge.summary/v4 + stdout
+injudge/report.py          # injudge.report/v8 + injudge.summary/v5 + stdout
 injudge/__main__.py        # python3 -m injudge
 prompts/                   # every LLM prompt, grouped by tool/purpose
 doc/                       # GitBook: LANGS.md + en/ + zh-CN/, each with SUMMARY.md

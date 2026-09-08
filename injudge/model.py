@@ -26,14 +26,14 @@ def memory_id(index: int) -> str:
     return f"m{index + 1}"
 
 
-def stamped_entry_id(memory: object, index: int) -> str:
-    """One delivered entry's span-local id off its stamped record (the report
-    stamps every memories entry with it), with the positional fallback for a
-    hand-edited record that lost its stamp (m2 → the second entry): the one
-    degrade rule every reader of the stamped ids shares — injudge's usage
-    rollups and memgraph's verdict merge — never a key-based guess."""
+def stamped_entry_id(memory: object) -> str | None:
+    """The span-local id the report stamps on each delivered memories entry.
+    Absent or non-string is no id — never reconstructed from list position
+    or guessed from a display key (the writer always stamps; a missing
+    stamp is corrupt, not an older artifact shape to repair). Shared by
+    injudge's usage rollups and memgraph's verdict merge."""
     entry_id = memory.get("id") if isinstance(memory, dict) else None
-    return entry_id if isinstance(entry_id, str) and entry_id else memory_id(index)
+    return entry_id if isinstance(entry_id, str) and entry_id else None
 
 
 @dataclass

@@ -40,17 +40,18 @@ def _memory_labels(span: dict) -> dict[str, str]:
     """span-local entry id → display label for one report operation, off its
     stamped memories list: the rubric and memory_usage key on the span-local
     ids (display keys are labels), and the popover needs this map to render
-    the two together. A hand-edited record without the stamp falls back to
-    the id's position (m2 → the second entry — injudge's own rollup rule);
-    an entry without a string key labels itself by id."""
+    the two together. An unstamped entry is skipped (no invented mN) — the
+    merge notes the skip; an entry without a string key labels itself by id."""
     labels: dict[str, str] = {}
     mems = span.get("memories")
     if not isinstance(mems, list):
         return labels
-    for i, m in enumerate(mems):
+    for m in mems:
         if not isinstance(m, dict):
             continue
-        entry_id = stamped_entry_id(m, i)
+        entry_id = stamped_entry_id(m)
+        if entry_id is None:
+            continue
         key = m.get("key")
         labels[entry_id] = key if isinstance(key, str) and key else entry_id
     return labels
@@ -117,6 +118,19 @@ def apply_verdicts(graph: dict, report: dict, source: str = "") -> None:
                 f"verdict report: duplicate operation_id {op_id!r}; the later entry wins",
             )
         spans_by_id[op_id] = o
+        mems = o.get("memories")
+        if isinstance(mems, list):
+            n_unstamped = sum(
+                1 for m in mems
+                if isinstance(m, dict) and stamped_entry_id(m) is None
+            )
+            if n_unstamped:
+                note(
+                    "warn",
+                    f"verdict report: {n_unstamped} unstamped memories "
+                    f"entr{'y' if n_unstamped == 1 else 'ies'} on "
+                    f"{op_id!r} skipped",
+                )
     traj_run: dict[str, str] = {}
     for t in entries("trajectories"):
         traj_id = t.get("id")

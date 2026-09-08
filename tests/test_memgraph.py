@@ -1453,8 +1453,9 @@ def verdict_report(run_id, span_id, entries, verdict="neutral"):
         "verdict": verdict,
         "confidence": 0.85,
         "analysis": "agent never touched the injected keys",
+        "memories": [{"id": "m1", "key": "key_a"}, {"id": "m2", "key": "key_b"}],
         "rubric": {
-            "key_a": {
+            "m1": {
                 "relevance": {"value": True, "note": "task-related"},
                 "accuracy": {"value": "uncontradicted", "note": "not disproven"},
                 "novelty": {"value": "redundant", "note": "agent already had it"},
@@ -1462,14 +1463,14 @@ def verdict_report(run_id, span_id, entries, verdict="neutral"):
                 "positive_effect": {"value": None, "note": "n/a"},
             },
         },
-        "memory_usage": {"key_a": {"usage": "ignored", "evidence": "never referenced",
-                                   "reason": "redundant"},
-                         "key_b": {"usage": "unclear", "evidence": ""}},
+        "memory_usage": {"m1": {"usage": "ignored", "evidence": "never referenced",
+                                "reason": "redundant"},
+                         "m2": {"usage": "unclear", "evidence": ""}},
         "evidence": [{"claim": "no mention of key_a after the injection",
                       "steps": [3, 4], "seqs": [9]}],
         "delivery_cost": {"deliveries": 2, "content_chars_total": 400,
                           "approx_tokens_total": 100},
-        # the budget-gate regime record, as a v5 gate span carries it
+        # the budget-gate regime record a judged span carries
         "input": {"path": "scan", "chunks": 2, "none_chunks": 0,
                   "evidence_tokens": 100, "gold": True},
         "auto": None,
@@ -1516,9 +1517,9 @@ def test_apply_verdicts_joins_by_run_id_and_seq(tmp_path):
     detail = first["verdict_detail"]
     assert detail["confidence"] == 0.85
     assert detail["analysis"] == "agent never touched the injected keys"
-    assert detail["rubric"]["key_a"]["influence"]["value"] == "none"
+    assert detail["rubric"]["m1"]["influence"]["value"] == "none"
     assert detail["delivery_cost"]["approx_tokens_total"] == 100
-    assert detail["memory_usage"]["key_a"]["usage"] == "ignored"
+    assert detail["memory_usage"]["m1"]["usage"] == "ignored"
     # the budget-gate regime record rides the span detail into the graph
     assert detail["input"] == {"path": "scan", "chunks": 2, "none_chunks": 0,
                                "evidence_tokens": 100, "gold": True}
@@ -1533,10 +1534,10 @@ def test_apply_verdicts_joins_by_run_id_and_seq(tmp_path):
 
 
 def test_apply_verdicts_carries_memory_labels(tmp_path):
-    """v7 rubric/usage key on span-local entry ids: the merge carries the
+    """Rubric/usage key on span-local entry ids: the merge carries the
     id → display-key map off the report's stamped memories so the popover
-    renders "m1 (key_a)", never a bare id; an unstamped (hand-edited) record
-    falls back to the positional id, an unkeyed entry labels itself."""
+    renders "m1 (key_a)", never a bare id; an unkeyed entry labels itself,
+    an unstamped entry is skipped (no invented positional id)."""
     from memgraph.verdicts import apply_verdicts
 
     b = (TrajBuilder().agent_turn(with_task=True).agent_turn()
@@ -1550,11 +1551,13 @@ def test_apply_verdicts_carries_memory_labels(tmp_path):
     report["operations"][0]["memories"] = [
         {"key": "key_a", "id": "m1"},
         {"id": "m2"},          # no key: labels itself by id
-        {"key": "key_c"},      # no stamp: falls back to the positional id
+        {"key": "key_c"},      # no stamp: skipped, not invented as m3
     ]
     apply_verdicts(graph, report)
     detail = recalls[0]["verdict_detail"]
-    assert detail["memory_labels"] == {"m1": "key_a", "m2": "m2", "m3": "key_c"}
+    assert detail["memory_labels"] == {"m1": "key_a", "m2": "m2"}
+    assert any("unstamped memories entry on 'T99:S1' skipped" in v["msg"]
+               for v in graph["validation"])
 
 
 def test_render_html_verdict_detail_resolves_memory_labels():
@@ -1973,7 +1976,7 @@ def test_render_html_with_verdicts_embeds_them(tmp_path):
     (op,) = [o for o in g["ops"] if o["kind"] == "recall"]
     assert op["verdict"] == "neutral" and op["span_verdict"] == "neutral"
     assert op["verdict_detail"]["evidence"][0]["steps"] == [3, 4]
-    assert op["verdict_detail"]["rubric"]["key_a"]["influence"]["value"] == "none"
+    assert op["verdict_detail"]["rubric"]["m1"]["influence"]["value"] == "none"
     assert "agent never touched the injected keys" in html
     # the span's budget-gate record rides verdict_detail into the embedded
     # graph JSON, and the popover reads it (JS-side, like every popover field)
@@ -2019,6 +2022,17 @@ def test_render_html_without_verdicts_has_no_verdict_payload(tmp_path):
     assert all("verdict" not in o and "span_verdict" not in o for o in g["ops"])
     # legend group exists but stays hidden; JS reveal is guarded by G.tool&&G.tool.verdicts
     assert '<div class="group" id="legend-verdicts" style="display:none">' in html
+
+
+def test_render_html_verdict_stats_count_auto_as_unassessable():
+    """The overlay header counts auto-neutral spans as unassessable (v8),
+    not ○neutral (v7). Guarded in JS — no engine in the stdlib suite."""
+    from memgraph.html import render_html
+
+    html = render_html({"trajectories": [], "ops": [], "memories": [],
+                        "edges": [], "validation": []})
+    assert '(o.verdict_detail||{}).auto?"unassessable"' in html
+    assert "⊘${vc.unassessable}" in html
 
 
 def test_render_html_title_literal_in_graph_data_survives(tmp_path):

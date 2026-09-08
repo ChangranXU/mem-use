@@ -140,7 +140,7 @@ Each row is one span. Memories not listed are absent.
 
 | Case | `verdict` | Judge call | Rubric / usage in aggregates |
 |---|---|---|---|
-| No attributed agent step | `neutral`, `auto: no_subsequent_turn` | none | Placeholder null rubric and `unclear` usage. Excluded from rubric rates, usage tallies, and confidence. Counts as judged **neutral** in verdict rates. |
+| No attributed agent step | `neutral`, `auto: no_subsequent_turn` | none | Placeholder null rubric and `unclear` usage. Excluded from rubric rates, usage tallies, and confidence. Tallies as **unassessable** in aggregates — out of every directional rate and the wasted-token share. |
 | `--limit` cutoff or `--dry-run` | `unjudged` | none | Count only. Not a rate denominator. |
 | Coverage/anchor violation after exhausted attempts, contract failure | `error` | attempted | Count only. Raw text kept. Not coerced to neutral. |
 

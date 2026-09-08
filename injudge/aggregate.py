@@ -86,18 +86,19 @@ def _entry_records(op: dict) -> dict[str, tuple[tuple[str | None, str] | None, d
     memories list carries each delivered entry stamped with its span-local
     id, so a rubric entry resolves to exactly the (namespace, item) identity
     of ITS delivery — never a key-based guess that would conflate two
-    identities sharing one display key. A hand-edited record without the
-    stamp falls back to the id's position (m2 → the second entry), and an
-    unresolvable id gets _entry_identity's degrade (the identity it names,
-    else the span-scoped fallback)."""
+    identities sharing one display key. An unstamped entry is skipped (no
+    invented mN); an unresolvable id gets _entry_identity's span-scoped
+    degrade."""
     mems = op.get("memories") or []
     if not isinstance(mems, list):
         mems = []
     out: dict[str, tuple[tuple[str | None, str] | None, dict]] = {}
-    for i, m in enumerate(mems):
+    for m in mems:
         if not isinstance(m, dict):
             continue
-        entry_id = stamped_entry_id(m, i)
+        entry_id = stamped_entry_id(m)
+        if entry_id is None:
+            continue
         ident = None
         item = item_key(m)
         if item:
@@ -112,26 +113,16 @@ def _entry_identity(
     operation_id: str,
 ) -> tuple[str | None, str]:
     """The identity one judged entry tallies under: its own delivery's
-    (namespace, item) pair. An entry id resolving to no stamped record (a
-    hand-edited artifact) still tallies under the identity it NAMES when it
-    unambiguously spells one delivered entry's item half (a key-keyed edit:
-    with no item_id recorded the key IS the identity). Anything else — an
-    identity-less delivery (no item_id and no key: a redacted/anonymous
-    ref), an ambiguous spelling — has no pair to join on, and the
-    span-local entry id is unique only within its own span, so the fallback
-    scopes it by the producing operation: two spans' keyless m1 entries are
-    not known to be the same memory and must never merge into one rollup
-    cell."""
+    (namespace, item) pair, joined only by the stamped span-local id.
+    A usage/rubric key that is not a stamped id is not an identity. An
+    identity-less delivery (no item_id and no key) or an id with no stamped
+    record has no pair to join on, and the span-local entry id is unique
+    only within its own span, so the fallback scopes it by the producing
+    operation: two spans' keyless m1 entries are not known to be the same
+    memory and must never merge into one rollup cell."""
     ident = records.get(entry_id, (None, {}))[0]
     if ident is not None:
         return ident
-    named = {
-        ident
-        for ident, _m in records.values()
-        if ident is not None and ident[1] == entry_id
-    }
-    if len(named) == 1:
-        return next(iter(named))
     return None, f"{operation_id}:{entry_id}"
 
 

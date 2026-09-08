@@ -140,7 +140,7 @@ return "neutral"
 
 | 情形 | `verdict` | 评审调用 | 汇总中的评分 / 使用 |
 |---|---|---|---|
-| 没有可归属的 agent 步骤 | `neutral`，`auto: no_subsequent_turn` | 无 | 占位的空评分与 `unclear` 使用。不计入评分比率、使用汇总与置信度。在判定率中计为已评判的 **neutral**。 |
+| 没有可归属的 agent 步骤 | `neutral`，`auto: no_subsequent_turn` | 无 | 占位的空评分与 `unclear` 使用。不计入评分比率、使用汇总与置信度。在汇总中计为 **unassessable**——不进入任何方向性比率，也不计入浪费 token 份额。 |
 | `--limit` 截断或 `--dry-run` | `unjudged` | 无 | 只计数。不是比率分母。 |
 | 覆盖/锚点违反且纠正重试耗尽、契约失败 | `error` | 已尝试 | 只计数。保留原始文本。不会被改写成 neutral。 |
 
