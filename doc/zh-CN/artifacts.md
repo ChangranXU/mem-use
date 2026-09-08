@@ -1,5 +1,5 @@
 ---
-description: "injudge.report/v9、injudge.summary/v5、全部字段，以及每项比率如何计数。"
+description: "injudge.report/v10、injudge.summary/v6、全部字段，以及每项比率如何计数。"
 icon: box-archive
 ---
 
@@ -11,15 +11,17 @@ injudge 的全部产物写入输出目录（`-o DIR`，默认 `output/`）。
 
 | 文件 | Schema | 作用 |
 |---|---|---|
-| `injudge-report.json` | `injudge.report/v9` | 运行时评审记录。每条轨迹完成后重写，崩溃也保留已完成部分。用 `--verdicts` 喂给 memgraph。 |
-| `summary.json` | `injudge.summary/v5` | 最终统计集合：计数、比率，以及无叙述的区间索引。 |
+| `injudge-report.json` | `injudge.report/v10` | 运行时评审记录。每条轨迹完成后重写，崩溃也保留已完成部分。用 `--verdicts` 喂给 memgraph。 |
+| `summary.json` | `injudge.summary/v6` | 最终统计集合：计数、比率，以及无叙述的区间索引。 |
 | `memgraph-verdicts.html` | — | 仅在 `--html` 时产出（默认关闭）：召回节点按区间判定着色的 memgraph。 |
+| `evidence/<span-id>/` | — | 每个被评判区间一个文件夹：智能体检索过的原始文件。 |
+| `agent-runs/<span-id>.jsonl` | — | 每个被评判区间一条轨迹：评判对话的 pi 事件流记录（见[评审智能体](judge-client.md#轨迹记录)）。 |
 
 memgraph 的 `--json` 产物是 `{tool, trajectories, ops, memories, edges, validation}`——与 HTML 内嵌的同一个 dict。见 [memgraph](memgraph.md#图模型)。
 
 ## Report 与 Summary
 
-**report** 是评审记录。每个操作带有含 note 的评分、`analysis`、`evidence`、失败时的 `judge_raw`、投递成本、预算门区间上的 `input` 路径，以及 validation 日志。区间的 `operation_id` 就是在该文件中查找所用的 id。
+**report** 是评审记录。每个操作带有含 note 的评分、`analysis`、`evidence`、失败时的 `judge_raw`、投递成本、被评判区间上的 `input` 智能体运行记录，以及 validation 日志。区间的 `operation_id` 就是在该文件中查找所用的 id。
 
 **summary** 是供阅读和比较记忆系统的数字。评判叙述只留在 report 中。
 
@@ -85,11 +87,11 @@ $$
 
 ### 输入路径计数
 
-仅 overall：带 `input` 记录的预算门区间计入 `input_paths.full` / `scan`、`gold_scored` 与 `over_budget`。auto-neutral 与 unjudged 区间没有 `input`，因此不出现在这些计数中。
+仅 overall：带 `input` 记录的被评判区间计入 `input_paths.agent`、`gold_scored` 与 `forced_answers`（判定出自预算耗尽的强制作答轮的区间）。auto-neutral 与 unjudged 区间没有 `input`，因此不出现在这些计数中。
 
 ## summary.json 字段
 
-顶层：`tool.schema`、`tool.judge_model`、`tool.config`（本次运行实际使用的、已解析且无密钥的评审/扫描配置）、`generated_at`、`overall`（全部轨迹合并）、`trajectories`（逐轨迹块，含同样的统计外加区间索引）。每条轨迹在有记录时带上 `instance_id` / `model` / `adapter`。
+顶层：`tool.schema`、`tool.judge_model`、`tool.config`（本次运行实际使用的、已解析且无密钥的评审智能体配置）、`generated_at`、`overall`（全部轨迹合并）、`trajectories`（逐轨迹块，含同样的统计外加区间索引）。每条轨迹在有记录时带上 `instance_id` / `model` / `adapter`。
 
 每个聚合块（`overall` 与每条轨迹）：
 
@@ -113,9 +115,9 @@ $$
 | `rubric.inaccurate_keys` / `irrelevant_keys` | 排查清单 `{key, spans}`——评审认定被证伪 / 不相关的记忆；仅在非空时写出 |
 | `cost` | 确定性投递成本：`content_chars_total`、`approx_tokens_total`（`chars // 4`）、按区间判定类别归集的 `approx_tokens_by_verdict`（为零时省略） |
 | `confidence.mean_by_verdict` / `confidence.buckets` | 按判定类别的均值（省略 null 类）与 `[0,0.5)` / `[0.5,0.8)` / `[0.8,1.0]` 分桶计数，覆盖 LLM 已评判区间 |
-| `input_paths` | 仅 overall：预算门后走全文 / 分块扫描输入的区间数 |
+| `input_paths` | 仅 overall：经智能体评判的区间数（`agent`） |
 | `gold_scored` | 仅 overall：在 gold 评分规则下评判的区间数 |
-| `over_budget` | 仅 overall：评分输入超过 `JUDGE_INPUT_TOKENS` 仍原样发送的区间数 |
+| `forced_answers` | 仅 overall：判定出自预算耗尽的强制作答轮的区间数 |
 | `judge_compliance` | 评审契约合规度：`pe_pairing_corrected_spans` / `llm_judged_spans` / `pe_pairing_correction_rate`——LLM 已评判区间中评分表需要 positive_effect↔influence 配对纠正的占比（存在 LLM 已评判区间时写出） |
 | `n_trajectories` | 仅 overall |
 | `memory_usage` | 逐记忆使用统计：`key` + 非零 `tallies`；已录制内容跨区间变化时加 `value_drift: true`。标签定义见[判定推导](verdict-derivation.md#使用标签)。 |
@@ -136,8 +138,8 @@ $$
 
 ## 仅 Report 中的字段
 
-`injudge-report.json` 每个操作还带有：`memories`（完整已录制引用，每条标注其区间本地 `id`）、`memory_exposure`（逐条目：placement 对该值是 `full`、`full_normalized`——整体载入但仅在空白符折叠 / markdown 转义剥离后匹配——、`clipped` 到 N 字符前缀，还是 `unknown`——无法核实，故评审输入中隐去规范值；含引号、反斜杠或换行结构的值只做逐字比对）、`memory_windows`（逐条目 id：该条目动作 `anchors` 校验所依据的足迹窗口结束步——从未被重投递时为 `null`，即其上界是步骤流末尾；同一步投递冲突会把仍开放的窗口闭合在该区间自己的末次投递步；无 agent 回合归类时省略）、评分 note 与各条目的动作 `anchors`、`analysis`、`evidence`、`step_gaps`、`new_keys` / `removed_keys` / `previous_keys` / `changed_keys`、`auto`、`error`、`judge_raw`、`pe_pairing_corrections`（若有），以及预算门区间上的 `input`（`path` 为 `full` 或 `scan`，外加扫描计数，适用时还有 `"gold"`、`"over_budget"`、`"length_fallback"`——后者标记因端点拒绝过长输入而改走扫描路径的全文发送）。评判意外失败的区间会保留不含扫描计数的再推导 `{path, gold?}` 记录，使路径计数仍包含该区间。`tool.config` 记录已解析、无密钥的评审/扫描配置（净化为 `scheme://host[:port][/path]`），便于从产物本身复现运行。
+`injudge-report.json` 每个操作还带有：`memories`（完整已录制引用，每条标注其区间本地 `id`）、`memory_exposure`（逐条目：placement 对该值是 `full`、`full_normalized`——整体载入但仅在空白符折叠 / markdown 转义剥离后匹配——、`clipped` 到 N 字符前缀，还是 `unknown`——无法核实，故评审输入中隐去规范值；含引号、反斜杠或换行结构的值只做逐字比对）、`memory_windows`（逐条目 id：该条目动作 `anchors` 校验所依据的足迹窗口结束步——从未被重投递时为 `null`，即其上界是步骤流末尾；同一步投递冲突会把仍开放的窗口闭合在该区间自己的末次投递步；无 agent 回合归类时省略）、评分 note 与各条目的动作 `anchors`、`analysis`、`evidence`、`step_gaps`、`new_keys` / `removed_keys` / `previous_keys` / `changed_keys`、`auto`、`error`、`judge_raw`、`pe_pairing_corrections`（若有），以及被评判区间上的 `input`（`path` 为 `agent`，外加 `attempts`、`llm_calls`、`tool_calls`、`transcript`——指向 `agent-runs/` 下该对话的轨迹 JSONL，相对输出目录——适用时还有 `"gold"` / `"forced"`——`forced` 标记步数或上下文预算以强制作答轮结束的判定）。`tool.config` 记录已解析、无密钥的评审智能体配置（净化为 `scheme://host[:port][/path]`），便于从产物本身复现运行。
 
 `injections` 数组列出每一次原始投递及其所属区间、`role`（`first` 或 `restated`）、`verdict`、`content_chars`，以及 `op_id` / `seq` / `step`。
 
-`injudge.report/v9` 删除 `tool.config.scan.evidence_tokens`（单块压缩上限）。逐操作的 `input.evidence_tokens` 仍表示证据包实际大小。评分规则结构与 `injudge.summary/v5` 不变；仅接受当前报告 schema。
+`injudge.report/v10` 是智能体评审：每个被评判操作的 `input` 记录变为智能体运行记录（`path: "agent"`，带 `attempts` / `llm_calls` / `tool_calls` 与 `gold` / `forced` 标记），`tool.config` 变为已解析的智能体配置，`over_budget` 让位于 `forced_answers`。评分规则与推导链不变；仅接受当前报告 schema。

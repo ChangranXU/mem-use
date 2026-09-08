@@ -1,5 +1,5 @@
-"""Report assembly: the `injudge.report/v9` JSON artifact, the statistics-only
-`injudge.summary/v5` distillation, and the stdout summary.
+"""Report assembly: the `injudge.report/v10` JSON artifact, the statistics-only
+`injudge.summary/v6` distillation, and the stdout summary.
 
 The runtime artifact's output contract: per operation
 {operation_id, kind, seq, payload_summary, verdict, confidence, evidence[]}
@@ -8,14 +8,15 @@ span-local memory id — relevance / accuracy / novelty / influence /
 positive_effect with notes, plus the entry's action anchors), the judge's
 analysis, the per-entry placement exposure record (what the agent could
 actually see of each canonical value) and the per-entry footprint window
-bounds the anchors were validated against, the input record on budget-gate spans
-({"path": "full"|"scan", ...} with the scan counters, the gold-regime
-marker, the over-budget-send marker, and the length-fallback marker when a
-too-long full-text send was rerouted to the scan path), the per-span
+bounds the anchors were validated against, the agent-run record on judged
+spans ({"path": "agent", "attempts", "llm_calls", "tool_calls",
+"transcript"} plus the gold-regime marker and the forced-answer marker when
+a budget ended the conversation — `transcript` points at the conversation's
+pi event-sourced trajectory JSONL under agent-runs/), the per-span
 pairing-correction count,
 the deterministic delivery-cost and delivery-policy accounting, and per-run
 aggregates (verdict rates, rubric distributions, headline numbers, the
-input-path, gold-regime and over-budget-send counts) over all
+input-path, gold-regime and forced-answer counts) over all
 audited trajectories — the artifact used to claim one memory system or
 configuration is better than another. The tool block carries the resolved,
 secret-free judge configuration so the run is reproducible from its own
@@ -113,9 +114,9 @@ def operation_record(span: InjectionSpan, verdict: dict, delivery_cost: dict) ->
         "delivery_cost": delivery_cost,
         "auto": verdict.get("auto"),
         "error": verdict.get("error"),
-        # the budget-gate record — gate spans only: rule-judged auto-neutral
+        # the agent-run record — judged spans only: rule-judged auto-neutral
         # spans and --limit/dry-run unjudged spans omit it entirely (stamping
-        # them "full" would pollute the regime diagnostic)
+        # them "agent" would pollute the regime diagnostic)
         **({"input": verdict["input"]} if verdict.get("input") else {}),
         # judge-compliance marker: positive_effect↔influence pairing
         # corrections applied at verdict assembly, only when any (the
@@ -499,7 +500,7 @@ def _slim_aggregate(a: dict) -> dict:
     buckets = a.get("confidence_buckets") or {}
     if means or any(buckets.values()):
         out["confidence"] = {"mean_by_verdict": means, "buckets": buckets}
-    for opt in ("n_trajectories", "input_paths", "gold_scored", "over_budget",
+    for opt in ("n_trajectories", "input_paths", "gold_scored", "forced_answers",
                 "judge_compliance"):
         if opt in a:
             out[opt] = a[opt]
@@ -537,7 +538,7 @@ def _summary_span_index(op: dict) -> dict:
 
 
 def build_summary(artifact: dict) -> dict:
-    """The `injudge.summary/v5` artifact: the final statistics set of a run —
+    """The `injudge.summary/v6` artifact: the final statistics set of a run —
     the combined overall aggregate, and per trajectory the trajectory-level
     aggregate plus a narrative-free span index. The report artifact stays the
     judging record (rubric notes, analysis, judge_raw, the validation log);

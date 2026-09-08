@@ -1,0 +1,22 @@
+{
+	"name": "injudge-agent",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"description": "The pi-based agentic judge runner for injudge: one span's evidence folder, read-only tools, forced answer at the budget.",
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"scripts": {
+		"test": "node --test \"*.test.ts\""
+	},
+	"dependencies": {
+		"@earendil-works/pi-agent-core": "^0.85.1",
+		"@earendil-works/pi-ai": "^0.85.1",
+		"typebox": "1.3.7"
+	},
+	"devDependencies": {
+		"@types/node": "22.19.19",
+		"typescript": "5.9.3"
+	}
+}

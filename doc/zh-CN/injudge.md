@@ -12,8 +12,11 @@ injudge 根据召回注入在后续 agent 回合中的足迹，将其判为 **po
 ```bash
 uv run -m injudge <paths>    # 写出 output/injudge-report.json 与 output/summary.json
 
-# 预览模式：按区间打印评审输入（含 gold 块），全程不访问网络。
-# 只读 .env 中的预算/分块键——不读凭证、不发起调用、不写文件：
+# 评审的 TS 半边（一个 pi 智能体）需要先安装一次依赖：
+cd agent && npm install && cd ..
+
+# 预览模式：打印每个区间的证据文档、文件索引与开场消息，
+# 全程不访问网络、不启动 node、不写文件：
 uv run -m injudge <paths> --dry-run --limit 3
 ```
 
@@ -25,9 +28,11 @@ uv run -m injudge <paths> --dry-run --limit 3
 
 | 文件 | 内容 |
 |---|---|
-| `injudge-report.json` | 运行时评审记录（`injudge.report/v9`），每条轨迹后重写，崩溃也保留已完成部分 |
-| `summary.json` | 最终统计（`injudge.summary/v5`）：计数、比率、逐记忆使用 |
+| `injudge-report.json` | 运行时评审记录（`injudge.report/v10`），每条轨迹后重写，崩溃也保留已完成部分 |
+| `summary.json` | 最终统计（`injudge.summary/v6`）：计数、比率、逐记忆使用 |
 | `memgraph-verdicts.html` | 仅在 `--html` 时产出：召回节点按判定着色的 memgraph |
+| `evidence/` | 每个被评判区间一个文件夹：智能体检索过的文件（区间文档、manifest、逐步骤文件、gold） |
+| `agent-runs/` | 每个被评判区间一条轨迹 JSONL：判定如何得出的 pi 事件流记录 |
 
 投递成本与投递策略指标由录制数据按确定性规则计算，不经评审——见[产物](artifacts.md#交付成本与策略)。完整字段说明也在该页。
 
@@ -48,11 +53,11 @@ uv run -m injudge <paths> --dry-run --limit 3
 
 每个区间经过三个阶段，各自单独成页：
 
-1. **组装评分输入。** 已录制的任务陈述（若有）、该区间，以及 agent 步骤流。装得下 `JUDGE_INPUT_TOKENS` 的输入逐字进入；超预算的输入走证据扫描而非截断。→ [评分输入](scoring-input.md)
-2. **按评分规则打分。** 一次 LLM 调用为每条投递记忆返回五个信号——`relevance`、`accuracy`、`novelty`、`influence`、`positive_effect`——绝不返回判定。→ [评分规则与判定推导](verdict-derivation.md)
+1. **物化证据。** 已录制的任务陈述（若有）、区间文档、gold 附件（若有），以及每个已录制 agent 步骤一个文件，写入一个由智能体用其三个只读工具读取的文件夹。→ [评审证据](scoring-input.md)
+2. **按评分规则打分。** 一条智能体对话检索证据，为每条投递记忆返回五个信号——`relevance`、`accuracy`、`novelty`、`influence`、`positive_effect`——绝不返回判定。→ [评分规则与判定推导](verdict-derivation.md)
 3. **代码推导判定。** 先得出使用标签，再得出区间判定：任一误用即为 negative；否则任一采纳即为 positive；否则为 neutral。→ [评分规则与判定推导](verdict-derivation.md)
 
-调用本身的重试、层级与失败行为见[评审客户端](judge-client.md)。
+预算、强制作答与对话的重试/失败行为见[评审智能体](judge-client.md)。
 
 ## Golden Answer 与 Correctness
 
@@ -65,4 +70,4 @@ uv run -m injudge <paths> --dry-run --limit 3
 
 `correctness.json` 接受简单的 `{"resolved": true|false, "score": …}` 记录，或 SWE-bench 风格的评测报告（`resolved_ids` / `unresolved_ids`）。评测报告按轨迹记录的 `instance_id` 连接；error / incomplete 实例属于 harness 故障而非结果，不附加 correctness。`--gold-metadata` / `--harness-report` 是多轨迹形态：每条轨迹获得自己实例的 patch 与 resolved 位；连接失败（未记录 `instance_id`，或文件中缺该实例）时降级到下一来源并附 validation 注记。不可用的 linkage 文件（不可读、不可解析、形状不符）在任何付费 judge 调用之前快速失败。
 
-两者都没有时，评分使用朴素规则。gold 体系记录在每个经过预算门的操作的 `input` 上（`"gold": true`），并计入 `aggregates.overall.gold_scored`。
+两者都没有时，评分使用朴素规则。gold 体系记录在每个被评判操作的 `input` 上（`"gold": true`），并计入 `aggregates.overall.gold_scored`。

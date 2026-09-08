@@ -6,8 +6,9 @@ mem-eval scores memory-system quality from schema-v6 gate trajectories
 - **memgraph** renders every memory operation and its relationships as a
   self-contained HTML/JSON graph.
 - **injudge** scores each recall injection's subsequent influence with an
-  LLM rubric and writes `injudge.report/v9`, which memgraph can overlay
-  with `--verdicts`.
+  agentic LLM rubric (a pi agent searching one evidence folder per span)
+  and writes `injudge.report/v10`, which memgraph can overlay with
+  `--verdicts`.
 
 An injection is judged by its influence on later agent turns. The final
 task result is never the verdict.
@@ -35,12 +36,13 @@ From the checkout root:
 
 ```bash
 uv sync                                 # once: .venv from pyproject.toml + uv.lock
-uv run pytest tests -q                  # full suite (offline)
+cd agent && npm install                 # once: the pi agent packages (node >= 22.19)
+uv run pytest tests -q                  # full suite (offline; also runs node --test)
 uv run pytest tests/test_injudge.py -q  # one file
 uv run -m memgraph <paths> -o memgraph.html --json memgraph.json
-uv run -m injudge <paths> -o output/    # injudge-report.json + summary.json
+uv run -m injudge <paths> -o output/    # injudge-report.json + summary.json + evidence/
 uv run -m injudge <paths> --html        # also memgraph-verdicts.html
-uv run -m injudge <paths> --dry-run     # print judge input; no calls, no files
+uv run -m injudge <paths> --dry-run     # print each span's evidence; no calls, no files
 ```
 
 `<paths>` are trajectory dirs (containing `trajectory.jsonl`),
@@ -54,12 +56,16 @@ render. injudge also accepts `--golden`, `--correctness`, `--gold-metadata`,
 `--harness-report`, `--limit`, and `--env` (see `doc/en/configuration.md`).
 
 Judge credentials live in the checkout `.env` (copy `.env.example`; never
-commit `.env`). Every key the tools consume is validated. `--dry-run`
-reads only budget/chunk knobs from a readable `.env`, never credentials.
+commit `.env`). Every key the tools consume is validated; the API key
+reaches the runner only through the `JUDGE_API_KEY` environment variable.
+`--dry-run` needs no `.env`, no node, and makes no calls.
 
-`uv sync` installs runtime (`tiktoken`, `tqdm`), `dev` (pytest), and `data`
+`uv sync` installs runtime (`tqdm`), `dev` (pytest), and `data`
 (pandas/numpy/pyarrow/huggingface_hub for `data/utils` only). memgraph is
-stdlib-only; the data group is never imported by the tools or tests.
+stdlib-only; the data group is never imported by the tools or tests. The
+judge agent is TypeScript under `agent/` (`@earendil-works/pi-agent-core`
++ `@earendil-works/pi-ai`, ESM, node >= 22.19 with type stripping, no
+build step); `npm install` there once.
 
 ## Layout
 
@@ -72,19 +78,23 @@ memgraph/model.py          # Trajectory / MemoryOp / MemoryUnit / Edge
 memgraph/parse_trajectory.py  # trajectory.jsonl → ops; shared step rule
 memgraph/graph.py          # path discovery, cross-trajectory linking, validation
 memgraph/html.py           # self-contained HTML (template + embedded graph JSON)
-memgraph/verdicts.py       # merge injudge.report/v9 onto recall ops
+memgraph/verdicts.py       # merge injudge.report/v10 onto recall ops
 memgraph/__main__.py       # python3 -m memgraph
 injudge/__init__.py        # REPORT_SCHEMA / SUMMARY_SCHEMA (writer + memgraph reader)
 injudge/model.py           # AgentStep / ToolExec / InjectionSpan
 injudge/steps.py           # agent-lane step stream + all-lane billed prompt tokens
 injudge/spans.py           # recall ops → injection spans
-injudge/judge.py           # .env, tiered urllib client, budget gate, verdict parse
-injudge/scan.py            # overflow path: chunks, evidence extraction, assembly
+injudge/judge.py           # the verdict contract, judge prompts, evidence renderers
+injudge/evidence.py        # one span's judge evidence as a folder of files + manifest
+injudge/agent.py           # .env → AgentConfig, runner subprocess, corrective-retry loop
 injudge/gold.py            # golden-answer / correctness sidecars and CLI joins
 injudge/prompts.py         # loads prompts/ (never inline prompts in code)
 injudge/aggregate.py       # verdict counts/rates, per-memory usage roll-ups
-injudge/report.py          # injudge.report/v9 + injudge.summary/v5 + stdout
+injudge/report.py          # injudge.report/v10 + injudge.summary/v6 + stdout
 injudge/__main__.py        # python3 -m injudge
+agent/                     # TS judge agent: runner.ts (pi Agent + budgets),
+                           # evidence-tools.ts (scoped read-only tools),
+                           # trajectory.ts (pi event-sourced recording), protocol.ts
 prompts/                   # every LLM prompt, grouped by tool/purpose
 doc/                       # GitBook: LANGS.md + en/ + zh-CN/, each with SUMMARY.md
 data/                      # SWE-bench Verified streams; data/utils build stack
@@ -206,80 +216,51 @@ LLM. `used` is acted-on influence that improved the work; `misused` is
 acted-on influence with `positive_effect` `no_effect` or `harmed`. Mere
 reference is never misuse.
 
+The judge is an AGENT, not one prompt. Python materializes each span's
+evidence into a folder (`injudge/evidence.py`: manifest.json + span.md +
+gold.md + one file per recorded agent step, written under
+`<output>/evidence/`) and spawns `agent/runner.ts` — a pi agent whose only
+tools are list/read/search, scoped to that folder (absolute paths, `..`,
+and out-of-root symlinks refused). The conversation is bounded by two
+budgets, both ending in a FORCED final answer (the harness pattern), never
+a mid-run failure: MAX_STEPS caps LLM calls, and the CONTEXT_WINDOW
+watermark (minus the reserved MAX_OUTPUT_TOKENS) rolls back the
+overflowing round and injects the forced message. A defiant tool call in
+the forced round is blocked.
+
 Easy to get wrong:
 
 - The judge contract keys every rubric entry by a span-local memory id
   (`m1`, `m2`, … per delivered entry). Display keys are labels only.
-- Span-relative checks run inside the attempt loop via the contract
-  validate hook: exact id coverage, action anchors (acted-on/decisive
-  claims cite step numbers inside that entry's footprint window, never past
-  the step stream's end), and the anchor/influence shape (`anchors` stay
-  empty when influence is `none`). Novelty, accuracy, influence, and
-  effect are ORTHOGONAL signals — a redundant memory can still change the
-  action as a reminder, and refuted content can still have triggered the
-  fix — so no cross-signal combination is a contract violation. A
-  shape-valid answer failing any of them is a model
-  error at every tier — constrained decoding cannot know the span's ids or
-  windows, so it is never a free tier discovery. It takes the corrective
-  retry; exhaustion is a visible `error`, never a silently partial verdict.
-- Judged input grounds every memory to its recorded placement exposure
+- Python owns the contract: the runner reports the final assistant text,
+  and `_strict_parse` + `_verdict_semantics` (injudge/judge.py) decide
+  whether it is a verdict — exact id coverage, action anchors (acted-on/
+  decisive claims cite step numbers inside that entry's footprint window,
+  never past the step stream's end), and the anchor/influence shape
+  (`anchors` stay empty when influence is `none`). A violation takes the
+  corrective retry, which CONTINUES the same conversation (the next runner
+  invocation seeds the prior transcript via job.history — no re-reading);
+  exhaustion is a visible `error` with the answer text kept (masked),
+  never a silently partial verdict. Novelty, accuracy, influence, and
+  effect are ORTHOGONAL signals — no cross-signal combination is a
+  contract violation.
+- The evidence grounds every memory to its recorded placement exposure
   (adapter-free value-vs-placement compare: full / whitespace-and-escape
-  normalized full (`full_normalized`) — prose-safe values only, since
-  collapsing whitespace or stripping escapes inside strings, regexes, or
-  indentation-sensitive content changes semantics rather than presentation —
-  clipped prefix only /
-  unknown-marked with the canonical value WITHHELD from the judge and from
-  the scan path's anchor seeding; the memory's `memory_type` label is
-  withheld from the judge alongside confidence). The judged evidence never
-  exceeds what the agent could have seen.
-- HTTP redirects are refused on every judge call (scoring and extraction).
-  The stdlib redirect handler would forward credential headers to any
-  Location, so a 3xx fails the span as a request fault.
-- Auto mode walks structured → json → prompt (anthropic: structured →
-  prompt). Tier discovery on a 400/422 or a proven-ignored format field is
-  free; everything else consumes `MAX_ATTEMPTS`. The learned-tier memo is
-  degrade-only. A 400/422 that repeats unchanged at the final (format-less)
-  tier is a config fault, not a format refusal. Any other non-429 4xx fails
-  the span at once.
-- Length/context-window rejection (413 by status, or a signed 400/422 body)
-  fails as "length" at the branch entry instead of walking the chain, so
-  the scoring caller falls back to the chunked scan path once (tiktoken can
-  undercount the real judge tokenizer).
-- With `OUTPUT_FORMAT` pinned there is no chain, so a 400/422 fails the
-  span (recorded, the run continues). A length-signed rejection still falls
-  back to the scan path — the pin constrains the format field, not the
-  input size.
-- At the json tier, invalid JSON is free degrade (JSON mode guarantees valid
-  JSON). A valid-but-wrong-shape answer is a model error and takes the
-  same-tier corrective retry.
-- Truncation and near-JSON:
-  - An answer cut at the output-token budget mid-way (no complete JSON
-    value) is a budget property: `error` naming the truncation, no degrade,
-    no same-budget retry.
-  - A complete-but-out-of-contract answer carrying the truncation signal is
-    not a budget failure; it routes through the chain / corrective retry.
-  - An integer literal past Python's digit limit is a finished answer (RFC
-    8259 sets no limit) and a model error at every tier, taking the
-    corrective retry. If the text is invalid JSON anyway (the refusal fires
-    at the literal, before later garbage), invalid-JSON wins and the json
-    tier degrades free.
-  - Pathological nesting past the parser's recursion limit is the same class
-    for the truncation gate (no budget produces or fixes it): the
-    completeness parsers read it as incomplete — they stop at the recursion
-    limit even with braces closed — so the deep-nesting error class is
-    excluded from the budget failure and keeps the corrective retries.
-    Depth is schema-illegal, so at the structured tier it proves an ignored
-    format field and degrades free; at json/prompt it is a model error
-    taking the corrective retry.
-  - A truncated answer that still slips past the completeness check (a stray
-    complete top-level object reads as finished; a fragment nested inside
-    the cut value never does) exhausts the corrective budget and ends in an
-    error naming both the violation and the budget.
-  - An empty-content answer that finished normally earns a fresh draw of the
-    identical request. On openai-chat, a complete verdict drafted into
-    `reasoning_content` is recovered instead (noted per span).
-- An unparseable or out-of-contract answer becomes verdict `error` with the
-  answer text kept (masked) — never silently neutral.
+  normalized full (`full_normalized`) — prose-safe values only — clipped
+  prefix only / unknown-marked with the canonical value WITHHELD from the
+  folder; the memory's `memory_type` label is withheld alongside
+  confidence). The judged evidence never exceeds what the agent could have
+  seen.
+- The API key travels to the runner only via the JUDGE_API_KEY
+  environment variable — never in the job/result files — and endpoint
+  output that echoes it is masked before any text reaches a verdict,
+  `judge_raw`, or validation note (raw key and every percent-encoded
+  spelling, either hex case; a key shorter than 8 characters is no
+  credential). A runner-level failure (node missing, packages uninstalled,
+  unreadable job) is that span's error verdict with a note, not a retry.
+- Out-of-contract answers, empty final texts, and output-budget cuts are
+  all one corrective-retry class — there are no conformance tiers, no
+  truncation forensics, no input budget gates, and no tiktoken anywhere.
 
 ## Style
 
@@ -287,9 +268,11 @@ Easy to get wrong:
    `from __future__ import annotations` at the top of every module
    (`test_*.py` excepted; `tests/conftest.py` and
    `tests/annotated_fixtures.py` use it).
-2. Runtime is stdlib plus tiktoken (o200k_base budget estimate) and tqdm
-   (CLI progress bars). urllib for the judge client, no SDK. Do not add
-   dependencies. The `data` group is for `data/utils` only.
+2. Python runtime is stdlib plus tqdm (CLI progress bars); the judge agent
+   is the TypeScript pi stack under `agent/` (no new Python dependencies;
+   no SDK on either side — urllib is gone with the one-shot client). The
+   `data` group is for `data/utils` only. TS side: erasable-typestrip
+   TypeScript, ESM, tabs, node:test for tests, no build step.
 3. `pathlib` instead of `os.path`. Artifacts go through `atomic_write`.
 4. Data containers are plain dataclasses with `to_dict()`. Parameterize
    generics (`set[str | None]`, not bare `set`).
@@ -301,12 +284,17 @@ Easy to get wrong:
 ## Tests
 
 Fixtures are synthetic schema-v6 trajectories from
-`tests/annotated_fixtures.py` (`AnnotatedBuilder`). No network: stub the
-judge by monkeypatching `injudge.judge.urlopen`, and the scan path with
-`injudge.scan.urlopen`. Assert on artifacts written to disk.
+`tests/annotated_fixtures.py` (`AnnotatedBuilder`). No network, no node:
+stub the agent runner by monkeypatching `injudge.agent._invoke_runner`
+with canned results (the corrective loop, input records, and evidence
+folders all run for real). Assert on artifacts written to disk. The TS
+evidence tools' path-scoping is security-bearing and tested under
+`node --test agent/` (`agent/evidence-tools.test.ts`), driven from pytest
+by `tests/test_agent_tools.py` (skipped when node or the packages are
+missing).
 
 Name tests `test_<behavior>`. When a test is warranted, hit a real failure
-point (corrupt input, step attribution, verdict joins, tier classification),
+point (corrupt input, step attribution, verdict joins, retry routing),
 not a status code. Payload-based HTML tests (poison in, exact escaped
 payload out) are the shape to follow; template-text pins exist only where
 the guarded behavior is JS-side and the stdlib-only rule bars a JS engine.
@@ -326,8 +314,9 @@ offline and uses disposable fixtures; do not stop for approval to run it.
 
 These are load-bearing; never weaken them.
 
-- The judge API key comes from `.env` and is sent only to the judge
-  endpoint. It must never appear in artifacts, reports, logs, or error
+- The judge API key comes from `.env`, travels to the runner only through
+  the `JUDGE_API_KEY` environment variable (never the job/result temp
+  files), and is sent only to the judge endpoint. It must never appear in artifacts, reports, logs, or error
   messages (credential and URL config errors name keys, never values;
   enum/numeric knob errors show the offending literal, which is no
   credential). Endpoint output that
@@ -360,7 +349,7 @@ The HTML colors rewrite markers by each marker's own `on_memory_lane` flag,
 computed at parse time against the final lane set. Do not prune a field
 from one consumer only.
 
-**injudge** writes `injudge.report/v9` (`{tool, generated_at, trajectories,
+**injudge** writes `injudge.report/v10` (`{tool, generated_at, trajectories,
 operations, injections, aggregates, validation}`), rewritten after every
 trajectory so a crash keeps completed work.
 
@@ -373,19 +362,25 @@ trajectory so a crash keeps completed work.
   and digests are
   never overwritten. Span set-diffs also carry `new_keys` / `removed_keys`
   / `previous_keys` / `changed_keys`.
-- `tool.config` is the resolved, secret-free judge/scan configuration (URLs
-  sanitized to `scheme://host[:port][/path]`).
-- Each operation that hit the input budget gate carries an `input` record:
-  `{"path": "full"}` or `{"path": "scan", "chunks", "none_chunks",
-  "evidence_tokens"}`, plus `"gold"`, `"over_budget"`, and
-  `"length_fallback"` when they apply. Rule-judged auto-neutral spans and
-  unjudged spans omit it. A span whose judging failed unexpectedly (a
-  non-JudgeError) keeps a re-derived `{"path", "gold"?}` record without the
-  scan counters.
+- `tool.config` is the resolved, secret-free judge-agent configuration
+  (URLs sanitized to `scheme://host[:port][/path]`).
+- Each judged operation carries an `input` record:
+  `{"path": "agent", "attempts", "llm_calls", "tool_calls", "transcript"}`
+  plus `"gold"` and `"forced"` when they apply (`forced`: the verdict came
+  from a budget-exhausted forced final round). Rule-judged auto-neutral
+  spans and unjudged spans omit it.
 - `aggregates.overall` counts the regimes: `input_paths`, `gold_scored`,
-  `over_budget`.
+  `forced_answers`.
+- The run also writes `<output>/evidence/<span-id>/` — the exact folders
+  the agents read (audit/replay value; they embed recorded memory values
+  like the report does) — and `<output>/agent-runs/<span-id>.jsonl` — the
+  pi event-sourced trajectory of each judging conversation (message lines
+  as they happen, `tombstone` lines for budget rollbacks, the injected
+  forced message, per-attempt `attempt_end` diagnostics; recorded raw by
+  the runner, rewritten masked by Python after every attempt; `seq` is
+  attempt-local).
 
-The companion `summary.json` (`injudge.summary/v5`) is the run's final
+The companion `summary.json` (`injudge.summary/v6`) is the run's final
 statistics: counts/rates, rubric distributions, cost, confidence, judge
 compliance (the positive_effect↔influence correction rate), per-trajectory
 extraction reliability (`n_extractions` / `extraction_failures`), and slim
@@ -437,14 +432,14 @@ Components for `fix` / `feat` / `enh` / `ref`:
 ## Rules
 
 - Every LLM prompt lives under `prompts/`, grouped by tool and purpose
-  (`prompts/injudge/signals/`, `scoring/`, `extraction/`) and loaded through
+  (`prompts/injudge/signals/`, `scoring/`, `agent/`) and loaded through
   `injudge/prompts.py`. Never inline a prompt string in code. Shared text
   (rubric signal definitions, the answer contract) is factored into shared
   files and assembled with `@slot@` placeholders; enum literals stay
   `@accuracy@`-style tokens filled from the contract constants. Prompt files
   hold instruction prose. Short structural text the code stamps around it
-  (section labels, span/chunk metadata lines, evidence-block step-range
-  headers) is code-owned, sized by the token reserves, and not a prompt.
+  (section labels, the evidence manifest's per-file descriptions, the
+  opening message's span stamp) is code-owned and not a prompt.
 - Do not preserve backward compatibility. Remove obsolete paths instead of
   adding compatibility layers, fallbacks, or migrations.
 - Smallest implementation that meets current requirements. No speculative

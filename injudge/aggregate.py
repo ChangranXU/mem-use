@@ -267,19 +267,19 @@ def aggregate(operations: list[dict], n_injections: int, n_trajectories: int | N
     }
     if n_trajectories is not None:
         out["n_trajectories"] = n_trajectories
-        # the two evidence regimes (full-text vs scanned input) and the two
-        # rubric regimes (gold vs plain), counted over gate spans only —
-        # visible before anyone compares memory systems off the aggregate;
-        # the over-budget sends count too: a span sent as-is past the input
-        # budget is its own evidence regime, and the per-operation marker is
-        # invisible without the tally
+        # the judging regime (every LLM-judged span runs the agent) and the
+        # two rubric regimes (gold vs plain), counted over judged spans
+        # only — visible before anyone compares memory systems off the
+        # aggregate; the forced answers count too: a span whose verdict came
+        # from the budget-exhausted final round is its own judge-quality
+        # regime, and the per-operation marker is invisible without the
+        # tally
         gate = [o["input"] for o in operations if o.get("input")]
         out["input_paths"] = {
-            "full": sum(1 for i in gate if i.get("path") == "full"),
-            "scan": sum(1 for i in gate if i.get("path") == "scan"),
+            "agent": sum(1 for i in gate if i.get("path") == "agent"),
         }
         out["gold_scored"] = sum(1 for i in gate if i.get("gold"))
-        out["over_budget"] = sum(1 for i in gate if i.get("over_budget"))
+        out["forced_answers"] = sum(1 for i in gate if i.get("forced"))
     counts = dict.fromkeys(_COUNTED, 0)
     conf_sums: dict[str, list[float]] = {v: [] for v in _VERDICTS}
     usage_roll: dict[tuple[str | None, str], dict] = {}

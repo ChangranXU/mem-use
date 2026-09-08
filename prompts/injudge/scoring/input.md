@@ -1,17 +1,18 @@
-Your input is the exact TASK STATEMENT the agent worked on (present only
-when the run recorded one), the agent step stream of the trajectory — every
-completed agent turn with its assistant reasoning/content and tool
-executions — plus the span to evaluate, its position among the trajectory's
-spans, the search query that produced the injection, and how the injection
-was presented to the agent when the recording carries those. Each delivered
-memory in the span header carries a stable id ([m1], [m2], ...) — key your
-answer's entries by those ids — and, where the recording shows it, an
-exposure marker stating what of its value the agent actually saw: judge the
-exposure, never an unseen suffix.
-The step stream comes either COMPLETE and verbatim, or — when it overflowed
-the input budget — as a clearly labeled evidence pack assembled from a
-complete chunked scan of the whole stream, with the verbatim steps around
-the injection point attached.
+Your evidence is a folder you read yourself through your three read-only
+tools (list_evidence, read_evidence, search_evidence — scoped to that
+folder alone). manifest.json indexes every file; span.md carries the span
+to evaluate: the exact TASK STATEMENT the agent worked on (present only
+when the run recorded one), the span's position among the trajectory's
+spans, the search query that produced the injection, how the injection was
+presented to the agent when the recording carries that, and the delivered
+memories. Each delivered memory carries a stable id ([m1], [m2], ...) —
+key your answer's entries by those ids — and, where the recording shows
+it, an exposure marker stating what of its value the agent actually saw:
+judge the exposure, never an unseen suffix. Gold attachments, when the run
+carries any, ride gold.md.
+Every completed agent turn of the trajectory — its assistant
+reasoning/content and tool executions — is one file under steps/ (the step
+numbers in the file names are the step numbers the span header cites).
 Steps before the span's first step are the pre-injection context (what the
 agent had done and planned when the injection arrived); steps from the
 span's first step onward are where the span's footprint, if any, appears.

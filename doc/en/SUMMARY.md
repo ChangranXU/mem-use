@@ -12,9 +12,9 @@
 ## Judging
 
 * [injudge](injudge.md)
-  * [Scoring input](scoring-input.md)
+  * [Judge evidence](scoring-input.md)
   * [Rubric and verdict derivation](verdict-derivation.md)
-  * [Judge client](judge-client.md)
+  * [Judge agent](judge-client.md)
 
 ## Reference
 

@@ -3,20 +3,22 @@
 Judge recall injections in gate trajectories: group identical injections
 into spans, then score every delivered memory on a five-signal rubric
 (relevance / accuracy / novelty / influence / positive_effect). The judge
-input is the recorded task statement (when the run carries one), the
-agent step stream, plus the span to evaluate — the full stream when it fits
-the judge input budget (JUDGE_INPUT_TOKENS), otherwise an evidence pack
-assembled from a chunked scan of the whole trajectory (never truncated).
-The span verdict is derived in code from the rubric — never asked of the
-LLM, never read off the final task result.
+is an AGENT, not one prompt: each span's evidence (task, span header,
+gold attachments, one file per recorded agent step) is materialized into a
+folder under <output>/evidence/, and a pi agent with read-only tools
+scoped to that folder searches it and answers with the rubric JSON. Two
+simple budgets bound every conversation — a max-steps LLM-call cap and
+the context window — and both end in a forced final answer, never a
+mid-run failure. The span verdict is derived in code from the rubric —
+never asked of the LLM, never read off the final task result.
 
-One scoring call per span (plus chunked evidence-extraction calls when the
-input overflows the budget). Outputs land in the -o/--output folder
-(default output/): injudge-report.json (the runtime report) and
-summary.json (the rubric statistics), plus memgraph-verdicts.html with
---html. --dry-run prints the judge input (task, span +
-whole step stream, any gold attachments) without any network access; when
-the input overflows the budget it also prints the would-be chunk counts.
+One agent conversation per span (plus corrective retries that continue
+the same conversation). Outputs land in the -o/--output folder (default
+output/): injudge-report.json (the runtime report), summary.json (the
+rubric statistics), evidence/ (the judged folders), agent-runs/ (one
+transcript JSONL per span — the audit trail of how each verdict was
+reached), plus memgraph-verdicts.html with --html. --dry-run prints each
+span's evidence document and file index without any network access.
 """
 
 from __future__ import annotations
@@ -41,6 +43,15 @@ except ImportError as e:
     ) from e
 
 from util import atomic_write, check_writable, print_safe, print_validation
+from injudge.agent import (
+    MAX_PARALLEL,
+    AgentConfig,
+    _int_config,
+    dry_run_print,
+    judge_span,
+    load_env,
+    resolve_config,
+)
 from injudge.gold import (
     join_gold_patch,
     join_harness_report,
@@ -48,23 +59,7 @@ from injudge.gold import (
     load_harness_report,
     load_sidecar,
 )
-from injudge.judge import (
-    MAX_PARALLEL,
-    GoldInput,
-    JudgeConfig,
-    JudgeError,
-    _gate_tokens,
-    _int_config,
-    _scoring_system,
-    auto_verdict_no_subsequent_turn,
-    blank_verdict,
-    count_tokens,
-    judge_span,
-    load_env,
-    render_user,
-    resolve_config,
-    unexpected_span_failure,
-)
+from injudge.judge import GoldInput, _mask_keys, auto_verdict_no_subsequent_turn, blank_verdict
 from injudge.model import InjectionSpan
 from injudge.report import (
     build_artifact,
@@ -73,7 +68,6 @@ from injudge.report import (
     operation_record,
     print_summary,
 )
-from injudge.scan import ScanConfig, _chunks, resolve_scan, scan_knobs
 from injudge.spans import group_spans
 from injudge.steps import _token_share, build_step_stream, prompt_tokens_total
 from memgraph.graph import build_graph, load_trajectories
@@ -111,54 +105,23 @@ def _safe_endpoint(url: str) -> str:
     return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
 
 
-def _run_manifest(
-    cfg: JudgeConfig, scan: ScanConfig | None, judge_parallel: int
-) -> dict:
+def _run_manifest(cfg: AgentConfig, judge_parallel: int) -> dict:
     """The resolved, secret-free configuration the run actually judged
     with: a saved report is replayable evidence only if its judge settings
     are recoverable from it. Never the API key, never a URL's
-    userinfo/query (see _safe_endpoint); runtime-mutating state
-    (learned_tier) and the credentials stay out by construction."""
-    manifest: dict = {
+    userinfo/query (see _safe_endpoint)."""
+    return {
         "api": cfg.api,
         "base_url": _safe_endpoint(cfg.base_url),
         "timeout_s": cfg.timeout,
         "max_attempts": cfg.max_attempts,
-        "max_tokens": cfg.max_tokens,
+        "max_steps": cfg.max_steps,
+        "max_output_tokens": cfg.max_output_tokens,
+        "context_window": cfg.context_window,
         "temperature": cfg.temperature,
-        "output_format": cfg.output_format,
+        "thinking_level": cfg.thinking_level,
         "judge_parallel": judge_parallel,
     }
-    for key in ("thinking", "thinking_effort", "thinking_budget"):
-        if getattr(cfg, key) is not None:
-            manifest[key] = getattr(cfg, key)
-    if scan is not None:
-        scan_cfg: dict = {
-            "parallel": scan.parallel,
-            "input_tokens": scan.input_tokens,
-            "chunk_steps": scan.chunk_steps,
-            "chunk_tokens": scan.chunk_tokens,
-            "neighborhood": scan.neighborhood,
-        }
-        ext = scan.extraction
-        if ext is not None:
-            scan_cfg.update(
-                {
-                    "api": ext.api,
-                    "base_url": _safe_endpoint(ext.base_url),
-                    "model": ext.model,
-                    "thinking": ext.thinking,
-                    "max_attempts": ext.max_attempts,
-                    "max_tokens": ext.max_tokens,
-                    "temperature": ext.temperature,
-                    "output_format": ext.output_format,
-                }
-            )
-            for key in ("thinking_effort", "thinking_budget"):
-                if getattr(ext, key) is not None:
-                    scan_cfg[key] = getattr(ext, key)
-        manifest["scan"] = scan_cfg
-    return manifest
 
 
 def _unjudged(reason: str) -> dict:
@@ -275,7 +238,7 @@ def _exposure_notes(run_id: str, spans: list[InjectionSpan]) -> list[dict]:
                 "msg": f"{run_id}: {unknown} of {total} span "
                        "memory entries have undeterminable placement exposure "
                        "(redacted/unrecorded placement, or a renderer that "
-                       "transformed the value); the judge input marks them "
+                       "transformed the value); the judge evidence marks them "
                        "unverified instead of implying full visibility",
             }
         )
@@ -296,7 +259,7 @@ class _Progress:
         # interactive terminal — a piped run gets the checkpoint lines
         # (finish_trajectory), never an inert bar each span update locks into
         self._tty = sys.stderr.isatty()
-        # mininterval=0 renders every update (spans move at LLM-call pace —
+        # mininterval=0 renders every update (spans move at agent-run pace —
         # seconds, not frames)
         self._traj_bar = (
             tqdm(total=total_trajs, desc="trajectories", unit="traj", mininterval=0)
@@ -372,37 +335,34 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--env", type=Path, default=None,
                     help=f".env path (default: {_DEFAULT_ENV})")
     ap.add_argument("--timeout", type=float, default=None,
-                    help="judge request timeout seconds (default 300)")
+                    help="per-LLM-call timeout seconds (default 300)")
     ap.add_argument("--max-attempts", type=int, default=None,
-                    help="generation tries per judged span at the working tier — "
-                    "transport failures and out-of-contract answers share the "
-                    "budget; tier discovery is free (default: MAX_ATTEMPTS "
-                    "from .env, else 5)")
+                    help="agent conversations per judged span — an out-of-contract "
+                    "answer takes a corrective retry that continues the same "
+            "conversation (default: MAX_ATTEMPTS from .env, else 5)")
     ap.add_argument("--judge-max-tokens", type=int, default=None,
-                    help="judge response budget (default: MAX_TOKENS from .env, else "
-                    "65536; reasoning models need headroom — it is a cap, not a "
-                    "reservation: billing is on tokens actually generated)")
+                    help="max output tokens per LLM call (default: "
+                    "MAX_OUTPUT_TOKENS from .env, else 65536)")
     ap.add_argument(
         "--dry-run",
         action="store_true",
-        help="print the judge input per span (gold blocks included), plus an "
-        "INPUT OVERFLOW note with the would-be chunk counts when it exceeds "
-        "the budget; reads only the budget/chunk knobs from .env (never "
-        "credentials), no judge calls, no files written",
+        help="print each span's evidence document and file index (the folder "
+        "the agent would search) plus the opening message; no judge calls, "
+        "no files written",
     )
     ap.add_argument(
         "--golden",
         type=Path,
         default=None,
         help="golden answer file (reference solution): its body is attached to "
-        "every scoring call and switches it to the gold rubric; overrides a "
+        "every span's evidence and switches it to the gold rubric; overrides a "
         "trajectory's golden.txt/golden.md sidecar",
     )
     ap.add_argument(
         "--correctness",
         choices=("resolved", "unresolved"),
         default=None,
-        help="recorded task outcome attached to every scoring call "
+        help="recorded task outcome attached to every span's evidence "
         "(corroboration only — it never selects the gold rubric); overrides a "
         "trajectory's correctness.json sidecar",
     )
@@ -412,7 +372,7 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="verified-metadata.json with per-instance gold patches: each "
         "trajectory's patch is joined by its recorded instance_id and "
-        "switches that call to the gold rubric; sits between --golden and "
+        "switches that span to the gold rubric; sits between --golden and "
         "the trajectory's golden.txt/golden.md sidecar in precedence",
     )
     ap.add_argument(
@@ -425,10 +385,10 @@ def main(argv: list[str] | None = None) -> int:
         "the trajectory's correctness.json sidecar in precedence",
     )
     ap.add_argument("--limit", type=int, default=None,
-                    help="judge at most N spans with the LLM (rest: unjudged); "
-                    "also caps --dry-run to printing the first N spans' judge "
-                    "inputs (rule-judged auto-neutral spans always verdict — "
-                    "they cost no judge call)")
+                    help="judge at most N spans with the agent (rest: unjudged); "
+                    "also caps --dry-run to printing the first N spans' evidence "
+                    "(rule-judged auto-neutral spans always verdict — "
+                    "they cost no agent run)")
     ap.add_argument(
         "-o",
         "--output",
@@ -436,7 +396,9 @@ def main(argv: list[str] | None = None) -> int:
         default=Path("output"),
         help="output folder for the artifacts (default: output/) — always "
         "injudge-report.json (the runtime report) and summary.json (the "
-        "rubric statistics); memgraph-verdicts.html with --html",
+        "rubric statistics), plus evidence/ (the judged folders) and "
+        "agent-runs/ (one transcript JSONL per span); "
+        "memgraph-verdicts.html with --html",
     )
     ap.add_argument(
         "--html",
@@ -492,12 +454,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.harness_report is not None:
         harness_report = load_harness_report(args.harness_report)
 
-    cfg = None
-    scan_cfg: ScanConfig | None = None
+    cfg: AgentConfig | None = None
     judge_parallel = 1  # JUDGE_PARALLEL: spans of one trajectory judged in parallel
     report_path = args.output / "injudge-report.json"
     summary_path = args.output / "summary.json"
     html_path = args.output / "memgraph-verdicts.html"
+    evidence_root = args.output / "evidence"
+    transcripts_root = args.output / "agent-runs"
     env_path = args.env or _DEFAULT_ENV
     if not args.dry_run:
         # fail fast on an unwritable output folder, before any paid judge
@@ -525,34 +488,9 @@ def main(argv: list[str] | None = None) -> int:
             max_attempts=args.max_attempts,
             max_tokens=args.judge_max_tokens,
         )
-        scan_cfg = resolve_scan(env, cfg)
         judge_parallel = _int_config(env, "JUDGE_PARALLEL") or 1
         if judge_parallel > MAX_PARALLEL:
             raise SystemExit(f"error: JUDGE_PARALLEL must be at most {MAX_PARALLEL}")
-    else:
-        # the dry run needs only the budget/chunk knobs for the overflow
-        # preview: read them from a READABLE .env (an illegal value fails fast
-        # naming the key, exactly as resolve_config would); a missing or
-        # unreadable one leaves the baked defaults — credentials are never
-        # required
-        env: dict[str, str] = {}
-        if env_path.is_file():
-            try:
-                env = load_env(env_path)
-            except SystemExit as e:
-                # load_env raises only for an unreadable/undecodable file:
-                # treat it like a missing one (its message names the cause)
-                print_safe(f"warning: {e}; the dry run uses the default "
-                           "budget/chunk knobs", err=True)
-        scan_cfg = ScanConfig(extraction=None, **scan_knobs(env))
-
-    # Probe the tokenizer once on the main thread, before the trajectory
-    # loop: with JUDGE_PARALLEL > 1 the first count would otherwise fire on a
-    # pool worker, where count_tokens' missing-tiktoken SystemExit (a
-    # BaseException the per-span handler cannot catch) surfaces only after
-    # the pool drains — the fail-fast belongs here, before any paid judge
-    # call
-    count_tokens("")
 
     trajectories: list[dict] = []
     operations: list[dict] = []
@@ -582,7 +520,7 @@ def main(argv: list[str] | None = None) -> int:
             # the resolved, secret-free settings the run judged with — a
             # report is replayable evidence only if its configuration is
             # recoverable from it (see _run_manifest)
-            "config": _run_manifest(cfg, scan_cfg, judge_parallel),
+            "config": _run_manifest(cfg, judge_parallel),
         }
 
     progress = _Progress(len(trajs), enabled=not args.dry_run)
@@ -706,7 +644,7 @@ def main(argv: list[str] | None = None) -> int:
             }
         )
 
-        # golden-answer / correctness attachments (final scoring call only):
+        # golden-answer / correctness attachments (the span's evidence only):
         # the CLI values win, then the per-instance linkage files (joined by
         # the recorded instance_id), then the trajectory's own sidecar files
         def _gold_warn(msg: str) -> None:
@@ -728,8 +666,8 @@ def main(argv: list[str] | None = None) -> int:
         verdict_by_span: dict[str, dict] = {}
         # per-span routing is decided serially — rule-judged auto-neutral,
         # --limit-cutoff and dry-run spans are instant and order-fixed; only
-        # the judge_span calls (each independent: its own input, its own
-        # scoring call) go to the pool when JUDGE_PARALLEL > 1
+        # the judge_span calls (each independent: its own evidence folder,
+        # its own agent conversation) go to the pool when JUDGE_PARALLEL > 1
         judged: list[tuple[int, InjectionSpan]] = []
         verdicts: dict[int, dict] = {}
         for i, span in enumerate(spans):
@@ -741,26 +679,10 @@ def main(argv: list[str] | None = None) -> int:
                 progress.advance_span()
             elif args.dry_run:
                 taken += 1
-                # the judge input embeds recorded memory values: print it
+                # the evidence embeds recorded memory values: print it
                 # surrogate-safe like the artifacts (a \ud800 value in a
                 # delivered memory must not abort the dry run)
-                user = render_user(span, steps, t.task, gold=gold)
-                print_safe(user)
-                system = _scoring_system(gold)
-                # the gate's own measurement: BPE is not additive across the
-                # head/stream/tail seams, so counting the joined user could
-                # disagree with the live routing near the budget threshold
-                tokens = _gate_tokens(system, span, steps, t.task, gold)
-                if tokens > scan_cfg.input_tokens:
-                    chunks = _chunks(steps, span, scan_cfg, t.task)
-                    n_pre = sum(1 for c in chunks if c.side == "pre")
-                    print_safe(
-                        f"INPUT OVERFLOW for {span.id}: ≈{tokens} tokens > "
-                        f"JUDGE_INPUT_TOKENS={scan_cfg.input_tokens} — a real run "
-                        f"would scan {n_pre} pre + {len(chunks) - n_pre} post chunks "
-                        "and assemble an evidence pack (extraction only runs live; "
-                        "above is the verbatim full-text input)"
-                    )
+                dry_run_print(span, steps, t.task, gold)
                 verdicts[i] = _unjudged("dry run")
                 progress.advance_span()
             else:
@@ -768,36 +690,28 @@ def main(argv: list[str] | None = None) -> int:
                 judged.append((i, span))
 
         def _judge(item: tuple[int, InjectionSpan]) -> tuple[int, dict, list[str], str | None]:
-            """One span's judging on a pool worker. The shared scoring cfg's
-            learned_tier memo folds degrade-only across span workers
-            (_memoize_tier), so completion order cannot flap it back to a
-            tier a sibling proved ignored; the scan path's extraction config
-            copies stay per-worker."""
+            """One span's judging on a pool worker: its own evidence folder
+            and agent conversation, sharing nothing mutable with siblings."""
             i, span = item
             span_warnings: list[str] = []
             error_note = None
             try:
                 verdict = judge_span(
-                    span, steps, cfg, span_warnings, t.task, gold=gold, scan=scan_cfg
+                    span, steps, cfg, span_warnings, t.task, gold=gold,
+                    evidence_root=evidence_root, transcripts_root=transcripts_root,
                 )
-            except JudgeError as e:
-                verdict = blank_verdict()
-                verdict["error"] = f"judge request failed: {e}"
-                # a gate span's input record rides the exception (stamped by
-                # judge_span/scan_span): the failed operation still counts in
-                # the input_paths/gold_scored regime tallies
-                verdict["input"] = e.input
-                error_note = f"{span.id}: judge request failed: {e}"
             except Exception as e:
-                # anything else is a bug or an unguarded corrupt shape: it
-                # must still degrade to one span's error verdict — one bad
-                # span never takes the run down with every un-flushed
-                # trajectory
-                verdict, error_note = unexpected_span_failure(
-                    e, span, cfg, gold, steps, t.task,
-                    scan_key=scan_cfg.extraction.api_key,
-                    input_tokens=scan_cfg.input_tokens,
+                # a bug or an unguarded corrupt shape: it must still degrade
+                # to one span's error verdict — one bad span never takes the
+                # run down with every un-flushed trajectory. judge_span keeps
+                # its own failure records; reaching here is a code fault, so
+                # the record is deliberately bare.
+                verdict = blank_verdict()
+                verdict["error"] = (
+                    "judging failed unexpectedly: "
+                    + _mask_keys(f"{type(e).__name__}: {e}", (cfg.api_key,))[:2000]
                 )
+                error_note = f"{span.id}: {verdict['error']}"
             progress.advance_span()
             return i, verdict, span_warnings, error_note
 
@@ -827,9 +741,9 @@ def main(argv: list[str] | None = None) -> int:
     progress.close()
 
     if args.dry_run:
-        # the span count describes the workload found; only the spans a
-        # judge call would take were printed (a --limit cap, or rule-judged
-        # auto-neutral spans that cost no call) — name that count when it
+        # the span count describes the workload found; only the spans an
+        # agent run would take were printed (a --limit cap, or rule-judged
+        # auto-neutral spans that cost no run) — name that count when it
         # differs, so the headline never overstates what was printed
         printed = (
             f" ({taken} printed)" if taken != len(operations) else ""
@@ -855,11 +769,11 @@ def main(argv: list[str] | None = None) -> int:
         apply_verdicts(graph, artifact, str(report_path))
         merge_notes = graph["validation"][n_before:]
         print_validation(merge_notes)
-        # the run's diagnostics (step attribution, per-span tier degrades and
-        # masking notes, chunk failures) accumulated in `validation` — the
-        # graph's own list only ever held the load-time prefix it was copied
-        # from; the HTML embeds graph["validation"], so hand it the full log
-        # or the render cannot explain its own error verdicts
+        # the run's diagnostics (step attribution, per-span masking notes,
+        # agent-run failures) accumulated in `validation` — the graph's own
+        # list only ever held the load-time prefix it was copied from; the
+        # HTML embeds graph["validation"], so hand it the full log or the
+        # render cannot explain its own error verdicts
         graph["validation"] = validation + merge_notes
         atomic_write(html_path, render_html(graph))
     n_error = print_summary(artifact)

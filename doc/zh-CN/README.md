@@ -20,7 +20,7 @@ icon: book-open
 | 工具 | 用途 |
 |---|---|
 | **memgraph** | 把每次记忆操作及其关系渲染成自包含的 HTML 图（可选 JSON 产物）。 |
-| **injudge** | 按五信号评分规则为每次召回注入打分，写出 `injudge.report/v9` 产物；用 `--verdicts` 可将其叠加回图上。 |
+| **injudge** | 按五信号评分规则为每次召回注入打分，写出 `injudge.report/v10` 产物；用 `--verdicts` 可将其叠加回图上。 |
 
 贯穿两个工具的一条原则：召回注入以其对 agent 的**后续影响**来评判。最终任务结果可以佐证判断，但绝不单独决定判断。
 
@@ -103,8 +103,8 @@ LLM 从不直接给出区间判定。它为每条投递记忆打五个信号—�
       <td><a href="injudge.md">injudge</a></td>
     </tr>
     <tr>
-      <td><strong>评分输入</strong></td>
-      <td>预算门：逐字全文，或分块证据扫描。</td>
+      <td><strong>评审证据</strong></td>
+      <td>每个区间一个证据文件夹，由智能体用只读工具检索。</td>
       <td><a href="scoring-input.md">scoring-input</a></td>
     </tr>
     <tr>
@@ -113,8 +113,8 @@ LLM 从不直接给出区间判定。它为每条投递记忆打五个信号—�
       <td><a href="verdict-derivation.md">verdict-derivation</a></td>
     </tr>
     <tr>
-      <td><strong>评审客户端</strong></td>
-      <td>合规层级、重试、失败处理与凭证。</td>
+      <td><strong>评审智能体</strong></td>
+      <td>预算与强制作答、纠正重试、失败处理与凭证。</td>
       <td><a href="judge-client.md">judge-client</a></td>
     </tr>
     <tr>

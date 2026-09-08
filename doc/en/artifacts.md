@@ -1,5 +1,5 @@
 ---
-description: "injudge.report/v9, injudge.summary/v5, every field, and how every rate is counted."
+description: "injudge.report/v10, injudge.summary/v6, every field, and how every rate is counted."
 icon: box-archive
 ---
 
@@ -11,15 +11,17 @@ injudge writes all artifacts to the output folder (`-o DIR`, default `output/`).
 
 | File | Schema | Role |
 |---|---|---|
-| `injudge-report.json` | `injudge.report/v9` | Runtime judging record. Rewritten after every trajectory so a crash keeps completed work. Feed it to memgraph with `--verdicts`. |
-| `summary.json` | `injudge.summary/v5` | Final statistics set: counts, rates, and a narrative-free span index. |
+| `injudge-report.json` | `injudge.report/v10` | Runtime judging record. Rewritten after every trajectory so a crash keeps completed work. Feed it to memgraph with `--verdicts`. |
+| `summary.json` | `injudge.summary/v6` | Final statistics set: counts, rates, and a narrative-free span index. |
 | `memgraph-verdicts.html` | — | Only with `--html` (off by default): memgraph with recall nodes colored by span verdict. |
+| `evidence/<span-id>/` | — | One folder per judged span: the exact files the agent searched. |
+| `agent-runs/<span-id>.jsonl` | — | One trajectory per judged span: the pi event-sourced recording of the judging conversation (see [Judge agent](judge-client.md#trajectory-recording)). |
 
 memgraph's `--json` artifact is `{tool, trajectories, ops, memories, edges, validation}` — the same dict embedded in the HTML. See [memgraph](memgraph.md#graph-model).
 
 ## Report vs Summary
 
-The **report** is the judging record. Each operation carries the rubric with notes, `analysis`, `evidence`, `judge_raw` on failures, delivery cost, the `input` regime on gated spans, and the validation log. A span's `operation_id` is the id to look up in this file.
+The **report** is the judging record. Each operation carries the rubric with notes, `analysis`, `evidence`, `judge_raw` on failures, delivery cost, the `input` agent-run record on judged spans, and the validation log. A span's `operation_id` is the id to look up in this file.
 
 The **summary** is the numbers for reading and comparing memory systems. Judging narrative stays in the report.
 
@@ -85,11 +87,11 @@ Means and buckets (`[0,0.5)`, `[0.5,0.8)`, `[0.8,1.0]`) cover LLM-judged spans o
 
 ### Input Regimes
 
-Overall only: gated spans carrying an `input` record are counted in `input_paths.full` / `scan`, `gold_scored`, and `over_budget`. Auto-neutral and unjudged spans omit `input`, so they do not appear in those tallies.
+Overall only: judged spans carrying an `input` record are counted in `input_paths.agent`, `gold_scored`, and `forced_answers` (spans whose verdict came from a budget-exhausted forced final round). Auto-neutral and unjudged spans omit `input`, so they do not appear in those tallies.
 
 ## summary.json Fields
 
-Top level: `tool.schema`, `tool.judge_model`, `tool.config` (the resolved, secret-free judge/scan configuration the run judged with — never the API key, never a URL's userinfo or query), `generated_at`, `overall` (all trajectories combined), `trajectories` (per-trajectory blocks with the same statistics plus a span index). Each trajectory carries `instance_id` / `model` / `adapter` when recorded.
+Top level: `tool.schema`, `tool.judge_model`, `tool.config` (the resolved, secret-free judge-agent configuration the run judged with — never the API key, never a URL's userinfo or query), `generated_at`, `overall` (all trajectories combined), `trajectories` (per-trajectory blocks with the same statistics plus a span index). Each trajectory carries `instance_id` / `model` / `adapter` when recorded.
 
 Per aggregate block (`overall` and each trajectory):
 
@@ -113,9 +115,9 @@ Per aggregate block (`overall` and each trajectory):
 | `rubric.inaccurate_keys` / `irrelevant_keys` | Triage lists `{key, spans}` — memories the judge found contradicted / irrelevant; written only when non-empty |
 | `cost` | Deterministic delivery cost: `content_chars_total`, `approx_tokens_total` (`chars // 4`), `approx_tokens_by_verdict` charged by span verdict class (omitted when zero) |
 | `confidence.mean_by_verdict` / `confidence.buckets` | Per-verdict means (null classes omitted) and `[0,0.5)` / `[0.5,0.8)` / `[0.8,1.0]` bucket counts, over LLM-judged spans |
-| `input_paths` | Overall only: gated spans judged on the full-text vs chunked-scan input |
+| `input_paths` | Overall only: spans judged through the agent (`agent`) |
 | `gold_scored` | Overall only: spans scored under the gold rubric |
-| `over_budget` | Overall only: spans whose scoring input was sent as-is past `JUDGE_INPUT_TOKENS` |
+| `forced_answers` | Overall only: spans whose verdict came from a budget-exhausted forced final round |
 | `judge_compliance` | Judge-contract compliance: `pe_pairing_corrected_spans` / `llm_judged_spans` / `pe_pairing_correction_rate` — the share of LLM-judged spans whose rubric needed the positive_effect↔influence pairing correction (present whenever LLM-judged spans exist) |
 | `n_trajectories` | Overall only |
 | `memory_usage` | Per-memory usage tallies: `key` + non-zero `tallies`, plus `value_drift: true` when recorded content changed across spans. Labels are defined in [Verdict derivation](verdict-derivation.md#usage-labels). |
@@ -136,8 +138,8 @@ Each trajectory's `spans` is a narrative-free index into the report:
 
 ## Report-Only Fields
 
-`injudge-report.json` additionally carries, per operation: `memories` (full recorded refs, each stamped with its span-local `id`), `memory_exposure` (per entry: whether the placement showed the value `full`, `full_normalized` — whole, but only up to whitespace-run or markdown-escape normalization —, `clipped` to a prefix of N chars, or `unknown` — unverifiable, so the canonical value is withheld from the judge input; prose-unsafe values (quotes, backslashes, line structure) compare verbatim only), `memory_windows` (per entry id: the footprint-window end step the entry's action `anchors` were validated against — `null` when the entry was never re-delivered, so its bound was the step stream's end; a same-step delivery collision closes a still-open window at the span's own last delivery step; omitted when no agent turn classified), `memory_window_starts` (only when a same-step collision bumped an entry: its window opens after the shared step the earlier carrier owns), rubric notes and each entry's action `anchors`, `analysis`, `evidence`, `step_gaps`, `new_keys` / `removed_keys` / `previous_keys` / `changed_keys`, `auto`, `error`, `judge_raw`, `pe_pairing_corrections` (when any), and `input` on gated spans (`path`: `full` or `scan`, plus scan counters, `"gold"`, `"over_budget"`, and `"length_fallback"` when they apply — the latter marks a full-text send the endpoint rejected as too long, rerouted to the scan path). A span whose judging failed unexpectedly keeps a re-derived `{path, gold?}` record without scan counters, so the regime tallies still include it.
+`injudge-report.json` additionally carries, per operation: `memories` (full recorded refs, each stamped with its span-local `id`), `memory_exposure` (per entry: whether the placement showed the value `full`, `full_normalized` — whole, but only up to whitespace-run or markdown-escape normalization —, `clipped` to a prefix of N chars, or `unknown` — unverifiable, so the canonical value is withheld from the judge input; prose-unsafe values (quotes, backslashes, line structure) compare verbatim only), `memory_windows` (per entry id: the footprint-window end step the entry's action `anchors` were validated against — `null` when the entry was never re-delivered, so its bound was the step stream's end; a same-step delivery collision closes a still-open window at the span's own last delivery step; omitted when no agent turn classified), `memory_window_starts` (only when a same-step collision bumped an entry: its window opens after the shared step the earlier carrier owns), rubric notes and each entry's action `anchors`, `analysis`, `evidence`, `step_gaps`, `new_keys` / `removed_keys` / `previous_keys` / `changed_keys`, `auto`, `error`, `judge_raw`, `pe_pairing_corrections` (when any), and `input` on judged spans (`path`: `agent`, plus `attempts`, `llm_calls`, `tool_calls`, `transcript` — the conversation's trajectory JSONL under `agent-runs/`, relative to the output dir — and `"gold"` / `"forced"` when they apply — `forced` marks a verdict the step or context budget ended with a forced final answer).
 
 The `injections` array lists every raw delivery with its span, `role` (`first` or `restated`), `verdict`, `content_chars`, and its `op_id` / `seq` / `step`.
 
-`injudge.report/v9` removes `tool.config.scan.evidence_tokens` (the per-chunk compression limit). Per-operation `input.evidence_tokens` remains the measured evidence-pack size. The rubric and `injudge.summary/v5` are unchanged; only the current report schema is accepted.
+`injudge.report/v10` is the agentic judge: each judged operation's `input` record becomes the agent-run record (`path: "agent"` with `attempts` / `llm_calls` / `tool_calls` and the `gold` / `forced` markers), `tool.config` becomes the resolved agent configuration, and `over_budget` gives way to `forced_answers`. The rubric and derivation chain are unchanged; only the current report schema is accepted.

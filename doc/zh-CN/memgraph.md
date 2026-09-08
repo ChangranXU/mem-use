@@ -51,7 +51,7 @@ JSON 产物——嵌在 HTML 里的是同一个 dict——的形状是：
 |---|---|
 | `-o PATH` | HTML 输出路径（默认 `memory-graph.html`） |
 | `--json PATH` | 同时写出机器可读的图产物 |
-| `--verdicts PATH` | 渲染前合并一份 `injudge.report/v9` 文件 |
+| `--verdicts PATH` | 渲染前合并一份 `injudge.report/v10` 文件 |
 
 ## 判定叠加
 
@@ -75,7 +75,7 @@ JSON 产物——嵌在 HTML 里的是同一个 dict——的形状是：
 | 灰色 | neutral |
 | 琥珀色 | error |
 
-页眉加上判定计数；弹层展示评审分析、每条记忆的使用情况，以及该区间的输入路径（`full` / `scan`、gold、over-budget、length-fallback）。
+页眉加上判定计数；弹层展示评审分析、每条记忆的使用情况，以及该区间的输入记录（`agent` 路径，含 gold / forced 标记与尝试次数）。
 
 {% hint style="info" %}
 未匹配或歧义的连接记为 validation 说明，绝不报错。歧义键——多个已加载轨迹共享同一 `run_id`，或同一 `(run_id, seq)` 被多条报告注入或多条召回操作占用——会被跳过，而不是交叉标注。图仍会渲染。

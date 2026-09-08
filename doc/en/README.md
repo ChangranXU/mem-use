@@ -20,7 +20,7 @@ Two read-only tools share one parsing core:
 | Tool | Purpose |
 |---|---|
 | **memgraph** | Renders every memory operation and its relationships as a self-contained HTML graph, with an optional JSON artifact. |
-| **injudge** | Scores each recall injection against a five-signal rubric and writes the `injudge.report/v9` artifact, which overlays onto the graph with `--verdicts`. |
+| **injudge** | Scores each recall injection against a five-signal rubric and writes the `injudge.report/v10` artifact, which overlays onto the graph with `--verdicts`. |
 
 One principle runs through both: a recall injection is judged by its **subsequent influence** on the agent. The final task result may corroborate a judgment; it never decides one.
 
@@ -103,8 +103,8 @@ A correct final patch can still contain harmful injections the agent happened to
       <td><a href="injudge.md">injudge</a></td>
     </tr>
     <tr>
-      <td><strong>Scoring input</strong></td>
-      <td>The budget gate: verbatim full text, or the chunked evidence scan.</td>
+      <td><strong>Judge evidence</strong></td>
+      <td>One evidence folder per span, searched by the agent with read-only tools.</td>
       <td><a href="scoring-input.md">scoring-input</a></td>
     </tr>
     <tr>
@@ -113,8 +113,8 @@ A correct final patch can still contain harmful injections the agent happened to
       <td><a href="verdict-derivation.md">verdict-derivation</a></td>
     </tr>
     <tr>
-      <td><strong>Judge client</strong></td>
-      <td>Conformance tiers, retries, failure handling, credentials.</td>
+      <td><strong>Judge agent</strong></td>
+      <td>Budgets and forced answers, corrective retries, failure handling, credentials.</td>
       <td><a href="judge-client.md">judge-client</a></td>
     </tr>
     <tr>

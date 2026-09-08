@@ -12,9 +12,11 @@ injudge classifies each recall injection as **positive**, **negative**, or **neu
 ```bash
 uv run -m injudge <paths>    # writes output/injudge-report.json + output/summary.json
 
-# Preview mode: print the judge input per span (gold blocks included) with no
-# network access. Only the budget/chunk knobs are read from .env — never
-# credentials, no judge calls, no files written:
+# The TS half of the judge (a pi agent) needs its packages once:
+cd agent && npm install && cd ..
+
+# Preview mode: print each span's evidence document, file index, and opening
+# message with no network access, no node, no files written:
 uv run -m injudge <paths> --dry-run --limit 3
 ```
 
@@ -26,9 +28,11 @@ Each run writes into `-o DIR` (default `output/`):
 
 | File | Contents |
 |---|---|
-| `injudge-report.json` | The runtime judging record (`injudge.report/v9`), rewritten after every trajectory so a crash keeps completed work |
-| `summary.json` | The final statistics (`injudge.summary/v5`): counts, rates, per-memory usage |
+| `injudge-report.json` | The runtime judging record (`injudge.report/v10`), rewritten after every trajectory so a crash keeps completed work |
+| `summary.json` | The final statistics (`injudge.summary/v6`): counts, rates, per-memory usage |
 | `memgraph-verdicts.html` | Only with `--html`: memgraph with recall nodes colored by verdict |
+| `evidence/` | One folder per judged span: the files the agent searched (span document, manifest, per-step files, gold) |
+| `agent-runs/` | One trajectory JSONL per judged span: the pi event-sourced recording of how each verdict was reached |
 
 Delivery cost and delivery-policy metrics are computed deterministically from the recordings, not judged — see [Artifacts](artifacts.md#delivery-cost-and-policy). The full field reference lives there too.
 
@@ -49,11 +53,11 @@ Span construction, including the fingerprint fallback for undigested content, is
 
 Each span goes through three stages, each documented on its own page:
 
-1. **Assemble the scoring input.** The recorded task statement (when present), the span, and the agent step stream. Input that fits `JUDGE_INPUT_TOKENS` goes in verbatim; overflowing input is scanned for evidence rather than truncated. → [Scoring input](scoring-input.md)
-2. **Score the rubric.** One LLM call returns five signals per delivered memory — `relevance`, `accuracy`, `novelty`, `influence`, `positive_effect` — and never a verdict. → [Rubric and verdict derivation](verdict-derivation.md)
+1. **Materialize the evidence.** The recorded task statement (when present), the span document, any gold attachments, and one file per recorded agent step, written into a folder the agent reads with its three read-only tools. → [Judge evidence](scoring-input.md)
+2. **Score the rubric.** One agent conversation searches the evidence and answers with five signals per delivered memory — `relevance`, `accuracy`, `novelty`, `influence`, `positive_effect` — and never a verdict. → [Rubric and verdict derivation](verdict-derivation.md)
 3. **Derive the verdict in code.** Usage labels first, then the span verdict: any misused memory makes the span negative; otherwise any used memory makes it positive; otherwise it is neutral. → [Rubric and verdict derivation](verdict-derivation.md)
 
-Retry, tier, and failure behavior of the calls themselves is in [Judge client](judge-client.md).
+Budgets, forced answers, and the conversation's retry/failure behavior are in [Judge agent](judge-client.md).
 
 ## Golden Answer and Correctness
 
@@ -66,4 +70,4 @@ The scoring call accepts two optional attachments. Each comes from a sidecar nex
 
 `correctness.json` accepts a plain `{"resolved": true|false, "score": …}` record or a SWE-bench-style harness report (`resolved_ids` / `unresolved_ids`). A harness report is joined by the trajectory's recorded `instance_id`; errored or incomplete instances are harness failures, not outcomes, so no correctness attaches. The `--gold-metadata` / `--harness-report` links are the multi-trajectory form: each trajectory gets its own instance's patch and resolved bit, and a trajectory that fails to join (no recorded `instance_id`, or the instance absent from the file) degrades to the next source with a validation note. An unusable linkage file (unreadable, unparseable, wrong shape) fails fast before any paid judge call.
 
-With neither attachment, scoring uses the plain rubric. The gold regime is recorded on each gated operation's `input` (`"gold": true`) and counted in `aggregates.overall.gold_scored`.
+With neither attachment, scoring uses the plain rubric. The gold regime is recorded on each judged operation's `input` (`"gold": true`) and counted in `aggregates.overall.gold_scored`.

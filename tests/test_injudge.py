@@ -1,53 +1,39 @@
-"""Fixture tests for injudge: step stream, spans, judge input, verdicts.
+"""Fixture tests for injudge: step stream, spans, evidence, verdicts.
 
 Fixtures are schema-v6 annotated trajectories (tests/annotated_fixtures.py):
 memory actions are memory_* events, and the step stream consumes the ordinary
 turn/message/tool events. The step-stream quirks verified against real runs
 still apply: origin-history re-records after MAIN-lane rewrites, turn-less
 late tool closes (in either close order), mid-turn rewrites, and interleaved
-memory-lane turns. No network: the judge's urlopen is monkeypatched throughout.
+memory-lane turns. No network and no node: the agent runner subprocess is
+monkeypatched (injudge.agent._invoke_runner) with canned results, so the
+corrective loop, the input records, and the evidence folders are exercised
+without spawning a single agent.
 """
 
-import http.client
 import json
 import re
-from datetime import datetime, timedelta, timezone
-from email.utils import format_datetime
-from io import BytesIO
-from urllib.error import HTTPError
 
 import pytest
 
 from injudge import __main__ as injudge_main
+from injudge.agent import AgentConfig, judge_span, resolve_config
 from injudge.aggregate import WASTE_SHARE_CAVEAT, aggregate, policy_rollup
+from injudge.evidence import build_evidence, span_dir_name, write_evidence
 from injudge.judge import (
     GOLD_SYSTEM_PROMPT,
     SYSTEM_PROMPT,
-    VERDICT_SCHEMA,
-    JudgeConfig,
-    JudgeError,
     _ACCURACY,
     _INFLUENCE,
     _NOVELTY,
     _POS_EFFECT,
-    _SCAN_PROBE,
-    _STRUCTURAL_REPROBES,
     _assemble_verdict,
-    _build_request,
-    _complete_json_present,
     _error_verdict,
-    _memoize_tier,
-    _render_steps,
     _strict_parse,
-    _top_level_objects,
-    _truncated,
     auto_verdict_no_subsequent_turn,
-    judge_span,
-    load_env,
-    render_user,
-    resolve_config,
 )
 from injudge.model import AgentStep, InjectionSpan, ToolExec
+from injudge import SUMMARY_SCHEMA
 from injudge.report import (
     _policy_line,
     _rubric_line,
@@ -64,6 +50,8 @@ from memgraph.parse_trajectory import load_events, parse_trajectory
 from annotated_fixtures import MEM, TASK
 from annotated_fixtures import AnnotatedBuilder as TrajBuilder
 from annotated_fixtures import cure_ref
+
+# ---- kept suites ----
 
 REF_A = cure_ref("key_a", "Use xarray/core/variable.py apply_ufunc carefully",
                  confidence=0.95)
@@ -83,6 +71,7 @@ def _recall_ops(b: TrajBuilder, tmp_path, name="t1"):
     return [op for op in ops if op.kind == "recall"]
 
 
+# ---------------------------------------------------------------- step stream
 # ---------------------------------------------------------------- step stream
 
 
@@ -397,9 +386,11 @@ def test_step_stream_normalizes_non_openai_message_shapes():
     assert steps[0].reasoning == "ponder"
     assert steps[0].content == "first\nsecond"
     span, _steps = _judge_input_fixture()
-    user = render_user(span, steps)
-    assert "reasoning: ponder" in user and "content: first\nsecond" in user
-    assert "command: bash — ls --color" in user  # raw args, not "\"ls --color\""
+    from injudge.evidence import build_evidence
+    files = build_evidence(span, steps, None, None)
+    step_text = files["steps/step_000001.md"]
+    assert "reasoning: ponder" in step_text and "content: first\nsecond" in step_text
+    assert "command: bash — ls --color" in step_text  # raw args, not "\"ls --color\""
 
 
 def test_step_stream_lane_parity_with_memgraph(tmp_path):
@@ -773,52 +764,6 @@ def test_spans_thread_the_delivery_context(tmp_path):
     assert span.placement_text == (
         "- [insight] key_a: Use xarray/core/variable.py apply_ufunc carefully"
     )
-
-
-def test_render_user_carries_the_delivery_context():
-    """The judge input names the span's position in the run, the search
-    query that produced the injection, and the presentation the agent saw —
-    the context the novelty/relevance calls are made against."""
-    span, steps = _judge_input_fixture()
-    span.position, span.total = 2, 3
-    span.queries = ["the dtype bug", "the narrowed dtype bug", "a third rewrite"]
-    span.placement_kind = "prompt_message"
-    span.placement_text = "## CURE Memory Policy"
-    user = render_user(span, steps)
-    assert "This is span 2 of 3 in the trajectory; earlier spans already " \
-           "delivered memories before it." in user
-    assert 'Search queries (distinct, per injection) that produced the ' \
-           'injection: "the dtype bug"; "the narrowed dtype bug"; "a third rewrite"' in user
-    assert 'Presentation: prompt_message.' in user
-    assert 'DELIVERED PLACEMENT (verbatim):\n## CURE Memory Policy' in user
-    # Every query survives, even past the old preview-count cap.
-    span.queries = [f"rewrite {i}" for i in range(9)]
-    user = render_user(span, steps)
-    assert '"rewrite 7"; "rewrite 8"' in user
-    # a single query reads in the singular, and an unrecorded placement
-    # (redacted/locator) adds no presentation line at all
-    span.queries = ["the dtype bug"]
-    span.placement_kind = None
-    span.placement_text = None
-    user = render_user(span, steps)
-    assert 'Search query that produced the injection: "the dtype bug"' in user
-    assert "Presentation:" not in user
-
-
-def test_render_user_bounded_window_is_stated():
-    """A span with at least one bounded memory states each memory's window
-    separately (mixed bounded/unbounded in one span); an all-unbounded span
-    keeps the open-ended wording and adds no windows line."""
-    span, steps = _judge_input_fixture()
-    user = render_user(span, steps)
-    assert "steps >= 1" in user
-    assert "Footprint windows:" not in user
-    span.memory_windows = {"m1": 3, "m2": None}
-    user = render_user(span, steps)
-    assert "Footprint windows: m1 (key_a) — steps 1–3 (re-delivered from step 4; " \
-           "later steps belong to that span); m2 (key_b) — steps 1 onward " \
-           "(never re-delivered)." in user
-    assert "steps >= 1" in user  # the stream label keeps its base wording
 
 
 def test_spans_unattributed_tail(tmp_path):
@@ -1335,7 +1280,9 @@ def test_parse_verdict_non_finite_confidence_is_error():
         warnings = []
         v = parse_verdict(json.dumps(payload), _FakeSpan(), warnings)
         assert v["verdict"] == "error" and v["judge_raw"], bad
-        assert "is not valid JSON" in v["error"]
+        # non-finite is out of contract whichever way the parser slices it:
+        # an error verdict, never a silently clamped bucket
+        assert "confidence" in v["error"] or "not valid JSON" in v["error"]
 
 
 def test_parse_verdict_overflow_literal_confidence_is_error():
@@ -1356,9 +1303,9 @@ def test_parse_verdict_huge_int_confidence_never_raises():
     """A confidence with thousands of digits is numeric and finite, but any
     float() conversion of it overflows: the range check/clamp must stay in
     the numeric domain. A digit count past the parser's int() limit is
-    valid JSON (RFC 8259 sets no limit) the judge still cannot be read
-    through: a model error — an error verdict, never an uncaught exception
-    and never an "is not valid JSON" misclassification."""
+    unreadable either way in the agentic flow — one corrective-retry class —
+    but it must never raise: an error verdict, never an uncaught exception
+    (the round-tripped 10**4000 int still parses and clamps)."""
     payload = json.loads(GOOD)
     payload["confidence"] = 10 ** 4000  # json round-trips it; float() cannot
     warnings = []
@@ -1368,7 +1315,7 @@ def test_parse_verdict_huge_int_confidence_never_raises():
     warnings = []
     raw = GOOD.replace('"confidence": 0.8', '"confidence": ' + "9" * 5000)
     v = parse_verdict(raw, _FakeSpan(), warnings)
-    assert v["verdict"] == "error" and "past the digit limit" in v["error"]
+    assert v["verdict"] == "error" and "not valid JSON" in v["error"]
 
 
 def test_clamped_confidence_warning_is_bounded():
@@ -1532,29 +1479,6 @@ def test_aggregate_zero_operations():
     assert agg["cost"]["approx_tokens_total"] == 0
 
 
-def test_aggregate_over_budget_sends_count_in_the_regime_tallies():
-    """A span sent as-is past the input budget carries the over_budget marker
-    on its per-operation input record; the overall regime tallies must
-    surface the count too — a run that sent N spans over-budget as-is is not
-    indistinguishable from one that never overran."""
-    ops = [
-        {**_op("T1:S1", "neutral", 0.9),
-         "input": {"path": "scan", "chunks": 2, "none_chunks": 0,
-                   "evidence_tokens": 10, "over_budget": True}},
-        {**_op("T1:S2", "positive", 0.9, {"k": {"usage": "used", "evidence": ""}}),
-         "input": {"path": "full"}},
-        {**_op("T1:S3", "error"),
-         "input": {"path": "scan", "gold": True, "over_budget": True}},
-        _op("T1:S4", "unjudged"),  # no gate record: counts nowhere
-    ]
-    agg = aggregate(ops, n_injections=4, n_trajectories=1)
-    assert agg["input_paths"] == {"full": 1, "scan": 2}
-    assert agg["gold_scored"] == 1
-    assert agg["over_budget"] == 2
-    # the summary projection passes the regime tallies through
-    assert _slim_aggregate(agg)["over_budget"] == 2
-
-
 def test_aggregate_cost_share_survives_an_unrepresentable_quotient():
     """Hand-edited delivery costs (a negative chars next to a >308-digit one)
     can make the wasted-token share's quotient overflow the double range:
@@ -1649,7 +1573,7 @@ def test_summary_is_statistics_only():
         [{"level": "warn", "msg": "process note"}],
     )
     summary = build_summary(artifact)
-    assert summary["tool"]["schema"] == "injudge.summary/v5"
+    assert summary["tool"]["schema"] == SUMMARY_SCHEMA
     assert "validation" not in summary
     _assert_stats_only(summary)
     blob = json.dumps(summary)
@@ -2392,92 +2316,6 @@ def test_aggregate_cost_by_verdict():
         "unassessable": 0}
 
 
-# ---------------------------------------------------------------- judge client
-
-
-class FakeResponse:
-    def __init__(self, payload):
-        self.payload = payload
-
-    def read(self):
-        return json.dumps(self.payload).encode()
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *a):
-        return False
-
-
-def _auto_verdict_body(req) -> dict:
-    """A conforming endpoint answer for whatever span the request carries:
-    one entry per delivered-memory id line in the request's user content
-    (the judge input's own `- [mN] …` rendering), the first acted_on and
-    improved at an in-window step, the rest ignored. The coverage contract
-    means a canned two-entry answer would error any other span — the fake
-    endpoint reads the span like the real one does."""
-    user = ""
-    try:
-        body = json.loads(req.data.decode())
-        for m in body.get("messages") or []:
-            # the FIRST user message is the judge input; a corrective retry
-            # appends its note as a later one, which carries no memory lines
-            if m.get("role") == "user" and not user:
-                user = m.get("content") or ""
-    except (ValueError, AttributeError):
-        pass
-    ids = re.findall(r"(?m)^- \[(m\d+)\] ", user)
-    # the span's own consumption step: inside every footprint window by
-    # construction (windows never cut a span's delivery steps) — except a
-    # same-step collision bump, where the header's Footprint windows line
-    # opens the entry's window AFTER the shared step ("m1 (key) — steps 4
-    # onward" / "m1 (key) — steps 4–6"); read that start when stated
-    consumed = re.search(r"consumed at (?:agent )?steps? (\d+)", user)
-    anchor_step = int(consumed.group(1)) if consumed else 1
-    window_starts = {
-        m: int(n)
-        for m, n in re.findall(
-            r"(\bm\d+) \([^)]*\) — steps? (\d+)(?:–\d+| onward)", user)
-    }
-    entries = []
-    for i, mid in enumerate(ids):
-        acted = i == 0
-        entries.append({
-            "id": mid,
-            "relevance": {"value": True, "note": "topical"},
-            "accuracy": {"value": "corroborated", "note": "matches the steps"},
-            "novelty": {"value": "novel", "note": "not seen before"},
-            "influence": (
-                {"value": "acted_on", "note": "shaped the action"}
-                if acted else {"value": "none", "note": "never referenced"}
-            ),
-            "positive_effect": (
-                {"value": "improved", "note": "saved work"} if acted
-                else {"value": None, "note": "n/a"}
-            ),
-            "anchors": [window_starts.get(mid, anchor_step)] if acted else [],
-        })
-    return {"choices": [{"message": {"content": json.dumps({
-        "memories": entries,
-        "analysis": "auto",
-        "evidence": [],
-        "confidence": 0.8,
-    })}}]}
-
-
-def fake_urlopen_factory(record, payload=None, fail=None):
-    def _open(req, timeout=None):
-        record.append(json.loads(req.data.decode()))
-        if fail:
-            raise fail
-        return FakeResponse(payload or _auto_verdict_body(req))
-    return _open
-
-
-def http_error(code, detail=b"bad request"):
-    return HTTPError("http://x", code, "err", {}, BytesIO(detail))
-
-
 def _judge_input_fixture():
     """One span plus the complete step stream it is judged against."""
     span = InjectionSpan(
@@ -2506,91 +2344,6 @@ def _judge_input_fixture():
         ),
     ]
     return span, steps
-
-
-def test_judge_span_end_to_end(monkeypatch):
-    record = []
-    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory(record))
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
-    verdict = judge_span(span, steps, cfg, [])
-    assert verdict["verdict"] == "positive"
-    body = record[0]
-    assert body["model"] == "m" and body["temperature"] == 0.0
-    # auto mode opens at the structured tier: json_schema strict, canonical schema
-    assert body["response_format"] == {
-        "type": "json_schema",
-        "json_schema": {"name": "injudge_verdict", "strict": True, "schema": VERDICT_SCHEMA},
-    }
-    user = body["messages"][1]["content"]
-    assert "key_a" in user and "T1:S1" in user
-    # the whole step stream is the judge input: step header + full surfaces
-    assert "[step 1, turn 1, seqs 1–5]" in user
-    assert "reasoning: thinking" in user and "result (completed): ok" in user
-
-
-def test_echo_overlap_warning_flags_a_novel_echo(monkeypatch):
-    """The code-side echo guard: novelty=novel for a memory whose value
-    substantially overlaps the pre-injection context (the agent's own
-    pre-span steps, or the task statement) earns a validation warning naming
-    the span and key — the judged novelty stands; the guard never rewrites
-    it. A disjoint value and a non-novel call earn none."""
-    record = []
-    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory(record))
-    echo = "the agent should preserve dtype information when copying variables into a fresh array"
-    steps = [
-        AgentStep(step=1, turn=1, seq_start=1, seq_end=5,
-                  reasoning=f"I see it now: {echo}", content="", tools=[]),
-        AgentStep(step=2, turn=2, seq_start=6, seq_end=9,
-                  reasoning="applying the fix", content="", tools=[]),
-    ]
-    span = InjectionSpan(
-        id="T1:S1", traj="T1", step_first=2, step_last=2, seq_first=6, seq_last=6,
-        n_injections=1,
-        memories=[{"key": "key_a", "value": echo},
-                  {"key": "key_b",
-                   "value": "unrelated telemetry from a different subsystem entirely"}],
-    )
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
-
-    warnings = []
-    verdict = judge_span(span, steps, cfg, warnings)
-    assert verdict["verdict"] == "positive"  # the judged rubric is untouched
-    assert warnings == [
-        "T1:S1: m1 (key_a).novelty judged 'novel' but 100% of the value's "
-        "words already appear in the task statement or the pre-injection "
-        "steps — a possible same-episode echo (the judged novelty stands; "
-        "review the span)"
-    ]
-
-    # a redundant call is the judge applying the rule — no guard warning.
-    # The answer must stay coherent: novelty redundant pairs with influence
-    # none/referenced (the redundant⇒not-acted_on dependency is enforced in
-    # the attempt loop)
-    payload = json.loads(GOOD)
-    entry = _good_entries(payload)["m1"]
-    entry["novelty"]["value"] = "redundant"
-    entry["influence"]["value"] = "none"
-    entry["positive_effect"]["value"] = None
-    entry["anchors"] = []
-    mutant = {"choices": [{"message": {"content": json.dumps(payload)}}]}
-    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory([], payload=mutant))
-    warnings = []
-    judge_span(span, steps, cfg, warnings)
-    assert warnings == []
-
-    # the overlap can come from the task statement alone (it sits in the
-    # agent's context from step 0)
-    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory([]))
-    steps = [
-        AgentStep(step=1, turn=1, seq_start=1, seq_end=5,
-                  reasoning="exploring the repository layout first", content="", tools=[]),
-        steps[1],
-    ]
-    warnings = []
-    judge_span(span, steps, cfg, warnings, task=echo)
-    assert any("same-episode echo" in w for w in warnings)
-
 
 def test_pe_pairing_corrections_counted_and_aggregated(tmp_path):
     """The positive_effect↔influence pairing corrections are counted per
@@ -2661,25 +2414,6 @@ def test_headline_wasted_share_always_carries_the_caveat(capsys):
     assert "caveat" in aggregate(ops, 2)["headline"]
 
 
-def test_render_user_single_step_span_says_step_not_steps():
-    """A single-step span reads "step N", not "steps N–N" — payload_summary's
-    singular rule, mirrored in the judge input."""
-    span, steps = _judge_input_fixture()
-    span.step_first = span.step_last = 2
-    assert "consumed at agent step 2 " in render_user(span, steps)
-    assert "steps 2–2" not in render_user(span, steps)
-
-
-def test_render_user_includes_the_recorded_task():
-    """The relevance rubric judges against the task: the exact statement the
-    run recorded goes into the judge input — the judge never reconstructs it
-    from whatever the agent happened to say aloud."""
-    span, steps = _judge_input_fixture()
-    user = render_user(span, steps, "fix the setitem coercion bug")
-    assert "TASK STATEMENT" in user and "fix the setitem coercion bug" in user
-    assert "TASK STATEMENT" not in render_user(span, steps)  # absent when unrecorded
-
-
 def test_render_steps_reports_the_recorded_close_status():
     """A tool execution closed interrupted/no_result without a result must
     show the recorded close status — "(never observed)" would tell the judge
@@ -2692,403 +2426,10 @@ def test_render_steps_reports_the_recorded_close_status():
         ToolExec(tool_call_id="c2", name="bash", args={"command": "ls"},
                  seq_start=5),  # truncated: no close at all
     ]
-    text = _render_steps([step])
+    from injudge.judge import _render_step
+    text = "\n".join(_render_step(s) for s in [step])
     assert "result (interrupted): (none recorded)" in text
     assert "result: (never observed)" in text  # the truly unclosed one
-
-
-def test_empty_content_retries_same_tier(monkeypatch):
-    """Reasoning models sporadically return empty content (budget burned on
-    reasoning_content): a server-side quirk worth a fresh draw at the SAME
-    tier — it is not a format problem, so no degrade happens. The fresh draw
-    resends the identical request, so it waits out the usual backoff first."""
-    attempts = []
-    sleeps = []
-    monkeypatch.setattr("injudge.judge.time.sleep", sleeps.append)
-
-    def _open(req, timeout=None):
-        attempts.append(json.loads(req.data.decode()))
-        if len(attempts) < 3:
-            return FakeResponse({"choices": [{"message": {
-                "content": "", "reasoning_content": "thinking about it…"}}]})
-        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
-
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", max_attempts=3)
-    assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
-    assert len(attempts) == 3
-    assert all(b["response_format"]["type"] == "json_schema" for b in attempts)
-    assert sleeps == [1, 4]  # identical resends never fire back-to-back
-
-    def _always_empty(req, timeout=None):
-        return FakeResponse({"choices": [{"message": {"content": ""}}]})
-
-    monkeypatch.setattr("injudge.judge.urlopen", _always_empty)
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", max_attempts=2)
-    with pytest.raises(JudgeError, match="no message content"):
-        judge_span(span, steps, cfg, [])
-
-
-def test_reasoning_rescue_recovers_a_drained_answer_at_any_tier(monkeypatch):
-    """A reasoning model may route the ENTIRE verdict into reasoning_content
-    and return empty content — retrying the identical request cannot recover
-    that, but the answer is right there. The rescue applies on every
-    openai-chat tier (strict parsing still validates the contract, so a bad
-    draft becomes an honest error, never a silent pass)."""
-    span, steps = _judge_input_fixture()
-    payload = {"choices": [{"message": {"content": "", "reasoning_content": GOOD}}]}
-    for fmt in ("structured", "json", "prompt"):
-        record = []
-        monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory(record, payload))
-        warnings = []
-        cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", output_format=fmt)
-        verdict = judge_span(span, steps, cfg, warnings)
-        assert verdict["verdict"] == "positive", fmt
-        assert len(record) == 1  # no retry needed — the answer was there
-        assert any("reasoning_content" in w and "T1:S1" in w for w in warnings), fmt
-
-    # a draft that is NOT a complete JSON object (genuine budget exhaustion)
-    # is not rescuable: the empty answer falls through to the fresh-draw retry
-    partial = {"choices": [{"message": {"content": "",
-                                        "reasoning_content": GOOD[:-20]}}]}
-    record = []
-    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory(record, partial))
-    monkeypatch.setattr("injudge.judge.time.sleep", lambda s: None)
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m",
-                      output_format="json", max_attempts=2)
-    with pytest.raises(JudgeError, match="no message content"):
-        judge_span(span, steps, cfg, [])
-    assert len(record) == 2
-
-
-def test_reasoning_rescue_does_not_memoize_the_tier(monkeypatch):
-    """A verdict rescued from reasoning_content never passed through the
-    format channel, so its conformance proves nothing about tier enforcement:
-    the learned-tier memo stays untouched (the same rule the degrade path
-    applies to a rescued draft's contract violation)."""
-    span, steps = _judge_input_fixture()
-    payload = {"choices": [{"message": {"content": "", "reasoning_content": GOOD}}]}
-    record = []
-    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory(record, payload))
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")  # auto chain
-    assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
-    assert len(record) == 1
-    assert cfg.learned_tier == "structured"  # memo untouched by the rescue
-
-
-def test_reasoning_rescue_picks_the_closing_top_level_object(monkeypatch):
-    """Reasoning that quotes other JSON before drafting the verdict is still
-    rescuable: the LAST top-level object wins (a greedy first-to-last span
-    would straddle both and never parse), and trailing prose after the
-    object is ignored."""
-    span, steps = _judge_input_fixture()
-    for rc in (
-        'schema reminder {"type": "object"} … the verdict:\n' + GOOD,
-        GOOD + "\ndone } here",
-    ):
-        payload = {"choices": [{"message": {"content": "", "reasoning_content": rc}}]}
-        record = []
-        monkeypatch.setattr("injudge.judge.urlopen",
-                            fake_urlopen_factory(record, payload))
-        cfg = JudgeConfig(base_url="http://x", api_key="k", model="m",
-                          output_format="json")
-        assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
-        assert len(record) == 1  # rescued without a retry
-
-
-def test_reasoning_rescue_recovers_an_array_wrapped_verdict(monkeypatch):
-    """A reasoning model may draft the verdict wrapped in an array: "[{...}]"
-    nests the object one level down — no problem for the rescue scan, which
-    tracks no array nesting and records the object inside as a span like any
-    other (still raw_decode-proven, still strictly parsed downstream)."""
-    span, steps = _judge_input_fixture()
-    rc = "wrapping the answer in an array:\n[" + GOOD + "]"
-    payload = {"choices": [{"message": {"content": "", "reasoning_content": rc}}]}
-    record = []
-    monkeypatch.setattr("injudge.judge.urlopen",
-                        fake_urlopen_factory(record, payload))
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m",
-                      output_format="json")
-    assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
-    assert len(record) == 1  # rescued without a retry
-
-
-def test_reasoning_rescue_recovers_a_draft_past_the_probe_window(monkeypatch):
-    """A drafted verdict longer than the probe window is rescued even when
-    the window boundary slices a literal inside it — the span scan's
-    full-tail proof covers what the probe cannot decide."""
-    span, steps = _judge_input_fixture()
-    cut_at = GOOD.index("true")  # key_a's relevance literal
-    prose = "x" * (_SCAN_PROBE - cut_at - 3)  # the window ends inside `true`
-    rc = prose + GOOD
-    payload = {"choices": [{"message": {"content": "", "reasoning_content": rc}}]}
-    record = []
-    monkeypatch.setattr("injudge.judge.urlopen",
-                        fake_urlopen_factory(record, payload))
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m",
-                      output_format="json")
-    assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
-    assert len(record) == 1  # rescued without a retry
-
-
-def test_build_request_format_fields_per_tier():
-    """Each tier's provider-native format field; the prompt tier sends none."""
-    msgs = [{"role": "system", "content": "S"}, {"role": "user", "content": "U"}]
-
-    def body(cfg, tier):
-        return json.loads(_build_request(cfg, msgs, tier).data.decode())
-
-    chat = JudgeConfig(base_url="http://x", api_key="k", model="m")
-    assert body(chat, "structured")["response_format"] == {
-        "type": "json_schema",
-        "json_schema": {"name": "injudge_verdict", "strict": True, "schema": VERDICT_SCHEMA},
-    }
-    assert body(chat, "json")["response_format"] == {"type": "json_object"}
-    assert "response_format" not in body(chat, "prompt")
-
-    resp = JudgeConfig(base_url="http://x", api_key="k", model="m", api="responses")
-    assert body(resp, "structured")["text"] == {"format": {
-        "type": "json_schema", "name": "injudge_verdict",
-        "strict": True, "schema": VERDICT_SCHEMA}}
-    assert body(resp, "json")["text"] == {"format": {"type": "json_object"}}
-    assert "text" not in body(resp, "prompt")
-
-    ant = JudgeConfig(base_url="http://x", api_key="k", model="m", api="anthropic",
-                      thinking_effort="high")
-    # anthropic structured output merges into the output_config effort set
-    assert body(ant, "structured")["output_config"] == {
-        "effort": "high", "format": {"type": "json_schema", "schema": VERDICT_SCHEMA}}
-    assert body(ant, "prompt")["output_config"] == {"effort": "high"}
-
-
-def test_judge_span_responses_format(monkeypatch):
-    """API=responses: POST /responses with instructions+input, output_text parsed."""
-    calls = []
-
-    def _open(req, timeout=None):
-        calls.append((req.full_url, json.loads(req.data.decode())))
-        return FakeResponse({"output": [
-            {"type": "reasoning", "summary": []},
-            {"type": "message",
-             "content": [{"type": "output_text", "text": GOOD}]},
-        ]})
-
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x/v1", api_key="k", model="m", api="responses")
-    assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
-    url, body = calls[0]
-    assert url == "http://x/v1/responses"
-    assert body["instructions"] and "SPAN TO EVALUATE" in body["input"]
-    assert body["text"]["format"]["type"] == "json_schema"
-
-
-def test_judge_span_anthropic_format(monkeypatch):
-    """API=anthropic: POST /v1/messages, x-api-key auth, text blocks parsed."""
-    calls = []
-
-    def _open(req, timeout=None):
-        headers = {k.lower(): v for k, v in req.headers.items()}
-        calls.append((req.full_url, headers, json.loads(req.data.decode())))
-        return FakeResponse({"content": [
-            {"type": "thinking", "thinking": "working on it"},
-            {"type": "text", "text": GOOD},
-        ]})
-
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", api="anthropic")
-    assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
-    url, headers, body = calls[0]
-    assert url == "http://x/v1/messages"
-    assert headers["x-api-key"] == "k"
-    assert headers["anthropic-version"] == "2023-06-01"
-    assert "authorization" not in headers
-    assert body["system"] and len(body["messages"]) == 1
-    assert body["max_tokens"] == cfg.max_tokens
-    assert body["output_config"]["format"] == {"type": "json_schema", "schema": VERDICT_SCHEMA}
-
-    # a proxy-style base already carrying /v1 gets /messages, not /v1/v1/messages
-    calls.clear()
-    cfg = JudgeConfig(base_url="http://x/v1", api_key="k", model="m", api="anthropic")
-    judge_span(span, steps, cfg, [])
-    assert calls[0][0] == "http://x/v1/messages"
-
-
-def test_tier_degrades_on_400_then_memoized(monkeypatch):
-    """Auto chain: a 400 rejects the structured REQUEST for free (no attempt
-    consumed — DeepSeek 400s json_schema); the learned-tier memo then starts
-    later spans at the working tier."""
-    record = []
-
-    def _open(req, timeout=None):
-        body = json.loads(req.data.decode())
-        record.append(body)
-        if body.get("response_format", {}).get("type") == "json_schema":
-            raise http_error(400, b"response_format json_schema unsupported")
-        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
-
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", max_attempts=1)
-    warnings = []
-    # max_attempts=1 and still positive: the 400 degrade consumed no attempt
-    assert judge_span(span, steps, cfg, warnings)["verdict"] == "positive"
-    assert [b.get("response_format", {}).get("type") for b in record] == [
-        "json_schema", "json_object"]
-    assert cfg.learned_tier == "json"
-    assert any("degrading to json" in w for w in warnings)
-    # the next span skips the structured probe entirely
-    record.clear()
-    assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
-    assert [b.get("response_format", {}).get("type") for b in record] == ["json_object"]
-
-
-def test_learned_tier_memo_folds_degrade_only():
-    """The run's learned-tier memo records the weakest tier ever proven to
-    work and never moves back to a stronger one: a parallel walker that read
-    the memo before a sibling's fold (or got a lucky conforming draw through
-    a format-ignoring proxy) must not make later calls re-pay a free reject
-    per call, nor may completion order park the run at a weaker tier than
-    proven — the degrade-only fold ignores both directions of flap."""
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
-    assert cfg.learned_tier == "structured"
-    _memoize_tier(cfg, "structured")  # the same tier is a no-op
-    assert cfg.learned_tier == "structured"
-    _memoize_tier(cfg, "prompt")  # a weaker tier proven: the memo degrades
-    assert cfg.learned_tier == "prompt"
-    # a stale snapshot or lucky draw at a stronger tier never moves it back
-    _memoize_tier(cfg, "json")
-    _memoize_tier(cfg, "structured")
-    assert cfg.learned_tier == "prompt"
-    # the comparison rides the declared API's own chain (anthropic has no json tier)
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", api="anthropic")
-    _memoize_tier(cfg, "prompt")
-    assert cfg.learned_tier == "prompt"
-    _memoize_tier(cfg, "structured")
-    assert cfg.learned_tier == "prompt"
-
-
-def test_tier_independent_400_fails_at_the_format_less_tier(monkeypatch):
-    """A 400 repeating unchanged up to the FINAL (format-less) tier is no
-    format refusal — a tier-independent config fault (e.g. max_tokens over
-    the model limit) no degrade can fix: the span fails there on the
-    endpoint's message. The repeat can only be judged at the format-less
-    tier — a gateway rejecting every format field with ONE generic body
-    repeats it across the format tiers too, and failing fast on the first
-    repeat would strand the walk before the tier that answers."""
-    record = []
-
-    def _open(req, timeout=None):
-        record.append(json.loads(req.data.decode()))
-        raise http_error(400, b"Invalid max_tokens value")  # fresh instance per request
-
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
-    warnings = []
-    with pytest.raises(JudgeError, match="unchanged across conformance tiers"):
-        judge_span(span, steps, cfg, warnings)
-    assert [b.get("response_format", {}).get("type") for b in record] == [
-        "json_schema", "json_object", None]  # the full walk, decided at the end
-    assert cfg.learned_tier == "structured"  # memo untouched
-
-
-def test_generic_body_400s_walk_to_the_prompt_tier(monkeypatch):
-    """A gateway rejecting EVERY request carrying a format field with one
-    generic non-empty 400 body is not a tier-independent fault — the
-    format-less prompt tier answers it: the identical-body repeat across
-    the format tiers must not fail the span before that tier is tried."""
-    record = []
-
-    def _open(req, timeout=None):
-        body = json.loads(req.data.decode())
-        record.append(body)
-        if "response_format" in body:
-            raise http_error(400, b'{"error": {"message": "Bad Request"}}')
-        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
-
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
-    warnings = []
-    assert judge_span(span, steps, cfg, warnings)["verdict"] == "positive"
-    assert [b.get("response_format", {}).get("type") for b in record] == [
-        "json_schema", "json_object", None]  # walked to the prompt tier
-    assert cfg.learned_tier == "prompt"
-    # the next span starts at the working tier — no repeated rejections
-    record.clear()
-    assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
-    assert [b.get("response_format", {}).get("type") for b in record] == [None]
-
-
-def test_endpoint_echo_never_leaks_the_api_key(monkeypatch):
-    """An auth/proxy fault page reflecting the request (credential header
-    included) flows into the span's recorded error — the key must be masked
-    before any of that text reaches a verdict, note, or artifact, in its raw
-    AND urlencoded forms (a gateway spelling the request as a URL)."""
-    key = "sk-secret+key"
-    echo = (
-        f'{{"error": "auth failed: Authorization Bearer {key} '
-        f'(request logged as /v1/chat/completions?api_key={key.replace("+", "%2B")})"}}'
-    ).encode()
-
-    def _open(req, timeout=None):
-        raise http_error(401, echo)
-
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key=key, model="m")
-    with pytest.raises(JudgeError) as excinfo:
-        judge_span(span, steps, cfg, [])
-    message = str(excinfo.value)
-    assert key not in message and "sk-secret%2Bkey" not in message
-    assert "***" in message
-
-
-def test_echoed_key_in_a_200_answer_never_reaches_judge_raw(monkeypatch):
-    """A broken auth/proxy endpoint can reflect the request — credential
-    header included — inside a 200 ANSWER, not just an error page: that
-    text reaches judge_raw in the error verdict, so it is masked like the
-    4xx/5xx paths (both the raw and urlencoded key forms)."""
-    key = "sk-secret+key"
-    echo = (
-        f"auth failed: Authorization Bearer {key} "
-        f"(request logged as /v1/chat/completions?api_key={key.replace('+', '%2B')})"
-    )
-    payload = {"choices": [{"message": {"content": echo}}]}
-    record = []
-    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory(record, payload))
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key=key, model="m", max_attempts=1)
-    verdict = judge_span(span, steps, cfg, [])
-    assert verdict["verdict"] == "error"  # the echo is out of contract
-    assert key not in verdict["judge_raw"] and "sk-secret%2Bkey" not in verdict["judge_raw"]
-    assert "***" in verdict["judge_raw"]
-
-
-def test_echoed_key_in_a_conforming_verdict_never_reaches_the_artifact(monkeypatch):
-    """A 200 verdict is endpoint output too: the key echoed into its
-    analysis, evidence claims, or per-signal notes would land verbatim in
-    injudge.report/v9 — mask it in every copied field, not just judge_raw."""
-    key = "sk-secret+key"
-    obj = json.loads(GOOD)
-    obj["analysis"] = f"the agent saw {key} in the injection"
-    obj["evidence"][0]["claim"] = f"grep quoted {key} at step 3"
-    obj["memories"][0]["positive_effect"]["note"] = f"acted on {key}"
-    payload = {"choices": [{"message": {"content": json.dumps(obj)}}]}
-    record = []
-    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory(record, payload))
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key=key, model="m")
-    verdict = judge_span(span, steps, cfg, [])
-    assert verdict["verdict"] == "positive"  # a conforming answer
-    for field in (verdict["analysis"], verdict["evidence"][0]["claim"],
-                  verdict["rubric"]["m1"]["positive_effect"]["note"],
-                  verdict["memory_usage"]["m1"]["evidence"]):
-        assert key not in field and "sk-secret%2Bkey" not in field
-        assert "***" in field
 
 
 def test_masking_skips_degenerate_short_keys():
@@ -3168,3534 +2509,340 @@ def test_masked_head_masks_before_capping():
     assert key[:6] not in out
 
 
-def test_transport_exception_text_stays_masked(monkeypatch):
-    """A BadStatusLine's str IS the endpoint's raw status line: an echoing
-    proxy can reflect the credential there (a channel no error-body masking
-    sees), and the transport-failure path interpolates it into the recorded
-    error — mask it like every other echo path."""
-    key = "sk-secret+key"
+# ------------------------------------------------------------- agent flow
 
-    def _open(req, timeout=None):
-        raise http.client.BadStatusLine(f"HTTP/1.1 401 Bearer {key} rejected")
 
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
+def _agent_cfg(**kw):
+    """A minimal AgentConfig; the runner is stubbed, so the endpoint values
+    are never dialed."""
+    base = dict(base_url="http://x", api_key="k", model="m")
+    base.update(kw)
+    return AgentConfig(**base)
+
+
+def _result(answer, *, error=None, forced=False, llm_calls=3, tool_calls=4,
+            messages=None, stop_reason="answer"):
+    """One canned runner result."""
+    return {
+        "answer": answer,
+        "error": error,
+        "forced": forced,
+        "llm_calls": llm_calls,
+        "tool_calls": tool_calls,
+        "messages": messages if messages is not None else [{"role": "user"},
+                                                           {"role": "assistant"}],
+        "stop_reason": stop_reason,
+    }
+
+
+def stub_runner(monkeypatch, results):
+    """Replace the runner subprocess with canned results consumed in call
+    order; records every (message, history) invocation for assertions. Like
+    the real runner, the stub records a trajectory JSONL at the given path
+    (attempt marker, one message line per history entry, attempt_end with
+    the diagnostics), raw — masking stays Python's half."""
+    calls = []
+
+    def _fake(cfg, evidence_dir, trajectory_path, attempt, system, message,
+              history, warnings):
+        calls.append({"message": message, "history": history,
+                      "system": system, "evidence_dir": evidence_dir,
+                      "trajectory_path": trajectory_path, "attempt": attempt})
+        if not results:
+            raise AssertionError("the stubbed runner was invoked too often")
+        out = results.pop(0)
+        trajectory_path.parent.mkdir(parents=True, exist_ok=True)
+        # only the NEW messages fire message_end — seeded history does not
+        new_messages = (
+            [m for m in out.get("messages") or []
+             if isinstance(m, dict)][len(history or []):]
+            if isinstance(out, dict) else
+            [{"role": "user", "content": [{"type": "text", "text": message}]}]
+        )
+        lines = [{"seq": 0, "type": "attempt", "attempt": attempt}]
+        seq = 1
+        for m in new_messages:
+            lines.append({"seq": seq, "type": "message", "message": m})
+            seq += 1
+        lines.append({
+            "seq": seq, "type": "attempt_end",
+            "answer": out.get("answer") if isinstance(out, dict) else None,
+            "stop_reason": (out or {}).get("stop_reason") if isinstance(out, dict) else None,
+            "error": out.get("error") if isinstance(out, dict) else None,
+        })
+        with trajectory_path.open("a", encoding="utf-8") as fh:
+            for line in lines:
+                fh.write(json.dumps(line) + "\n")
+        return out if not isinstance(out, Exception) else (_ for _ in ()).throw(out)
+
+    monkeypatch.setattr("injudge.agent._invoke_runner", _fake)
+    return calls
+
+
+def test_agent_span_end_to_end(monkeypatch, tmp_path):
+    """One span, one conforming agent answer: the verdict assembles, the
+    agent-run input record lands on the operation, and the evidence folder
+    the agent read was actually materialized (manifest + span document +
+    one file per step)."""
+    calls = stub_runner(monkeypatch, [_result(GOOD)])
     span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key=key, model="m", max_attempts=1)
-    with pytest.raises(JudgeError) as excinfo:
-        judge_span(span, steps, cfg, [])
-    message = str(excinfo.value)
-    assert key not in message and "sk-secret%2Bkey" not in message
-    assert "***" in message
+    warnings: list[str] = []
+    verdict = judge_span(span, steps, _agent_cfg(), warnings, "the task",
+                         gold=None, evidence_root=tmp_path, transcripts_root=tmp_path / "runs")
+    assert verdict["verdict"] == "positive"
+    assert verdict["input"] == {"path": "agent", "attempts": 1, "llm_calls": 3,
+                                "tool_calls": 4,
+                                "transcript": verdict["input"]["transcript"]}
+    from injudge.evidence import span_dir_name
+    trajectory = tmp_path / "runs" / f"{span_dir_name(span.id)}.jsonl"
+    records = [json.loads(line) for line in trajectory.read_text().splitlines()]
+    # the pi-style trajectory: an attempt marker, the conversation's
+    # messages, and the attempt's diagnostics
+    assert records[0]["type"] == "attempt" and records[0]["attempt"] == 1
+    kinds = [r["type"] for r in records]
+    assert kinds[-1] == "attempt_end" and kinds.count("message") >= 1
+    assert records[-1]["answer"] == GOOD
+    assert verdict["input"]["transcript"] == f"runs/{span_dir_name(span.id)}.jsonl"
+    assert len(calls) == 1
+    assert span.id in calls[0]["message"]  # the opening names the span
+    assert calls[0]["history"] is None
+    dest = tmp_path / span_dir_name(span.id)
+    files = sorted(p.name for p in (dest / "steps").iterdir())
+    assert files == ["step_000001.md", "step_000002.md"]
+    assert (dest / "manifest.json").is_file() and (dest / "span.md").is_file()
+    manifest = json.loads((dest / "manifest.json").read_text())
+    assert manifest["span_id"] == span.id and manifest["n_steps"] == 2
+    assert manifest["footprint_from_step"] == 1
+    # the evidence document carries the recorded task verbatim
+    assert "the task" in (dest / "span.md").read_text()
 
 
-def test_config_rejects_a_non_latin1_key_before_any_paid_call():
-    """The key rides an HTTP header (http.client encodes latin-1), so a
-    mangled paste carrying non-latin-1 characters can never be sent: fail
-    fast naming the KEY (never its value) instead of burning the attempt
-    budget on a request-build error mislabeled 'unparseable response
-    body'."""
+def test_agent_gold_attachments_ride_gold_md(monkeypatch, tmp_path):
+    from injudge.judge import GoldInput
+
+    calls = stub_runner(monkeypatch, [_result(GOOD)])
+    span, steps = _judge_input_fixture()
+    judge_span(span, steps, _agent_cfg(), [], None,
+               gold=GoldInput(golden="the golden patch",
+                              correctness={"resolved": True}),
+               evidence_root=tmp_path, transcripts_root=tmp_path / "runs")
+    gold_md = (tmp_path / span_dir_name(span.id) / "gold.md").read_text()
+    assert "the golden patch" in gold_md and "resolved" in gold_md
+    # the gold regime selects the gold system prompt for the conversation
+    assert calls[0]["system"] is GOLD_SYSTEM_PROMPT
+
+
+def test_agent_corrective_retry_continues_the_conversation(monkeypatch, tmp_path):
+    """An out-of-contract answer takes one corrective retry that continues
+    the SAME conversation: the retry's message is the corrective note naming
+    the violation, and the history carries the failed attempt's transcript."""
+    bad = json.loads(GOOD)
+    bad["memories"] = bad["memories"][:1]  # missing m2 -> coverage violation
+    calls = stub_runner(monkeypatch, [_result(json.dumps(bad)), _result(GOOD)])
+    span, steps = _judge_input_fixture()
+    verdict = judge_span(span, steps, _agent_cfg(max_attempts=3), [], None,
+                         evidence_root=tmp_path, transcripts_root=tmp_path / "runs")
+    assert verdict["verdict"] == "positive"
+    assert verdict["input"]["attempts"] == 2
+    assert "covers ids" in calls[1]["message"]  # the corrective note
+    assert calls[1]["history"] == [{"role": "user"}, {"role": "assistant"}]
+    assert calls[0]["history"] is None
+
+
+def test_agent_attempt_exhaustion_is_error_with_raw(monkeypatch, tmp_path):
+    """Exhausted corrective retries end in a visible error verdict with the
+    raw answer kept (masked) — never a silent neutral."""
+    calls = stub_runner(monkeypatch, [_result("nope")] * 5)
+    span, steps = _judge_input_fixture()
+    warnings: list[str] = []
+    verdict = judge_span(span, steps, _agent_cfg(), warnings, None,
+                         evidence_root=tmp_path, transcripts_root=tmp_path / "runs")
+    assert verdict["verdict"] == "error"
+    assert "not valid JSON" in verdict["error"] and "5 attempts" in verdict["error"]
+    assert verdict["judge_raw"] == "nope"
+    assert len(calls) == 5
+    assert verdict["input"]["attempts"] == 5
+
+
+def test_agent_runner_failure_is_an_error_verdict_not_a_retry(monkeypatch, tmp_path):
+    """A runner-level failure (setup fault, missing result) is that span's
+    error verdict with a validation note; an identical retry would re-pay
+    it, so none is taken."""
+    stub_runner(monkeypatch, [None])
+    span, steps = _judge_input_fixture()
+    warnings: list[str] = []
+    verdict = judge_span(span, steps, _agent_cfg(), warnings, None,
+                         evidence_root=tmp_path, transcripts_root=tmp_path / "runs")
+    assert verdict["verdict"] == "error"
+    assert verdict["input"]["path"] == "agent" and verdict["input"]["attempts"] == 1
+    # a runner-level failure is unmasked never retried; whatever trajectory
+    # lines a crashed runner managed to append stay as-is (partial audit)
+    assert any("judge agent failed" in w for w in warnings)
+
+
+def test_agent_run_error_field_is_an_error_verdict(monkeypatch, tmp_path):
+    stub_runner(monkeypatch, [_result("", error="HTTP 401: bad key")])
+    span, steps = _judge_input_fixture()
+    warnings: list[str] = []
+    verdict = judge_span(span, steps, _agent_cfg(), warnings, None,
+                         evidence_root=tmp_path, transcripts_root=tmp_path / "runs")
+    assert verdict["verdict"] == "error"
+    assert "agent run failed" in verdict["error"]
+    assert any("agent run failed" in w for w in warnings)
+
+
+def test_agent_forced_answer_lands_in_the_input_record(monkeypatch, tmp_path):
+    """A budget-forced final answer is still a verdict, but the regime
+    tallies see it: the forced marker rides the input record and the
+    aggregate's forced_answers count."""
+    stub_runner(monkeypatch, [_result(GOOD, forced=True,
+                                      stop_reason="step_budget_forced")])
+    span, steps = _judge_input_fixture()
+    verdict = judge_span(span, steps, _agent_cfg(), [], None, evidence_root=tmp_path, transcripts_root=tmp_path / "runs")
+    assert verdict["verdict"] == "positive"
+    assert verdict["input"]["forced"] is True
+    op = operation_record(span, verdict,
+                          {"deliveries": 1, "content_chars_total": 4,
+                           "approx_tokens_total": 1})
+    agg = aggregate([op], 1, 1)
+    assert agg["input_paths"] == {"agent": 1}
+    assert agg["forced_answers"] == 1
+    assert _slim_aggregate(agg)["forced_answers"] == 1
+
+
+def test_agent_trajectory_masks_an_echoed_credential(monkeypatch, tmp_path):
+    """The runner records its trajectory raw (it holds the credential and
+    cannot fork the masking implementation); Python rewrites the file
+    masked after each attempt — the KEPT artifact never carries the key,
+    in any echo spelling."""
+    key = "sk-secret+key"
+    echo = f"auth failed: Bearer {key} (logged as {key.replace('+', '%2B')})"
+    canned = _result(
+        GOOD,
+        messages=[{"role": "user"},
+                  {"role": "assistant", "content": [{"type": "text", "text": echo}]}],
+    )
+    stub_runner(monkeypatch, [canned])
+    span, steps = _judge_input_fixture()
+    verdict = judge_span(span, steps, _agent_cfg(api_key=key), [], None,
+                         evidence_root=tmp_path, transcripts_root=tmp_path / "runs")
+    assert verdict["verdict"] == "positive"
+    from injudge.evidence import span_dir_name
+    text = (tmp_path / "runs" / f"{span_dir_name(span.id)}.jsonl").read_text()
+    assert key not in text and "sk-secret%2Bkey" not in text
+    assert "***" in text  # the echo survived, masked
+
+
+def test_agent_error_paths_mask_an_echoed_credential(monkeypatch, tmp_path):
+    """The runner's error string and the exhausted raw answer are endpoint
+    output: a credential reflected into either is masked before it reaches
+    the verdict or the validation notes (the same echo paths the one-shot
+    judge masked)."""
+    key = "sk-secret+key"
+    echo = f"auth failed: Bearer {key} (logged as {key.replace('+', '%2B')})"
+    stub_runner(monkeypatch, [_result(echo)] * 2)
+    span, steps = _judge_input_fixture()
+    warnings: list[str] = []
+    verdict = judge_span(span, steps, _agent_cfg(api_key=key, max_attempts=2),
+                         warnings, None, evidence_root=tmp_path, transcripts_root=tmp_path / "runs")
+    assert verdict["verdict"] == "error"
+    for echo_path in (verdict["error"], verdict["judge_raw"], *warnings):
+        assert key not in echo_path and "sk-secret%2Bkey" not in echo_path
+
+
+def test_agent_conforming_answer_masks_an_echoed_credential(monkeypatch, tmp_path):
+    """A conforming answer is endpoint output too: the key echoed into its
+    analysis, evidence claims, or per-signal notes never lands in the
+    artifact verbatim."""
+    key = "sk-secret+key"
+    obj = json.loads(GOOD)
+    obj["analysis"] = f"the agent saw {key} in the injection"
+    obj["evidence"][0]["claim"] = f"grep quoted {key} at step 3"
+    obj["memories"][0]["positive_effect"]["note"] = f"acted on {key}"
+    stub_runner(monkeypatch, [_result(json.dumps(obj))])
+    span, steps = _judge_input_fixture()
+    verdict = judge_span(span, steps, _agent_cfg(api_key=key), [], None,
+                         evidence_root=tmp_path, transcripts_root=tmp_path / "runs")
+    assert verdict["verdict"] == "positive"
+    for field in (verdict["analysis"], verdict["evidence"][0]["claim"],
+                  verdict["rubric"]["m1"]["positive_effect"]["note"],
+                  verdict["memory_usage"]["m1"]["evidence"]):
+        assert key not in field and "sk-secret%2Bkey" not in field
+        assert "***" in field
+
+
+def test_agent_empty_answer_takes_the_corrective_retry(monkeypatch, tmp_path):
+    """A forced round that produced no text at all is an out-of-contract
+    answer like any other: the corrective retry answers again."""
+    calls = stub_runner(monkeypatch, [_result("", forced=True,
+                                              stop_reason="format_error_forced"),
+                                      _result(GOOD)])
+    span, steps = _judge_input_fixture()
+    verdict = judge_span(span, steps, _agent_cfg(), [], None, evidence_root=tmp_path, transcripts_root=tmp_path / "runs")
+    assert verdict["verdict"] == "positive"
+    # the record describes the conversation that produced the verdict: the
+    # empty forced first attempt is history, the answering attempt was not
+    assert verdict["input"]["attempts"] == 2 and "forced" not in verdict["input"]
+    assert "produced no final text" in calls[1]["message"]
+
+
+def test_evidence_exposure_grounding_lands_in_the_span_document(tmp_path):
+    """The judged evidence never exceeds what the agent could see: a clipped
+    entry carries only its exposed prefix, an unverifiable one withholds the
+    canonical value entirely — in the evidence folder exactly as in the old
+    one-shot input."""
+    span, steps = _judge_input_fixture()
+    span.memory_exposure = [
+        {"state": "clipped", "exposed_chars": 1, "value_chars": 1},
+        {"state": "unknown"},
+    ]
+    write_evidence(tmp_path, build_evidence(span, steps, None, None))
+    doc = (tmp_path / "span.md").read_text()
+    assert "EXPOSED CLIP" in doc and "only the first 1 of 1 chars" in doc
+    assert "EXPOSURE UNVERIFIED" in doc
+    assert "value withheld" in doc
+    assert ": w" not in doc  # the unverified canonical value never shows
+
+
+def test_evidence_replaces_a_prior_run(tmp_path):
+    """A re-judged span must never read stale files: the folder is replaced
+    wholesale."""
+    span, steps = _judge_input_fixture()
+    write_evidence(tmp_path, build_evidence(span, steps, "old task", None))
+    write_evidence(tmp_path, build_evidence(span, steps, "new task", None))
+    assert "new task" in (tmp_path / "span.md").read_text()
+    assert "old task" not in (tmp_path / "span.md").read_text()
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "manifest.json", "span.md", "steps"]
+
+
+def test_span_dir_name_is_filesystem_safe_and_collision_free():
+    ugly = "traj/with:weird*ids:S1"
+    name = span_dir_name(ugly)
+    assert "/" not in name and ":" not in name and "*" not in name
+    assert name != span_dir_name("traj/with:weird*ids:S2")
+
+
+def test_config_rejects_a_non_latin1_key_before_any_paid_call(monkeypatch):
+    """The key rides an HTTP header, so a mangled paste carrying non-latin-1
+    characters can never be sent: fail fast naming the KEY (never its
+    value). The runner check is stubbed out (its inputs exist here)."""
+    monkeypatch.setattr("injudge.agent._check_runner", lambda: None)
     with pytest.raises(SystemExit, match="latin-1"):
         resolve_config({"BASE_URL": "http://x", "API_KEY": "sk-中 文", "MODEL": "m"})
 
 
-def test_strict_parse_violation_naming_the_key_stays_masked(monkeypatch):
-    """A strict-parse error interpolates endpoint-provided memory keys and
-    signal values; a 200 answer echoing the credential into one flows into
-    the span's error verdict and the validation warnings — mask both, like
-    every other echo path."""
-    key = "sk-secret+key"
-    obj = json.loads(GOOD)
-    # a signal value outside the contract: the error names it verbatim
-    obj["memories"][0]["relevance"]["value"] = key
-    payload = {"choices": [{"message": {"content": json.dumps(obj)}}]}
-    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory([], payload))
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key=key, model="m", max_attempts=1)
-    warnings: list[str] = []
-    verdict = judge_span(span, steps, cfg, warnings)
-    assert verdict["verdict"] == "error"
-    for echo in (verdict["error"], *warnings):
-        assert key not in echo and "sk-secret%2Bkey" not in echo
-        assert "***" in echo
-
-
-def test_unknown_rubric_id_fails_coverage_with_the_echo_masked(monkeypatch):
-    """A rubric entry for an id the span never delivered is a COVERAGE
-    violation — the attempt loop corrects it, and a stubborn answer ends in
-    an error verdict whose text (the judge's own id is endpoint output, an
-    echoed credential inside it) must be masked before it reaches the
-    artifact."""
-    key = "sk-secret+key"
-    obj = json.loads(GOOD)
-    # a rubric entry (valid shape) for an id the span never delivered
-    obj["memories"].append({
-        "id": key,
-        "relevance": {"value": True, "note": ""},
-        "accuracy": {"value": "corroborated", "note": ""},
-        "novelty": {"value": "novel", "note": ""},
-        "influence": {"value": "none", "note": ""},
-        "positive_effect": {"value": None, "note": ""},
-        "anchors": [],
-    })
-    payload = {"choices": [{"message": {"content": json.dumps(obj)}}]}
-    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory([], payload))
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key=key, model="m")
-    warnings: list[str] = []
-    verdict = judge_span(span, steps, cfg, warnings)
-    assert verdict["verdict"] == "error" and "covers ids" in verdict["error"]
-    assert key not in verdict["error"] and "sk-secret%2Bkey" not in verdict["error"]
-    for w in warnings:
-        assert key not in w and "sk-secret%2Bkey" not in w
-
-
-def test_top_level_objects_huge_int_never_misreads_completeness():
-    """An int literal past the digit limit is a Python conversion limit, not
-    invalid JSON: the scan must not materialize it (parse_int=str), so a
-    COMPLETE answer holding one keeps its span and reads "whole" — its
-    braces closed, so the truncation gate can never blame the budget for a
-    wrong shape — while a genuinely cut answer after it still scans as cut."""
-    huge = "9" * 5000
-    complete = '{"memories": [], "analysis": "x", "confidence": ' + huge + "}"
-    assert _top_level_objects(complete) == [(0, len(complete))]
-    assert _complete_json_present(complete) == "whole"
-    cut = '{"memories": [{"key": "k", "n": ' + huge + ', "note": {"a": 1}'
-    assert _top_level_objects(cut) == []
-    assert _complete_json_present(cut) is None
-
-
-def test_top_level_objects_stray_brace_prose_stays_linear(monkeypatch):
-    """Every "{" candidate in stray-brace prose must fail its raw_decode
-    probe inside the bounded window: a full-text failure costs O(position)
-    in the exception's line/column formatting alone (quadratic), and an
-    unterminated string stops the scan outright — escape parity is local,
-    so no candidate past it can parse."""
-    import injudge.judge as judge_mod
-
-    calls = []
-
-    class CountingDecoder(json.JSONDecoder):
-        def raw_decode(self, s, idx=0):
-            calls.append(len(s) - idx)
-            return super().raw_decode(s, idx)
-
-    monkeypatch.setattr(judge_mod.json, "JSONDecoder", CountingDecoder)
-    prose = '{" ' * 4000 + "x" * 50
-    assert _top_level_objects(prose) == []
-    assert calls and all(size <= _SCAN_PROBE for size in calls)  # no full-tail scans
-    calls.clear()
-    unterminated = 'prefix {"abc ' + "{ " * 500  # no closing quote anywhere past it
-    assert _top_level_objects(unterminated) == []
-    assert len(calls) == 2  # one probe + one full-tail proof, then the scan stops
-
-
-def test_top_level_objects_pathological_nesting_stops_the_scan(monkeypatch):
-    """A candidate nested past the parser's recursion limit is never the
-    answer (the contract nests a handful of levels), and its interior
-    fragments are not either: the scan must stop at it. Re-probing each
-    interior brace would repay a full descent to the limit per brace —
-    minutes of CPU on adversarially deep endpoint output. Spans already
-    recorded stand."""
-    import injudge.judge as judge_mod
-
-    calls = []
-
-    class CountingDecoder(json.JSONDecoder):
-        def raw_decode(self, s, idx=0):
-            calls.append(len(s) - idx)
-            return super().raw_decode(s, idx)
-
-    monkeypatch.setattr(judge_mod.json, "JSONDecoder", CountingDecoder)
-    deep = '{"a": ' * 200_000  # past every interpreter's json recursion limit
-    assert _top_level_objects(deep) == []
-    assert len(calls) <= 2  # one window probe + at most one full-tail proof
-    calls.clear()
-    # a complete answer BEFORE the pathological value keeps its span
-    assert _top_level_objects(GOOD + " " + deep) == [(0, len(GOOD))]
-    assert len(calls) <= 3
-
-
-def _object_cut_at_the_probe_window(token_prefix: str, token_rest: str) -> str:
-    """A complete {"k": "…", "b": <token>} JSON object whose first
-    _SCAN_PROBE chars end exactly inside the token (the window boundary
-    slices it)."""
-    pad = _SCAN_PROBE - len('{"k": "') - len('", "b": ') - len(token_prefix)
-    probe = '{"k": "' + "x" * pad + '", "b": ' + token_prefix
-    assert len(probe) == _SCAN_PROBE
-    return probe + token_rest + "}"
-
-
-def test_top_level_objects_window_cut_inside_a_token_still_proves():
-    """A complete object LONGER than the probe window whose boundary slices
-    a token (a literal prefix, a dangling decimal/exponent/sign, a
-    half-written \\u escape) has not genuinely failed to parse: the error
-    that close to the cut may be window-induced, so the candidate still
-    gets its full-tail proof and records the span. Misreading it loses the
-    answer — the truncation gate would call a finished answer a budget cut,
-    and the reasoning_content rescue would miss a large draft."""
-    for prefix, rest in (
-        ("tru", "e"), ("fals", "e"), ("nul", "l"),
-        ("12.", "5"), ("1e", "5"), ("1e+", "5"), ("-", "5"), ("-Infinit", "y"),
-    ):
-        text = _object_cut_at_the_probe_window(prefix, rest)
-        assert _top_level_objects(text) == [(0, len(text))], (prefix, rest)
-    # a half-written \\uXXXX escape inside a string value
-    pad = _SCAN_PROBE - len('{"k": "') - len("\\u12")
-    text = '{"k": "' + "x" * pad + "\\u12" + '34z"}'
-    assert len('{"k": "' + "x" * pad + "\\u12") == _SCAN_PROBE
-    assert _top_level_objects(text) == [(0, len(text))]
-
-
-def test_truncation_gate_huge_int_answer_is_not_a_false_budget_cut(monkeypatch):
-    """A COMPLETE-but-unparseable answer carrying the truncation signal (an
-    int past the digit limit is valid JSON, but Python's int() refuses it —
-    a model error, not "invalid JSON") is not the mid-answer budget cut the
-    gate exists for: the gate must read its completeness, so the error names
-    the model's own violation — not just "increase max_tokens" for a cut
-    that never happened."""
-    huge = '{"memories": [], "confidence": ' + "9" * 5000 + "}"
-    payload = {"choices": [{"finish_reason": "length", "message": {"content": huge}}]}
-    record = []
-    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory(record, payload))
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m",
-                      output_format="json", max_attempts=1)
-    verdict = judge_span(span, steps, cfg, [])
-    assert verdict["verdict"] == "error"
-    assert "past the digit limit" in verdict["error"]
-    assert "is not valid JSON" not in verdict["error"]
-    assert "truncated at the output budget (judge output" not in verdict["error"]
-
-
-def test_truncation_gate_deep_nesting_answer_is_not_a_false_budget_cut(monkeypatch):
-    """A COMPLETE but pathologically nested answer carrying the truncation
-    signal reads as "no complete JSON value" (both completeness parsers stop
-    at the recursion limit) — but no budget produced or fixes 100k-deep
-    nesting: like the digit-limit refusal above it is the model's own error,
-    so the gate must not fire. The span keeps its corrective retries, and
-    the exhaustion error names the nesting, never the "increase max_tokens"
-    misadvice."""
-    deep = ('{"memories": [], "analysis": "", "evidence": [], "confidence": 0.5, "x": '
-            + "[" * 100000 + "]" * 100000 + "}")
-    payload = {"choices": [{"finish_reason": "length", "message": {"content": deep}}]}
-    record = []
-    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory(record, payload))
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m",
-                      output_format="json", max_attempts=2)
-    verdict = judge_span(span, steps, cfg, [])
-    assert verdict["verdict"] == "error"
-    assert "nests too deeply" in verdict["error"]
-    assert "increase max_tokens" not in verdict["error"]
-    assert len(record) == 2  # the corrective retry the budget gate would skip
-
-
-def test_strict_parse_digit_limit_is_distinct_from_invalid_json():
-    """A >4300-digit integer literal is valid JSON (RFC 8259 sets no limit):
-    Python's int() refusal is a model error with its own reason, never the
-    "is not valid JSON" classification that reads as an ignored format
-    field at the json tier. NaN/Infinity stay "not valid JSON"."""
-    obj, error = _strict_parse('{"n": ' + "1" * 5000 + "}")
-    assert obj is None and error == "carries an integer literal past the digit limit"
-    obj, error = _strict_parse('{"n": ')
-    assert obj is None and error == "is not valid JSON"
-
-
-def test_strict_parse_digit_limit_plus_garbage_is_invalid_json():
-    """The int() refusal fires AT the literal, before the scanner reaches
-    later invalidity — a >4300-digit literal followed by trailing garbage
-    (or a NaN past it) is not valid JSON at all, so it takes the json tier's
-    ignored-format classification (the free degrade), never the model-error
-    path that burns corrective attempts."""
-    huge = "1" * 5000
-    for text in (huge + " garbage", '{"n": ' + huge + "} NaN", '{"n": ' + huge + "]}"):
-        obj, error = _strict_parse(text)
-        assert obj is None and error == "is not valid JSON", text[-20:]
-
-
-def test_strict_parse_digit_limit_plus_deep_nesting_never_raises():
-    """A >4300-digit literal BEFORE pathological nesting: the first parse
-    stops at the literal (the digit-limit refusal), so the grammar re-check
-    with the conversion disabled is the one that descends the nesting — its
-    RecursionError must classify as the deep-nesting model error, never
-    escape _strict_parse and abort the whole run (the run continues with a
-    per-span error, the never-raise-on-corrupt-endpoint-output invariant)."""
-    text = '{"n": ' + "1" * 5000 + ', "x": ' + "[" * 100000 + "]" * 100000 + "}"
-    obj, error = _strict_parse(text)
-    assert obj is None and error == "nests too deeply to parse"
-
-
-def test_top_level_objects_structural_failure_keeps_inner_objects():
-    """A candidate failing on a STRUCTURAL error (an offending character at
-    the decoder's position) proves only itself dead: a raw_decode-proven
-    complete object starting before that position is still the answer. The
-    skip must resume at the next live brace, never jump past it — a jump
-    would read a truncated answer holding that object as having no complete
-    JSON (a false budget error) and miss the reasoning_content rescue."""
-    text = '{"x": "abc {"a": 1}'
-    assert _top_level_objects(text) == [(11, 19)]
-    assert _complete_json_present(text) == "embedded"
-    # same inner object without the malformed prefix
-    assert _top_level_objects('prose {"a": 1}') == [(6, 14)]
-    # a genuine cut still jumps (the error position IS the end: every later
-    # brace sits inside the one unfinished value)
-    assert _top_level_objects('{"a": {"b": 1') == []
-
-
-def test_top_level_objects_structural_chain_stays_linear():
-    """Deeply nested malformed input must not chain one full-tail proof per
-    brace (O(text²) on adversarial answers): a full-tail failure repeating
-    the previous one's position means the candidate sits inside that
-    parse's extent — re-probe a bounded few, then skip to the error."""
-    import time
-    text = '{"a":' * 20000 + "!"
-    t0 = time.perf_counter()
-    assert _top_level_objects(text) == []
-    assert time.perf_counter() - t0 < 1.0
-
-
-def test_top_level_objects_repeat_failure_recovers_the_inner_object():
-    """An outer and an inner candidate failing at the SAME trailing
-    position: the outer is nested structure, never the answer — but the
-    interior may still close a COMPLETE object before the offender. The
-    repeat-position guard must re-probe a bounded few braces (not jump
-    straight past them), or a truncated answer holding that object reads as
-    a pure budget cut (a false "increase max_tokens" verdict) and the
-    reasoning_content rescue misses it. Past the cap, the scan jumps."""
-    # the reported miss: {"c": 1} closes before the offender X
-    assert _top_level_objects('{"a": {"b": {"c": 1} X') == [(12, 20)]
-    assert _complete_json_present('{"a": {"b": {"c": 1} X') == "embedded"
-    # a complete object LONGER than the probe window inside the dead extent:
-    # its full-tail proof succeeds (only failing proofs count as re-probes)
-    text = '{"a": {"b": {"c": "' + "x" * 5000 + '"} X'
-    assert _complete_json_present(text) == "embedded"
-    # past the re-probe cap the adversarial nest is jumped: deeper nesting
-    # than the cap still yields no spans (and stays fast — the chain test)
-    assert _top_level_objects('{"a": ' * (_STRUCTURAL_REPROBES + 5) + "!") == []
-
-
-def test_whole_digit_limit_answer_exhaustion_never_blames_the_budget(monkeypatch):
-    """A whole-text answer holding an int past the digit limit FINISHED —
-    its braces closed, so no token budget can fix its wrong shape: the
-    exhaustion error names the digit-limit violation alone, never "increase
-    max_tokens" (the truncation signal the endpoint attached is spurious)."""
-    huge = '{"memories": [], "confidence": ' + "9" * 5000 + "}"
-    payload = {"choices": [{"finish_reason": "length", "message": {"content": huge}}]}
-    record = []
-    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory(record, payload))
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m",
-                      output_format="prompt", max_attempts=1)
-    verdict = judge_span(span, steps, cfg, [])
-    assert verdict["verdict"] == "error"
-    assert "past the digit limit" in verdict["error"]
-    assert "increase max_tokens" not in verdict["error"]
-
-
-def test_chat_content_parts_output_text_spelling_is_read(monkeypatch):
-    """A compatible gateway emitting the Responses API's output_text part
-    spelling inside a chat content-parts body carries the answer in exactly
-    that part: reading it as "no answer" would burn the whole attempt
-    budget on identical empty draws."""
-    half = len(GOOD) // 2
-    payload = {"choices": [{"message": {"content": [
-        {"type": "reasoning", "text": "thinking…"},
-        {"type": "output_text", "text": GOOD[:half]},
-        {"type": "output_text", "text": GOOD[half:]},
-    ]}}]}
-    record = []
-    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory(record, payload))
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
-    assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
-    assert len(record) == 1
-
-
-def test_digit_limit_answer_at_json_tier_is_retried_never_degraded_free(monkeypatch):
-    """At the json tier a digit-limit answer is the model's own error: the
-    corrective retry changes the request at the SAME tier. A free degrade
-    would read valid JSON from a conforming JSON-mode endpoint as proof it
-    ignored the format field — and memoize the weakest tier for the run."""
-    huge = '{"memories": [], "confidence": ' + "9" * 5000 + "}"
-    answers = iter([huge, GOOD])
-    record = []
-
-    def _open(req, timeout=None):
-        body = json.loads(req.data.decode())
-        record.append(body)
-        return FakeResponse({"choices": [{"message": {"content": next(answers)}}]})
-
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", learned_tier="json")
-    verdict = judge_span(span, steps, cfg, [])
-    assert verdict["verdict"] == "positive"
-    # both requests stayed at the json tier — no free degrade to prompt
-    assert [b.get("response_format", {}).get("type") for b in record] == [
-        "json_object", "json_object"]
-    assert cfg.learned_tier == "json"
-    # the retry carried the corrective note naming the digit-limit violation
-    assert "past the digit limit" in record[1]["messages"][-1]["content"]
-
-
-def test_digit_limit_answer_at_structured_tier_is_retried_never_degraded_free(monkeypatch):
-    """At the structured tier a digit-limit answer is the model's own error
-    too: a >4300-digit integer is valid JSON and legal inside the contract's
-    unbounded integer fields (evidence steps/seqs), so a strict endpoint can
-    legitimately produce one — the corrective retry stays at the SAME tier.
-    A free degrade would misread a Python parser limit as an ignored format
-    field and memoize a weaker tier off a valid answer."""
-    huge = '{"memories": [], "confidence": ' + "9" * 5000 + "}"
-    answers = iter([huge, GOOD])
-    record = []
-
-    def _open(req, timeout=None):
-        body = json.loads(req.data.decode())
-        record.append(body)
-        return FakeResponse({"choices": [{"message": {"content": next(answers)}}]})
-
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
-    verdict = judge_span(span, steps, cfg, [])
-    assert verdict["verdict"] == "positive"
-    # both requests stayed at the structured tier — no free degrade to json
-    assert [b.get("response_format", {}).get("type") for b in record] == [
-        "json_schema", "json_schema"]
-    assert cfg.learned_tier == "structured"
-    assert "past the digit limit" in record[1]["messages"][-1]["content"]
-
-
-def test_deep_nesting_at_structured_tier_degrades_free(monkeypatch):
-    """At the structured tier a complete-but-pathologically-nested answer is
-    the output-side proof the endpoint ignored the format field: constrained
-    decoding bounds the answer to the schema's handful of levels, so no
-    conforming endpoint can produce 100k-deep nesting — unlike the
-    digit-limit literal, which is schema-LEGAL and stays a model error. The
-    tier degrades free (no attempt budget consumed, no corrective note); at
-    the json/prompt tiers the same answer is a model error instead (pinned
-    by the digit-limit and truncation-gate tests)."""
-    deep = ('{"memories": [], "analysis": "", "evidence": [], "confidence": 0.5, "x": '
-            + "[" * 100000 + "]" * 100000 + "}")
-    answers = iter([deep, GOOD])
-    record = []
-
-    def _open(req, timeout=None):
-        body = json.loads(req.data.decode())
-        record.append(body)
-        return FakeResponse({"choices": [{"message": {"content": next(answers)}}]})
-
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", max_attempts=1)
-    warnings = []
-    verdict = judge_span(span, steps, cfg, warnings)
-    assert verdict["verdict"] == "positive"
-    # structured, then a FREE degrade to json — with max_attempts=1 a
-    # consumed budget would have exhausted instead
-    assert [b.get("response_format", {}).get("type") for b in record] == [
-        "json_schema", "json_object"]
-    assert cfg.learned_tier == "json"
-    assert any("nests too deeply" in w and "degrading to json" in w for w in warnings)
-
-
-def test_empty_400s_walk_the_whole_chain(monkeypatch):
-    """An EMPTY rejection body is silence, not an unchanged rejection: a
-    gateway dropping per-tier error text must not be diagnosed tier-
-    independent (a generic-body proxy could be rejecting only the format
-    field) — the walk continues to the tier that works."""
-    record = []
-
-    def _open(req, timeout=None):
-        record.append(json.loads(req.data.decode()))
-        if "response_format" in json.loads(req.data.decode()):
-            raise http_error(400, b"")
-        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
-
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
-    warnings = []
-    assert judge_span(span, steps, cfg, warnings)["verdict"] == "positive"
-    assert [b.get("response_format", {}).get("type") for b in record] == [
-        "json_schema", "json_object", None]  # walked to the prompt tier
-    assert cfg.learned_tier == "prompt"
-
-
-def test_distinct_400s_per_tier_still_walk_the_chain(monkeypatch):
-    """Per-tier format rejections carry per-tier messages: distinct details
-    are never read as a tier-independent fault — the free walk continues to
-    the tier that works."""
-    record = []
-    details = iter([b"response_format json_schema unsupported",
-                    b"response_format json_object unsupported"])
-
-    def _open(req, timeout=None):
-        body = json.loads(req.data.decode())
-        record.append(body)
-        if "response_format" in body:
-            raise http_error(400, next(details))
-        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
-
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
-    assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
-    assert [b.get("response_format", {}).get("type") for b in record] == [
-        "json_schema", "json_object", None]
-    assert cfg.learned_tier == "prompt"
-
-
-def test_rejections_differing_past_the_message_cap_still_walk(monkeypatch):
-    """Two DISTINCT 400 rejections whose bodies share their first 300
-    characters (a verbose envelope differing only in a trailing field) are
-    not "the identical rejection": the tier walk continues. The fail-fast
-    compares full bodies; only the recorded message is capped."""
-    record = []
-    prefix = b'{"error": {"message": "' + b"x" * 400  # > 300 chars of shared prefix
-    details = iter([prefix + b'", "param": "response_format"}',
-                    prefix + b'", "param": "json_schema"}'])
-
-    def _open(req, timeout=None):
-        body = json.loads(req.data.decode())
-        record.append(body)
-        if "response_format" in body:
-            raise http_error(400, next(details))
-        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
-
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
-    assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
-    assert [b.get("response_format", {}).get("type") for b in record] == [
-        "json_schema", "json_object", None]  # walked the chain to the prompt tier
-
-
-def test_identical_rejection_at_the_final_tier_fails_tier_independent(monkeypatch):
-    """The unchanged-rejection fail-fast fires when NOTHING answered between
-    the two identical 400 bodies: no format field is left to refuse at the
-    prompt tier, so the repeat is tier-independent (a config fault or the
-    span's own content), not a format refusal."""
-    body = b'{"error": {"message": "max_tokens too large"}}'
-    record = []
-
-    def _open(req, timeout=None):
-        record.append(json.loads(req.data.decode()))
-        raise http_error(400, body)
-
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
-    with pytest.raises(JudgeError) as excinfo:
-        judge_span(span, steps, cfg, [])
-    assert "unchanged across conformance tiers" in str(excinfo.value)
-    assert [b.get("response_format", {}).get("type") for b in record] == [
-        "json_schema", "json_object", None]
-
-
-def test_distinct_non_utf8_400_bodies_are_not_the_identical_rejection(monkeypatch):
-    """Distinct non-UTF-8 400 bodies decode (U+FFFD replacement) to the same
-    string: the unchanged-rejection fail-fast must compare the RAW bytes —
-    two genuinely different rejections are not the tier-independent repeat
-    even when their decodes are identical."""
-    bodies = iter([b'{"error": "\xff"}', b'{"error": "\xfe"}', b'{"error": "\xfc"}'])
-
-    def _open(req, timeout=None):
-        raise http_error(400, next(bodies))
-
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
-    with pytest.raises(JudgeError) as excinfo:
-        judge_span(span, steps, cfg, [])
-    assert "unchanged across conformance tiers" not in str(excinfo.value)
-    assert "HTTP 400" in str(excinfo.value)
-
-
-def test_rejection_chain_resets_when_a_tier_answers_200(monkeypatch):
-    """structured 400 (body B) → json 200 with out-of-contract output (free
-    degrade) → prompt 400 with the SAME body B: the endpoint answered a
-    request in between, so the two rejections never went "unchanged across
-    conformance tiers" — the span fails on the plain HTTP message instead
-    of the tier-independent misreading."""
-    body = b'{"error": {"message": "generic gateway rejection"}}'
-    record = []
-
-    def _open(req, timeout=None):
-        payload = json.loads(req.data.decode())
-        record.append(payload)
-        rf = payload.get("response_format", {}).get("type")
-        if rf == "json_schema":
-            raise http_error(400, body)
-        if rf == "json_object":
-            return FakeResponse({"choices": [{"message": {"content": "not json"}}]})
-        raise http_error(400, body)  # prompt tier
-
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
-    with pytest.raises(JudgeError) as excinfo:
-        judge_span(span, steps, cfg, [])
-    assert "unchanged across conformance tiers" not in str(excinfo.value)
-    assert "HTTP 400" in str(excinfo.value)
-    assert [b.get("response_format", {}).get("type") for b in record] == [
-        "json_schema", "json_object", None]
-
-
-def test_rejection_chain_resets_on_an_unparseable_200_body(monkeypatch):
-    """A 200 whose body fails to decode or parse is still an ANSWER, not
-    silence: the identical-rejection chain resets there too, so a later 400
-    repeating a pre-answer body fails the span on the plain HTTP message
-    instead of the tier-independent misreading — the same reset a parseable
-    200 gets (the endpoint answered between the two rejections)."""
-    body = b'{"error": {"message": "generic gateway rejection"}}'
-    answered_garbled = []
-
-    class GarbledResponse:
-        def read(self):
-            return b"\xff\xfe garbled"  # not UTF-8: the decode fails first
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
-    def _open(req, timeout=None):
-        payload = json.loads(req.data.decode())
-        if "response_format" in payload:
-            raise http_error(400, body)  # both format tiers reject identically
-        if not answered_garbled:
-            answered_garbled.append(True)
-            return GarbledResponse()  # the final tier's request got a garbled 200
-        raise http_error(400, body)  # the retry repeats the old rejection body
-
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    monkeypatch.setattr("injudge.judge.time.sleep", lambda s: None)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
-    with pytest.raises(JudgeError) as excinfo:
-        judge_span(span, steps, cfg, [])
-    assert "unchanged across conformance tiers" not in str(excinfo.value)
-    assert "HTTP 400" in str(excinfo.value)
-
-
-def test_tier_degrades_on_out_of_contract_output(monkeypatch):
-    """A proxy silently ignoring the format field answers out of contract:
-    output-driven degrade, memoized."""
-    record = []
-
-    def _open(req, timeout=None):
-        body = json.loads(req.data.decode())
-        record.append(body)
-        if body.get("response_format", {}).get("type") == "json_schema":
-            return FakeResponse({"choices": [{"message": {"content": "not json at all"}}]})
-        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
-
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
-    warnings = []
-    assert judge_span(span, steps, cfg, warnings)["verdict"] == "positive"
-    assert cfg.learned_tier == "json"
-    assert len(record) == 2
-    assert any("ignored the format field" in w for w in warnings)
-
-
-def test_out_of_contract_degrade_consumes_no_attempt(monkeypatch):
-    """An out-of-contract answer on a constrained tier is the output-side
-    discovery of a format-ignoring proxy — the same endpoint property a
-    400/422 rejection reports, so it degrades for free: the budget bounds
-    tries at the working tier only, and even max_attempts=1 reaches it."""
-    record = []
-
-    def _open(req, timeout=None):
-        body = json.loads(req.data.decode())
-        record.append(body)
-        if "response_format" in body:  # the proxy ignores the format field
-            return FakeResponse({"choices": [{"message": {"content": "not json at all"}}]})
-        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
-
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", max_attempts=1)
-    assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
-    assert [b.get("response_format", {}).get("type") for b in record] == [
-        "json_schema", "json_object", None]  # walked the whole chain for free
-    assert cfg.learned_tier == "prompt"
-
-
-def test_json_tier_non_finite_confidence_degrades_free(monkeypatch):
-    """A NaN/Infinity confidence is invalid JSON (RFC 8259): under JSON mode
-    the endpoint could never have emitted it, so a json-tier answer carrying
-    one is the output-side proof the format field was ignored — degrade to
-    the prompt tier for free instead of burning the attempt budget on
-    corrective retries that cannot fix an endpoint property."""
-    record = []
-
-    def _open(req, timeout=None):
-        body = json.loads(req.data.decode())
-        record.append(body)
-        fmt = body.get("response_format", {}).get("type")
-        if fmt == "json_schema":
-            raise http_error(400, b"json_schema unsupported")
-        if fmt == "json_object":  # the proxy ignores JSON mode
-            bad = json.loads(GOOD)
-            bad["confidence"] = float("nan")  # json.dumps emits NaN: invalid JSON
-            return FakeResponse({"choices": [{"message": {"content": json.dumps(bad)}}]})
-        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
-
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", max_attempts=1)
-    warnings = []
-    # max_attempts=1 and still positive: the NaN rejection consumed no attempt
-    assert judge_span(span, steps, cfg, warnings)["verdict"] == "positive"
-    assert [b.get("response_format", {}).get("type") for b in record] == [
-        "json_schema", "json_object", None]  # walked the whole chain for free
-    assert cfg.learned_tier == "prompt"
-    assert any("is not valid JSON" in w and "degrading to prompt" in w for w in warnings)
-
-
-def test_json_tier_overflow_literal_confidence_is_a_model_error(monkeypatch):
-    """A 1e999 confidence is valid JSON (parse_constant never fires) that
-    parses to a non-finite float: at the json tier that is the model's own
-    schema violation, not proof of a format-ignoring endpoint (JSON mode
-    guarantees valid JSON, and 1e999 IS valid) — it consumes the budget on a
-    same-tier corrective retry instead of degrading free."""
-    record = []
-
-    def _open(req, timeout=None):
-        body = json.loads(req.data.decode())
-        record.append(body)
-        fmt = body.get("response_format", {}).get("type")
-        if fmt == "json_schema":
-            raise http_error(400, b"json_schema unsupported")
-        if len(record) == 2:  # first json-tier answer: valid JSON, non-finite confidence
-            bad = GOOD.replace('"confidence": 0.8', '"confidence": 1e999')
-            return FakeResponse({"choices": [{"message": {"content": bad}}]})
-        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
-
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
-    warnings = []
-    assert judge_span(span, steps, cfg, warnings)["verdict"] == "positive"
-    # the violation retried at the SAME tier with a corrective note; the
-    # prompt tier was never touched, and the memo only records the json tier
-    assert [b.get("response_format", {}).get("type") for b in record] == [
-        "json_schema", "json_object", "json_object"]
-    assert len(record[2]["messages"]) == 4  # the corrective round was appended
-    assert "non-finite confidence" in record[2]["messages"][3]["content"]
-    assert not any("degrading to prompt" in w for w in warnings)
-    assert cfg.learned_tier == "json"
-
-
-def test_anthropic_chain_skips_json_tier(monkeypatch):
-    """anthropic walks structured → prompt (no plain JSON mode in the API)."""
-    record = []
-
-    def _open(req, timeout=None):
-        body = json.loads(req.data.decode())
-        record.append(body)
-        if "format" in body.get("output_config", {}):
-            raise http_error(400, b"output_config.format unsupported")
-        return FakeResponse({"content": [{"type": "text", "text": GOOD}]})
-
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", api="anthropic")
-    assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
-    assert "output_config" not in record[1]  # prompt tier sends nothing
-    assert cfg.learned_tier == "prompt"
-
-
-def test_corrective_retry_at_final_tier(monkeypatch):
-    """Prompt tier: the retry appends the invalid answer plus a corrective
-    note — it never repeats the identical request (deterministic at t=0)."""
-    record = []
-
-    def _open(req, timeout=None):
-        body = json.loads(req.data.decode())
-        record.append(body)
-        if len(record) == 1:
-            return FakeResponse({"choices": [{"message": {"content": "garbage"}}]})
-        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
-
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", output_format="prompt")
-    assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
-    assert len(record) == 2
-    msgs = record[1]["messages"]
-    assert [m["role"] for m in msgs] == ["system", "user", "assistant", "user"]
-    assert msgs[2]["content"] == "garbage"
-    assert "not valid per the output contract" in msgs[3]["content"]
-
-
-def test_corrective_retry_preserves_roles_on_anthropic(monkeypatch):
-    """The anthropic retry forwards the invalid answer + corrective note as
-    the judge's own turn pair, not flattened into the user blob."""
-    record = []
-
-    def _open(req, timeout=None):
-        body = json.loads(req.data.decode())
-        record.append(body)
-        text = "garbage" if len(record) == 1 else GOOD
-        return FakeResponse({"content": [{"type": "text", "text": text}]})
-
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m",
-                      api="anthropic", output_format="prompt")
-    assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
-    assert len(record) == 2
-    assert [m["role"] for m in record[0]["messages"]] == ["user"]  # first request unchanged
-    msgs = record[1]["messages"]
-    assert [m["role"] for m in msgs] == ["user", "assistant", "user"]
-    assert msgs[1]["content"] == "garbage"
-    assert "not valid per the output contract" in msgs[2]["content"]
-
-
-def test_corrective_retry_preserves_roles_on_responses(monkeypatch):
-    """The responses retry switches input from the plain-string form to the
-    message-list form so the invalid answer keeps its assistant role."""
-    record = []
-
-    def _open(req, timeout=None):
-        body = json.loads(req.data.decode())
-        record.append(body)
-        text = "garbage" if len(record) == 1 else GOOD
-        return FakeResponse({"output": [{"type": "message",
-                                         "content": [{"type": "output_text", "text": text}]}]})
-
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m",
-                      api="responses", output_format="prompt")
-    assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
-    assert len(record) == 2
-    assert isinstance(record[0]["input"], str)  # single-shot keeps the string form
-    convo = record[1]["input"]
-    assert [m["role"] for m in convo] == ["user", "assistant", "user"]
-    assert convo[1]["content"] == "garbage"
-    assert "not valid per the output contract" in convo[2]["content"]
-
-
-def test_wrong_shaped_response_body_is_retried_not_crashing(monkeypatch):
-    """A 200 whose body parses but drifts from the declared shape (a proxy's
-    JSON error page) reads as 'no message content': retried within the
-    budget, then an honest JudgeError — never an uncaught AttributeError."""
-    span, steps = _judge_input_fixture()
-    monkeypatch.setattr("injudge.judge.time.sleep", lambda s: None)
-    for payload in (["not", "an", "object"],
-                    {"choices": ["not-an-object"]},
-                    {"choices": [{"message": "not-an-object"}]}):
-        record = []
-        monkeypatch.setattr("injudge.judge.urlopen",
-                            fake_urlopen_factory(record, payload))
-        cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", max_attempts=2)
-        with pytest.raises(JudgeError, match="no message content"):
-            judge_span(span, steps, cfg, [])
-        assert len(record) == 2
-
-    # ...and a one-off shape drift recovers on the retry
-    calls = {"n": 0}
-
-    def drift_once(req, timeout=None):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            return FakeResponse({"choices": ["garbage"]})
-        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
-
-    monkeypatch.setattr("injudge.judge.urlopen", drift_once)
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
-    assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
-
-
-def test_budget_exhausted_invalid_output_is_error_with_raw(monkeypatch):
-    record = []
-    payload = {"choices": [{"message": {"content": "garbage"}}]}
-    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory(record, payload))
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m",
-                      output_format="prompt", max_attempts=2)
-    warnings = []
-    verdict = judge_span(span, steps, cfg, warnings)
-    assert verdict["verdict"] == "error"
-    assert verdict["judge_raw"] == "garbage"
-    assert len(record) == 2  # budget spent, then the honest error verdict
-    assert any("not valid JSON" in w for w in warnings)
-
-
-def test_pinned_output_format_rejected_is_config_error(monkeypatch):
-    """Pinned + 400 → the span fails fast (a pinned tier cannot degrade), but
-    as a per-span JudgeError — recorded, the run continues — never a
-    SystemExit aborting a multi-trajectory run mid-way after paid judge
-    calls (the artifact flushes per trajectory, so an abort would lose the
-    current trajectory's completed verdicts)."""
-    record = []
-    monkeypatch.setattr("injudge.judge.urlopen",
-                        fake_urlopen_factory(record, fail=http_error(400)))
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", output_format="structured")
-    with pytest.raises(JudgeError, match="OUTPUT_FORMAT"):
-        judge_span(span, steps, cfg, [])
-    assert len(record) == 1
-
-
-def test_pinned_tier_retries_within_tier_only(monkeypatch):
-    """Pinned + invalid output → corrective retries inside that tier, never
-    a degrade."""
-    record = []
-
-    def _open(req, timeout=None):
-        body = json.loads(req.data.decode())
-        record.append(body)
-        if len(record) < 3:
-            return FakeResponse({"choices": [{"message": {"content": "bad"}}]})
-        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
-
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", output_format="json")
-    assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
-    assert [b["response_format"] for b in record] == [{"type": "json_object"}] * 3
-    assert len(record[2]["messages"]) == 6  # two corrective rounds accumulated
-
-
-def test_transport_failures_share_the_attempt_budget(monkeypatch):
-    calls = {"n": 0}
-
-    def flaky(req, timeout=None):
-        calls["n"] += 1
-        if calls["n"] < 3:
-            raise OSError("boom")
-        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
-
-    monkeypatch.setattr("injudge.judge.urlopen", flaky)
-    monkeypatch.setattr("injudge.judge.time.sleep", lambda s: None)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", max_attempts=3)
-    assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
-    calls["n"] = 0
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", max_attempts=2)
-    with pytest.raises(JudgeError, match="OSError"):
-        judge_span(span, steps, cfg, [])
-
-
-def test_truncated_or_garbled_body_is_retried_never_escapes(monkeypatch):
-    """A 200 whose body dies mid-read (IncompleteRead) or is not UTF-8 at all
-    is the same transport class as a refused connection: retried within the
-    budget, then an honest JudgeError — never an uncaught escape that aborts
-    the whole run mid-trajectory."""
-    span, steps = _judge_input_fixture()
-    monkeypatch.setattr("injudge.judge.time.sleep", lambda s: None)
-
-    class TruncatedResponse:
-        def read(self):
-            raise http.client.IncompleteRead(b"partial")
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
-    calls = {"n": 0}
-
-    def flaky(req, timeout=None):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            return TruncatedResponse()
-        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
-
-    monkeypatch.setattr("injudge.judge.urlopen", flaky)
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
-    assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
-
-    class GarbledResponse(FakeResponse):
-        def read(self):
-            return b"\xff\xfe not utf-8"
-
-    monkeypatch.setattr(
-        "injudge.judge.urlopen", lambda req, timeout=None: GarbledResponse({}))
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", max_attempts=2)
-    with pytest.raises(JudgeError, match="unparseable response body"):
-        judge_span(span, steps, cfg, [])
-
-
-def test_pathologically_nested_body_is_retried_never_escapes(monkeypatch):
-    """A body nested past the JSON parser's recursion limit raises
-    RecursionError, not JSONDecodeError: the same transport class as a
-    garbled body — retried within the budget, then an honest JudgeError,
-    never an uncaught escape aborting the run mid-trajectory."""
-    span, steps = _judge_input_fixture()
-    monkeypatch.setattr("injudge.judge.time.sleep", lambda s: None)
-
-    class NestedResponse(FakeResponse):
-        def read(self):
-            return b"[" * 200000  # never parses: hits the recursion limit
-
-    calls = {"n": 0}
-
-    def flaky(req, timeout=None):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            return NestedResponse({})
-        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
-
-    monkeypatch.setattr("injudge.judge.urlopen", flaky)
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
-    assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
-
-    monkeypatch.setattr(
-        "injudge.judge.urlopen", lambda req, timeout=None: NestedResponse({}))
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", max_attempts=2)
-    with pytest.raises(JudgeError, match="unparseable response body"):
-        judge_span(span, steps, cfg, [])
-
-
-def test_non_format_4xx_fails_fast(monkeypatch):
-    """A 401/403/404 is an endpoint/config fault, not a format-tier refusal:
-    fail the span on the first request — no chain walk, no misleading
-    degrade warnings, no learned-tier memo pollution."""
-    record = []
-    monkeypatch.setattr("injudge.judge.urlopen",
-                        fake_urlopen_factory(record, fail=http_error(401, b"invalid key")))
-    monkeypatch.setattr("injudge.judge.time.sleep", lambda s: None)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
-    warnings = []
-    with pytest.raises(JudgeError, match="HTTP 401"):
-        judge_span(span, steps, cfg, warnings)
-    assert len(record) == 1  # no tier walk
-    assert not any("degrading" in w for w in warnings)
-    assert cfg.learned_tier == "structured"  # memo untouched
-
-
-def test_429_honors_retry_after(monkeypatch):
-    """A 429 carrying Retry-After paces the retry by the server's own delay
-    (capped), not the fixed backoff."""
-    calls = {"n": 0}
-    sleeps = []
-    monkeypatch.setattr("injudge.judge.time.sleep", sleeps.append)
-
-    def throttled(req, timeout=None):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise HTTPError("http://x", 429, "err", {"Retry-After": "7"}, BytesIO(b"slow down"))
-        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
-
-    monkeypatch.setattr("injudge.judge.urlopen", throttled)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
-    assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
-    assert sleeps == [7.0]
-
-
-def test_429_honors_retry_after_http_date(monkeypatch):
-    """Retry-After may also be an RFC 7231 HTTP-date (what generic HTTP
-    gateways send): honored like delta-seconds instead of falling back to
-    the fixed backoff and burning attempts against a throttled endpoint."""
-    calls = {"n": 0}
-    sleeps = []
-    monkeypatch.setattr("injudge.judge.time.sleep", sleeps.append)
-    when = datetime.now(timezone.utc) + timedelta(seconds=30)
-
-    def throttled(req, timeout=None):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise HTTPError("http://x", 429, "err",
-                            {"Retry-After": format_datetime(when, usegmt=True)},
-                            BytesIO(b"slow down"))
-        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
-
-    monkeypatch.setattr("injudge.judge.urlopen", throttled)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
-    assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
-    assert len(sleeps) == 1 and 25.0 < sleeps[0] <= 30.0
-
-
-def test_mixed_failure_keeps_the_raw_answer(monkeypatch):
-    """Out-of-contract output followed by transport exhaustion: the error
-    verdict still carries the judge's raw answer — a transport retry never
-    erases the last real output — and the recorded error names that answer's
-    own contract violation, never the later transport cause."""
-    calls = {"n": 0}
-
-    def flaky(req, timeout=None):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            return FakeResponse({"choices": [{"message": {"content": "garbage"}}]})
-        raise OSError("boom")
-
-    monkeypatch.setattr("injudge.judge.urlopen", flaky)
-    monkeypatch.setattr("injudge.judge.time.sleep", lambda s: None)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m",
-                      output_format="prompt", max_attempts=2)
-    verdict = judge_span(span, steps, cfg, [])
-    assert verdict["verdict"] == "error"
-    assert verdict["judge_raw"] == "garbage"
-    assert verdict["error"] == "judge output is not valid JSON"
-
-
-def test_free_tier_discovery_does_not_seed_the_error_attribution(monkeypatch):
-    """A free tier discovery (an ignored format field) consumed no budget, so
-    it is not this span's failure: when the working tier then dies on
-    transport, the honest JudgeError names the transport cause — never the
-    stale contract violation from the abandoned tier."""
-    calls = {"n": 0}
-
-    def flaky(req, timeout=None):
-        calls["n"] += 1
-        body = json.loads(req.data.decode())
-        if body.get("response_format", {}).get("type") == "json_schema":
-            return FakeResponse({"choices": [{"message": {"content": "not json at all"}}]})
-        raise OSError("boom")
-
-    monkeypatch.setattr("injudge.judge.urlopen", flaky)
-    monkeypatch.setattr("injudge.judge.time.sleep", lambda s: None)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", max_attempts=2)
-    with pytest.raises(JudgeError, match="OSError"):
-        judge_span(span, steps, cfg, [])
-    assert calls["n"] == 3  # the free discovery plus the two paid attempts
-
-
-def test_json_tier_schema_violation_is_a_model_error_not_a_tier_discovery(monkeypatch):
-    """JSON mode guarantees valid JSON, never schema conformance: a valid but
-    wrong-shape answer at the json tier is a model error — it consumes the
-    budget on a same-tier corrective retry. It must NOT free-degrade to the
-    prompt tier (one span's bad draw would otherwise pin the whole run to the
-    weakest tier via the memo)."""
-    record = []
-
-    def _open(req, timeout=None):
-        body = json.loads(req.data.decode())
-        record.append(body)
-        fmt = body.get("response_format", {}).get("type")
-        if fmt == "json_schema":
-            raise http_error(400, b"json_schema unsupported")
-        if len(record) == 2:  # first json-tier answer: valid JSON, wrong shape
-            return FakeResponse(
-                {"choices": [{"message": {"content": '{"verdict": "positive"}'}}]})
-        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
-
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
-    warnings = []
-    assert judge_span(span, steps, cfg, warnings)["verdict"] == "positive"
-    # the schema violation retried at the SAME tier with a corrective note;
-    # the prompt tier was never touched
-    assert [b.get("response_format", {}).get("type") for b in record] == [
-        "json_schema", "json_object", "json_object"]
-    assert len(record[2]["messages"]) == 4  # the corrective round was appended
-    assert "not valid per the output contract" in record[2]["messages"][3]["content"]
-    assert not any("degrading to prompt" in w for w in warnings)
-    assert cfg.learned_tier == "json"  # memoized only once the tier produced a verdict
-
-
-def test_chat_content_parts_array_is_read(monkeypatch):
-    """An OpenAI-compatible endpoint may answer with a content-parts array
-    instead of a plain string: its text blocks join like the
-    anthropic/responses branches. Read as "no answer", a valid verdict would
-    burn the attempt budget on identical empty draws and end in a JudgeError
-    without judge_raw."""
-    record = []
-    half = len(GOOD) // 2
-    monkeypatch.setattr(
-        "injudge.judge.urlopen",
-        fake_urlopen_factory(
-            record,
-            payload={"choices": [{"message": {"content": [
-                {"type": "text", "text": GOOD[:half]},
-                {"type": "text", "text": GOOD[half:]},
-            ]}}]},
-        ),
-    )
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
-    assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
-    assert len(record) == 1
-
-
-def test_truncated_answer_is_a_budget_error_never_a_tier_degrade(monkeypatch):
-    """A max_tokens-truncated answer is invalid JSON, but that is a budget
-    property of THIS response — never proof the endpoint ignored the format
-    field. A free degrade would misdiagnose it, and a prompt-tier success
-    would memoize the weakest tier for the rest of the run off one span's
-    budget. The span gets an honest error verdict naming the truncation, the
-    partial answer kept, no doomed same-budget retry."""
-    record = []
-
-    def _open(req, timeout=None):
-        record.append(json.loads(req.data.decode()))
-        if len(record) == 1:  # the structured-tier answer is cut mid-JSON
-            return FakeResponse({"choices": [
-                {"finish_reason": "length", "message": {"content": GOOD[:40]}}]})
-        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
-
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
-    warnings = []
-    verdict = judge_span(span, steps, cfg, warnings)
-    assert verdict["verdict"] == "error"
-    assert "truncated at the output budget" in verdict["error"]
-    assert verdict["judge_raw"]  # the partial answer is kept
-    assert len(record) == 1  # no degrade, no same-budget retry
-    assert not any("degrading" in w for w in warnings)
-    assert cfg.learned_tier == "structured"  # the memo is never poisoned
-
-
-def test_complete_json_present_reads_past_unclosed_prose_brackets():
-    """A depth count is no proof of nesting: an unclosed "[" in leading
-    prose must not blind the scan to the complete verdict object after it
-    (the truncation gate would misread that completed answer as a budget
-    cut), while a complete fragment nested inside a genuinely cut object is
-    never the answer."""
-    assert _complete_json_present(GOOD)
-    # prose with an unclosed bracket, then the complete verdict, then the cut
-    assert _complete_json_present("Signals: [relevance, accuracy\n" + GOOD + "\ncut")
-    # a genuine mid-answer cut holds no complete top-level object
-    assert not _complete_json_present(GOOD[:200])
-    # a stray complete object still counts (documented residual: the gate
-    # stays bypassed; the exhaustion path names the budget instead)
-    assert _complete_json_present('{"confidence": 0.9}\n' + GOOD[:200])
-
-
-def test_truncated_signal_with_a_complete_answer_routes_through_the_chain(monkeypatch):
-    """A finish_reason "length" answer whose prose (with an unclosed
-    bracket) precedes a COMPLETE verdict is not a budget cut — the cut only
-    removed trailing prose. It must route through the tier chain (a paid
-    redraw can produce a clean answer), never the final budget error that
-    would leave the span's memories unjudged."""
-    record = []
-
-    def _open(req, timeout=None):
-        record.append(json.loads(req.data.decode()))
-        if len(record) == 1:  # complete verdict after unclosed prose, then cut
-            return FakeResponse({"choices": [
-                {"finish_reason": "length",
-                 "message": {"content": "Signals: [relevance\n" + GOOD + "\ncut"}}]})
-        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
-
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
-    warnings = []
-    verdict = judge_span(span, steps, cfg, warnings)
-    assert verdict["verdict"] == "positive"
-    assert len(record) == 2  # one free tier discovery, then the redraw
-    assert any("degrading to json" in w for w in warnings)
-    assert cfg.learned_tier == "json"
-
-
-def test_quote_bracketed_complete_answer_routes_through_the_chain(monkeypatch):
-    """Prose quotes put a side string-tracker out of step with the JSON it
-    guards: a complete verdict bracketed by an unmatched prose quote must
-    still be recognized as complete (the budget cut ate prose at most) and
-    route through the tier chain — never the budget error that would leave
-    the span's memories unjudged."""
-    record = []
-
-    def _open(req, timeout=None):
-        record.append(json.loads(req.data.decode()))
-        if len(record) == 1:  # complete verdict inside quoted prose, then cut
-            return FakeResponse({"choices": [
-                {"finish_reason": "length",
-                 "message": {"content": f'He said "the verdict is {GOOD}" — final.'}}]})
-        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
-
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
-    verdict = judge_span(span, steps, cfg, [])
-    assert verdict["verdict"] == "positive"
-    assert len(record) == 2  # a free tier discovery, then the clean redraw
-
-
-def test_nan_in_a_closed_object_with_truncation_signal_still_degrades_free(monkeypatch):
-    """A syntactically closed object carrying NaN is a COMPLETED answer —
-    the budget did not cut it mid-value, so the truncation signal must not
-    turn it into a budget error: the invalid constant is the json tier's
-    free-degrade proof ("is not valid JSON") instead."""
-    nan_text = json.dumps({**json.loads(GOOD), "confidence": float("nan")})
-    record = []
-
-    def _open(req, timeout=None):
-        record.append(json.loads(req.data.decode()))
-        if len(record) == 1:
-            return FakeResponse({"choices": [
-                {"finish_reason": "length", "message": {"content": nan_text}}]})
-        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
-
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
-    warnings = []
-    verdict = judge_span(span, steps, cfg, warnings)
-    assert verdict["verdict"] == "positive"
-    assert len(record) == 2
-    assert any("degrading to json" in w for w in warnings)
-
-
-def test_huge_integer_answer_never_crashes_the_run(monkeypatch):
-    """A 4300+-digit integer makes the decoder raise plain ValueError (not
-    JSONDecodeError); the truncation gate must degrade to an error verdict,
-    never let the exception escape judge_span and kill the whole run."""
-    huge = '{"memories": [], "n": ' + "1" * 5000  # cut before any value closes
-
-    def _open(req, timeout=None):
-        return FakeResponse({"choices": [
-            {"finish_reason": "length", "message": {"content": huge}}]})
-
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
-    verdict = judge_span(span, steps, cfg, [])
-    assert verdict["verdict"] == "error"
-    assert "truncated at the output budget" in verdict["error"]
-
-
-def test_truncated_stray_object_exhaustion_names_the_budget(monkeypatch):
-    """A genuine mid-answer cut holding a stray complete object slips past
-    the completeness gate (the object reads as a finished answer) and burns
-    the corrective budget on re-truncations — the final error must name the
-    output budget, never end in a bare "not valid JSON" that points nowhere.
-    The gate stays bypassed by design: a tail-based cut detector cannot
-    tell a prose tail beginning with "{" (a finished verdict plus trimmed
-    prose — a redraw can still conform) from a reopened cut object without
-    guessing, and a wrong guess would fail fast on a judgeable span."""
-    record = []
-
-    def _open(req, timeout=None):
-        record.append(json.loads(req.data.decode()))
-        return FakeResponse({"choices": [
-            {"finish_reason": "length",
-             "message": {"content": '{"confidence": 0.9}\n' + GOOD[:200]}}]})
-
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
-    verdict = judge_span(span, steps, cfg, [])
-    assert verdict["verdict"] == "error"
-    assert "is not valid JSON" in verdict["error"]
-    assert "increase max_tokens" in verdict["error"]
-    # two free tier discoveries, then the five paid corrective retries
-    assert len(record) == 7
-
-
-def test_whole_answer_wrong_shape_exhaustion_never_blames_the_budget(monkeypatch):
-    """A whole-text answer with a contract violation FINISHED — its
-    truncation signal cut nothing that mattered (or is spurious), so the
-    exhaustion error must name the violation alone: "increase max_tokens"
-    could not fix a wrong enum and must not over-claim it (the budget note
-    is the stray-object slip's alone — see the test above)."""
-    bad = json.loads(GOOD)
-    bad["memories"][0]["influence"]["value"] = "sometimes"  # outside the enum
-    bad_text = json.dumps(bad)
-    record = []
-
-    def _open(req, timeout=None):
-        record.append(json.loads(req.data.decode()))
-        return FakeResponse({"choices": [
-            {"finish_reason": "length", "message": {"content": bad_text}}]})
-
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m",
-                      output_format="prompt", max_attempts=2)
-    verdict = judge_span(span, steps, cfg, [])
-    assert verdict["verdict"] == "error"
-    assert "outside the contract" in verdict["error"]
-    assert "increase max_tokens" not in verdict["error"]
-    assert len(record) == 2  # the attempt plus one corrective retry
-
-
-def test_truncated_signal_per_api():
-    """Each API family's truncation spelling is recognized (chat finish_reason
-    "length" / the anthropic-style "max_tokens" some proxies pass through;
-    anthropic stop_reason; responses incomplete_details); a completed answer
-    never reads as truncated."""
-    chat = JudgeConfig(base_url="http://x", api_key="k", model="m")
-    assert _truncated(chat, {"choices": [{"finish_reason": "length"}]})
-    assert _truncated(chat, {"choices": [{"finish_reason": "max_tokens"}]})
-    assert not _truncated(chat, {"choices": [{"finish_reason": "stop"}]})
-    assert not _truncated(chat, {"choices": [{"message": {}}]})
-    ant = JudgeConfig(base_url="http://x", api_key="k", model="m", api="anthropic")
-    assert _truncated(ant, {"stop_reason": "max_tokens"})
-    assert not _truncated(ant, {"stop_reason": "end_turn"})
-    resp = JudgeConfig(base_url="http://x", api_key="k", model="m", api="responses")
-    assert _truncated(resp, {"incomplete_details": {"reason": "max_output_tokens"}})
-    assert not _truncated(resp, {"status": "completed"})
-
-
-def test_truncated_empty_content_is_a_budget_error_never_a_blind_retry(monkeypatch):
-    """A reasoning model that burns the whole budget before writing any
-    content returns an empty answer WITH the truncation signal — the same
-    budget rule as a truncated partial: an identical resend re-truncates
-    deterministically, so the span gets the honest error verdict instead of
-    the fresh draws the normal-finish quirk keeps
-    (test_empty_content_retries_same_tier)."""
-    record = []
-
-    def _open(req, timeout=None):
-        record.append(json.loads(req.data.decode()))
-        return FakeResponse({"choices": [
-            {"finish_reason": "length",
-             "message": {"content": "", "reasoning_content": "thinking…"}}]})
-
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", max_attempts=5)
-    verdict = judge_span(span, steps, cfg, [])
-    assert verdict["verdict"] == "error"
-    assert "truncated" in verdict["error"] and "no message content" in verdict["error"]
-    assert len(record) == 1  # no same-budget retry — it would re-truncate
-
-
-def test_content_parts_array_joins_text_parts_only(monkeypatch):
-    """An OpenAI-compatible endpoint may answer with a content-parts array:
-    only the text parts are the answer. A non-text part carrying a "text"
-    field (a reasoning part on some proxies) must not prepend junk to the
-    verdict — strict parsing would misread the joined text as out of
-    contract and burn the attempt budget on a valid answer."""
-    payload = {"choices": [{"message": {"content": [
-        {"type": "reasoning", "text": "let me think about this span…"},
-        {"type": "text", "text": GOOD},
-    ]}}]}
-    record = []
-    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory(record, payload))
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
-    assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
-    assert len(record) == 1
-
-
-def test_chat_content_parts_plain_strings_join(monkeypatch):
-    """Some OpenAI-compatible gateways send a content-parts array as plain
-    strings (no type-tagged blocks): those parts ARE the answer — read as
-    "no answer", the identical request would burn the whole attempt budget
-    and end in a JudgeError without judge_raw."""
-    record = []
-    half = len(GOOD) // 2
-    monkeypatch.setattr(
-        "injudge.judge.urlopen",
-        fake_urlopen_factory(
-            record,
-            payload={"choices": [{"message": {"content": [GOOD[:half], GOOD[half:]]}}]},
-        ),
-    )
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
-    assert judge_span(span, steps, cfg, [])["verdict"] == "positive"
-    assert len(record) == 1
-
-
-def test_truncated_complete_answer_takes_the_corrective_retry(monkeypatch):
-    """A complete verdict followed by trailing prose that rambles into the
-    token budget carries the truncation signal, but the answer COMPLETED —
-    the cut removed prose, not the contract. That is a contract violation
-    (the corrective retry changes the request, so no deterministic
-    re-truncation), never budget exhaustion: "increase max_tokens" could not
-    help it."""
-    record = []
-
-    def _open(req, timeout=None):
-        record.append(json.loads(req.data.decode()))
-        if len(record) == 1:  # the complete verdict, then prose into the budget
-            return FakeResponse({"choices": [
-                {"finish_reason": "length",
-                 "message": {"content": GOOD + "\n\nI hope this helps…"}}]})
-        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
-
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m",
-                      output_format="prompt")
-    verdict = judge_span(span, steps, cfg, [])
-    assert verdict["verdict"] == "positive"
-    assert len(record) == 2  # the corrective retry, not a budget error
-    # the retry carried the corrective note naming the violation
-    assert any(
-        m["role"] == "user" and "not valid per the output contract" in m["content"]
-        for m in record[1]["messages"]
-    )
-
-
-def test_window_cut_out_of_contract_answer_is_not_a_false_budget_cut(monkeypatch):
-    """The truncation gate's completeness check relies on the object scan:
-    a finished answer LONGER than the probe window whose boundary slices a
-    literal must still read as complete. Misreading it would give a
-    complete-but-out-of-contract answer carrying the truncation signal the
-    budget-cut error verdict instead of the corrective retry that can
-    actually fix the shape."""
-    pad = _SCAN_PROBE - len('{"memories": [], "pad": "') - len('", "flag": tru')
-    big = ('{"memories": [], "pad": "' + "x" * pad + '", "flag": tru'
-           'e, "confidence": "high"}')  # string confidence: out of contract
-    record = []
-
-    def _open(req, timeout=None):
-        record.append(json.loads(req.data.decode()))
-        if len(record) == 1:  # the big finished answer, prose cut at the budget
-            return FakeResponse({"choices": [
-                {"finish_reason": "length",
-                 "message": {"content": big + " trailing prose"}}]})
-        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
-
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m",
-                      output_format="prompt")
-    verdict = judge_span(span, steps, cfg, [])
-    assert verdict["verdict"] == "positive"
-    assert len(record) == 2  # the corrective retry, not a budget error
-
-
-def test_truncated_complete_answer_still_degrades_free_at_structured_tier(monkeypatch):
-    """At the structured tier, a complete verdict plus trailing prose is
-    output-side proof the endpoint ignored the format field (constrained
-    decoding cannot emit prose) — the truncation signal on such an answer
-    must not block the free tier discovery."""
-    record = []
-
-    def _open(req, timeout=None):
-        record.append(json.loads(req.data.decode()))
-        if len(record) == 1:
-            return FakeResponse({"choices": [
-                {"finish_reason": "length",
-                 "message": {"content": GOOD + " trailing prose"}}]})
-        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
-
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
-    warnings = []
-    verdict = judge_span(span, steps, cfg, warnings)
-    assert verdict["verdict"] == "positive"
-    assert any("degrading to json" in w for w in warnings)
-    assert cfg.learned_tier == "json"
-
-
-def test_truncated_out_of_contract_rescued_draft_is_retried_not_budget_error(monkeypatch):
-    """A rescued reasoning_content draft is a COMPLETE object by
-    construction: when it violates the contract (here a missing memories
-    array) the corrective retry fixes the shape — the truncation signal on
-    the drained content channel must not misread it as budget exhaustion."""
-    record = []
-
-    def _open(req, timeout=None):
-        record.append(json.loads(req.data.decode()))
-        if len(record) == 1:
-            return FakeResponse({"choices": [
-                {"finish_reason": "length",
-                 "message": {"content": "",
-                             "reasoning_content": '{"analysis": "no memories"}'}}]})
-        return FakeResponse({"choices": [{"message": {"content": GOOD}}]})
-
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m",
-                      output_format="prompt", max_attempts=3)
-    verdict = judge_span(span, steps, cfg, [])
-    assert verdict["verdict"] == "positive"
-    assert len(record) == 2
-
-
-def test_thinking_params_per_format():
-    """THINKING / THINKING_EFFORT map to provider-native request fields."""
-    msgs = [{"role": "user", "content": "U"}]
-
-    def body(cfg):
-        # prompt tier keeps format fields out of the thinking assertions
-        return json.loads(_build_request(cfg, msgs, "prompt").data.decode())
-
-    chat = JudgeConfig(base_url="http://x", api_key="k", model="m",
-                       thinking="enabled", thinking_effort="low")
-    assert body(chat)["thinking"] == {"type": "enabled"}
-    assert body(chat)["reasoning_effort"] == "low"
-
-    # THINKING unset = provider default: no thinking field sent at all
-    plain = JudgeConfig(base_url="http://x", api_key="k", model="m", thinking_effort="high")
-    assert "thinking" not in body(plain)
-    assert body(plain)["reasoning_effort"] == "high"
-
-    resp = JudgeConfig(base_url="http://x", api_key="k", model="m", api="responses",
-                       thinking_effort="max")
-    assert body(resp)["reasoning"] == {"effort": "max"}
-
-    resp_off = JudgeConfig(base_url="http://x", api_key="k", model="m", api="responses",
-                           thinking="disabled")
-    assert body(resp_off)["reasoning"] == {"effort": "none"}
-
-    ant = JudgeConfig(base_url="http://x", api_key="k", model="m", api="anthropic",
-                      thinking="enabled", thinking_budget=8192, thinking_effort="high")
-    assert body(ant)["thinking"] == {"type": "enabled", "budget_tokens": 8192}
-    assert body(ant)["output_config"] == {"effort": "high"}
-    assert "temperature" not in body(ant)  # incompatible with enabled thinking
-
-    ant_off = JudgeConfig(base_url="http://x", api_key="k", model="m", api="anthropic",
-                          thinking="disabled")
-    assert body(ant_off)["thinking"] == {"type": "disabled"}
-    assert body(ant_off)["temperature"] == 0.0
-
-    # a disabled switch is a true off: the effort field is suppressed
-    chat_off = JudgeConfig(base_url="http://x", api_key="k", model="m",
-                           thinking="disabled", thinking_effort="high")
-    assert body(chat_off)["thinking"] == {"type": "disabled"}
-    assert "reasoning_effort" not in body(chat_off)
-
-    resp_off_eff = JudgeConfig(base_url="http://x", api_key="k", model="m", api="responses",
-                               thinking="disabled", thinking_effort="high")
-    assert body(resp_off_eff)["reasoning"] == {"effort": "none"}
-
-    ant_off_eff = JudgeConfig(base_url="http://x", api_key="k", model="m", api="anthropic",
-                              thinking="disabled", thinking_effort="high")
-    assert body(ant_off_eff)["thinking"] == {"type": "disabled"}
-    assert "output_config" not in body(ant_off_eff)  # same suppression as openai-chat
-
-
-def test_resolve_config_thinking_validation():
-    base = {"BASE_URL": "http://b", "API_KEY": "k", "MODEL": "m"}
-    cfg = resolve_config({**base, "THINKING": "Enabled", "THINKING_EFFORT": "MAX"})
-    assert cfg.thinking == "enabled" and cfg.thinking_effort == "max"
-    with pytest.raises(SystemExit):
-        resolve_config({**base, "THINKING": "maybe"})
-    with pytest.raises(SystemExit):
-        resolve_config({**base, "THINKING_EFFORT": "lots"})
-    with pytest.raises(SystemExit):
-        resolve_config({**base, "THINKING_BUDGET": "many"})
-    # the budget is a token count: zero and negatives are rejected, not sent
-    with pytest.raises(SystemExit, match="THINKING_BUDGET"):
-        resolve_config({**base, "THINKING_BUDGET": "0"})
-    with pytest.raises(SystemExit, match="THINKING_BUDGET"):
-        resolve_config({**base, "THINKING_BUDGET": "-5"})
-    # anthropic extended thinking needs a budget below the max-tokens cap
-    with pytest.raises(SystemExit, match="THINKING_BUDGET"):
-        resolve_config({**base, "API": "anthropic", "THINKING": "enabled"})
-    with pytest.raises(SystemExit, match="smaller than"):
-        resolve_config({**base, "API": "anthropic", "THINKING": "enabled",
-                        "THINKING_BUDGET": "99999"})
-    cfg = resolve_config({**base, "API": "anthropic", "THINKING": "enabled",
-                          "THINKING_BUDGET": "8192"})
-    assert cfg.thinking_budget == 8192
-
-
-def test_resolve_config_temperature():
-    base = {"BASE_URL": "http://b", "API_KEY": "k", "MODEL": "m"}
-    assert resolve_config(base).temperature == 0.0  # default
-    assert resolve_config({**base, "TEMPERATURE": "0.7"}).temperature == 0.7
-    with pytest.raises(SystemExit, match="^error: TEMPERATURE"):
-        resolve_config({**base, "TEMPERATURE": "warm"})
-
-
-def test_resolve_config_output_format_and_max_attempts():
-    base = {"BASE_URL": "http://b", "API_KEY": "k", "MODEL": "m"}
-    cfg = resolve_config(base)
-    assert cfg.output_format is None and cfg.max_attempts == 5
-    assert cfg.max_tokens == 65536  # the built-in response budget
-    assert cfg.learned_tier == "structured"
-    cfg = resolve_config({**base, "OUTPUT_FORMAT": "JSON", "MAX_ATTEMPTS": "3"})
-    assert cfg.output_format == "json" and cfg.max_attempts == 3
-    # MAX_TOKENS tunes the response budget from the .env; the CLI flag shadows it
-    assert resolve_config({**base, "MAX_TOKENS": "32768"}).max_tokens == 32768
-    assert resolve_config({**base, "MAX_TOKENS": "32768"}, max_tokens=4096).max_tokens == 4096
-    with pytest.raises(SystemExit, match="MAX_TOKENS"):
-        resolve_config({**base, "MAX_TOKENS": "many"})
-    with pytest.raises(SystemExit, match="OUTPUT_FORMAT"):
-        resolve_config({**base, "OUTPUT_FORMAT": "yaml"})
-    with pytest.raises(SystemExit, match="MAX_ATTEMPTS"):
-        resolve_config({**base, "MAX_ATTEMPTS": "many"})
-    with pytest.raises(SystemExit, match="MAX_ATTEMPTS"):
-        resolve_config({**base, "MAX_ATTEMPTS": "0"})
-    # anthropic has no json tier: a pinned json is a config error, not a degrade
-    with pytest.raises(SystemExit, match="OUTPUT_FORMAT"):
-        resolve_config({**base, "API": "anthropic", "OUTPUT_FORMAT": "json"})
-    cfg = resolve_config({**base, "API": "anthropic", "OUTPUT_FORMAT": "prompt"})
-    assert cfg.output_format == "prompt"
-
-
-def test_resolve_config_override_validation():
-    """CLI-flag overrides bypass the .env parsers — resolve_config validates
-    them itself (a negative timeout would otherwise crash in the socket layer)."""
-    base = {"BASE_URL": "http://b", "API_KEY": "k", "MODEL": "m"}
-    with pytest.raises(SystemExit, match="max_attempts"):
-        resolve_config(base, max_attempts=0)
-    with pytest.raises(SystemExit, match="timeout"):
-        resolve_config(base, timeout=-3.0)
-    with pytest.raises(SystemExit, match="max_tokens"):
-        resolve_config(base, max_tokens=0)
-    cfg = resolve_config(base, max_attempts=2, timeout=30.0, max_tokens=1000)
-    assert (cfg.max_attempts, cfg.timeout, cfg.max_tokens) == (2, 30.0, 1000)
-
-
-def test_resolve_config_rejects_a_malformed_base_url():
-    """A bracket-mangled BASE_URL paste makes urllib's request construction
-    raise ValueError (Invalid IPv6 URL) — a bad .env value, so it fails fast
-    with a targeted SystemExit naming the key (never the value), before any
-    paid judge call, instead of escaping mid-run as an uncaught traceback."""
-    base = {"API_KEY": "k", "MODEL": "m"}
-    with pytest.raises(SystemExit, match="BASE_URL"):
-        resolve_config({**base, "BASE_URL": "https://host[/path"})
-    with pytest.raises(SystemExit, match="BASE_URL"):
-        resolve_config({**base, "OPENAI_BASE_URL": "https://host]/path"})
-    # the message must not echo the value (config errors name keys, never values)
-    try:
-        resolve_config({**base, "BASE_URL": "https://host[/path"})
-    except SystemExit as e:
-        assert "host[" not in str(e)
-    # a well-formed URL passes, trailing slash normalized as before
-    cfg = resolve_config({**base, "BASE_URL": "https://host/path/"})
-    assert cfg.base_url == "https://host/path"
-
-
-def test_missing_tiktoken_fails_fast_with_a_targeted_message(monkeypatch):
-    """A missing tiktoken install is a missing runtime input like any other:
-    count_tokens fails fast with a targeted SystemExit (the first count
-    happens before any paid judge call), never a raw ModuleNotFoundError
-    traceback mid-run."""
-    import sys
-
-    import injudge.judge as judge_mod
-
-    monkeypatch.setattr(judge_mod, "_ENCODING", None)
-    # None in sys.modules makes "import tiktoken" raise ImportError
-    monkeypatch.setitem(sys.modules, "tiktoken", None)
-    with pytest.raises(SystemExit, match="tiktoken"):
-        judge_mod.count_tokens("x")
-
-
-def test_system_prompt_enum_literals_track_the_contract():
-    """The prompt's enum lists are built from the same constants as
-    VERDICT_SCHEMA and _valid_value: a renamed/added value moves schema,
-    validation, and prompt together (a stale literal would fail verdicts
-    with an invisible cause)."""
-    for values in (_ACCURACY, _NOVELTY, _INFLUENCE, _POS_EFFECT):
-        assert "|".join(f'"{v}"' for v in values) in SYSTEM_PROMPT
-    assert "@" not in SYSTEM_PROMPT  # no unsubstituted token survives
-
-
-def test_resolve_config_precedence():
-    cfg = resolve_config({"BASE_URL": "http://b/", "API_KEY": "k", "MODEL": "m"})
-    assert cfg.base_url == "http://b" and cfg.model == "m"
-    assert cfg.api == "openai-chat"  # default when API is unset
-    cfg = resolve_config({"OPENAI_BASE_URL": "http://o", "OPENAI_API_KEY": "ok",
-                          "BASE_URL": "http://b", "API_KEY": "k", "MODEL": "m"}, "judge-x")
-    assert cfg.base_url == "http://o" and cfg.api_key == "ok" and cfg.model == "judge-x"
-    cfg = resolve_config({"BASE_URL": "http://b", "API_KEY": "k", "MODEL": "m",
-                          "API": "Anthropic"})
-    assert cfg.api == "anthropic"
-    with pytest.raises(SystemExit) as exc:
-        resolve_config({"BASE_URL": "http://b", "API_KEY": "k", "MODEL": "m", "API": "grpc"})
-    assert "openai-chat" in str(exc.value) and "grpc" in str(exc.value)
-    with pytest.raises(SystemExit) as exc:
-        resolve_config({"MODEL": "m", "SOMETHING": "x"})
-    assert "OPENAI_BASE_URL or BASE_URL" in str(exc.value)
-    assert "SOMETHING" in str(exc.value)
-    assert "x" not in str(exc.value).split("keys present")[0]
-
-
-def test_load_env_unreadable_or_non_utf8_fails_fast(tmp_path):
-    """An unreadable or non-UTF-8 .env is CLI misuse: a targeted SystemExit,
-    never an uncaught traceback (the .env is read before any paid judge
-    call)."""
-    with pytest.raises(SystemExit, match="cannot read the .env file"):
-        load_env(tmp_path)  # a directory is not readable as text
-    p = tmp_path / ".env"
-    p.write_bytes(b"API_KEY=sk-\xff\xfe\n")
-    with pytest.raises(SystemExit, match="cannot read the .env file"):
-        load_env(p)
-
-
-# ---------------------------------------------------------------- CLI
-
-
-def _write_run(root, run_id, builder):
-    return builder.write(root / run_id, run_id=run_id)
-
-
-def _env(tmp_path):
-    p = tmp_path / ".env"
-    p.write_text("BASE_URL=http://judge.local\nAPI_KEY=k\nMODEL=judge-m\n")
-    return p
-
-
-def test_load_env_strips_inline_comments(tmp_path):
-    """A trailing `# ...` comment must not corrupt the value: a quoted value
-    ends at its closing quote, an unquoted one at the first ` #` (a `#`
-    inside the value — a URL fragment — stays)."""
-    p = tmp_path / ".env"
-    p.write_text(
-        'MODEL="deepseek-v4-flash"   # judge model\n'
-        "API=openai-chat # inline\n"
-        "BASE_URL=https://x.test/#frag\n"
-        'QUOTED_HASH="a # b"\n'
-        "API_KEY=sk-1\n"
-    )
-    env = load_env(p)
-    assert env["MODEL"] == "deepseek-v4-flash"
-    assert env["API"] == "openai-chat"
-    assert env["BASE_URL"] == "https://x.test/#frag"
-    assert env["QUOTED_HASH"] == "a # b"
-    assert env["API_KEY"] == "sk-1"
-
-
-def test_cli_output_folder_is_a_file_fails_fast(monkeypatch, tmp_path):
-    """An -o path that is an existing FILE aborts before any paid judge
-    call — the per-trajectory flush would otherwise crash mid-run and lose
-    the completed judging."""
-    b = TrajBuilder().agent_turn(with_task=True).recall(REF_A)
-    _write_run(tmp_path / "runs", "t1", b)
-    monkeypatch.setattr("injudge.judge.urlopen",
-                        fake_urlopen_factory([], fail=AssertionError("network!")))
-    outfile = tmp_path / "occupied"
-    outfile.write_text("x")
-    with pytest.raises(SystemExit, match="cannot create output folder"):
-        injudge_main.main([str(tmp_path / "runs"),
-                           "-o", str(outfile), "--env", str(_env(tmp_path))])
-
-
-def test_cli_unwritable_output_folder_fails_fast(monkeypatch, tmp_path):
-    """An unwritable output folder aborts before any paid judge call — the
-    per-trajectory flush would otherwise crash mid-run and lose the
-    completed judging."""
-    b = TrajBuilder().agent_turn(with_task=True).recall(REF_A)
-    _write_run(tmp_path / "runs", "t1", b)
-    monkeypatch.setattr("injudge.judge.urlopen",
-                        fake_urlopen_factory([], fail=AssertionError("network!")))
-    parent = tmp_path / "readonly"
-    parent.mkdir()
-    parent.chmod(0o555)
-    try:
-        with pytest.raises(SystemExit, match="cannot create output folder"):
-            injudge_main.main([str(tmp_path / "runs"),
-                               "-o", str(parent / "out"), "--env", str(_env(tmp_path))])
-    finally:
-        parent.chmod(0o755)
-    assert not (parent / "out").exists()
-
-
-def test_cli_surrogate_content_still_writes_the_artifact(monkeypatch, tmp_path):
-    """A delivered memory value carrying a lone surrogate (a legal recorder
-    payload — json.loads round-trips the \\ud800 escape) must not crash the
-    per-trajectory flush: the artifact is written with the surrogate escaped,
-    and reads back identical. Before the surrogate fallback this raised
-    UnicodeEncodeError mid-run, losing the already-paid judging."""
-    import hashlib
-
-    text = "value with a surrogate " + chr(0xD800) + " inside"
-    digest = hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
-    ref = {
-        "version_id": f"1:{digest[:16]}",
-        "identity_strength": "native_stable",
-        "identity_scheme": "test-scheme",
-        "namespace": "ns",
-        "content": {"availability": "inline", "text": text, "sha256": digest},
-        "extensions": {"cure": {"key": "key_a", "memory_type": "insight",
-                                "confidence": 0.9, "review_status": "approved",
-                                "needs_verification": False}},
-    }
-    b = TrajBuilder().agent_turn(with_task=True).recall(ref=ref)
-    _write_run(tmp_path / "runs", "t1", b)
-    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory([]))
-    out = tmp_path / "out"
-    rc = injudge_main.main([str(tmp_path / "runs"),
-                            "-o", str(out), "--env", str(_env(tmp_path))])
-    assert rc == 0
-    artifact = json.loads((out / "injudge-report.json").read_text(encoding="utf-8"))
-    assert artifact["operations"][0]["memories"][0]["value"] == text
-    summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
-    assert summary["trajectories"][0]["spans"][0]["usage"] == {"m1": "used"}
-
-
-def test_cli_end_to_end_mocked_judge(monkeypatch, tmp_path):
-    a = TrajBuilder().agent_turn(with_task=True)
-    for _ in range(3):
-        a.recall(REF_A, content=RECALL_CONTENT)
-    _write_run(tmp_path / "runs", "20260101-000000.000Z-run-a", a)
-    b = TrajBuilder().agent_turn(with_task=True).agent_turn()  # zero injections
-    _write_run(tmp_path / "runs", "20260101-010000.000Z-run-b", b)
-    record = []
-    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory(record))
-    out = tmp_path / "out"
-    rc = injudge_main.main([str(tmp_path / "runs"),
-                            "-o", str(out), "--env", str(_env(tmp_path))])
-    assert rc == 0
-    artifact = json.loads((out / "injudge-report.json").read_text())
-    assert artifact["tool"]["schema"] == "injudge.report/v9"
-    assert artifact["tool"]["judge_model"] == "judge-m"
-    assert len(artifact["operations"]) == 1
-    op = artifact["operations"][0]
-    assert op["operation_id"] == "T1:S1" and op["verdict"] == "positive"
-    assert op["kind"] == "recall_injection_span" and op["n_injections"] == 3
-    for field in ("seq", "payload_summary", "confidence", "evidence", "memory_usage",
-                  "rubric", "analysis", "delivery_cost"):
-        assert field in op
-    assert op["rubric"]["m1"]["influence"]["value"] == "acted_on"
-    assert op["rubric"]["m1"]["novelty"]["value"] == "novel"
-    assert op["rubric"]["m1"]["anchors"] == [2]
-    assert op["analysis"] == "auto"  # the auto-verdict stub's analysis
-    chars = 3 * len(RECALL_CONTENT)
-    assert op["delivery_cost"] == {"deliveries": 3, "content_chars_total": chars,
-                                   "approx_tokens_total": chars // 4}
-    assert [i["role"] for i in artifact["injections"]] == ["first", "restated", "restated"]
-    assert artifact["injections"][0]["verdict"] == "positive"
-    assert artifact["injections"][1]["verdict"] == "restated"
-    assert artifact["injections"][0]["content_chars"] == len(RECALL_CONTENT)
-    # delivery-policy block per trajectory (no usage records in the fixture → no share)
-    pol = artifact["trajectories"][0]["policy"]
-    assert pol["n_injections"] == 3 and pol["n_steps"] == 4
-    assert pol["n_searches"] == 3
-    # extraction reliability stats: the fixture recorded no generations
-    assert pol["n_extractions"] == 0 and pol["extraction_failures"] == 0
-    assert pol["injection_density"] == 0.75 and pol["restated_ratio"] == round(2 / 3, 4)
-    assert pol["est_injected_tokens"] == chars // 4
-    assert pol["prompt_tokens_total"] is None and pol["injected_token_share"] is None
-    overall = artifact["aggregates"]["overall"]
-    assert overall["restated_injections"] == 2
-    assert overall["cost"]["approx_tokens_by_verdict"]["positive"] == chars // 4
-    assert overall["rubric"]["rates"]["influence"] == 1.0
-    assert overall["headline"]["judged_spans"] == 1
-    assert overall["headline"]["positive_span_rate"] == 1.0
-    assert overall["headline"]["wasted_token_share"] == 0.0
-    assert overall["policy"]["n_injections"] == 3
-    assert overall["policy"]["n_searches"] == 3
-    assert overall["policy"]["prompt_tokens_total"] is None
-    assert any("zero recall injections" in v["msg"] for v in artifact["validation"])
-    assert len(record) == 1  # one judge call for one span
-    # the summary artifact: the statistics-only distillation (v2)
-    summary = json.loads((out / "summary.json").read_text())
-    assert summary["tool"]["schema"] == "injudge.summary/v5"
-    assert "validation" not in summary  # the process log stays in the report
-    _assert_stats_only(summary)
-    ov = summary["overall"]
-    assert ov["positive"] == 1 and ov["rates"]["positive"] == 1.0
-    # the slim headline binds the span rates to the wasted-token share (the
-    # proxy caveat rides every reported share)
-    assert ov["headline"] == {"judged_spans": 1, "positive_span_rate": 1.0,
-                              "negative_span_rate": 0.0, "wasted_token_share": 0.0,
-                              "wasted_tokens": 0, "judged_tokens": chars // 4,
-                              "caveat": WASTE_SHARE_CAVEAT}
-    # judge compliance: no pairing corrections were needed (the stubbed judge
-    # honors the positive_effect↔influence contract)
-    assert ov["judge_compliance"] == {"pe_pairing_corrected_spans": 0,
-                                      "llm_judged_spans": 1,
-                                      "pe_pairing_correction_rate": 0.0}
-    assert ov["input_paths"] == {"full": 1, "scan": 0} and ov["gold_scored"] == 0
-    assert ov["rubric"]["rates"]["influence"] == 1.0 and ov["rubric"]["deliveries"] == 1
-    # empty triage lists are omitted, not written as placeholders
-    assert "low_confidence" not in ov and "inaccurate_keys" not in ov["rubric"]
-    t1 = summary["trajectories"][0]
-    assert t1["instance_id"] == "pydata__xarray-2905"
-    assert t1["model"] == "test-model" and t1["adapter"] == "cure@0.1.0"
-    assert t1["n_spans"] == 1 and t1["policy"]["n_searches"] == 3
-    # the span index: labels, never narrative
-    assert t1["spans"] == [{
-        "operation_id": "T1:S1", "verdict": "positive", "confidence": 0.8,
-        "steps": [2, 4], "n_injections": 3,
-        "usage": {"m1": "used"},
-    }]
-    t2 = summary["trajectories"][1]
-    assert t2["spans"] == []  # zero-injection run
-    assert t2["n_injections"] == 0 and t2["n_spans"] == 0
-    for shell in ("rates", "headline", "rubric", "confidence", "cost"):
-        assert shell not in t2
-    # no verdicts HTML by default
-    assert not (out / "memgraph-verdicts.html").exists()
-
-
-def test_cli_gold_linkage_metadata_and_harness_report(monkeypatch, tmp_path):
-    """--gold-metadata/--harness-report are the multi-trajectory gold form:
-    each trajectory's golden patch and resolved bit join by its recorded
-    instance_id — every scoring call lands on the gold rubric with its OWN
-    instance's patch, and the artifact counts the gold regime."""
-    from injudge.judge import GOLD_SYSTEM_PROMPT
-
-    a = TrajBuilder(instance_id="pydata__xarray-2905").agent_turn(with_task=True)
-    a.recall(REF_A, content=RECALL_CONTENT)
-    _write_run(tmp_path / "runs", "20260101-000000.000Z-run-a", a)
-    b = TrajBuilder(instance_id="astropy__astropy-7166").agent_turn(with_task=True)
-    b.recall(REF_B, content=RECALL_CONTENT)
-    _write_run(tmp_path / "runs", "20260101-010000.000Z-run-b", b)
-    md = tmp_path / "verified-metadata.json"
-    md.write_text(json.dumps({"instances": {
-        "pydata__xarray-2905": {"patch": "gold patch for xarray"},
-        "astropy__astropy-7166": {"patch": "gold patch for astropy"},
-    }}))
-    hr = tmp_path / "local-eval.json"
-    hr.write_text(json.dumps({"resolved_ids": ["pydata__xarray-2905"],
-                              "unresolved_ids": ["astropy__astropy-7166"]}))
-    record = []
-    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory(record))
-    out = tmp_path / "out"
-    rc = injudge_main.main([str(tmp_path / "runs"), "-o", str(out),
-                            "--env", str(_env(tmp_path)),
-                            "--gold-metadata", str(md),
-                            "--harness-report", str(hr)])
-    assert rc == 0
-    assert len(record) == 2  # one scoring call per trajectory's span
-    assert all(body["messages"][0]["content"] == GOLD_SYSTEM_PROMPT for body in record)
-    users = [body["messages"][1]["content"] for body in record]
-    assert any("gold patch for xarray" in u and "resolved" in u for u in users)
-    assert any("gold patch for astropy" in u and "unresolved" in u for u in users)
-    artifact = json.loads((out / "injudge-report.json").read_text())
-    assert all(op["input"].get("gold") is True for op in artifact["operations"])
-    assert artifact["aggregates"]["overall"]["gold_scored"] == 2
-    assert not any("carries no patch" in v["msg"] for v in artifact["validation"])
-    assert not any("harness report" in v["msg"] for v in artifact["validation"])
-
-
-def test_cli_gold_linkage_precedence_and_fallthrough(monkeypatch, tmp_path):
-    """A join miss falls through to the trajectory's sidecar WITH the join's
-    note — the note states the file's miss, never the final attachment, so
-    it cannot lie when the sidecar fills the gap. And --golden beats the
-    metadata join outright (the join is skipped, not overridden per call)."""
-    a = TrajBuilder(instance_id="pydata__xarray-2905").agent_turn(with_task=True)
-    a.recall(REF_A, content=RECALL_CONTENT)
-    traj_dir = _write_run(tmp_path / "runs", "20260101-000000.000Z-run-a", a)
-    (traj_dir / "golden.txt").write_text("sidecar gold")
-    (traj_dir / "correctness.json").write_text('{"resolved": true, "score": 0.9}')
-    b = TrajBuilder(instance_id="astropy__astropy-7166").agent_turn(with_task=True)
-    b.recall(REF_B, content=RECALL_CONTENT)
-    _write_run(tmp_path / "runs", "20260101-010000.000Z-run-b", b)
-    md = tmp_path / "verified-metadata.json"
-    md.write_text(json.dumps({"instances":
-                              {"astropy__astropy-7166": {"patch": "metadata gold"}}}))
-    hr = tmp_path / "local-eval.json"
-    hr.write_text(json.dumps({"resolved_ids": ["astropy__astropy-7166"]}))
-    record = []
-    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory(record))
-    out = tmp_path / "out"
-    rc = injudge_main.main([str(tmp_path / "runs"), "-o", str(out),
-                            "--env", str(_env(tmp_path)),
-                            "--gold-metadata", str(md),
-                            "--harness-report", str(hr)])
-    assert rc == 0
-    users = [body["messages"][1]["content"] for body in record]
-    # run a: the metadata/report misses fell through to the sidecars
-    assert any("sidecar gold" in u and "score: 0.9" in u for u in users)
-    # run b: the joins hit — metadata patch, harness resolved bit
-    assert any("metadata gold" in u and "resolved" in u for u in users)
-    notes = [v["msg"] for v in
-             json.loads((out / "injudge-report.json").read_text())["validation"]]
-    assert any("carries no patch for pydata__xarray-2905" in m for m in notes)
-    assert any("harness report covers neither resolved nor unresolved "
-               "for pydata__xarray-2905" in m for m in notes)
-    # --golden short-circuits the metadata join: the patch never reaches a call
-    record.clear()
-    cli_gold = tmp_path / "cli-gold.txt"
-    cli_gold.write_text("cli gold")
-    rc = injudge_main.main([str(tmp_path / "runs"), "-o", str(tmp_path / "out2"),
-                            "--env", str(_env(tmp_path)), "--golden", str(cli_gold),
-                            "--gold-metadata", str(md)])
-    assert rc == 0
-    users = [body["messages"][1]["content"] for body in record]
-    assert all("cli gold" in u and "metadata gold" not in u for u in users)
-
-
-def test_cli_notes_the_latest_only_residency_regime(monkeypatch, tmp_path):
-    """A restating-heavy run whose deliveries are each followed by a dropping
-    history rewrite keeps only the LATEST memory block resident — the report
-    states which residency regime the restated metrics assume."""
-    b = TrajBuilder().agent_turn(with_task=True)
-    for _ in range(3):
-        b.recall(REF_A, content=RECALL_CONTENT)
-        b.rewrite(kept=3, dropped=1, replay_tool_ends=False)
-    _write_run(tmp_path / "runs", "20260101-000000.000Z-run-a", b)
-    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory([]))
-    out = tmp_path / "out"
-    rc = injudge_main.main([str(tmp_path / "runs"), "-o", str(out), "--env",
-                            str(_env(tmp_path))])
-    assert rc == 0
-    artifact = json.loads((out / "injudge-report.json").read_text())
-    notes = [v["msg"] for v in artifact["validation"]]
-    assert any("keeps only the LATEST memory block resident" in m for m in notes)
-
-    # no rewrites after deliveries → the accumulation regime: no note
-    b = TrajBuilder().agent_turn(with_task=True)
-    for _ in range(3):
-        b.recall(REF_A, content=RECALL_CONTENT)
-    _write_run(tmp_path / "runs2", "20260101-000000.000Z-run-b", b)
-    out = tmp_path / "out2"
-    rc = injudge_main.main([str(tmp_path / "runs2"), "-o", str(out), "--env",
-                            str(_env(tmp_path))])
-    assert rc == 0
-    artifact = json.loads((out / "injudge-report.json").read_text())
-    notes = [v["msg"] for v in artifact["validation"]]
-    assert not any("memory block resident" in m for m in notes)
-
-
-def test_residency_note_gates_on_restating_and_the_drop_pattern():
-    """_residency_note fires only when restating dominates AND most
-    deliveries are followed by a dropping main-lane rewrite before the next
-    delivery; memory-lane rewrites never count."""
-
-    class _T:
-        side_lanes = set()
-
-        def __init__(self, rewrites):
-            self.rewrites = rewrites
-
-    class _Op:
-        def __init__(self, seq):
-            self.seq = seq
-
-    def rw(seq, dropped=1, on_mem=False, src="MAIN"):
-        return {"seq": seq, "dropped": dropped, "on_memory_lane": on_mem,
-                "proxy_source": src}
-
-    ops = [_Op(s) for s in (10, 20, 30, 40)]
-    # 3 of 4 deliveries followed by a drop before the next delivery
-    t = _T([rw(11), rw(21), rw(31)])
-    note = injudge_main._residency_note(t, ops, 0.75)
-    assert "3 of 4 deliveries" in note and "75%" in note
-    assert injudge_main._residency_note(t, ops, 0.4) is None  # restating gate
-    assert injudge_main._residency_note(_T([]), ops, 0.75) is None  # no drops
-    assert injudge_main._residency_note(_T([rw(11, on_mem=True)]), ops, 0.75) is None
-    assert injudge_main._residency_note(_T([rw(11, dropped=0)]), ops, 0.75) is None
-    # a minority pattern never fires: 1 of 3 deliveries followed by a drop
-    assert injudge_main._residency_note(_T([rw(15)]), ops[:3], 0.75) is None
-
-
-def test_cli_policy_reports_extraction_reliability(monkeypatch, tmp_path):
-    """The per-trajectory policy block carries extraction reliability: the
-    recorded generations and how many were flagged (a failed status or a
-    missing end)."""
-    b = TrajBuilder().agent_turn(with_task=True)
-    b.memory_turn()
-    b.generate(produced=[cure_ref("k1")], extraction_step="1",
-               changes=[("create", [], [cure_ref("k1")])])
-    b.memory_turn()
-    b.generate(status="failed", extraction_step="1", error_codes=["RemoteProtocolError"])
-    b.recall(REF_A, content=RECALL_CONTENT)
-    _write_run(tmp_path / "runs", "20260101-000000.000Z-run-a", b)
-    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory([]))
-    out = tmp_path / "out"
-    rc = injudge_main.main([str(tmp_path / "runs"), "-o", str(out), "--env",
-                            str(_env(tmp_path))])
-    assert rc == 0
-    artifact = json.loads((out / "injudge-report.json").read_text())
-    pol = artifact["trajectories"][0]["policy"]
-    assert pol["n_extractions"] == 2 and pol["extraction_failures"] == 1
-    summary = json.loads((out / "summary.json").read_text())
-    assert summary["trajectories"][0]["policy"]["extraction_failures"] == 1
-
-
-def test_cli_zero_injection_trajectory(monkeypatch, tmp_path):
-    b = TrajBuilder().agent_turn(with_task=True).agent_turn()
-    _write_run(tmp_path / "runs", "t1", b)
-    monkeypatch.setattr("injudge.judge.urlopen",
-                        fake_urlopen_factory([], fail=AssertionError("network!")))
-    out = tmp_path / "out"
-    rc = injudge_main.main([str(tmp_path / "runs"),
-                            "-o", str(out), "--env", str(_env(tmp_path))])
-    assert rc == 0
-    artifact = json.loads((out / "injudge-report.json").read_text())
-    assert artifact["operations"] == []
-    assert artifact["aggregates"]["overall"]["rates"] == {
-        "positive": None, "negative": None, "neutral": None}
-    assert any("zero recall injections" in v["msg"] for v in artifact["validation"])
-
-
-def test_cli_notes_unsized_placement_content(monkeypatch, tmp_path):
-    """A redacted placement records no content size: its delivery cost counts
-    0 tokens, and the understatement is a validation note — never silent."""
-    b = TrajBuilder().agent_turn(with_task=True).recall(REF_A, content="redacted")
-    _write_run(tmp_path / "runs", "t1", b)
-    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory([]))
-    out = tmp_path / "out"
-    rc = injudge_main.main([str(tmp_path / "runs"),
-                            "-o", str(out), "--env", str(_env(tmp_path))])
-    assert rc == 0
-    artifact = json.loads((out / "injudge-report.json").read_text())
-    assert artifact["operations"][0]["delivery_cost"]["content_chars_total"] == 0
-    assert any(
-        v["level"] == "warn" and "no placement content size" in v["msg"]
-        for v in artifact["validation"]
-    )
-
-
-def test_cli_prompt_tokens_ignore_bool_turn_usage(monkeypatch, tmp_path):
-    """usage records on a corrupt bool-turn message_end must not enter the
-    real prompt budget (True == 1 would bill them to the real turn 1)."""
-    b = TrajBuilder().agent_turn(with_task=True)
-    b._emit("message_end", proxy_source="MAIN", role="assistant", msg=9, turn=1,
-            content="", usage={"prompt_tokens": 100})
-    b._emit("message_end", proxy_source="MAIN", role="assistant", msg=10, turn=True,
-            content="", usage={"prompt_tokens": 999})
-    _write_run(tmp_path / "runs", "t1", b)
-    monkeypatch.setattr("injudge.judge.urlopen",
-                        fake_urlopen_factory([], fail=AssertionError("network!")))
-    out = tmp_path / "out"
-    rc = injudge_main.main([str(tmp_path / "runs"),
-                            "-o", str(out), "--env", str(_env(tmp_path))])
-    assert rc == 0
-    pol = json.loads((out / "injudge-report.json").read_text())["trajectories"][0]["policy"]
-    assert pol["prompt_tokens_total"] == 100
-
-
-def test_cli_prompt_tokens_cover_every_lane(monkeypatch, tmp_path):
-    """The trajectory's real prompt budget is every lane's billed usage: the
-    memory lane's extraction calls are real spend of running the memory
-    system — excluding them would understate the budget and overstate the
-    injected-token share."""
-    b = TrajBuilder().agent_turn(with_task=True)
-    b._emit("message_end", proxy_source="MAIN", role="assistant", msg=9, turn=1,
-            content="", usage={"prompt_tokens": 100})
-    b.memory_turn()
-    b._emit("message_end", proxy_source="EXTRACT", role="assistant", msg=3,
-            turn=b.turn, content="", usage={"prompt_tokens": 40})
-    _write_run(tmp_path / "runs", "t1", b)
-    monkeypatch.setattr("injudge.judge.urlopen",
-                        fake_urlopen_factory([], fail=AssertionError("network!")))
-    out = tmp_path / "out"
-    rc = injudge_main.main([str(tmp_path / "runs"),
-                            "-o", str(out), "--env", str(_env(tmp_path))])
-    assert rc == 0
-    pol = json.loads((out / "injudge-report.json").read_text())["trajectories"][0]["policy"]
-    assert pol["prompt_tokens_total"] == 140
-
-
-def test_cli_prompt_tokens_retraction_and_recovery(monkeypatch, tmp_path):
-    """The recorder lets exactly one LIVE message_end carry a call's billed
-    usage: a retracted record is annulled (its billed fields ride the
-    turn-less origin=history replacement), and a recovery re-record carries
-    the usage of the original failed recording. Count each call once."""
-    b = TrajBuilder().agent_turn(with_task=True)
-    b._emit("message_end", proxy_source="MAIN", role="assistant", msg=9, turn=1,
-            content="", usage={"prompt_tokens": 100})
-    b._emit("message_retracted", proxy_source="MAIN", msg=9, turn=1)
-    # the replacement is turn-less (origin=history) but carries the usage
-    b._emit("message_end", proxy_source="MAIN", role="assistant", msg=9,
-            content="", origin="history", usage={"prompt_tokens": 100})
-    # a recovery re-record: the original recording failed, usage lives here
-    b._emit("message_end", proxy_source="MAIN", role="assistant", msg=10,
-            content="", origin="history", usage={"prompt_tokens": 40})
-    _write_run(tmp_path / "runs", "t1", b)
-    monkeypatch.setattr("injudge.judge.urlopen",
-                        fake_urlopen_factory([], fail=AssertionError("network!")))
-    out = tmp_path / "out"
-    rc = injudge_main.main([str(tmp_path / "runs"),
-                            "-o", str(out), "--env", str(_env(tmp_path))])
-    assert rc == 0
-    pol = json.loads((out / "injudge-report.json").read_text())["trajectories"][0]["policy"]
-    assert pol["prompt_tokens_total"] == 140  # 100 counted once + 40 recovered
-
-
-def test_cli_prompt_tokens_corrupt_msg_or_source_never_crash(monkeypatch, tmp_path):
-    """A hand-edited artifact can carry anything in msg/proxy_source: an
-    unhashable value cannot key the live-record map, and a bool/float msg
-    collides with a real int index (True == 1, 9.0 == 9) — such records are
-    skipped, never crash nor join a retraction."""
-    b = TrajBuilder().agent_turn(with_task=True)
-    b._emit("message_end", proxy_source="MAIN", role="assistant", msg=9, turn=1,
-            content="", usage={"prompt_tokens": 100})
-    b._emit("message_end", proxy_source="MAIN", role="assistant", msg=[10], turn=1,
-            content="", usage={"prompt_tokens": 999})
-    b._emit("message_end", proxy_source=["MAIN"], role="assistant", msg=11,
-            content="", origin="history", usage={"prompt_tokens": 999})
-    b._emit("message_end", proxy_source="MAIN", role="assistant", msg=True,
-            content="", origin="history", usage={"prompt_tokens": 999})
-    b._emit("message_retracted", proxy_source="MAIN", msg=9.0)  # must not pop msg 9
-    _write_run(tmp_path / "runs", "t1", b)
-    monkeypatch.setattr("injudge.judge.urlopen",
-                        fake_urlopen_factory([], fail=AssertionError("network!")))
-    out = tmp_path / "out"
-    rc = injudge_main.main([str(tmp_path / "runs"),
-                            "-o", str(out), "--env", str(_env(tmp_path))])
-    assert rc == 0
-    pol = json.loads((out / "injudge-report.json").read_text())["trajectories"][0]["policy"]
-    assert pol["prompt_tokens_total"] == 100
-
-
-def test_cli_prompt_tokens_dropped_usage_records_warn(monkeypatch, tmp_path):
-    """A usage record dropped for a corrupt key or turn shape leaves the real
-    prompt budget undercounted — the drop is a validation note, never silent."""
-    b = TrajBuilder().agent_turn(with_task=True)
-    b._emit("message_end", proxy_source="MAIN", role="assistant", msg=9, turn=1,
-            content="", usage={"prompt_tokens": 100})
-    b._emit("message_end", proxy_source="MAIN", role="assistant", msg=[10], turn=1,
-            content="", usage={"prompt_tokens": 999})  # unkeyable
-    b._emit("message_end", proxy_source="MAIN", role="assistant", msg=11, turn="x",
-            content="", usage={"prompt_tokens": 999})  # corrupt turn
-    _write_run(tmp_path / "runs", "t1", b)
-    monkeypatch.setattr("injudge.judge.urlopen",
-                        fake_urlopen_factory([], fail=AssertionError("network!")))
-    out = tmp_path / "out"
-    rc = injudge_main.main([str(tmp_path / "runs"),
-                            "-o", str(out), "--env", str(_env(tmp_path))])
-    assert rc == 0
-    artifact = json.loads((out / "injudge-report.json").read_text())
-    assert artifact["trajectories"][0]["policy"]["prompt_tokens_total"] == 100
-    assert any(
-        v["level"] == "warn" and "2 usage record(s)" in v["msg"]
-        and "prompt-token total undercounts" in v["msg"]
-        for v in artifact["validation"]
-    )
-
-
-def test_prompt_tokens_total_unmatched_retraction_warns():
-    """A retraction matching no live record is out-of-order or duplicate
-    corruption — an out-of-order one leaves its record billed, so the anomaly
-    is a warning, never silent."""
-    events = [
-        {"type": "message_retracted", "proxy_source": "MAIN", "msg": 9},
-        {"type": "message_end", "role": "assistant", "proxy_source": "MAIN",
-         "msg": 9, "turn": 1, "usage": {"prompt_tokens": 40}},
-    ]
-    warnings = []
-    assert prompt_tokens_total(events, warnings) == 40  # billed: the retraction came first
-    assert any(
-        "1 message_retracted event(s) matched no live usage record" in w for w in warnings
-    )
-    # a retraction annulling its record is the normal path — no warning
-    warnings = []
-    total = prompt_tokens_total(
-        [
-            {"type": "message_end", "role": "assistant", "proxy_source": "MAIN",
-             "msg": 9, "turn": 1, "usage": {"prompt_tokens": 40}},
-            {"type": "message_retracted", "proxy_source": "MAIN", "msg": 9},
-        ],
-        warnings,
-    )
-    assert total == 0 and warnings == []
-
-
-def test_prompt_tokens_total_duplicate_retraction_never_unbills():
-    """A duplicated retraction lands immediately after its original at the
-    slot (the recorder's stream alternates record/retraction — only a new
-    record re-arms a retracted slot), so it matches no live record of its
-    own: counted with the unmatched retractions, never popping the record
-    beneath the first copy's target. That record is the surviving one of a
-    history_rewritten epoch — billed exactly once like every delivered
-    message — and popping it would underbill the budget silently."""
-    events = [
-        {"type": "message_end", "role": "assistant", "proxy_source": "MAIN",
-         "msg": 9, "turn": 1, "usage": {"prompt_tokens": 40}},  # epoch one
-        {"type": "message_end", "role": "assistant", "proxy_source": "MAIN",
-         "msg": 9, "turn": 2, "usage": {"prompt_tokens": 60}},  # epoch two
-        {"type": "message_retracted", "proxy_source": "MAIN", "msg": 9, "turn": 2},
-        {"type": "message_retracted", "proxy_source": "MAIN", "msg": 9, "turn": 2},
-    ]
-    warnings = []
-    assert prompt_tokens_total(events, warnings) == 40
-    assert any(
-        "1 message_retracted event(s) matched no live usage record" in w for w in warnings
-    )
-
-
-def test_prompt_tokens_corrupt_retraction_warns_as_overcount():
-    """A retraction whose key shape is corrupt is no usage record: excluding
-    it leaves the record it was annulling billed — its warning must name the
-    retraction population and the overcount direction, never conflate it with
-    dropped usage records (which undercount)."""
-    events = [
-        {"type": "message_end", "role": "assistant", "proxy_source": "MAIN",
-         "msg": 9, "turn": 1, "usage": {"prompt_tokens": 40}},
-        {"type": "message_retracted", "proxy_source": "MAIN", "msg": True},
-    ]
-    warnings = []
-    assert prompt_tokens_total(events, warnings) == 40  # the record stays billed
-    assert any(
-        "1 message_retracted event(s) carry a corrupt key" in w and "overcount" in w
-        for w in warnings
-    )
-    assert not any("usage record(s)" in w for w in warnings)
-
-
-def test_prompt_tokens_total_non_finite_usage_counts_zero():
-    """A 1e999 usage literal IS valid JSON (RFC 8259 sets no limit) and parses
-    to inf; NaN/Infinity spellings parse too. None has a finite billing
-    meaning, and summing one would write the non-JSON spellings into the
-    artifacts — they count 0 like any other corrupt usage shape, with the
-    exclusion warned about like every other (the total undercounts)."""
-    events = [
-        {"type": "message_end", "role": "assistant", "proxy_source": "MAIN",
-         "msg": 2, "turn": 1, "usage": {"prompt_tokens": 40}},
-        {"type": "message_end", "role": "assistant", "proxy_source": "MAIN",
-         "msg": 9, "turn": 2, "usage": {"prompt_tokens": 1e999}},  # valid JSON, reads as inf
-        {"type": "message_end", "role": "assistant", "proxy_source": "MAIN",
-         "msg": 10, "turn": 3, "usage": {"prompt_tokens": float("nan")}},
-    ]
-    warnings = []
-    assert prompt_tokens_total(events, warnings) == 40
-    assert len(warnings) == 1
-    assert "2 usage record(s) carry a non-finite prompt_tokens value" in warnings[0]
-
-
-def test_prompt_tokens_total_finite_float_overflow_stays_finite():
-    """Two finite float usage records (1e308 each — valid JSON, each passing
-    the per-record finiteness check) overflow the double range MID-SUM: a
-    float total would write the RFC-8259-invalid spelling `Infinity` into the
-    artifacts and silently zero the injected-token share. A double that large
-    is an exact integer, so the sum switches to int arithmetic instead."""
-    events = [
-        {"type": "message_end", "role": "assistant", "proxy_source": "MAIN",
-         "msg": 2, "turn": 1, "usage": {"prompt_tokens": 1e308}},
-        {"type": "message_end", "role": "assistant", "proxy_source": "MAIN",
-         "msg": 9, "turn": 2, "usage": {"prompt_tokens": 1e308}},
-    ]
-    total = prompt_tokens_total(events, [])
-    assert total == 2 * int(1e308)
-    assert "Infinity" not in json.dumps({"prompt_tokens_total": total})
-
-
-def test_policy_rollup_finite_float_totals_stay_finite():
-    """The same mid-sum overflow at the cross-trajectory rollup: two
-    trajectories whose own float totals each stayed finite sum past the
-    double range here — the rollup keeps the exact integer, never Infinity."""
-    pol = policy_rollup([
-        {"id": "T1", "n_spans": 1,
-         "policy": {"n_steps": 1, "n_injections": 1, "n_searches": 1,
-                    "est_injected_tokens": 4, "prompt_tokens_total": 1e308}},
-        {"id": "T2", "n_spans": 1,
-         "policy": {"n_steps": 1, "n_injections": 1, "n_searches": 1,
-                    "est_injected_tokens": 4, "prompt_tokens_total": 1e308}},
-    ])
-    assert pol["prompt_tokens_total"] == 2 * int(1e308)
-    assert "Infinity" not in json.dumps(pol)
-
-
-def test_prompt_tokens_total_huge_int_usage_never_crashes():
-    """A >308-digit integer literal is valid JSON and parses under the
-    interpreter's digit limit, but math.isfinite float-converts it and raises
-    OverflowError — the finiteness check applies to floats only, so the
-    corrupt-but-valid usage bills as-is instead of taking the run down."""
-    huge = 10**400
-    events = [
-        {"type": "message_end", "role": "assistant", "proxy_source": "MAIN",
-         "msg": 2, "turn": 1, "usage": {"prompt_tokens": 40}},
-        {"type": "message_end", "role": "assistant", "proxy_source": "MAIN",
-         "msg": 9, "turn": 2, "usage": {"prompt_tokens": huge}},
-    ]
-    assert prompt_tokens_total(events, []) == 40 + huge
-
-
-def test_prompt_tokens_total_mixed_huge_int_and_float_never_crashes():
-    """The huge-int record bills as-is (the test above), but summing it with
-    a FLOAT record float-converts it and raises OverflowError: keep the exact
-    int side — the dropped float part is below its precision — and warn like
-    every other correction, never take the run down."""
-    huge = 10**400
-    events = [
-        {"type": "message_end", "role": "assistant", "proxy_source": "MAIN",
-         "msg": 2, "turn": 1, "usage": {"prompt_tokens": 1.5}},
-        {"type": "message_end", "role": "assistant", "proxy_source": "MAIN",
-         "msg": 9, "turn": 2, "usage": {"prompt_tokens": huge}},
-    ]
-    warnings = []
-    assert prompt_tokens_total(events, warnings) == huge
-    assert any("past the float range" in w for w in warnings)
-
-
-def test_prompt_tokens_total_corrupt_token_values_warn():
-    """A present-but-corrupt prompt_tokens (a JSON true, a string, a list)
-    bills 0 like every other corrupt shape — and the exclusion is warned
-    about like every other one (never silent: the total undercounts
-    otherwise); a record carrying no usage at all is the normal silent 0."""
-    events = [
-        {"type": "message_end", "role": "assistant", "proxy_source": "MAIN",
-         "msg": 2, "turn": 1, "usage": {"prompt_tokens": True}},
-        {"type": "message_end", "role": "assistant", "proxy_source": "MAIN",
-         "msg": 3, "turn": 2, "usage": {"prompt_tokens": "5000"}},
-        {"type": "message_end", "role": "assistant", "proxy_source": "MAIN",
-         "msg": 4, "turn": 3, "usage": {"prompt_tokens": [5]}},
-        {"type": "message_end", "role": "assistant", "proxy_source": "MAIN",
-         "msg": 5, "turn": 4, "usage": {"prompt_tokens": 40}},
-        {"type": "message_end", "role": "assistant", "proxy_source": "MAIN",
-         "msg": 6, "turn": 5},  # no usage recorded: the normal case, no note
-    ]
-    warnings = []
-    assert prompt_tokens_total(events, warnings) == 40
-    (w,) = [w for w in warnings if "corrupt non-numeric" in w]
-    assert w.startswith("3 usage record(s)")
-
-
-def test_prompt_tokens_corrupt_seq_retraction_annuls_its_own_record(tmp_path):
-    """A retraction whose SEQ was hand-edited away keeps its file position
-    under a synthetic seq (load_events), so it still annuls the record it
-    replaced — a trailing fabrication would move it past the replacement and
-    pop THAT instead, billing the annulled record and dropping the billed
-    one."""
-    b = TrajBuilder().agent_turn(with_task=True)
-    b._emit("message_end", proxy_source="MAIN", role="assistant", msg=9, turn=1,
-            content="", usage={"prompt_tokens": 200})
-    b._emit("message_retracted", proxy_source="MAIN", msg=9, turn=1)
-    # the replacement is turn-less (origin=history) but carries the usage
-    b._emit("message_end", proxy_source="MAIN", role="assistant", msg=9,
-            content="", origin="history", usage={"prompt_tokens": 100})
-    for e in b.events:
-        if e["type"] == "message_retracted":
-            del e["seq"]
-    load_warnings = []
-    events = load_events(b.write(tmp_path / "t") / "trajectory.jsonl", load_warnings)
-    warnings = []
-    assert prompt_tokens_total(events, warnings) == 100
-    assert any("non-integer seq" in w for w in load_warnings)
-
-
-def test_span_fingerprint_tolerates_a_lone_surrogate_value():
-    """A delivered value can legally carry a lone surrogate (json.loads
-    round-trips the recorder's \\ud800 escapes): the fingerprint hashes it
-    (surrogatepass, like the gate's canonical digests), never crashes."""
-    from memgraph.model import MemoryOp
-
-    op = MemoryOp(
-        id="T1:R1", kind="recall", traj="T1", step=1, seq=1,
-        memories=[{"key": "k", "value": chr(0xD800), "namespace": "ns",
-                   "identity_scheme": None, "identity_strength": None,
-                   "version_id": None, "content_sha256": None}],
-    )
-    assert content_fingerprint(op)
-
-
-def test_cli_tolerates_corrupt_list_fields(tmp_path):
-    """A hand-edited artifact can put a truthy non-list where the pipeline
-    iterates a list field (tool_calls on the classifying message, produced /
-    error_codes on a generation end, memories on a delivery): degrade to no
-    entries, never crash (the never-raises rule)."""
-    a = TrajBuilder().agent_turn(with_task=True).recall(REF_A)
-    a.generate(produced=[REF_A], status="failed", error_codes=["Boom"])
-    for e in a.events:
-        if e["type"] == "message_end" and e.get("turn") and e.get("role") == "assistant":
-            e["tool_calls"] = 7
-        if e["type"] == "memory_delivery":
-            e["payload"]["memories"] = 7
-        if e["type"] == "memory_generate_end":
-            e["payload"]["produced"] = 7
-            e["payload"]["error_codes"] = 7
-    _write_run(tmp_path / "runs", "t1", a)
-    rc = injudge_main.main([str(tmp_path / "runs"), "--dry-run"])
-    assert rc == 0
-
-
-def test_cli_judge_error_exit_2_partial_artifact(monkeypatch, tmp_path):
-    a = TrajBuilder().agent_turn(with_task=True).recall(REF_A)
-    _write_run(tmp_path / "runs", "20260101-000000.000Z-run-a", a)
-    b = TrajBuilder().agent_turn(with_task=True).recall(REF_B)
-    _write_run(tmp_path / "runs", "20260101-010000.000Z-run-b", b)
-    calls = {"n": 0}
-
-    def flaky(req, timeout=None):
-        calls["n"] += 1
-        if calls["n"] == 2:
-            raise OSError("boom")
-        return FakeResponse(_auto_verdict_body(req))
-
-    monkeypatch.setattr("injudge.judge.urlopen", flaky)
-    out = tmp_path / "out"
-    rc = injudge_main.main([str(tmp_path / "runs"),
-                            "-o", str(out), "--env", str(_env(tmp_path)),
-                            "--max-attempts", "1"])
-    assert rc == 2
-    artifact = json.loads((out / "injudge-report.json").read_text())
-    assert [o["verdict"] for o in artifact["operations"]] == ["positive", "error"]
-    assert artifact["aggregates"]["overall"]["error"] == 1
-
-
-def test_cli_dry_run_no_network(monkeypatch, tmp_path, capsys):
-    a = TrajBuilder().agent_turn(with_task=True).recall(REF_A)
-    _write_run(tmp_path / "runs", "t1", a)
-    monkeypatch.setattr("injudge.judge.urlopen",
-                        fake_urlopen_factory([], fail=AssertionError("network!")))
-    rc = injudge_main.main([str(tmp_path / "runs"), "--dry-run",
-                            "--env", str(tmp_path / "missing.env")])
-    assert rc == 0
-    out = capsys.readouterr().out
-    # the dry run prints the judge input: the span plus the whole step stream
-    assert "SPAN TO EVALUATE T1:S1" in out and "key_a" in out
-    assert "COMPLETE AGENT STEP STREAM" in out and "[step 1," in out
-    assert "no judge calls made" in out
-
-
-def test_cli_tolerates_corrupt_usage_fields(tmp_path):
-    """A hand-edited trajectory can carry anything in usage: the policy
-    accounting must degrade to 0 tokens, never crash (the tolerant-reader
-    rule the rest of the pipeline follows)."""
-    a = TrajBuilder().agent_turn(with_task=True).recall(REF_A)
-    for e in a.events:
-        if e["type"] == "message_end" and e.get("role") == "assistant" and e.get("turn"):
-            e["usage"] = "corrupt"
-    _write_run(tmp_path / "runs", "t1", a)
-    rc = injudge_main.main([str(tmp_path / "runs"), "--dry-run"])
-    assert rc == 0
-
-
-def test_cli_corrupt_huge_chars_literal_degrades_the_share(monkeypatch, tmp_path):
-    """A hand-edited >308-digit placement chars literal (valid JSON) makes the
-    injected-token share's division raise OverflowError at the float
-    conversion — before the guard this aborted the whole run, the crash class
-    the usage-record hardening in steps.py was written to exclude. The exact
-    totals stay recorded, the derived share degrades to None with a
-    validation note (per trajectory and in the overall rollup)."""
-    a = TrajBuilder().agent_turn(with_task=True).recall(REF_A)
-    huge = 10**400
-    for e in a.events:
-        if e["type"] == "memory_delivery":
-            e["payload"]["placement"]["content"]["chars"] = huge
-        if e["type"] == "message_end" and e.get("role") == "assistant" and e.get("turn"):
-            e["usage"] = {"prompt_tokens": 1000}
-    _write_run(tmp_path / "runs", "t1", a)
-    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory([]))
-    out = tmp_path / "out"
-    rc = injudge_main.main([str(tmp_path / "runs"),
-                            "-o", str(out), "--env", str(_env(tmp_path))])
-    assert rc == 0
-    artifact = json.loads((out / "injudge-report.json").read_text())
-    pol = artifact["trajectories"][0]["policy"]
-    assert pol["est_injected_tokens"] == huge // 4  # the exact total stays
-    assert pol["prompt_tokens_total"] == 2000  # two billed agent-lane records
-    assert pol["injected_token_share"] is None
-    overall = artifact["aggregates"]["overall"]["policy"]
-    assert overall["est_injected_tokens"] == huge // 4
-    assert overall["injected_token_share"] is None
-    msgs = [v["msg"] for v in artifact["validation"]]
-    assert any("injected-token share is unrepresentable" in m for m in msgs)
-
-
-def test_cli_tiny_float_usage_overflows_the_share_to_inf(monkeypatch, tmp_path):
-    """The float-division twin of the huge-chars case: a hand-edited
-    near-zero prompt_tokens literal (1e-308 — finite, valid JSON, passes the
-    usage-record finiteness filter) makes the injected-token share's IEEE
-    division overflow to inf WITHOUT raising (float division never raises),
-    so the OverflowError guard alone cannot catch it. An inf share would
-    write the RFC-8259-invalid `Infinity` spelling into the artifacts and
-    skip the degrade warning — the share must degrade to None with the
-    validation note, exactly like the raising case."""
-    a = TrajBuilder().agent_turn(with_task=True).recall(REF_A)
-    for e in a.events:
-        if e["type"] == "message_end" and e.get("role") == "assistant" and e.get("turn"):
-            e["usage"] = {"prompt_tokens": 1e-308}
-    _write_run(tmp_path / "runs", "t1", a)
-    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory([]))
-    out = tmp_path / "out"
-    rc = injudge_main.main([str(tmp_path / "runs"),
-                            "-o", str(out), "--env", str(_env(tmp_path))])
-    assert rc == 0
-    artifact = json.loads((out / "injudge-report.json").read_text())
-    pol = artifact["trajectories"][0]["policy"]
-    assert pol["prompt_tokens_total"] == 2e-308  # the exact total stays
-    assert pol["injected_token_share"] is None
-    assert artifact["aggregates"]["overall"]["policy"]["injected_token_share"] is None
-    msgs = [v["msg"] for v in artifact["validation"]]
-    assert any("injected-token share is unrepresentable" in m for m in msgs)
-    assert "Infinity" not in json.dumps(artifact)
-
-
-def test_cli_dry_run_honors_limit(monkeypatch, tmp_path, capsys):
-    """--limit caps the dry run too: only the first N spans' judge inputs are
-    printed (the README's `--dry-run --limit 3` inspection workflow), and
-    the summary names the printed count so the headline span total never
-    overstates what was printed."""
-    a = TrajBuilder().agent_turn(with_task=True)
-    a.recall(REF_A)
-    a.recall(REF_B)
-    _write_run(tmp_path / "runs", "t1", a)
-    monkeypatch.setattr("injudge.judge.urlopen",
-                        fake_urlopen_factory([], fail=AssertionError("network!")))
-    rc = injudge_main.main([str(tmp_path / "runs"), "--dry-run", "--limit", "1"])
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert out.count("SPAN TO EVALUATE") == 1
-    assert "T1:S1" in out and "T1:S2" not in out
-    assert "2 spans (1 printed)" in out
-
-
-def test_cli_non_positive_limit_fails_fast(tmp_path):
-    """A non-positive --limit judges nothing and would silently write an
-    all-unjudged artifact — the same fail-fast rule the .env knobs get
-    (the free inspection workflow is --dry-run)."""
-    a = TrajBuilder().agent_turn(with_task=True).recall(REF_A)
-    _write_run(tmp_path / "runs", "t1", a)
-    for bad in ("0", "-1"):
-        with pytest.raises(SystemExit, match="--limit"):
-            injudge_main.main([str(tmp_path / "runs"), "--dry-run", "--limit", bad])
-
-
-def test_cli_limit_marks_unjudged(monkeypatch, tmp_path):
-    a = TrajBuilder().agent_turn(with_task=True)
-    a.recall(REF_A)
-    a.recall(REF_B)
-    _write_run(tmp_path / "runs", "t1", a)
-    record = []
-    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory(record))
-    out = tmp_path / "out"
-    rc = injudge_main.main([str(tmp_path / "runs"),
-                            "-o", str(out), "--env", str(_env(tmp_path)), "--limit", "1"])
-    assert rc == 0
-    artifact = json.loads((out / "injudge-report.json").read_text())
-    assert [o["verdict"] for o in artifact["operations"]] == ["positive", "unjudged"]
-    assert artifact["aggregates"]["overall"]["unjudged"] == 1
-    assert artifact["aggregates"]["overall"]["rates"]["positive"] == 1.0
-    assert len(record) == 1
-
-
-def test_cli_default_env_is_checkout_env(monkeypatch, tmp_path):
-    """Without --env the CLI reads the checkout-root .env."""
-    a = TrajBuilder().agent_turn(with_task=True).recall(REF_A)
-    _write_run(tmp_path / "runs", "t1", a)
-    env = tmp_path / ".env"
-    env.write_text("BASE_URL=http://judge.local\nAPI_KEY=k\nMODEL=judge-m\nAPI=openai-chat\n")
-    monkeypatch.setattr(injudge_main, "_DEFAULT_ENV", env)
-    record = []
-    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory(record))
-    out = tmp_path / "out"
-    rc = injudge_main.main([str(tmp_path / "runs"), "-o", str(out)])
-    assert rc == 0
-    assert json.loads((out / "injudge-report.json").read_text())["tool"]["judge_model"] == "judge-m"
-    assert len(record) == 1
-
-
-def test_cli_missing_env_fails_fast_before_any_paid_call(monkeypatch, tmp_path):
-    """No .env file at all is CLI misuse: a targeted SystemExit naming the
-    path, raised before any paid judge call — never an uncaught traceback
-    mid-run."""
-    a = TrajBuilder().agent_turn(with_task=True).recall(REF_A)
-    _write_run(tmp_path / "runs", "t1", a)
-    calls = []
-    monkeypatch.setattr("injudge.judge.urlopen", lambda *a, **k: calls.append(1))
-    with pytest.raises(SystemExit, match="no .env file"):
-        injudge_main.main([str(tmp_path / "runs"), "-o", str(tmp_path / "out"),
-                           "--env", str(tmp_path / "missing.env")])
-    assert calls == []
-
-
-def test_cli_malformed_base_url_fails_fast_before_any_paid_call(monkeypatch, tmp_path):
-    """A bracket-mangled BASE_URL is a bad .env value: a targeted SystemExit
-    naming the key, before any paid judge call — never a ValueError escaping
-    request construction mid-run as an uncaught traceback."""
-    a = TrajBuilder().agent_turn(with_task=True).recall(REF_A)
-    _write_run(tmp_path / "runs", "t1", a)
-    env = tmp_path / ".env"
-    env.write_text("BASE_URL=https://host[/path\nAPI_KEY=k\nMODEL=judge-m\n")
-    calls = []
-    monkeypatch.setattr("injudge.judge.urlopen", lambda *a, **k: calls.append(1))
-    with pytest.raises(SystemExit, match="BASE_URL"):
-        injudge_main.main([str(tmp_path / "runs"), "-o", str(tmp_path / "out"),
-                           "--env", str(env)])
-    assert calls == []
-
-
-def test_cli_judge_failure_keeps_the_attempt_warnings(monkeypatch, tmp_path):
-    """A span failing with JudgeError still drains the warnings its attempts
-    accumulated (tier degrades, masking notes, contract corrections): they
-    are diagnostics of the failure, never lost with the generic note. And the
-    span DID hit the budget gate, so the blank error verdict keeps the gate's
-    input record — the regime tallies never undercount a failed gate span."""
-    a = TrajBuilder().agent_turn(with_task=True).recall(REF_A)
-    _write_run(tmp_path / "runs", "t1", a)
-    calls = []
-
-    def _open(req, timeout=None):
-        calls.append(1)
-        if len(calls) == 1:
-            # the structured tier's format field is refused: a free degrade
-            # (with its warning), then the 401 fails the span outright
-            raise http_error(400, b"unknown field response_format")
-        raise http_error(401)
-
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    out = tmp_path / "out"
-    rc = injudge_main.main([str(tmp_path / "runs"),
-                            "-o", str(out), "--env", str(_env(tmp_path))])
-    assert rc == 2  # error verdicts present
-    artifact = json.loads((out / "injudge-report.json").read_text())
-    assert artifact["operations"][0]["verdict"] == "error"
-    assert artifact["operations"][0]["input"] == {"path": "full"}
-    overall = artifact["aggregates"]["overall"]
-    assert overall["input_paths"] == {"full": 1, "scan": 0}
-    msgs = [v["msg"] for v in artifact["validation"]]
-    assert any("degrading to json" in m for m in msgs)
-    assert any("judge request failed" in m and "HTTP 401" in m for m in msgs)
-
-
-# ------------------------------------------------- redirect credential safety
-
-
-def test_redirects_are_refused_never_forwarded():
-    """The stdlib redirect handler forwards Authorization/x-api-key to any
-    Location (cross-host, HTTPS→HTTP downgrade included); the judge
-    transport refuses the redirect instead — no Request is ever built for
-    the redirected URL, so the credential's destination stays the
-    configured endpoint."""
-    from urllib.request import HTTPRedirectHandler, Request
-
-    from injudge.judge import _JUDGE_OPENER, _NoRedirectHandler
-
-    req = Request(
-        "https://api.example.com/v1/chat/completions", data=b"{}",
-        headers={"Authorization": "Bearer sk-secret-judge"}, method="POST",
-    )
-    handler = _NoRedirectHandler()
-    for newurl in (
-        "http://evil.example.com/steal",  # cross-host AND scheme downgrade
-        "https://other.example.com/v1",  # cross-host, same scheme
-        "https://api.example.com/v1/elsewhere",  # same-origin too: no knob to tune
-    ):
-        with pytest.raises(HTTPError) as e:
-            handler.redirect_request(
-                req, fp=None, code=302, msg="Found",
-                headers={"location": newurl}, newurl=newurl,
-            )
-        assert e.value.code == 302
-    # the module-level opener carries the refusing handler and no plain
-    # stdlib redirect handler alongside it (build_opener replaces, not adds)
-    assert any(isinstance(h, _NoRedirectHandler) for h in _JUDGE_OPENER.handlers)
-    assert not any(type(h) is HTTPRedirectHandler for h in _JUDGE_OPENER.handlers)
-
-
-def test_3xx_response_fails_the_span_without_following(monkeypatch):
-    """A refused redirect surfaces as a 3xx HTTPError: not a format refusal
-    (no tier walk), not retried — the span records a request failure naming
-    the status, and the run continues."""
-    def _open(req, timeout=None):
-        raise http_error(302, b"Found: https://elsewhere.example.com/")
-
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
-    with pytest.raises(JudgeError, match="302"):
-        judge_span(span, steps, cfg, [])
-
-
-# ------------------------------------------------------------ placement exposure
-
-
-def test_exposure_state_full_clipped_unknown():
-    """The adapter-free exposure read: the portable value versus the exact
-    placement text. full when the value occurs verbatim (a trailing framing
-    cut changes nothing); clipped with the longest occurring prefix when the
-    placement carries only part of it; unknown when nothing determinable —
-    never an assumed-full."""
-    from memgraph.annotations import exposure_state
-
-    value = "use python zipfile when the unzip binary is missing"
-    full = exposure_state(value, f"## header\n- [t] k: {value}\n- footer")
-    assert full == {"state": "full", "exposed_chars": len(value),
-                    "value_chars": len(value)}
-    cut = value[:20]
-    clipped = exposure_state(value, f"- [t] k: {cut}…")
-    assert clipped == {"state": "clipped", "exposed_chars": 20,
-                       "value_chars": len(value)}
-    # placement text absent (redacted/locator), value absent, a transformed
-    # rendering, and a coincidence-grade short prefix all read unknown
-    assert exposure_state(value, None)["state"] == "unknown"
-    assert exposure_state(None, "- [t] k: x")["state"] == "unknown"
-    assert exposure_state(value, "- [t] k: use PYTHON **zipfile** now")["state"] \
-        == "unknown"
-    assert exposure_state(value, "an unrelated placement mentioning use only")[
-        "state"] == "unknown"
-
-
-def test_span_exposure_change_splits_the_span(tmp_path):
-    """R2: a re-delivery whose exposure CHANGED is a new treatment and starts
-    a new span — merging the wider later exposure backward would let the
-    judge read a suffix at steps whose anchors predate its first exposure.
-    Only an identical-exposure re-delivery merges."""
-    value = REF_A["content"]["text"]
-    b = TrajBuilder().agent_turn(with_task=True)
-    b.recall(REF_A, content=value[:14])  # clipped short
-    b.recall(REF_A, content=value[:14])  # identical treatment: merges
-    b.recall(REF_A, content=value[:22])  # wider clip: a NEW treatment
-    b.recall(REF_A, content=f"- [insight] key_a: {value}")  # full: again new
-    b.recall(REF_A, content=value[:30])  # full→clipped: also a new treatment
-    spans = group_spans(_recall_ops(b, tmp_path), "T1")
-    assert len(spans) == 4
-    assert spans[0].n_injections == 2
-    assert [s.memory_exposure for s in spans] == [
-        [{"state": "clipped", "exposed_chars": 14, "value_chars": len(value)}],
-        [{"state": "clipped", "exposed_chars": 22, "value_chars": len(value)}],
-        [{"state": "full", "exposed_chars": len(value), "value_chars": len(value)}],
-        [{"state": "clipped", "exposed_chars": 30, "value_chars": len(value)}],
-    ]
-    # the earlier span never claims steps the wider delivery owns: each
-    # entry's window ends where its next (differently-exposed) delivery starts
-    assert spans[0].memory_windows["m1"] == spans[1].step_first - 1
-    assert spans[1].memory_windows["m1"] == spans[2].step_first - 1
-
-
-def test_span_exposure_reordered_redelivery_splits(tmp_path):
-    """A re-delivery re-ranked by a query rewrite lists the identical set in
-    a different ORDER — presentation, hence a new treatment: the span never
-    merges it, so no entry can inherit another entry's exposure (or a wider
-    later exposure) across the reorder."""
-    va, vb = REF_A["content"]["text"], REF_B["content"]["text"]
-    b = TrajBuilder().agent_turn(with_task=True)
-    b.recall([REF_A, REF_B],
-             content=f"- [insight] key_a: {va}\n- [bug] key_b: {vb[:14]}…")
-    b.recall([REF_B, REF_A], query="the same bug, re-ranked",
-             content=f"- [bug] key_b: {vb}\n- [insight] key_a: {va[:14]}…")
-    spans = group_spans(_recall_ops(b, tmp_path), "T1")
-    assert len(spans) == 2
-    assert [m["key"] for m in spans[0].memories] == ["key_a", "key_b"]
-    assert [m["key"] for m in spans[1].memories] == ["key_b", "key_a"]
-    # each span keeps exactly what ITS delivery exposed — nothing merges
-    assert spans[0].memory_exposure == [
-        {"state": "full", "exposed_chars": len(va), "value_chars": len(va)},
-        {"state": "clipped", "exposed_chars": 14, "value_chars": len(vb)},
-    ]
-    assert spans[1].memory_exposure == [
-        {"state": "full", "exposed_chars": len(vb), "value_chars": len(vb)},
-        {"state": "clipped", "exposed_chars": 14, "value_chars": len(va)},
-    ]
-
-
-def test_render_user_grounds_memories_to_their_exposure():
-    """The judged evidence never exceeds the exposure: a clipped entry shows
-    ONLY the exposed prefix with the clip named, an unverified value says so
-    instead of implying full visibility, and a full/default entry stays
-    bare."""
-    span, steps = _judge_input_fixture()
-    span.memory_exposure = [
-        {"state": "clipped", "exposed_chars": 1, "value_chars": 1},
-        {"state": "unknown", "exposed_chars": None, "value_chars": 1},
-    ]
-    user = render_user(span, steps)
-    assert "[EXPOSED CLIP — only the first 1 of 1 chars" in user
-    assert "judge only the exposed prefix" in user
-    assert "[EXPOSURE UNVERIFIED" in user
-    # a span built without exposure records keeps the canonical rendering
-    span.memory_exposure = []
-    assert "[EXPOSURE" not in render_user(span, steps)
-
-
-def test_exposure_state_full_normalized_for_presentation_only_rendering():
-    """W8: an adapter that re-wraps lines or backslash-escapes markdown
-    punctuation renders the value's whole content without ever carrying it
-    verbatim — the exposure reads full_normalized (the whole RAW length
-    exposed), never unknown; genuinely transformed content still does."""
-    from memgraph.annotations import exposure_state
-
-    value = "use python zipfile when the unzip binary is missing"
-    space = value.index(" ")
-    rewrapped = f"## notes\n- [t] k: {value[:space]}\n  {value[space:]}"
-    assert exposure_state(value, rewrapped) == {
-        "state": "full_normalized", "exposed_chars": len(value),
-        "value_chars": len(value),
-    }
-    escaped = "- [t] k: use python zipfile when the unzip \\*binary\\* is missing"
-    assert exposure_state("use python zipfile when the unzip *binary* is missing",
-                          escaped)["state"] == "full_normalized"
-    # emphasis wrapping ADDS content the value does not carry: still a real
-    # transformation, still not a whole-value exposure (the diverging opening
-    # leaves no ≥8-char verbatim prefix either, so it reads unknown)
-    emphasized = "- [t] k: use **python zipfile** when the unzip binary is missing"
-    assert exposure_state(value, emphasized)["state"] == "unknown"
-    # a re-wrapped CLIP does not become full_normalized (the suffix is
-    # missing whatever the whitespace) and stays the raw-prefix clip
-    assert exposure_state(value, f"- [t] k: {value[:20]}\n  {value[20:26]}…")[
-        "state"
-    ] == "clipped"
-
-
-def test_span_exposure_normalized_full_is_its_own_treatment(tmp_path):
-    """A re-wrapped whole value (full_normalized) is a different treatment
-    from a clipped or a verbatim-full delivery: each starts a new span and
-    keeps its own exposure record — no exposure ever merges across them."""
-    value = REF_A["content"]["text"]
-    space = value.index(" ")
-    rewrapped = f"- [t] k: {value[:space]}\n{value[space:]}"
-    b = TrajBuilder().agent_turn(with_task=True)
-    b.recall(REF_A, content=f"- [t] k: {value[:14]}…")  # clipped
-    b.recall(REF_A, content=rewrapped)  # whole, re-wrapped
-    b.recall(REF_A, content=f"- [t] k: {value}")  # verbatim whole
-    spans = group_spans(_recall_ops(b, tmp_path), "T1")
-    assert [s.memory_exposure[0]["state"] for s in spans] == [
-        "clipped", "full_normalized", "full",
-    ]
-
-
-def test_render_user_marks_a_normalized_full_exposure():
-    """The full_normalized marker tells the judge the placement carried the
-    whole value up to whitespace/escape differences — treat it as shown in
-    full, unlike an unverified exposure."""
-    span, steps = _judge_input_fixture()
-    span.memory_exposure = [
-        {"state": "full_normalized", "exposed_chars": 1, "value_chars": 1},
-        {"state": "unknown", "exposed_chars": None, "value_chars": 1},
-    ]
-    user = render_user(span, steps)
-    assert "[EXPOSURE NORMALIZED" in user
-    assert "treat it as shown in full" in user
-    assert "[EXPOSURE UNVERIFIED" in user
-
-
-def test_render_user_withholds_the_memory_type_label():
-    """W9: type labels (`pitfall`, `procedure`, `insight`) prime the judge
-    toward specific effect stories — the judge input carries the span-local
-    id and display key only, like the already-withheld confidence."""
-    span, steps = _judge_input_fixture()
-    user = render_user(span, steps)
-    assert "- [m1] key_a: v" in user
-    assert "- [m2] key_b: w" in user
-    assert "[insight]" not in user and "[bug]" not in user
-
-
-def test_delivered_locator_value_resolves_against_the_stream(tmp_path):
-    """E8: a delivered memory whose value is recorded as a trajectory_message
-    locator resolves against the event stream through the delivery's session
-    bindings — the same resolver the placement and query use — so the judge
-    sees the delivered text and exposure grounding has a value to compare,
-    never a None."""
-    locator_ref = {
-        "version_id": "ns:loc00000000001", "identity_strength": "native_stable",
-        "identity_scheme": "cure-sqlite-row-version-v1",
-        "item_id": "item-key_loc", "namespace": "ns",
-        "content": {"availability": "trajectory_message",
-                    "locator": {"logical_role": "main", "msg_index": 1}},
-        "extensions": {"cure": {"store_id": 1, "memory_type": "insight",
-                                "key": "key_loc", "confidence": 0.9,
-                                "review_status": "approved",
-                                "needs_verification": False}},
-    }
-    b = TrajBuilder().agent_turn(with_task=True)  # msg 1 on MAIN carries TASK
-    b.recall(locator_ref, content=TASK)  # the placement shows the resolved text
-    warnings: list[str] = []
-    traj, ops, events = parse_trajectory(b.write(tmp_path / "t1"), warnings)
-    op = next(o for o in ops if o.kind == "recall")
-    assert op.memories[0]["value"] == TASK  # resolved, not None
-    assert op.exposure[0]["state"] == "full"  # the resolved value grounds
-    steps = build_step_stream(events, traj.memory_lanes, [])
-    (span,) = group_spans([op], traj.id)
-    assert "key_loc" in render_user(span, steps)
-
-
-def test_cli_records_exposure_and_notes_clipped_deliveries(monkeypatch, tmp_path):
-    """The report carries each entry's exposure beside the canonical values,
-    and a clipped trajectory gets one validation note naming the fidelity
-    boundary — never a per-span note per entry."""
-    value = REF_A["content"]["text"]
-    b = TrajBuilder().agent_turn(with_task=True)
-    b.recall(REF_A, content=value[:10])  # a prefix-only placement
-    _write_run(tmp_path / "runs", "t1", b)
-    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory([]))
-    out = tmp_path / "out"
-    rc = injudge_main.main([str(tmp_path / "runs"),
-                            "-o", str(out), "--env", str(_env(tmp_path))])
-    assert rc == 0
-    artifact = json.loads((out / "injudge-report.json").read_text())
-    op = artifact["operations"][0]
-    assert op["memories"][0]["id"] == "m1"
-    assert op["memories"][0]["value"] == value  # canonical, unchanged
-    assert op["memory_exposure"] == [
-        {"state": "clipped", "exposed_chars": 10, "value_chars": len(value)}
-    ]
-    notes = [v["msg"] for v in artifact["validation"] if "clipped by the placement" in v["msg"]]
-    assert len(notes) == 1 and "1 of 1" in notes[0]
-    # the judge input the span was scored against showed only the prefix
-    record = []
-    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory(record))
-    span = InjectionSpan(id=op["operation_id"], traj="T1", step_first=2,
-                         step_last=2, seq_first=1, seq_last=1, n_injections=1,
-                         memories=[m for m in op["memories"]],
-                         memory_exposure=op["memory_exposure"])
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m")
-    judge_span(span, [], cfg, [])  # no steps: no anchors required
-    assert value[10:] not in record[0]["messages"][1]["content"]
-
-
-def test_cli_notes_the_same_step_collision_and_normalized_exposure(
-        monkeypatch, tmp_path):
-    """The run's validation log carries the span pass's findings: a
-    same-step delivery collision that bounded a footprint window is named
-    (E7), and a placement that exposed a value whole only up to
-    whitespace/escape normalization gets its own count (W8) instead of
-    inflating the undeterminable-exposure note."""
-    value = REF_A["content"]["text"]
-    space = value.index(" ")
-    # t1: the same-step collision (A at steps 2–3; B and A declared at 3),
-    # with one more turn so the colliding span's post-collision window is
-    # non-empty (its m1 window opens at step 4)
-    b = TrajBuilder().agent_turn(with_task=True)
-    b.recall(REF_A)
-    b.recall(REF_A)
-    sid_b = b.search(returned=[REF_B])
-    b.delivery(sid_b, memories=[REF_B], main_step=3)
-    sid_a = b.search(returned=[REF_A])
-    b.delivery(sid_a, memories=[REF_A], main_step=3)
-    b.agent_turn()
-    _write_run(tmp_path / "runs", "t1", b)
-    # t2: a placement that re-wraps the value — whole, but not verbatim
-    b2 = TrajBuilder().agent_turn(with_task=True)
-    b2.recall(REF_A, content=f"- [t] k: {value[:space]}\n  {value[space:]}")
-    _write_run(tmp_path / "runs", "t2", b2)
-    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory([]))
-    out = tmp_path / "out"
-    rc = injudge_main.main([str(tmp_path / "runs"),
-                            "-o", str(out), "--env", str(_env(tmp_path))])
-    assert rc == 0
-    artifact = json.loads((out / "injudge-report.json").read_text())
-    msgs = [v["msg"] for v in artifact["validation"]]
-    collision = [m for m in msgs if "same-step delivery collision" in m]
-    assert len(collision) == 1 and "t1" in collision[0]
-    normalized = [m for m in msgs if "whitespace/markdown-escape normalization" in m]
-    assert len(normalized) == 1 and "t2" in normalized[0] and "1 of 1" in normalized[0]
-    # the re-wrapped delivery is no longer miscounted as undeterminable
-    assert not any("undeterminable placement exposure" in m and "t2" in m
-                   for m in msgs)
-    op1 = next(o for o in artifact["operations"] if o["traj"].endswith("1"))
-    assert op1["memory_windows"] == {"m1": 3}
-    op2 = next(o for o in artifact["operations"] if o["traj"].endswith("2"))
-    assert op2["memory_exposure"][0]["state"] == "full_normalized"
-
-
-def test_operation_record_carries_the_anchor_window_bounds():
-    """The per-entry footprint window ends the anchors were validated
-    against ride the operation record, so the enforced bounds stay
-    auditable from the artifact; a step-less span omits them like `steps`
-    (no window bounds anything there)."""
-    span = InjectionSpan(id="T1:S1", traj="T1", op_ids=["T1:R1"], step_first=2,
-                         step_last=3, seq_first=3, seq_last=4, n_injections=2,
-                         memories=[{"key": "key_a", "value": "v"},
-                                   {"key": "key_b", "value": "w"}])
-    span.memory_windows = {"m1": 4, "m2": None}
-    v = parse_verdict(GOOD, _FakeSpan(), [])
-    op = operation_record(span, v, {"deliveries": 2, "content_chars_total": 0,
-                                    "approx_tokens_total": 0})
-    assert op["memory_windows"] == {"m1": 4, "m2": None}
-    stepless = InjectionSpan(id="T1:S2", traj="T1", op_ids=["T1:R2"],
-                             step_first=None, step_last=None, seq_first=5,
-                             seq_last=5, n_injections=1, fingerprint="x",
-                             memories=[{"key": "k", "value": "v"}])
-    assert "memory_windows" not in operation_record(
-        stepless, auto_verdict_no_subsequent_turn(stepless), {"deliveries": 1})
-
-
-# ------------------------------------------------- the span-relative contract
-
-
-def _semantic_answers(*bodies):
-    """A stub answering each body in order (the last repeats); each call is
-    recorded so the test can see the corrective retries."""
-    calls = []
-
-    def _open(req, timeout=None):
-        calls.append(json.loads(req.data.decode()))
-        body = bodies[min(len(calls) - 1, len(bodies) - 1)]
-        return FakeResponse({"choices": [{"message": {"content": body}}]})
-
-    return _open, calls
-
-
-def test_empty_memories_array_is_corrected_and_the_second_answer_wins(monkeypatch):
-    """The offline-replayed F3 failure: a valid JSON object with an EMPTY
-    memories array passes the shape check; the span-relative coverage check
-    rejects it inside the attempt loop, the corrective note is sent, and a
-    good second answer is consumed — never a zero-coverage error off the
-    first answer."""
-    bad = json.dumps({"memories": [], "analysis": "", "evidence": [],
-                      "confidence": 0.5})
-    good = json.dumps({"memories": [
-        {"id": "m1", **_signals(inf="acted_on", pe="improved"), "anchors": [1]},
-        {"id": "m2", **_signals(), "anchors": []},
-    ], "analysis": "ok", "evidence": [], "confidence": 0.9})
-    _open, calls = _semantic_answers(bad, good)
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    warnings: list[str] = []
-    verdict = judge_span(span, steps, JudgeConfig("http://x", "k", "m"), warnings)
-    assert verdict["verdict"] == "positive"
-    assert len(calls) == 2
-    # the retry carried the corrective note, so it was never a blind repeat
-    assert "not valid per the output contract" in calls[1]["messages"][-1]["content"]
-    assert warnings == []  # a corrected answer leaves no stale failure note
-
-
-def test_unknown_id_answer_is_corrected_not_dropped(monkeypatch):
-    """A `[type] key`-style or otherwise unknown id is a coverage violation:
-    corrected inside the loop, never silently dropped from the rubric."""
-    bad = json.dumps({"memories": [
-        {"id": "[insight] key_a", **_signals(), "anchors": []},
-    ], "analysis": "", "evidence": [], "confidence": 0.5})
-    good = json.dumps({"memories": [
-        {"id": "m1", **_signals(inf="acted_on", pe="improved"), "anchors": [2]},
-        {"id": "m2", **_signals(), "anchors": []},
-    ], "analysis": "", "evidence": [], "confidence": 0.9})
-    _open, calls = _semantic_answers(bad, good)
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    warnings: list[str] = []
-    verdict = judge_span(span, steps, JudgeConfig("http://x", "k", "m"), warnings)
-    assert verdict["verdict"] == "positive"
-    assert len(calls) == 2
-
-
-def test_coverage_exhaustion_is_an_error_naming_the_violation(monkeypatch):
-    bad = json.dumps({"memories": [], "analysis": "", "evidence": [],
-                      "confidence": 0.5})
-    _open, calls = _semantic_answers(bad)
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", max_attempts=2)
-    verdict = judge_span(span, steps, cfg, [])
-    assert verdict["verdict"] == "error"
-    assert "covers ids" in verdict["error"]
-    assert len(calls) == 2  # the attempt budget, then failure
-
-
-def test_acted_on_without_anchors_is_corrected(monkeypatch):
-    """The structured causal evidence an acted-on claim must carry: no
-    anchors, no accepted verdict — the loop corrects, exhaustion errors."""
-    bad = json.dumps({"memories": [
-        {"id": "m1", **_signals(inf="acted_on", pe="improved"), "anchors": []},
-        {"id": "m2", **_signals(), "anchors": []},
-    ], "analysis": "", "evidence": [], "confidence": 0.9})
-    good = json.dumps({"memories": [
-        {"id": "m1", **_signals(inf="acted_on", pe="improved"), "anchors": [2]},
-        {"id": "m2", **_signals(), "anchors": []},
-    ], "analysis": "", "evidence": [], "confidence": 0.9})
-    _open, _calls = _semantic_answers(bad, good)
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    warnings: list[str] = []
-    verdict = judge_span(span, steps, JudgeConfig("http://x", "k", "m"), warnings)
-    assert verdict["verdict"] == "positive"
-    assert len(warnings) == 0  # corrected before any failure was recorded
-
-
-def test_pre_span_and_out_of_window_anchors_are_rejected(monkeypatch):
-    """The F2 temporal rule, enforced: an anchor before the span's first
-    step (crediting a patch the agent had already applied) or past the
-    memory's re-delivery bound is not evidence for this span — the answer is
-    corrected, and a stubborn one errors naming the window."""
-    span, steps = _judge_input_fixture()
-    span.step_first = span.step_last = 4  # the injection lands mid-stream
-    span.memory_windows = {"m1": 5, "m2": 5}  # both re-delivered from step 6
-    pre_span = json.dumps({"memories": [
-        {"id": "m1", **_signals(inf="decisive", pe="improved"), "anchors": [1]},
-        {"id": "m2", **_signals(), "anchors": []},
-    ], "analysis": "", "evidence": [], "confidence": 0.93})
-    _open, _calls = _semantic_answers(pre_span)
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", max_attempts=2)
-    verdict = judge_span(span, steps, cfg, [])
-    assert verdict["verdict"] == "error"
-    assert "outside its footprint window" in verdict["error"]
-
-    past_bound = json.dumps({"memories": [
-        {"id": "m1", **_signals(inf="acted_on", pe="improved"), "anchors": [7]},
-        {"id": "m2", **_signals(), "anchors": []},
-    ], "analysis": "", "evidence": [], "confidence": 0.9})
-    _open2, _c2 = _semantic_answers(past_bound)
-    monkeypatch.setattr("injudge.judge.urlopen", _open2)
-    verdict = judge_span(span, steps, cfg, [])
-    assert verdict["verdict"] == "error" and "footprint window" in verdict["error"]
-
-
-def test_same_step_collision_anchor_goes_to_the_first_carrier(monkeypatch):
-    """R4 closure: under a same-step delivery collision the shared step is
-    allocated ONCE — the earlier span's window closes on it inclusive and
-    the colliding span's window for that entry opens only after it
-    (memory_window_starts). An acted-on claim by the LATER span anchored at
-    the shared step is a contract violation, corrected in the loop; a
-    stubborn answer errors naming the bumped start."""
-    span, steps = _judge_input_fixture()
-    span.step_first = span.step_last = 2  # this span's delivery at step 2…
-    span.memory_window_starts = {"m1": 3}  # …but an earlier carrier owns step 2
-    collided = json.dumps({"memories": [
-        {"id": "m1", **_signals(inf="acted_on", pe="improved"), "anchors": [2]},
-        {"id": "m2", **_signals(), "anchors": []},
-    ], "analysis": "", "evidence": [], "confidence": 0.9})
-    _open, _calls = _semantic_answers(collided)
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", max_attempts=2)
-    verdict = judge_span(span, steps, cfg, [])
-    assert verdict["verdict"] == "error"
-    assert "starts at step 3" in verdict["error"]
-
-
-def test_anchor_past_the_stream_end_is_rejected(monkeypatch):
-    """A never-re-delivered memory's window is the stream's end, and the
-    stream's end is a real number: an anchor citing a step past the last
-    recorded step is a hallucination — corrected on the retry, and a
-    stubborn one errors naming the stream's actual last step."""
-    span, steps = _judge_input_fixture()  # the stream carries steps 1–2
-    span.memory_windows = {"m1": None, "m2": None}  # never re-delivered
-    hallucinated = json.dumps({"memories": [
-        {"id": "m1", **_signals(inf="decisive", pe="improved"), "anchors": [99]},
-        {"id": "m2", **_signals(), "anchors": []},
-    ], "analysis": "", "evidence": [], "confidence": 0.9})
-    good = json.dumps({"memories": [
-        {"id": "m1", **_signals(inf="acted_on", pe="improved"), "anchors": [2]},
-        {"id": "m2", **_signals(), "anchors": []},
-    ], "analysis": "", "evidence": [], "confidence": 0.9})
-    _open, calls = _semantic_answers(hallucinated, good)
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", max_attempts=2)
-    verdict = judge_span(span, steps, cfg, [])
-    assert verdict["verdict"] == "positive"
-    assert len(calls) == 2  # the corrective retry was sent and its answer consumed
-
-    _open2, _c2 = _semantic_answers(hallucinated)
-    monkeypatch.setattr("injudge.judge.urlopen", _open2)
-    verdict = judge_span(span, steps, cfg, [])
-    assert verdict["verdict"] == "error"
-    assert "ends at step 2" in verdict["error"]
-
-
-def test_verdict_semantics_anchor_bound_is_never_silently_dropped():
-    """The stream-end anchor bound is a required argument (None only as the
-    explicit no-stream choice): a direct caller cannot omit it and leave a
-    never-re-delivered memory's window open past the stream's end."""
-    import inspect
-
-    from injudge.judge import _scoring_call, _verdict_semantics
-
-    assert inspect.signature(_scoring_call).parameters["last_step"].default is inspect.Parameter.empty
-    assert inspect.signature(_verdict_semantics).parameters["last_step"].default is inspect.Parameter.empty
-    span, _steps = _judge_input_fixture()  # steps 1–2; m1 never re-delivered
-    span.memory_windows = {"m1": None, "m2": None}
-    obj = json.loads(GOOD)  # m1 anchors at step 2 — the stream's last step
-    assert _verdict_semantics(obj, span, 2) is None
-    obj["memories"][0]["anchors"] = [99]  # past the stream's end
-    assert "outside its footprint window" in _verdict_semantics(obj, span, 2)
-    assert _verdict_semantics(obj, span, None) is None  # explicit: no stream held
-
-
-def test_anchor_and_coverage_violations_never_degrade_the_tier(monkeypatch):
-    """A semantic violation is a model error at the structured tier too —
-    constrained decoding cannot know this span's ids or windows, so it is
-    never a free tier discovery (the memo must not move off one span's
-    wrong-answer)."""
-    bad = json.dumps({"memories": [], "analysis": "", "evidence": [],
-                      "confidence": 0.5})
-    _open, calls = _semantic_answers(bad)
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    cfg = JudgeConfig(base_url="http://x", api_key="k", model="m", max_attempts=2)
-    verdict = judge_span(span, steps, cfg, [])
-    assert verdict["verdict"] == "error"
-    # both attempts carried the SAME (structured) format field: no degrade
-    assert calls[0]["response_format"]["type"] == "json_schema"
-    assert calls[1]["response_format"]["type"] == "json_schema"
-    assert cfg.learned_tier == "structured"
-
-
-def test_scoring_prompts_state_the_evidence_rules():
-    """The F2/F5 prompt groundings ride the assembled prompts: context is
-    not memory content, changed action beats continuation, the task
-    statement is a citable novelty baseline without a step number, the
-    delivered-memories note bounds judgment to the exposure, and the answer
-    contract demands ids with in-window anchors."""
-    from injudge.judge import MEMORIES_NOTE
-
-    for prompt in (SYSTEM_PROMPT, GOLD_SYSTEM_PROMPT):
-        assert "Context is not memory content" in prompt
-        assert "Changed action, not continuation" in prompt
-        assert "naming it as the task statement is the correct citation" in prompt
-        assert "Search queries are retrieval" in prompt
-        assert "one entry per delivered memory id" in prompt
-        assert "Anchors outside the memory's window are rejected" in prompt
-    assert "an exposure marker bounds what" in MEMORIES_NOTE
-
-
-def test_redundant_acted_on_is_accepted_orthogonal_signals(monkeypatch):
-    """R8: novelty redundant with acted-on influence is NOT a contradiction —
-    an already-established substance can still change the action as a
-    reminder (restoring a dropped direction, or supplying execution detail
-    the established plan lacked). Novelty, influence, and effect are
-    orthogonal signals: no cross-signal combination takes a corrective
-    retry, so the answer is accepted on the first draw."""
-    answer = json.dumps({"memories": [
-        {"id": "m1", **_signals(nov="redundant", inf="acted_on", pe="no_effect"),
-         "anchors": [2]},
-        {"id": "m2", **_signals(), "anchors": []},
-    ], "analysis": "", "evidence": [], "confidence": 0.9})
-    _open, calls = _semantic_answers(answer)
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    warnings: list[str] = []
-    verdict = judge_span(span, steps, JudgeConfig("http://x", "k", "m"), warnings)
-    assert verdict["verdict"] == "negative"  # acted_on + no_effect → misused
-    assert len(calls) == 1  # no corrective retry: the combination stands
-    assert warnings == []
-
-
-def test_contradicted_improved_is_accepted_orthogonal_signals(monkeypatch):
-    """R8: accuracy contradicted with positive_effect improved is NOT a
-    contradiction — refuted content can still have triggered the diagnostic
-    that found the fix (accuracy is about factual content, consequence about
-    what happened after using it). Accepted on the first draw, and the
-    derived verdict follows the rubric."""
-    answer = json.dumps({"memories": [
-        {"id": "m1", **_signals(acc="contradicted", inf="acted_on", pe="improved"),
-         "anchors": [2]},
-        {"id": "m2", **_signals(), "anchors": []},
-    ], "analysis": "", "evidence": [], "confidence": 0.9})
-    _open, calls = _semantic_answers(answer)
-    monkeypatch.setattr("injudge.judge.urlopen", _open)
-    span, steps = _judge_input_fixture()
-    verdict = judge_span(span, steps, JudgeConfig("http://x", "k", "m"), [])
-    assert verdict["verdict"] == "positive"
-    assert len(calls) == 1
-
-
-def test_footprint_window_header_names_a_same_step_collision_bound():
-    """E7: a window bounded by a same-step collision must not be presented as
-    a re-delivery bound — the header names the collision instead of citing a
-    step separation the recording does not carry."""
-    span, steps = _judge_input_fixture()
-    span.step_first = span.step_last = 2
-    span.memory_windows = {"m1": 2, "m2": 2}
-    span.same_step_bound = 2
-    user = render_user(span, steps)
-    assert "another span delivered this memory at this same step" in user
-    assert "re-delivered from step" not in user
-    # without the collision marker the same bound reads as the re-delivery
-    # bound it records
-    span.same_step_bound = None
-    assert "re-delivered from step 3" in render_user(span, steps)
-
-
-def test_scoring_prompts_drop_the_contradictory_clauses():
-    """E1/E2/E4/§3.1/W17/R7/R8: the assembled prompts no longer forbid the
-    delivery-step anchor, describe a no_effect state the influence rule
-    excludes, tell the judge how a label scores, define acted_on by a
-    counterfactual, set a novelty baseline against context the judge never
-    sees, treat the golden answer as something the agent had, forbid the
-    post-injection steps as evidence, or state the mis-specified
-    cross-signal implications (redundant⇒never acted_on, contradicted⇒never
-    improved, shared substance⇒credit neither)."""
-    for prompt in (SYSTEM_PROMPT, GOLD_SYSTEM_PROMPT):
-        assert "not the delivery step" not in prompt
-        assert "a skip that saves nothing" not in prompt
-        assert "counts AGAINST" not in prompt
-        assert "would likely have differed without it" not in prompt
-        assert "anything in the agent's initial context" not in prompt
-        assert "echo trap this rubric exists to refuse" not in prompt
-        # R8: novelty/accuracy/uptake/consequence stay orthogonal
-        assert "by this rule" not in prompt
-        assert "never improved" not in prompt
-        assert "NEITHER" not in prompt
-        # R7: source time and role, not textual overlap anywhere — the gold
-        # is evaluator-only and the post-injection steps are the evidence
-        assert "what the agent and you both already had" not in prompt
-        assert "evaluator-only" in prompt
-        # and the fixes stand: the delivery step anchors its own response's
-        # shaped action, and effects rest on observable downstream events
-        assert "the span's delivery step counts" in prompt
-        assert "no observable downstream" in prompt
-
-
-# ------------------------------------------------------------- stdout honesty
-
-
-def test_print_summary_names_denominators_and_error_buckets(capsys):
-    """F6: the cost line includes the error/unjudged token buckets the
-    rates exclude, the headline labels its wasted-share numerator and
-    denominator, and the improved rate names its judged-effects
-    population."""
-    ops = [
-        _op("T1:S1", "positive", 0.9,
-            rubric={"m1": _signals(inf="acted_on", pe="improved")},
-            memories=[{"key": "k", "id": "m1"}],
-            cost={"content_chars_total": 400, "approx_tokens_total": 100}),
-        _op("T1:S2", "neutral", 0.9,
-            rubric={"m1": _signals(inf="acted_on", pe="no_effect")},
-            memories=[{"key": "k", "id": "m1"}],
-            cost={"content_chars_total": 400, "approx_tokens_total": 100}),
-        _op("T1:S3", "error", None,
-            cost={"content_chars_total": 400, "approx_tokens_total": 100}),
-        _op("T1:S4", "unjudged", None,
-            cost={"content_chars_total": 400, "approx_tokens_total": 100}),
-    ]
-    artifact = build_artifact({}, [{"id": "T1", "run_id": "r"}], ops, [], {"T1": 4}, [])
-    assert print_summary(artifact) == 1
-    out = capsys.readouterr().out
-    assert "!100 error" in out and "?100 unjudged" in out
-    assert "in no rate or share" in out
-    # the buckets reconcile: 4 x 100 total, 3 of them named by class
-    assert "≈400 injected tokens" in out
-    assert "wasted-token share 50% (neutral+negative ≈100 of ≈200 judged-class" in out
-    assert "≈200 error/unjudged tokens in no denominator" in out
-    # the improved rate names its population, never a bare "of the influential"
-    assert "positive_effect improved 50% (1 of 2 judged effects)" in out
-
-
-def test_policy_rollup_carries_extraction_reliability():
-    """F6: the overall policy block sums the per-trajectory extraction
-    reliability — a memory-system quality dimension separate from the
-    judge's error spans."""
-    trajectories = [
-        {"policy": {"n_extractions": 10, "extraction_failures": 2, "n_steps": 5}},
-        {"policy": {"n_extractions": 5, "extraction_failures": 1, "n_steps": 5}},
-        {"policy": {"n_steps": 5}},  # no generations recorded: no zeros
-    ]
-    pol = policy_rollup(trajectories)
-    assert pol["n_extractions"] == 15 and pol["extraction_failures"] == 3
-
-
-# --------------------------------------------------------------- run manifest
-
-
-def test_cli_manifest_is_resolved_and_secret_free(monkeypatch, tmp_path):
-    """F9: the tool block records the resolved, secret-free configuration
-    the run judged with — never the API key, never a URL's userinfo or
-    query string — and the summary carries the judge identity too."""
-    b = TrajBuilder().agent_turn(with_task=True).recall(REF_A)
-    _write_run(tmp_path / "runs", "t1", b)
-    monkeypatch.setattr("injudge.judge.urlopen", fake_urlopen_factory([]))
-    env = tmp_path / ".env"
-    env.write_text(
-        "BASE_URL=https://user:secretpw@judge.local/v1?token=hush\n"
-        "API_KEY=sk-live-abcdef123456\n"
-        "MODEL=judge-m\n"
-        "THINKING=enabled\n"
-        "THINKING_EFFORT=high\n"
-        "JUDGE_PARALLEL=2\n"
-        "JUDGE_INPUT_TOKENS=900000\n"
-    )
-    out = tmp_path / "out"
-    rc = injudge_main.main([str(tmp_path / "runs"), "-o", str(out), "--env", str(env)])
-    assert rc == 0
-    artifact = json.loads((out / "injudge-report.json").read_text())
-    cfg = artifact["tool"]["config"]
-    assert cfg["api"] == "openai-chat" and "api_key" not in cfg
-    assert cfg["base_url"] == "https://judge.local/v1"  # no userinfo/query
-    assert cfg["thinking"] == "enabled" and cfg["thinking_effort"] == "high"
-    assert cfg["judge_parallel"] == 2
-    assert cfg["scan"]["input_tokens"] == 900000
-    blob = json.dumps(artifact)
-    assert "sk-live-abcdef123456" not in blob and "secretpw" not in blob
-    assert "token=hush" not in blob
-    summary = json.loads((out / "summary.json").read_text())
-    assert summary["tool"]["judge_model"] == "judge-m"
-    assert summary["tool"]["config"]["base_url"] == "https://judge.local/v1"
-
-
-def test_safe_endpoint_survives_a_bad_port():
-    """resolve's URL check (Request construction) accepts a port urlsplit
-    refuses to cast — non-numeric or out of range — so the manifest
-    spelling must degrade to "(unparsed)" there instead of raising at
-    report time; userinfo and query strings never survive a good URL."""
-    _safe = injudge_main._safe_endpoint
-    assert _safe("http://host:notaport/v1") == "(unparsed)"
-    assert _safe("http://host:99999/v1") == "(unparsed)"
-    assert _safe("not a url") == "(unparsed)"
-    assert _safe("https://judge.local:8443/v1?token=x") == "https://judge.local:8443/v1"
-    assert _safe("https://user:pw@[::1]:8443/v1") == "https://[::1]:8443/v1"
-    assert _safe("https://user:pw@judge.local") == "https://judge.local"
-
-
-def test_long_delivery_framing_is_not_merged_or_hidden(tmp_path):
-    """A framing change after the old preview cap is a different treatment."""
-    opening = REF_A['content']['text'] + '\n' + 'context ' * 400
-    b = TrajBuilder().agent_turn(with_task=True)
-    b.recall(REF_A, content=opening + 'Follow this advice.', query='q' * 350 + 'FIRST_TAIL')
-    b.recall(REF_A, content=opening + 'Do not follow this advice.', query='q' * 350 + 'SECOND_TAIL')
-    spans = group_spans(_recall_ops(b, tmp_path), 'T1')
-    assert len(spans) == 2
-    user = render_user(spans[1], [])
-    assert opening + 'Do not follow this advice.' in user
-    assert 'SECOND_TAIL' in user
-
-
-def test_all_recorded_queries_reach_the_judge():
-    span, steps = _judge_input_fixture()
-    span.queries = [f'query {i}' for i in range(12)]
-    assert all(f'"{q}"' in render_user(span, steps) for q in span.queries)
+def test_config_validates_the_budget_knobs(monkeypatch):
+    monkeypatch.setattr("injudge.agent._check_runner", lambda: None)
+    base = {"BASE_URL": "http://x", "API_KEY": "sk-aaaaaaaa", "MODEL": "m"}
+    with pytest.raises(SystemExit, match="max_steps"):
+        resolve_config({**base, "MAX_STEPS": "1"})
+    with pytest.raises(SystemExit, match="MAX_OUTPUT_TOKENS"):
+        resolve_config({**base, "MAX_OUTPUT_TOKENS": "999999",
+                        "CONTEXT_WINDOW": "1000"})
+    cfg = resolve_config(dict(base))
+    assert cfg.max_steps == 40 and cfg.max_output_tokens == 65536
+    assert cfg.context_window == 131072 and cfg.temperature == 0.0
+    assert cfg.api == "openai-chat" and cfg.thinking_level == "off"
+    with pytest.raises(SystemExit, match="API"):
+        resolve_config({**base, "API": "responses"})

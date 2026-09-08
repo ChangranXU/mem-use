@@ -1,6 +1,6 @@
 """Merge injudge verdicts into the graph for rendering.
 
-`apply_verdicts` joins an `injudge.report/v9` artifact onto a
+`apply_verdicts` joins an `injudge.report` artifact (the current REPORT_SCHEMA) onto a
 loaded graph by (run_id, op seq) — robust to the two tools assigning different
 T-numbers when run on different path sets — and annotates each recall op in
 place:
@@ -15,9 +15,9 @@ place:
   entry id → display key map off the report's stamped memories — rubric and
   usage key on the ids; the popover renders the labels beside them),
   delivery_cost, auto, error,
-  input (the budget-gate regime record — full/scan path, gold marker,
-  over-budget marker — present on gate spans only) — the span's record,
-  stamped on each of its ops so a loaded path set missing the "first"
+  input (the agent-run record — path, attempts, LLM/tool call counts, gold
+  and forced-answer markers — present on judged spans only) — the span's
+  record, stamped on each of its ops so a loaded path set missing the "first"
   injection still shows it; rendered in the op popover.
 
 Unmatched lanes/ops are validation notes, never errors: the graph renders
@@ -58,7 +58,7 @@ def _memory_labels(span: dict) -> dict[str, str]:
 
 
 def load_verdict_report(path: Path) -> dict:
-    """Read and sanity-check an injudge.report/v9 artifact."""
+    """Read and sanity-check an injudge.report artifact (current schema)."""
     try:
         report = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError, RecursionError) as e:
@@ -312,7 +312,7 @@ def apply_verdicts(graph: dict, report: dict, source: str = "") -> None:
                 "delivery_cost": span.get("delivery_cost"),
                 "auto": span.get("auto"),
                 "error": span.get("error"),
-                # the budget-gate regime record (gate spans only; absent from
+                # the agent-run record (judged spans only; absent from
                 # rule-judged/unjudged spans, like the report's own record)
                 "input": span.get("input"),
             }

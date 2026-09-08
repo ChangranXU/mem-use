@@ -1,40 +1,52 @@
 ---
-description: "Conformance tiers, retries, failure handling, and credential rules for injudge's LLM calls."
+description: "The pi-based judge agent: runner protocol, budgets and forced answers, corrective retries, and credential rules."
 icon: plug
 ---
 
-# Judge Client
+# Judge Agent
 
 {% hint style="info" %}
-The client talks to the configured endpoint over urllib — no SDK. Everything below applies to both scoring calls and extraction calls; extraction runs on its own config copy (see [Scoring input](scoring-input.md#overflows-the-budget)).
+The judge is an agent built on the [pi](https://github.com/earendil-works/pi) agent runtime (`@earendil-works/pi-agent-core` + `@earendil-works/pi-ai`), driven by a small TypeScript runner (`agent/runner.ts`) that Python spawns once per span conversation. Python owns the verdict contract; the runner owns the conversation.
 {% endhint %}
 
-See [Configuration](configuration.md) for endpoint setup.
+See [Configuration](configuration.md) for endpoint setup (`cd agent && npm install` once; node ≥ 22.19 on PATH).
 
-## Conformance Tiers
+## The Conversation
 
-The client walks a conformance tier chain — **structured** (constrained decoding) → **json** (JSON mode) → **prompt**. Anthropic has no json tier.
+One span, one conversation. Python materializes the span's [evidence folder](scoring-input.md), assembles the system prompt (the same five-signal rubric text as always), and writes a secret-free job file; the runner builds the pi agent with exactly the three evidence tools, seeds it with the opening message, and lets it run until the model produces a final message with no tool calls. That final text is the judge answer. The conversation's diagnostics — LLM calls, tool calls, token usage, the stop reason — ride the result file back to Python and land on the operation's `input` record.
 
-- A rejected or proven-ignored format field degrades for free: tier discovery consumes no attempts.
-- The first working tier is memoized for the rest of the run.
-- A length/context-window rejection (413, or a signed 400/422 body) never walks the chain: a scoring call fails as "too long" at the branch entry and the span falls back to the chunked scan path once, marked `length_fallback` (see [Scoring input](scoring-input.md#guardrails)).
-- Pin a tier with `OUTPUT_FORMAT`. With a tier pinned there is no chain, so a 400/422 fails the span — recorded; the run continues.
+## Trajectory Recording
 
-Span-relative checks live on top of the tier chain: the scoring contract validates exact id coverage, action-anchor windows, and the rubric's cross-signal dependencies (`redundant` novelty never pairs with acted-on influence; `contradicted` accuracy never pairs with an `improved` effect) **inside the attempt loop**. A shape-valid answer that fails them is a model error at every tier (constrained decoding cannot know this span's ids or windows) — it takes the corrective retry, and exhaustion is a visible `error`, never a silently partial verdict.
+Every conversation is recorded as a pi event-sourced trajectory: the runner subscribes to the agent's event stream and appends each completed message to `<output>/agent-runs/<span-id>.jsonl` as it happens. One JSONL per span, replaced per judging run; each line is `{seq, type, …}` with attempt-local `seq`:
 
-## Retries and Failure Handling
+- `attempt` — opens each runner process's lines (corrective retries append to the same file; seeded history fires no events, so no duplication).
+- `message` — one full message (user opening, assistant turns with their tool calls and per-call usage, tool results), including turns a budget later rolled back.
+- `tombstone` — `{removedSeqs, reason}` for what the context-budget rollback (`context_budget_rollback`) or a forced round's stripped tool tail (`forced_tool_tail`) removed from the live conversation.
+- `attempt_end` — the attempt's diagnostics: answer, stop reason, forced flag, call counts, token usage, error.
 
-Transient failures — 429/5xx, transport errors, empty content — share `MAX_ATTEMPTS` with backoff and honor a declared `Retry-After`.
+The forced-answer message joins the conversation by context rewrite (no event fires for it), so the runner appends it to the trajectory explicitly. The runner records raw; Python rewrites the file masked after each attempt (the one masking implementation stays Python-side), so the kept artifact never carries the credential even when the endpoint echoed it. The operation's `input.transcript` names the file, relative to the output dir.
 
-- An answer cut mid-JSON at the output-token budget becomes an `error` verdict naming the truncation: no free degrade, no same-budget retry.
-- When the budget is exhausted, the span is `error` and the judge's raw text is kept.
-- Failures are never coerced to neutral.
-- The process exits 2 if any span errored.
+## Budgets and Forced Answers
+
+Two budgets bound every conversation, and both end in a **forced final answer** instead of a failure (the pattern the collection harness uses):
+
+- **Step budget** (`MAX_STEPS`): when the LLM-call count reaches the cap, the round is cut, the forced-answer message is appended ("stop calling tools; answer from what you have gathered"), and any defiant tool call in the forced round is blocked.
+- **Context budget** (`CONTEXT_WINDOW`): when the estimated context (the last assistant message's server-reported usage plus the trailing messages) crosses the watermark — the context window minus the reserved `MAX_OUTPUT_TOKENS` — the overflowing round is rolled back and the same forced message is injected, so the next request fits.
+
+A forced answer is still a verdict like any other; the operation's `input` record carries `"forced": true` and the aggregates tally `forced_answers`, because a budget-exhausted judgment is its own judge-quality regime.
+
+## Corrective Retries
+
+Python parses the final answer against the verdict contract — strict JSON shape, then the span-relative semantics (exact id coverage, action-anchor windows, anchors empty for `none` influence). A violation takes a corrective retry that **continues the same conversation**: the next runner invocation seeds the prior transcript and appends the corrective note naming the violation, so the retry costs no re-reading. Exhaustion (attempt budget `MAX_ATTEMPTS`) is a visible `error` verdict with the raw answer kept — never a silently coerced neutral.
+
+There are no conformance tiers, no truncation classes, no input budget gates: an answer cut at the output cap simply fails the parse and takes the corrective retry; an oversized trajectory simply means the agent reads selectively.
+
+## Failure Handling
+
+- A runner-level failure (node missing, uninstalled packages, unreadable job) is that span's `error` verdict with a validation note; the run continues. It is not retried — an identical retry would re-pay the setup fault.
+- An agent-level error (endpoint auth, persistent transport failure) surfaces as the run's `error` field and becomes that span's error verdict the same way.
+- Per-call transport retries, timeouts (`TIMEOUT`), and output caps (`MAX_OUTPUT_TOKENS`) are applied inside the runner on every stream call.
 
 ## Credentials
 
-{% hint style="warning" %}
-Endpoint credentials are sent only to the judge endpoint. They never appear in artifacts, reports, logs, or error messages. Endpoint output that echoes the request is masked before any of its text is kept.
-{% endhint %}
-
-Redirects are refused outright: a 301/302/303 would have the stdlib's redirect handler forward the `Authorization` / `x-api-key` header to any `Location` — another host, or an HTTPS→HTTP downgrade — so a 3xx surfaces as a request failure recorded on the span (no tier walk, no retry, no knob) and the credential's destination stays the configured endpoint. A report's `tool.config` manifest records the resolved settings for reproducibility, sanitized to `scheme://host[:port][/path]` — never the key, never a URL's userinfo or query string.
+The API key travels from Python to the runner only through the `JUDGE_API_KEY` environment variable — never through the job file, the result file, or any artifact — and is sent only to the configured endpoint. Endpoint output that echoes the request (an auth/proxy fault page reflecting the credential, in an HTTP error or a 200 answer alike) is masked before any of its text reaches a verdict, `judge_raw`, or a validation note: the raw key and every percent-encoded spelling, in either hex case.

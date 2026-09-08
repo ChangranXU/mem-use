@@ -14,6 +14,9 @@ __pycache__/
 .venv/
 venv/
 
+# Node (the TS judge agent installs its own dependencies)
+agent/node_modules/
+
 # Packaging artifacts
 *.egg-info/
 build/

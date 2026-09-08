@@ -51,7 +51,7 @@ The rendered page provides:
 |---|---|
 | `-o PATH` | HTML output path (default `memory-graph.html`) |
 | `--json PATH` | Also write the machine-readable graph artifact |
-| `--verdicts PATH` | Merge an `injudge.report/v9` file before rendering |
+| `--verdicts PATH` | Merge an `injudge.report/v10` file before rendering |
 
 ## Verdict Overlay
 
@@ -75,7 +75,7 @@ Recall nodes are colored by `span_verdict`:
 | Gray | neutral |
 | Amber | error |
 
-The header gains a verdict tally. Popovers show the judge's analysis, per-memory usage, and the span's input regime (`full` / `scan`, gold, over-budget, length-fallback).
+The header gains a verdict tally. Popovers show the judge's analysis, per-memory usage, and the span's input record (the `agent` path, with gold / forced markers and the attempt count).
 
 {% hint style="info" %}
 Unmatched or ambiguous joins are validation notes, never errors. An ambiguous key — a `run_id` shared by several loaded trajectories, or one `(run_id, seq)` claimed by several report injections or several recall ops — is skipped rather than cross-annotated. The graph still renders.

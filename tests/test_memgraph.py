@@ -1439,7 +1439,7 @@ def test_multiple_generations_and_lanes_in_tool_config(tmp_path):
 
 
 def verdict_report(run_id, span_id, entries, verdict="neutral"):
-    """Minimal injudge.report/v9 fixture.
+    """Minimal injudge.report fixture.
 
     entries: list of (seq, step, role) covering the span's injections. The
     report-side trajectory id ("T99") deliberately differs from the graph's
@@ -1470,9 +1470,9 @@ def verdict_report(run_id, span_id, entries, verdict="neutral"):
                       "steps": [3, 4], "seqs": [9]}],
         "delivery_cost": {"deliveries": 2, "content_chars_total": 400,
                           "approx_tokens_total": 100},
-        # the budget-gate regime record a judged span carries
-        "input": {"path": "scan", "chunks": 2, "none_chunks": 0,
-                  "evidence_tokens": 100, "gold": True},
+        # the agent-run record a judged span carries
+        "input": {"path": "agent", "attempts": 1, "llm_calls": 4,
+                  "tool_calls": 6, "gold": True},
         "auto": None,
         "error": None,
     }
@@ -1520,9 +1520,9 @@ def test_apply_verdicts_joins_by_run_id_and_seq(tmp_path):
     assert detail["rubric"]["m1"]["influence"]["value"] == "none"
     assert detail["delivery_cost"]["approx_tokens_total"] == 100
     assert detail["memory_usage"]["m1"]["usage"] == "ignored"
-    # the budget-gate regime record rides the span detail into the graph
-    assert detail["input"] == {"path": "scan", "chunks": 2, "none_chunks": 0,
-                               "evidence_tokens": 100, "gold": True}
+    # the agent-run record rides the span detail into the graph
+    assert detail["input"] == {"path": "agent", "attempts": 1, "llm_calls": 4,
+                               "tool_calls": 6, "gold": True}
     assert second["verdict"] == "restated"  # re-delivery: rolls up as a role
     assert second["verdict_span"] == "T99:S1"
     assert second["span_verdict"] == "neutral"
@@ -1953,11 +1953,11 @@ def test_load_verdict_report_requires_injudge_schema(tmp_path):
         load_verdict_report(bad)
     # older artifact versions are rejected, not adapted
     bad.write_text(json.dumps({"tool": {"schema": "injudge.report/v5"}}), encoding="utf-8")
-    with pytest.raises(SystemExit, match="injudge.report/v9"):
+    with pytest.raises(SystemExit, match=REPORT_SCHEMA):
         load_verdict_report(bad)
     good = tmp_path / "good.json"
-    good.write_text(json.dumps({"tool": {"schema": "injudge.report/v9"}}), encoding="utf-8")
-    assert load_verdict_report(good)["tool"]["schema"] == "injudge.report/v9"
+    good.write_text(json.dumps({"tool": {"schema": REPORT_SCHEMA}}), encoding="utf-8")
+    assert load_verdict_report(good)["tool"]["schema"] == REPORT_SCHEMA
 
 
 def test_render_html_with_verdicts_embeds_them(tmp_path):
@@ -1978,9 +1978,9 @@ def test_render_html_with_verdicts_embeds_them(tmp_path):
     assert op["verdict_detail"]["evidence"][0]["steps"] == [3, 4]
     assert op["verdict_detail"]["rubric"]["m1"]["influence"]["value"] == "none"
     assert "agent never touched the injected keys" in html
-    # the span's budget-gate record rides verdict_detail into the embedded
+    # the span's agent-run record rides verdict_detail into the embedded
     # graph JSON, and the popover reads it (JS-side, like every popover field)
-    assert op["verdict_detail"]["input"]["path"] == "scan"
+    assert op["verdict_detail"]["input"]["path"] == "agent"
     assert 'd.input||{}' in html and '· gold' in html
     # the enum glyph table ships in the JS; relevance is the only bool signal
     assert 'acted_on:["◑"' in html and 'referenced:["◔"' in html

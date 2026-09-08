@@ -279,7 +279,7 @@ Per-entry counters (also in `transfer-map.json` `run_orders`): cross-exposed tas
 
 No repo tooling performs this join; the shipped fields' analysis contract should not live in folklore. To condition injudge verdict rates on the transfer-map labels:
 
-1. **Verdicts** — injudge span verdicts per trajectory (positive/negative/neutral; auto-neutral spans tally as unassessable in the aggregates, from the `injudge.report/v9` artifact).
+1. **Verdicts** — injudge span verdicts per trajectory (positive/negative/neutral; auto-neutral spans tally as unassessable in the aggregates, from the `injudge.report/v10` artifact).
 2. **Memory origin** — the span's injected memory → its creating instance, via memgraph's `creates`/`recalls` linkage (delivery → the memory's creating trajectory).
 3. **The pair** — ordered pair `(origin_instance, current_instance)` → the transfer-map record: canonical `streams` records for same-repo pairs, `run_orders` records for cross-repo.
 4. **The label** — the pair's `quadrant` (canonical) or the entry's own threshold on the `run_orders` record (cross-repo).

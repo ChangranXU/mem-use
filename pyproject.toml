@@ -4,9 +4,8 @@ version = "0.1.0"
 description = "Evaluate memory-system quality from recorded agent trajectories (memgraph + injudge)."
 requires-python = ">=3.11"
 dependencies = [
-    # injudge runtime: o200k_base budget estimate + CLI progress bars.
-    # memgraph itself is stdlib-only.
-    "tiktoken",
+    # injudge CLI progress bars (the judge itself is the TS agent under
+    # agent/, installed with npm). memgraph is stdlib-only.
     "tqdm",
 ]
 
