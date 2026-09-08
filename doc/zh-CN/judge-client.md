@@ -6,7 +6,7 @@ icon: plug
 # 评审智能体
 
 {% hint style="info" %}
-评审是构建在 [pi](https://github.com/earendil-works/pi) agent 运行时（`@earendil-works/pi-agent-core` + `@earendil-works/pi-ai`）上的智能体，由一个小型 TypeScript 运行器（`agent/runner.ts`）驱动，Python 为每条区间对话生成一个进程。Python 拥有判定契约；运行器拥有对话。
+评审是构建在 [pi](https://github.com/earendil-works/pi) agent 运行时（`@earendil-works/pi-agent-core` + `@earendil-works/pi-ai`）上的智能体，由一个小型 TypeScript 运行器（`agent/runner.ts`）驱动，Python 为区间对话的每个阶段（首次调查、修复、恢复调查）各生成一个进程，各进程通过 `job.history` 延续同一条对话。Python 拥有判定契约；运行器拥有对话。
 {% endhint %}
 
 端点设置见[配置](configuration.md)（先执行一次 `cd agent && npm install`；PATH 上需要 node ≥ 22.19）。
@@ -17,7 +17,7 @@ icon: plug
 
 ## 轨迹记录
 
-每条对话都以 pi 事件流的形式记录为轨迹：运行器订阅智能体的事件流，把每条完成的消息即时追加到 `<output>/agent-runs/<span-id>.jsonl`。每个区间一个 JSONL，每次评判运行整体替换；每行为 `{seq, type, …}`，`seq` 在 attempt 内局部编号：
+每条对话都以 pi 事件流的形式记录为轨迹：运行器订阅智能体的事件流，把每条完成的消息即时追加到 `<output>/agent-runs/<span-dir>.jsonl`。每个区间一个 JSONL，每次评判运行整体替换；每行为 `{seq, type, …}`，`seq` 在 attempt 内局部编号：
 
 - `attempt`——开启每个运行器进程的行，并记录 `phase: "judge"` 或 `"repair"`。各阶段追加到同一文件；种入的 history 不触发事件，因此不会重复。
 - `message`——一条完整消息（用户开场、含工具调用与单次调用用量的 assistant 回合、工具结果），包括随后被预算回滚的回合。
@@ -30,7 +30,7 @@ icon: plug
 
 两个预算约束每条对话，且都以**强制作答**收尾而非失败（采集 harness 的模式）：
 
-- **步数预算**（`MAX_STEPS`）：LLM 调用数达到上限时，该轮被截断，追加强制作答消息（"停止调用工具；基于已收集的证据作答"），强制作答轮里任何违抗的工具调用都会被拦截。
+- **步数预算**（`MAX_STEPS`）：LLM 调用数达到上限时，对话被截为最后一个作答轮：追加强制作答消息（"停止调用工具；基于已收集的证据作答"），强制作答轮里任何违抗的工具调用都会被拦截。
 - **上下文预算**（`CONTEXT_WINDOW`）：当估算的上下文（最近一条 assistant 消息服务端报告的 usage 加上其后消息的估算）越过水位线——上下文窗口减去预留的 `MAX_OUTPUT_TOKENS`——溢出的那一轮被回滚并注入同样的强制作答消息，使下一个请求装得下。
 
 缺失证据后的恢复调查**最多使用四次模型调用，包含最终作答**；若 `MAX_STEPS` 更低则服从该值。四次上限允许最多三轮取证和一轮强制作答，不会重新获得完整的首次调查预算。既有上下文水位线仍可能更早触发强制作答。这是固定策略，不增加配置项。
@@ -51,9 +51,9 @@ Python 检查严格 JSON 形状和区间相对语义（精确 id 覆盖、动作
 
 ## 失败处理
 
-- 运行器层失败（缺 node、未安装依赖包、作业不可读）是该区间的 `error` 判定并附 validation 注记；运行继续。不重试——相同的重试只会重付一次配置故障。
+- 运行器层失败（子进程无法启动、非零退出、超过运行时限、或写不出可读结果）是该区间的 `error` 判定并附 validation 注记；运行继续。不重试——相同的重试只会重付一次故障。缺 node、缺运行器、或 agent 依赖树未安装属于配置误用，在任何付费调用之前即以明确错误快速失败。
 - 智能体层错误（端点认证、持续传输失败）以运行结果的 `error` 字段出现，同样成为该区间的 error 判定。
-- 单次调用的传输重试、超时（`TIMEOUT`）与输出上限（`MAX_OUTPUT_TOKENS`）由运行器在每次流式调用上施加。
+- 单次调用的超时（`TIMEOUT`）与输出上限（`MAX_OUTPUT_TOKENS`）由运行器在每次流式调用上施加；不做传输重试——请求失败即以运行结果的 `error` 字段出现。
 
 ## 凭证
 

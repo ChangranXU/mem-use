@@ -29,6 +29,7 @@ One principle runs through both: a recall injection is judged by its **subsequen
 ```bash
 # Install dependencies (once, inside the checkout)
 uv sync
+cd agent && npm install && cd ..   # the TS judge agent's packages (node ≥ 22.19)
 
 # 1 — Visualize every memory operation
 uv run -m memgraph runs/ -o memgraph.html --json memgraph.json
@@ -56,7 +57,7 @@ memgraph shows which `(trajectory, step)` created each memory and which `(trajec
 {% step %}
 ### Judge
 
-injudge groups identical re-injections into **spans** and scores every delivered memory with an LLM. The span verdict is then derived in code. Harm dominates: any misused memory makes the span negative; otherwise any used memory makes it positive; otherwise it is neutral.
+injudge groups identical re-injections into **spans** and scores every delivered memory with an LLM — a span with no observable downstream turn is rule-judged neutral without one. The span verdict is then derived in code. Harm dominates: any misused memory makes the span negative; otherwise any used memory makes it positive; otherwise it is neutral.
 {% endstep %}
 
 {% step %}

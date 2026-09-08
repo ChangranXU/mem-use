@@ -29,6 +29,7 @@ icon: book-open
 ```bash
 # 安装依赖（首次，在 checkout 内执行）
 uv sync
+cd agent && npm install && cd ..   # TS 评审智能体的依赖包（node ≥ 22.19）
 
 # 1 —— 可视化全部记忆操作
 uv run -m memgraph runs/ -o memgraph.html --json memgraph.json
@@ -56,7 +57,7 @@ memgraph 展示每条记忆由哪个 `(轨迹, 步骤)` 创建、随后被哪个
 {% step %}
 ### 评审
 
-injudge 把内容相同的重复注入归并为**区间（span）**，由 LLM 为每条投递记忆打分，再由代码推导区间判定。损害优先：任一误用即为 negative；否则任一采纳即为 positive；否则为 neutral。
+injudge 把内容相同的重复注入归并为**区间（span）**，由 LLM 为每条投递记忆打分——观察不到下游回合的区间不经 LLM，按规则判为 neutral——再由代码推导区间判定。损害优先：任一误用即为 negative；否则任一采纳即为 positive；否则为 neutral。
 {% endstep %}
 
 {% step %}

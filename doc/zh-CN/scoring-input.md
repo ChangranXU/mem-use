@@ -16,9 +16,9 @@ icon: align-left
 ## 文件夹
 
 ```
-<output>/evidence/<span-id>/
+<output>/evidence/<span-dir>/
   manifest.json        # 索引：每个文件、其大小，以及每个步骤文件的
-                       # step/turn/seq 范围和一行预览
+                       # step 与 turn、seq 范围和一行预览
   span.md              # 任务陈述 + 上文的区间文档
   gold.md              # golden answer / correctness 附件（若有）
   steps/
@@ -27,7 +27,7 @@ icon: align-left
     ...
 ```
 
-步骤文件承载完整录制流——不截断、不预摘要。`manifest.json` 让智能体不必读遍一切即可分诊：每个步骤条目列出其 step/turn/seq 范围、字符数、行数和一行预览。JSON 每行一个文件条目，不再重复记录估算 token 字段。开场消息包含 `span.md` 和 `manifest.json` 原文，无需先调用工具发现文件。预览只用于导航，不替代步骤证据。gold 附件载于 `gold.md`（它们是智能体读取证据的一部分，并为该区间选择 gold rubric——见[injudge](injudge.md#golden-answer-与-correctness)）。
+步骤文件承载完整录制流——不截断、不预摘要。`manifest.json` 让智能体不必读遍一切即可分诊：每个步骤条目列出其 step 与 turn、seq 范围、字符数、行数和一行预览。JSON 每行一个文件条目，不再重复记录估算 token 字段。开场消息包含 `span.md` 和 `manifest.json` 原文，无需先调用工具发现文件。预览只用于导航，不替代步骤证据。gold 附件载于 `gold.md`（它们是智能体读取证据的一部分；golden answer 正文会为该区间选择 gold rubric，仅有 correctness 附件时仍使用朴素规则——见[injudge](injudge.md#golden-answer-与-correctness)）。
 
 ## 工具
 

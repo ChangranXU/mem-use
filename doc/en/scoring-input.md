@@ -16,9 +16,9 @@ Each delivered entry's judged footprint window runs from the span's first step t
 ## The Folder
 
 ```
-<output>/evidence/<span-id>/
+<output>/evidence/<span-dir>/
   manifest.json        # the index: every file, its size, and per step
-                       # step/turn/seq ranges plus a one-line preview
+                       # the step and turn, its seq range, a one-line preview
   span.md              # task statement + the span document above
   gold.md              # golden answer / correctness attachments, when any
   steps/
@@ -27,7 +27,7 @@ Each delivered entry's judged footprint window runs from the span's first step t
     ...
 ```
 
-The step files carry the complete recorded stream — nothing is truncated or pre-summarized. `manifest.json` exists so the agent can triage without reading everything: each step entry lists its step/turn/seq range, character and line counts, and a one-line preview. The JSON uses one file entry per line; there is no duplicate approximate-token field. The opening includes the exact `span.md` and `manifest.json`, so no discovery calls are needed. Previews guide navigation, not verdicts. Gold attachments ride `gold.md` (they are part of the evidence the agent reads, selecting the gold rubric for that span — see [injudge](injudge.md#golden-answer-and-correctness)).
+The step files carry the complete recorded stream — nothing is truncated or pre-summarized. `manifest.json` exists so the agent can triage without reading everything: each step entry lists its step and turn, its seq range, character and line counts, and a one-line preview. The JSON uses one file entry per line; there is no duplicate approximate-token field. The opening includes the exact `span.md` and `manifest.json`, so no discovery calls are needed. Previews guide navigation, not verdicts. Gold attachments ride `gold.md` (they are part of the evidence the agent reads; a golden-answer body selects the gold rubric for that span, while a correctness-only attachment leaves the plain rubric in place — see [injudge](injudge.md#golden-answer-and-correctness)).
 
 ## The Tools
 

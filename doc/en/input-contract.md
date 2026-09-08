@@ -32,10 +32,10 @@ Memories are identified by the recorder's portable MemoryRef fields, never by ad
 
 The same display key minted by two stores — or held by two items in one store — is two distinct memories.
 
-Adapter extensions (`extensions.cure`) contribute a **display** projection only: key, `memory_type`, confidence, review status, rejection counts, and the declared extraction step. The portable fields remain the fallback, so a non-CURE adapter still parses.
+Adapter extensions (`extensions.cure`) contribute a **display** projection only: key, `memory_type`, confidence, review status, needs_verification, rejection counts, and the declared extraction step. The portable fields remain the fallback, so a non-CURE adapter still parses.
 
 {% hint style="info" %}
-**Span fingerprint fallback.** A memory with no portable version identity (an `operation_local` version id over undigested content) fingerprints on the delivered `(namespace, key, value)` instead. Redacted content records no value, so distinct redacted bodies under one `(namespace, key)` share a span: nothing recorded can tell them apart.
+**Span fingerprint fallback.** A memory with no portable version identity (an `operation_local` version id over undigested content) fingerprints on the delivered `(namespace, item, value)` instead. Redacted content records no value, so distinct redacted bodies under one `(namespace, item)` share a span: nothing recorded can tell them apart. A re-delivery merges into a span only as the same treatment: identical entries in the same order, the same placement presentation, and the same per-entry exposure — a changed exposure, a re-ranked bundle, or a re-framed block starts a new span.
 {% endhint %}
 
 ## Agent Steps
@@ -47,7 +47,7 @@ A lane that carries main traffic in **any** session is not a memory lane: it is 
 Two edge cases:
 
 - An extraction observed before the first agent turn completes is step `0`.
-- A delivery that cannot be attributed to any agent turn has `step = None`. Its span has no subsequent behavior to judge and is rule-judged neutral (see [injudge](injudge.md#injection-spans)).
+- A delivery that cannot be attributed to any agent turn has `step = None` and merges into a matching-content span wherever it sits; a span whose deliveries are all unattributable has no subsequent behavior to judge and is rule-judged neutral (see [injudge](injudge.md#injection-spans)).
 
 ## Input Paths
 
@@ -67,4 +67,4 @@ Corrupt data degrades gracefully; it never aborts the run.
 
 Malformed JSONL lines, corrupt seqs, unknown binding statuses, non-list payload fields, and broken session or operation links land in `validation` and warnings, and the run continues. Hand-edited artifacts degrade the same way; nothing raises.
 
-The event stream keeps file order. A missing seq gets a synthetic seq one past the highest seen so far, so retraction and order pairings stay attached to their targets. A genuinely non-increasing seq is noted, never re-sorted.
+The event stream keeps file order. A missing or non-integer seq gets a synthetic seq one past the highest seen so far, so retraction and order pairings stay attached to their targets. A genuinely non-increasing seq is noted, never re-sorted.

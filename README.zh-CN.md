@@ -40,7 +40,7 @@ uv run -m memgraph <paths> --verdicts output/injudge-report.json -o memgraph-ver
 
 injudge 把内容相同的重复注入归并为**区间（span）**，把每个区间的证据
 （任务、区间文档、gold 附件、每个已录制 agent 步骤一个文件）物化进一个
-文件夹，让一个工具只读且限定在该文件夹内的 pi 智能体对每条投递记忆条目
+文件夹，让一个工具只读且限定在该文件夹内的 pi 智能体对投递的记忆条目
 打五个信号（relevance、accuracy、novelty、influence、positive effect，
 按稳定的区间本地 id 逐条评分），再由代码推导区间判定：任一记忆被误用 ⇒
 **negative**，否则任一被采纳 ⇒ **positive**，否则 **neutral**。被评判的

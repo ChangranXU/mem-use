@@ -31,21 +31,21 @@ Each run writes into `-o DIR` (default `output/`):
 | `injudge-report.json` | The runtime judging record (`injudge.report/v10`), rewritten after every trajectory so a crash keeps completed work |
 | `summary.json` | The final statistics (`injudge.summary/v6`): counts, rates, per-memory usage |
 | `memgraph-verdicts.html` | Only with `--html`: memgraph with recall nodes colored by verdict |
-| `evidence/` | One folder per judged span: the files the agent searched (span document, manifest, per-step files, gold) |
-| `agent-runs/` | One trajectory JSONL per judged span: the pi event-sourced recording of how each verdict was reached |
+| `evidence/` | One folder per span sent to the judge agent (error outcomes included): the files the agent searched (span document, manifest, per-step files, gold) |
+| `agent-runs/` | One trajectory JSONL per span sent to the judge agent: the pi event-sourced recording of how each verdict was reached |
 
 Delivery cost and delivery-policy metrics are computed deterministically from the recordings, not judged — see [Artifacts](artifacts.md#delivery-cost-and-policy). The full field reference lives there too.
 
 ## Injection Spans
 
-Identical content is often re-injected, so the judged unit is the **injection span**: a maximal run of consecutive recall ops whose delivered set has the same portable identity.
+Identical content is often re-injected, so the judged unit is the **injection span**: a maximal run of consecutive recall ops delivering the same set under the same treatment — identical entries in the same order, the same placement presentation, and the same per-entry exposure.
 
 - Step gaps do not break a span; they are recorded in `step_gaps` and shown to the judge.
-- A content change does break a span. Each delivered entry's judged footprint window runs from the span's first step to that entry's next re-delivery (a re-delivery supersedes — a memory delivered in two spans is never credited in both); an entry never re-delivered keeps the rest of the stream, an unrelated span in between bounds nothing, and one entry's window ending never caps a co-delivered entry's window. Windows are per delivered ENTRY (the span-local id the rubric keys on): identities sharing one display key keep their own bounds, and every entry — keyed or not — is judged.
+- A content or treatment change does break a span — a re-ranked bundle, a re-framed block, or a changed per-entry exposure starts a new span even when the delivered content is identical. Each delivered entry's judged footprint window runs from the span's first step to that entry's next re-delivery (a re-delivery supersedes — a memory delivered in two spans is never credited in both); an entry never re-delivered keeps the rest of the stream, an unrelated span in between bounds nothing, and one entry's window ending never caps a co-delivered entry's window. Windows are per delivered ENTRY (the span-local id the rubric keys on): identities sharing one display key keep their own bounds, and every entry — keyed or not — is judged.
 - Re-deliveries roll up as `restated`: they count toward delivery cost and `n_injections`, but never appear in verdict rates.
 - A span with no attributed agent step (`step_first` is `None`) has no downstream footprint. It is rule-judged **neutral** with `auto: no_subsequent_turn`, and no judge call is made. Aggregates tally it as `unassessable`, out of every directional rate.
 
-The one-verdict-per-span rollup presupposes the earlier injection still resides in the agent's context. When the recording shows the opposite regime — most deliveries followed by a dropping history rewrite before the next delivery, so only the LATEST memory block is resident and re-delivery is the visibility mechanism — and restated re-deliveries dominate the run, the report states that residency regime in its validation notes, so readers know which harness semantics the restated metrics assume.
+The one-verdict-per-span rollup presupposes the earlier injection still resides in the agent's context. When the recording shows the opposite regime — at least half of the deliveries followed by a dropping history rewrite before the next delivery (a drop trailing the final delivery counts too: it evicts that block before the run's end), so only the LATEST memory block is resident and re-delivery is the visibility mechanism — and restated re-deliveries dominate the run, the report states that residency regime in its validation notes, so readers know which harness semantics the restated metrics assume.
 
 Span construction, including the fingerprint fallback for undigested content, is specified in [Memory identity](input-contract.md#memory-identity).
 
@@ -70,4 +70,4 @@ The scoring call accepts two optional attachments. Each comes from a sidecar nex
 
 `correctness.json` accepts a plain `{"resolved": true|false, "score": …}` record or a SWE-bench-style harness report (`resolved_ids` / `unresolved_ids`). A harness report is joined by the trajectory's recorded `instance_id`; errored or incomplete instances are harness failures, not outcomes, so no correctness attaches. The `--gold-metadata` / `--harness-report` links are the multi-trajectory form: each trajectory gets its own instance's patch and resolved bit, and a trajectory that fails to join (no recorded `instance_id`, or the instance absent from the file) degrades to the next source with a validation note. An unusable linkage file (unreadable, unparseable, wrong shape) fails fast before any paid judge call.
 
-With neither attachment, scoring uses the plain rubric. The gold regime is recorded on each judged operation's `input` (`"gold": true`) and counted in `aggregates.overall.gold_scored`.
+With neither attachment, scoring uses the plain rubric. The gold regime is recorded on the operation's `input` (`"gold": true`) and counted in `aggregates.overall.gold_scored`.

@@ -22,13 +22,8 @@ confirmation on reversible work, follow the user and continue.
 Infer routine gaps from this file and the surrounding code. Ask only when
 the answer would change the outcome. Do not stop at a plan, and do not
 ask permission to edit files, run tests, or make other reversible changes.
-
-Verification is proportional. Do not write tests that restate the
-implementation for docs, comments, formatting, renames, or other
-reversible low-impact edits. When a change does need tests, make them
-exercise a real failure point. Run the smallest relevant tests, then the
-required checks; once they pass, broaden or repeat only if a new change,
-failure, or unresolved concern justifies it.
+Finish the work the request authorizes before asking for review, so what
+the user approves is a concrete result.
 
 ## Commands
 
@@ -118,24 +113,27 @@ adapter vocabulary.
   is `(namespace, item_id)`, stable across versions of one item. Fall back
   to the display key when `item_id` was not recorded. The same display key
   from two stores, or two items in one store, is two memories.
-- **Span fingerprints** use the gate's version tuple: `namespace` /
-  `identity_scheme` / `version_id` / content sha256, plus the recorded item
-  identity (`item_id`, else the display-key fallback — two distinct items
-  sharing one content digest, or two redacted entries sharing one key with
-  distinct recorded item ids, are two memories, never one erased
-  provenance). An `operation_local`
-  version_id is withheld (it names nothing outside its own operation), so
-  comparison rides the content digest — and when the display "key" IS that
-  local id (no `item_id`, no real key recorded), it is no item identity
-  either and the item half reads as absent. When neither a withheld-adjusted
-  version_id nor a digest is present, the fingerprint is the delivered
-  `(namespace, item, value)`. Redacted content records no value, so
-  redacted bodies indistinguishable under one `(namespace, item)` share a
-  span. A re-delivery merges into a span only as the SAME treatment:
-  identical entries in the same order, the same placement presentation,
-  and the same per-entry exposure — a changed exposure, a re-ranked bundle,
-  or a re-framed block starts a new span (a wider later exposure never
-  merges backward onto anchors that predate it).
+- **Span fingerprints** use the gate's version tuple — `namespace` /
+  `identity_scheme` / `version_id` / content sha256 — plus the recorded
+  item identity (`item_id`, else the display-key fallback). A content
+  digest names content, not an item: two items sharing one digest, or
+  two redacted entries sharing one key with distinct recorded item ids,
+  stay two memories.
+  - An `operation_local` version_id is withheld: it names nothing
+    outside its own operation, so comparison rides the content digest.
+    When the display "key" IS that local id (no `item_id`, no real key
+    recorded), it is no item identity either, and the item half reads
+    as absent.
+  - With neither a withheld-adjusted version_id nor a digest, the
+    fingerprint is the delivered `(namespace, item, value)`. Redacted
+    content records no value, so redacted bodies indistinguishable
+    under one `(namespace, item)` share a span.
+  - A re-delivery merges into a span only as the SAME treatment:
+    identical entries in the same order, the same placement
+    presentation, and the same per-entry exposure. A changed exposure,
+    a re-ranked bundle, or a re-framed block starts a new span — a
+    wider later exposure never merges backward onto anchors that
+    predate it.
 - **`extensions.cure`** is a display projection only (key, memory_type,
   confidence, review status, needs_verification, rejection counts, declared
   extraction step — falling back to the protocol `main_step` when
@@ -163,14 +161,14 @@ Both tools attribute steps through one rule:
   agent steps nor memory turns; each side lane is listed in
   `validation`/warnings.
 - An extraction observed before the first agent turn completes is step `0`.
-- A delivery with no classified agent turn has `step = None`. Its span is
-  rule-judged auto-neutral with no LLM call. A KNOWN but unobserved
-  consumer — the bound call's turn classified as memory/side lane or never
-  completed — never falls back to a declared or most-recent step (that
-  would make a pre-exposure action eligible as downstream evidence); the
-  delivery stays unattributable with a warning. The observed-turn fallback
-  (no binding, no declared step) is an attribution assumption and is named
-  in the warnings per use.
+- A delivery with no classified agent turn has `step = None`, and its span
+  is rule-judged auto-neutral with no LLM call. When the consumer is KNOWN
+  but unobserved — the bound call's turn classified as memory/side lane or
+  never completed — never fall back to a declared or most-recent step:
+  that would make a pre-exposure action eligible as downstream evidence.
+  The delivery stays unattributable with a warning. The observed-turn
+  fallback (no binding, no declared step) is an attribution assumption,
+  named in the warnings per use.
 
 ## Corrupt input
 
@@ -217,17 +215,16 @@ acted-on influence with `positive_effect` `no_effect` or `harmed`. Mere
 reference is never misuse.
 
 The judge is an AGENT, not one prompt. Python materializes each span's
-evidence into a folder (`injudge/evidence.py`: manifest.json + span.md +
-gold.md + one file per recorded agent step, written under
-`<output>/evidence/`) and spawns `agent/runner.ts` — a pi agent whose opening contains span.md
-and the compact manifest verbatim, and whose only tools are read/search,
-scoped to that folder (absolute paths, `..`,
-and out-of-root symlinks refused). The conversation is bounded by two
-budgets, both ending in a FORCED final answer (the harness pattern), never
-a mid-run failure: MAX_STEPS caps LLM calls, and the CONTEXT_WINDOW
-watermark (minus the reserved MAX_OUTPUT_TOKENS) rolls back the
-overflowing round and injects the forced message. A defiant tool call in
-the forced round is blocked.
+evidence into a folder under `<output>/evidence/` (`injudge/evidence.py`:
+manifest.json + span.md + gold.md + one file per recorded agent step) and
+spawns `agent/runner.ts` — a pi agent whose opening contains span.md and
+the compact manifest verbatim, and whose only tools are read/search scoped
+to that folder (absolute paths, `..`, and out-of-root symlinks refused).
+Two budgets bound the conversation, both ending in a FORCED final answer
+(the harness pattern), never a mid-run failure: MAX_STEPS caps LLM calls,
+and the CONTEXT_WINDOW watermark (minus the reserved MAX_OUTPUT_TOKENS)
+rolls back the overflowing round and injects the forced message. A defiant
+tool call in the forced round is blocked.
 
 Easy to get wrong:
 
@@ -260,8 +257,12 @@ Easy to get wrong:
   output that echoes it is masked before any text reaches a verdict,
   `judge_raw`, or validation note (raw key and every percent-encoded
   spelling, either hex case; a key shorter than 8 characters is no
-  credential). A runner-level failure (node missing, packages uninstalled,
-  unreadable job) is that span's error verdict with a note, not a retry.
+  credential). A runner-level failure mid-run (the subprocess fails to
+  start, exits non-zero, exceeds its wall-clock bound, or writes no
+  readable result) is that span's error verdict with a note, not a
+  retry; a missing node, runner, or agent-package tree is setup misuse
+  that fails fast with a targeted SystemExit before any paid call
+  (`_check_runner`).
 - Out-of-contract answers, empty final texts, and output-budget cuts are
   all one corrective-retry class — there are no conformance tiers, no
   truncation forensics, no input budget gates, and no tiktoken anywhere.
@@ -274,9 +275,9 @@ Easy to get wrong:
    `tests/annotated_fixtures.py` use it).
 2. Python runtime is stdlib plus tqdm (CLI progress bars); the judge agent
    is the TypeScript pi stack under `agent/` (no new Python dependencies;
-   no SDK on either side — urllib is gone with the one-shot client). The
-   `data` group is for `data/utils` only. TS side: erasable-typestrip
-   TypeScript, ESM, tabs, node:test for tests, no build step.
+   no SDK on either side). The `data` group is for `data/utils` only. TS
+   side: erasable-typestrip TypeScript, ESM, tabs, node:test for tests, no
+   build step.
 3. `pathlib` instead of `os.path`. Artifacts go through `atomic_write`.
 4. Data containers are plain dataclasses with `to_dict()`. Parameterize
    generics (`set[str | None]`, not bare `set`).
@@ -293,8 +294,9 @@ stub the agent runner by monkeypatching `injudge.agent._invoke_runner`
 with canned results (the corrective loop, input records, and evidence
 folders all run for real). Assert on artifacts written to disk. The TS
 evidence tools' path-scoping is security-bearing and tested under
-`node --test agent/` (`agent/evidence-tools.test.ts`), driven from pytest
-by `tests/test_agent_tools.py` (skipped when node or the packages are
+`node --test` in `agent/` (`agent/evidence-tools.test.ts`,
+`agent/runner.test.ts`), driven from pytest by
+`tests/test_agent_tools.py` (skipped when node or the packages are
 missing).
 
 Name tests `test_<behavior>`. When a test is warranted, hit a real failure
@@ -303,16 +305,16 @@ not a status code. Payload-based HTML tests (poison in, exact escaped
 payload out) are the shape to follow; template-text pins exist only where
 the guarded behavior is JS-side and the stdlib-only rule bars a JS engine.
 
-Do not add tests for reversible, low-impact changes that mirror the
-implementation (docs, comments, formatting, renames, this file). Add or
-extend tests when the change is protocol/parsing, step attribution, the
-judge client, security, an artifact contract, corrupt-input degradation, or
-a bug fix (a test that reproduces it, then pass).
-
-Run the smallest relevant file or node after the change. Run
-`uv run pytest tests -q` before opening a PR. Once those pass, do not
-broaden or rerun unless a new change or failure justifies it. The suite is
-offline and uses disposable fixtures; do not stop for approval to run it.
+Verification is proportional to the change. Do not add tests for
+reversible, low-impact changes that mirror the implementation (docs,
+comments, formatting, renames, this file); add or extend them when the
+change is protocol/parsing, step attribution, the judge client, security,
+an artifact contract, corrupt-input degradation, or a bug fix (a test that
+reproduces it, then passes). Run the smallest relevant file or node after
+the change and the full suite (`uv run pytest tests -q`) before opening a
+PR; once those pass, broaden or rerun only when a new change, failure, or
+unresolved concern justifies it. The suite is offline and uses disposable
+fixtures — run it without asking for approval.
 
 ## Security
 
@@ -320,17 +322,17 @@ These are load-bearing; never weaken them.
 
 - The judge API key comes from `.env`, travels to the runner only through
   the `JUDGE_API_KEY` environment variable (never the job/result temp
-  files), and is sent only to the judge endpoint. It must never appear in artifacts, reports, logs, or error
-  messages (credential and URL config errors name keys, never values;
-  enum/numeric knob errors show the offending literal, which is no
-  credential). Endpoint output that
-  echoes the request — an auth/proxy fault reflecting the credential, in an
-  HTTP error page or a 200 answer alike — is masked before any of its text
-  reaches a verdict, `judge_raw`, or validation note. Masking covers the raw
-  key and every percent-encoded spelling (quote, quote_plus, fully-encoded,
-  non-alphanumeric-encoded — an sk- key's dash as `%2D` — each also in
-  lowercase hex). A key shorter than 8 characters is treated as no
-  credential and left unmasked.
+  files), and is sent only to the judge endpoint. It must never appear in
+  artifacts, reports, logs, or error messages: credential and URL config
+  errors name keys, never values (enum/numeric knob errors show the
+  offending literal, which is no credential). Endpoint output that echoes
+  the request — an auth/proxy fault reflecting the credential, in an HTTP
+  error page or a 200 answer alike — is masked before any of its text
+  reaches a verdict, `judge_raw`, or validation note. Masking covers the
+  raw key and every percent-encoded spelling (quote, quote_plus,
+  fully-encoded, non-alphanumeric-encoded — an sk- key's dash as `%2D` —
+  each also in lowercase hex). A key shorter than 8 characters is treated
+  as no credential and left unmasked.
 - The memgraph HTML is an untrusted-content host. Every trajectory- or
   artifact-controlled value interpolated into it is escaped: the embedded
   graph JSON has every `<` (plus U+2028/U+2029) unicode-escaped, the title
@@ -368,43 +370,46 @@ trajectory so a crash keeps completed work.
   / `previous_keys` / `changed_keys`.
 - `tool.config` is the resolved, secret-free judge-agent configuration
   (URLs sanitized to `scheme://host[:port][/path]`).
-- Each judged operation carries an `input` record:
+- Each operation the agent ran for carries an `input` record (error
+  outcomes included):
   `{"path": "agent", "attempts", "llm_calls", "tool_calls", "transcript"}`
-  plus `"gold"` and `"forced"` when they apply (`forced`: the verdict came
-  from a budget-exhausted forced final round). Rule-judged auto-neutral
-  spans and unjudged spans omit it.
+  plus `"gold"` and `"forced"` when they apply (`forced`: the
+  conversation's final answer came from a budget-exhausted forced round).
+  Only rule-judged auto-neutral spans and unjudged spans omit it.
 - `aggregates.overall` counts the regimes: `input_paths`, `gold_scored`,
   `forced_answers`.
-- The run also writes `<output>/evidence/<span-id>/` — the exact folders
+- The run also writes `<output>/evidence/<span-dir>/` — the exact folders
   the agents read (audit/replay value; they embed recorded memory values
-  like the report does) — and `<output>/agent-runs/<span-id>.jsonl` — the
+  like the report does) — and `<output>/agent-runs/<span-dir>.jsonl` — the
   pi event-sourced trajectory of each judging conversation (message lines
   as they happen, `tombstone` lines for budget rollbacks, the injected
   forced message, per-phase `attempt_end` diagnostics with cumulative
   retained-conversation counts/usage; `attempt.phase` identifies judge or
   repair; recorded raw by
   the runner, rewritten masked by Python after every attempt; `seq` is
-  attempt-local).
+  attempt-local). `<span-dir>` is the span id made filesystem-safe
+  (non-`[A-Za-z0-9._-]` replaced by `_`, capped at 80 chars) plus an
+  8-char digest suffix — `evidence.span_dir_name`.
 
 The companion `summary.json` (`injudge.summary/v6`) is the run's final
 statistics: counts/rates, rubric distributions, cost, confidence, judge
 compliance (the positive_effect↔influence correction rate), per-trajectory
 extraction reliability (`n_extractions` / `extraction_failures`), and slim
-per-memory usage tallies — per trajectory (`instance_id` / `model` /
-`adapter` when recorded) with a narrative-free span index (verdict /
-confidence / usage labels). Empty rate/headline/rubric/confidence/cost
-shells are omitted when a trajectory had no judged spans. The headline
-binds span rates to the wasted-token share, names `wasted_tokens` /
-`judged_tokens`, shows `error_unjudged_tokens` when non-zero, and states
-the proxy caveat on every reported share. Rule-judged auto-neutral
-(no-subsequent-turn) spans tally as `unassessable` — out of every
-directional denominator and the wasted-token share, with
+per-memory usage tallies. Each trajectory block carries `instance_id` /
+`model` / `adapter` when recorded, plus a narrative-free span index
+(verdict / confidence / usage labels); empty rate / headline / rubric /
+confidence / cost shells are omitted when a trajectory had no judged
+spans.
+The headline binds span rates to the wasted-token share, names
+`wasted_tokens` / `judged_tokens`, shows `error_unjudged_tokens` when
+non-zero, and states the proxy caveat on every reported share. Rule-judged
+auto-neutral (no-subsequent-turn) spans tally as `unassessable`, out of
+every directional denominator and the wasted-token share, with
 `unassessable_spans` / `unassessable_tokens` named in the headline when
-non-zero — since observation missingness is not a measured null effect.
-Identities sharing one
-display key carry a `key#<item-or-namespace>` suffix (8-char prefix, full
-base on a prefix collision). Narrative and process detail stays in the
-report artifact alone.
+non-zero — observation missingness is not a measured null effect.
+Identities sharing one display key carry a `key#<item-or-namespace>`
+suffix (8-char prefix, full base on a prefix collision). Narrative and
+process detail stays in the report artifact alone.
 
 memgraph joins the report by `(run_id, op seq)`. Unmatched entries in
 either direction are validation notes, never errors. An ambiguous join key

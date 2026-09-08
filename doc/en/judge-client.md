@@ -6,7 +6,7 @@ icon: plug
 # Judge Agent
 
 {% hint style="info" %}
-The judge is an agent built on the [pi](https://github.com/earendil-works/pi) agent runtime (`@earendil-works/pi-agent-core` + `@earendil-works/pi-ai`), driven by a small TypeScript runner (`agent/runner.ts`) that Python spawns once per span conversation. Python owns the verdict contract; the runner owns the conversation.
+The judge is an agent built on the [pi](https://github.com/earendil-works/pi) agent runtime (`@earendil-works/pi-agent-core` + `@earendil-works/pi-ai`), driven by a small TypeScript runner (`agent/runner.ts`) that Python spawns once per phase of a span's conversation (initial investigation, repairs, resumed investigations), each process continuing the same conversation through `job.history`. Python owns the verdict contract; the runner owns the conversation.
 {% endhint %}
 
 See [Configuration](configuration.md) for endpoint setup (`cd agent && npm install` once; node ≥ 22.19 on PATH).
@@ -17,7 +17,7 @@ One span, one conversation. Python materializes the span's [evidence folder](sco
 
 ## Trajectory Recording
 
-Every conversation is recorded as a pi event-sourced trajectory: the runner subscribes to the agent's event stream and appends each completed message to `<output>/agent-runs/<span-id>.jsonl` as it happens. One JSONL per span, replaced per judging run; each line is `{seq, type, …}` with attempt-local `seq`:
+Every conversation is recorded as a pi event-sourced trajectory: the runner subscribes to the agent's event stream and appends each completed message to `<output>/agent-runs/<span-dir>.jsonl` as it happens. One JSONL per span, replaced per judging run; each line is `{seq, type, …}` with attempt-local `seq`:
 
 - `attempt` — opens each runner process's lines, with `phase: "judge"` or `"repair"`. Phases append to the same file; seeded history fires no events, so no duplication.
 - `message` — one full message (user opening, assistant turns with their tool calls and per-call usage, tool results), including turns a budget later rolled back.
@@ -30,7 +30,7 @@ The forced-answer message joins the conversation by context rewrite (no event fi
 
 Two budgets bound every conversation, and both end in a **forced final answer** instead of a failure (the pattern the collection harness uses):
 
-- **Step budget** (`MAX_STEPS`): when the LLM-call count reaches the cap, the round is cut, the forced-answer message is appended ("stop calling tools; answer from what you have gathered"), and any defiant tool call in the forced round is blocked.
+- **Step budget** (`MAX_STEPS`): when the LLM-call count reaches the cap, the conversation is cut to one final round: the forced-answer message is appended ("stop calling tools; answer from what you have gathered"), and any defiant tool call in the forced round is blocked.
 - **Context budget** (`CONTEXT_WINDOW`): when the estimated context (the last assistant message's server-reported usage plus the trailing messages) crosses the watermark — the context window minus the reserved `MAX_OUTPUT_TOKENS` — the overflowing round is rolled back and the same forced message is injected, so the next request fits.
 
 A missing-evidence continuation gets **at most four model calls including its final answer**, or `MAX_STEPS` if that is lower. At the four-call limit this allows three evidence-gathering rounds and one forced final round; it does not regain the initial full investigation budget. The existing context watermark can force an answer earlier. This is a fixed policy, not another configuration knob.
@@ -51,9 +51,9 @@ There are no conformance tiers, no truncation classes, no input budget gates: an
 
 ## Failure Handling
 
-- A runner-level failure (node missing, uninstalled packages, unreadable job) is that span's `error` verdict with a validation note; the run continues. It is not retried — an identical retry would re-pay the setup fault.
+- A runner-level failure mid-run (the subprocess fails to start, exits non-zero, exceeds its wall-clock bound, or writes no readable result) is that span's `error` verdict with a validation note; the run continues. It is not retried — an identical retry would re-pay the fault. A missing node, runner, or agent-package tree is setup misuse that fails fast with a targeted error before any paid call.
 - An agent-level error (endpoint auth, persistent transport failure) surfaces as the run's `error` field and becomes that span's error verdict the same way.
-- Per-call transport retries, timeouts (`TIMEOUT`), and output caps (`MAX_OUTPUT_TOKENS`) are applied inside the runner on every stream call.
+- Per-call timeouts (`TIMEOUT`) and output caps (`MAX_OUTPUT_TOKENS`) are applied inside the runner on every stream call; there are no transport retries — a failed request surfaces as the run's `error`.
 
 ## Credentials
 

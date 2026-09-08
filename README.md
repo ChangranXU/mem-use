@@ -45,7 +45,7 @@ Each `<path>` is a trajectory dir (containing `trajectory.jsonl`), a
 injudge groups repeated identical injections into **spans**, materializes
 each span's evidence (task, span document, gold attachments, one file per
 recorded agent step) into a folder, and lets a pi agent with read-only
-tools scoped to that folder score every delivered memory entry on five
+tools scoped to that folder score the delivered memory entries on five
 signals (relevance, accuracy, novelty, influence, positive effect) under a
 stable span-local id; each span's verdict then derives in code: any misused
 memory ⇒ **negative**, else any used ⇒ **positive**, else **neutral**.
