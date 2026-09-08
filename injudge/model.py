@@ -7,6 +7,7 @@ attribution (memgraph/parse_trajectory.py).
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -182,3 +183,11 @@ class InjectionSpan:
     memory_windows: dict[str, int | None] = field(default_factory=dict)
     memory_window_starts: dict[str, int] = field(default_factory=dict)
     same_step_bound: int | None = None
+
+    def iter_exposed(self) -> Iterator[tuple[dict, dict | None]]:
+        """(memory, exposure) pairs for delivered entries; a shorter or
+        absent exposure list yields None records — the canonical value then
+        shows bare, exactly like a directly-built span."""
+        exposure = self.memory_exposure
+        for i, m in enumerate(self.memories):
+            yield m, exposure[i] if i < len(exposure) else None

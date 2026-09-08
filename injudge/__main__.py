@@ -53,11 +53,8 @@ from injudge.judge import (
     GoldInput,
     JudgeConfig,
     JudgeError,
-    _gate_over_budget,
     _gate_tokens,
-    _input_record,
     _int_config,
-    _mask_keys,
     _scoring_system,
     auto_verdict_no_subsequent_turn,
     blank_verdict,
@@ -66,6 +63,7 @@ from injudge.judge import (
     load_env,
     render_user,
     resolve_config,
+    unexpected_span_failure,
 )
 from injudge.model import InjectionSpan
 from injudge.report import (
@@ -231,6 +229,58 @@ def _residency_note(
         "visibility mechanism) — the one-verdict-per-span metrics assume "
         "that residency regime"
     )
+
+
+def _exposure_notes(run_id: str, spans: list[InjectionSpan]) -> list[dict]:
+    """One trajectory's placement-exposure summary: the fidelity boundary
+    between the canonical values and what the agent actually saw — one note
+    per trajectory (per-span detail rides each operation's memory_exposure)."""
+    clipped = unknown = normalized = 0
+    total = 0
+    for span in spans:
+        total += len(span.memories)
+        for exp in span.memory_exposure:
+            state = exp.get("state")
+            if state == "clipped":
+                clipped += 1
+            elif state == "unknown":
+                unknown += 1
+            elif state == "full_normalized":
+                normalized += 1
+    notes: list[dict] = []
+    if normalized:
+        notes.append(
+            {
+                "level": "info",
+                "msg": f"{run_id}: {normalized} of {total} span "
+                       "memory entries were exposed whole only up to "
+                       "whitespace/markdown-escape normalization (the placement "
+                       "re-wrapped or escaped the value); the judge treats them "
+                       "as fully shown",
+            }
+        )
+    if clipped:
+        notes.append(
+            {
+                "level": "warn",
+                "msg": f"{run_id}: {clipped} of {total} span "
+                       "memory entries were delivered clipped by the placement "
+                       "budget; the judge scores only each entry's exposed "
+                       "prefix, never the unshown suffix",
+            }
+        )
+    if unknown:
+        notes.append(
+            {
+                "level": "warn",
+                "msg": f"{run_id}: {unknown} of {total} span "
+                       "memory entries have undeterminable placement exposure "
+                       "(redacted/unrecorded placement, or a renderer that "
+                       "transformed the value); the judge input marks them "
+                       "unverified instead of implying full visibility",
+            }
+        )
+    return notes
 
 
 class _Progress:
@@ -554,61 +604,7 @@ def main(argv: list[str] | None = None) -> int:
         # footprint windows) surface like every other structural finding
         for w in span_warnings:
             validation.append({"level": "warn", "msg": f"{run_id}: {w}"})
-        # placement-exposure summary: the fidelity boundary between the
-        # canonical values and what the agent actually saw — one note per
-        # trajectory (per-span detail rides each operation's
-        # memory_exposure), never one per span
-        clipped_entries = sum(
-            1
-            for span in spans
-            for exp in span.memory_exposure
-            if exp.get("state") == "clipped"
-        )
-        unknown_entries = sum(
-            1
-            for span in spans
-            for exp in span.memory_exposure
-            if exp.get("state") == "unknown"
-        )
-        normalized_entries = sum(
-            1
-            for span in spans
-            for exp in span.memory_exposure
-            if exp.get("state") == "full_normalized"
-        )
-        total_entries = sum(len(span.memories) for span in spans)
-        if normalized_entries:
-            validation.append(
-                {
-                    "level": "info",
-                    "msg": f"{run_id}: {normalized_entries} of {total_entries} span "
-                           "memory entries were exposed whole only up to "
-                           "whitespace/markdown-escape normalization (the placement "
-                           "re-wrapped or escaped the value); the judge treats them "
-                           "as fully shown",
-                }
-            )
-        if clipped_entries:
-            validation.append(
-                {
-                    "level": "warn",
-                    "msg": f"{run_id}: {clipped_entries} of {total_entries} span "
-                           "memory entries were delivered clipped by the placement "
-                           "budget; the judge scores only each entry's exposed "
-                           "prefix, never the unshown suffix",
-                }
-            )
-        if unknown_entries:
-            validation.append(
-                {
-                    "level": "warn",
-                    "msg": f"{run_id}: {unknown_entries} of {total_entries} span "
-                           "memory entries have undeterminable placement exposure "
-                           "(redacted/unrecorded placement, or a renderer that "
-                           "transformed the value); the judge input marks them "
-                           "unverified instead of implying full visibility",
-                }
-            )
+        validation.extend(_exposure_notes(run_id, spans))
         progress.start_trajectory(t.instance_id or run_id, len(spans))
         n_injections_by_traj[t.id] = len(recall_ops)
         # delivery cost per span: the exact placement content size recorded
@@ -646,6 +642,9 @@ def main(argv: list[str] | None = None) -> int:
         prompt_total = prompt_tokens_total(events, budget_warnings)
         for w in budget_warnings:
             validation.append({"level": "warn", "msg": f"{run_id}: {w}"})
+        extracts = [op for op in ops if op.kind == "extract"]
+        n_extract = len(extracts)
+        n_extract_fail = sum(1 for op in extracts if op.flagged)
         # same per-span rounding the cost rollup uses: one artifact, one total
         est_injected_tokens = sum(c["approx_tokens_total"] for c in span_costs.values())
         # the share degrades to None when the recorded sizes make it
@@ -673,10 +672,8 @@ def main(argv: list[str] | None = None) -> int:
             # recorded, and how many were flagged (a failed status or a
             # missing end) — a core memory-system quality dimension the
             # metrics otherwise omit
-            "n_extractions": sum(1 for op in ops if op.kind == "extract"),
-            "extraction_failures": sum(
-                1 for op in ops if op.kind == "extract" and op.flagged
-            ),
+            "n_extractions": n_extract,
+            "extraction_failures": n_extract_fail,
             "injection_density": (
                 round(len(recall_ops) / t.n_steps, 4) if t.n_steps else None
             ),
@@ -796,34 +793,12 @@ def main(argv: list[str] | None = None) -> int:
                 # anything else is a bug or an unguarded corrupt shape: it
                 # must still degrade to one span's error verdict — one bad
                 # span never takes the run down with every un-flushed
-                # trajectory. Unlike a JudgeError's, this text is not masked
-                # upstream, so mask it here (it can interpolate endpoint
-                # output), capped like every other text kept in the artifact;
-                # the exception class stays for debugging.
-                # both keys mask over the WHOLE text before the cap is taken:
-                # capping first would let a key straddling the cut survive as
-                # an unmasked prefix (the _masked_head rule, with two keys)
-                masked = _mask_keys(
-                    f"{type(e).__name__}: {e}",
-                    (cfg.api_key, scan_cfg.extraction.api_key),
-                )[:2000]
-                verdict = blank_verdict()
-                verdict["error"] = f"judging failed unexpectedly: {masked}"
-                error_note = f"{span.id}: judging failed unexpectedly: {masked}"
-                try:
-                    # the same regime record the JudgeError path keeps (the
-                    # comment above it), re-derived through judge_span's own
-                    # routing/record helpers so the two can never desync: the
-                    # gate is deterministic, so re-deriving it cannot
-                    # misreport the path — a scan span's chunk counters die
-                    # with the exception. The handler itself must never raise.
-                    over = _gate_over_budget(
-                        _scoring_system(gold), span, steps, t.task, gold,
-                        scan_cfg.input_tokens,
-                    )
-                    verdict["input"] = _input_record("scan" if over else "full", gold)
-                except Exception:
-                    pass
+                # trajectory
+                verdict, error_note = unexpected_span_failure(
+                    e, span, cfg, gold, steps, t.task,
+                    scan_key=scan_cfg.extraction.api_key,
+                    input_tokens=scan_cfg.input_tokens,
+                )
             progress.advance_span()
             return i, verdict, span_warnings, error_note
 

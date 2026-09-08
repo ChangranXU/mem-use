@@ -259,11 +259,6 @@ class _Chunk:
         return f"steps {self.steps[0].step}–{self.steps[-1].step}"
 
 
-def scan_header(span: InjectionSpan, task: str | None) -> str:
-    """The header every scan-path input shares with the scoring call."""
-    return _render_span_header(span, task, MEMORIES_NOTE)
-
-
 def _chunk_header(span: InjectionSpan, task: str | None) -> str:
     """The extraction chunk's header — the same fields as the scoring header
     (a chunk's input is never a bare trajectory slice), with the note naming
@@ -441,7 +436,7 @@ def _anchor_terms(span: InjectionSpan) -> list[tuple[str, int | None]]:
     shaped: list[tuple[str, int | None]] = []  # identifier-shaped value words
     plain: list[tuple[str, int | None]] = []  # plain ≥8-char value words
     keys: list[tuple[str, int | None]] = []
-    for i, m in enumerate(span.memories):
+    for i, (m, exposure) in enumerate(span.iter_exposed()):
         end = span.memory_windows.get(memory_id(i))
         key = m.get("key")
         if isinstance(key, str) and key.strip():
@@ -449,7 +444,6 @@ def _anchor_terms(span: InjectionSpan) -> list[tuple[str, int | None]]:
         value = m.get("value")
         if not isinstance(value, str):
             continue
-        exposure = span.memory_exposure[i] if i < len(span.memory_exposure) else None
         state = exposure.get("state") if exposure is not None else None
         if state == "unknown":
             continue  # unverified exposure: the value may never have been shown
@@ -979,7 +973,7 @@ def scan_span(
             "scan.extraction is None (a dry-run scan config): the scan path "
             "needs a resolved extraction config"
         )
-    header = scan_header(span, task)
+    header = _render_span_header(span, task, MEMORIES_NOTE)
     chunks = _chunks(steps, span, scan, task)
     record: dict = {
         **_input_record("scan", gold),

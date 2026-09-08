@@ -1033,7 +1033,7 @@ GOLD_SYSTEM_PROMPT = _substitute_enums(_scoring_prompt("gold"))
 SCORING_CLOSING = load_prompt("injudge/scoring/closing")
 
 # The header note introducing the delivered memories on a SCORING input: the
-# fit path (_user_shell) and the scan path (injudge.scan's scan_header) send
+# fit path (_user_shell) and the scan path (injudge.scan) send
 # the same invitation — one file, one module-level load, never two copies.
 # The extraction chunks' own note lives in injudge.scan.
 MEMORIES_NOTE = load_prompt("injudge/scoring/memories_note")
@@ -1447,18 +1447,9 @@ def _render_span_header(span: InjectionSpan, task: str | None, memories_note: st
     parts.append(memories_note)
     parts.extend(
         _memory_line(m, memory_id(i), exp)
-        for i, (m, exp) in enumerate(_zip_exposure(span))
+        for i, (m, exp) in enumerate(span.iter_exposed())
     )
     return "\n".join(parts)
-
-
-def _zip_exposure(span: InjectionSpan) -> Iterable[tuple[dict, dict | None]]:
-    """(memory, exposure) pairs for a span's delivered entries; a length
-    mismatch or an absent exposure list yields None records — the canonical
-    value then shows bare, exactly like a directly-built span."""
-    exposure = span.memory_exposure
-    for i, m in enumerate(span.memories):
-        yield m, exposure[i] if i < len(exposure) else None
 
 
 def _gold_blocks(gold: GoldInput | None) -> str:
@@ -2109,12 +2100,11 @@ def _gate_over_budget(
     gold: GoldInput,
     input_tokens: int,
 ) -> bool:
-    """The budget gate's routing decision, shared by judge_span and the
-    CLI's unexpected-failure record (whose re-derived regime must match the
-    routing a survived exception would have taken) so the two can never
-    desync. A step-less span never scans: with no injection point in the
-    step stream, the scan's pre/post split and seam neighborhood have
-    nothing to bracket."""
+    """The budget gate's routing decision, shared by judge_span and
+    unexpected_span_failure (whose re-derived regime must match the routing
+    a survived exception would have taken) so the two can never desync. A
+    step-less span never scans: with no injection point in the step stream,
+    the scan's pre/post split and seam neighborhood have nothing to bracket."""
     return (
         span.step_first is not None
         and _gate_tokens(system, span, steps, task, gold) > input_tokens
@@ -2127,6 +2117,35 @@ def _input_record(path: str, gold: GoldInput) -> dict:
     counters at assembly; an unexpectedly failed span keeps this re-derived
     shape alone (the counters die with the exception)."""
     return {"path": path, **({"gold": True} if gold.golden else {})}
+
+
+def unexpected_span_failure(
+    exc: BaseException,
+    span: InjectionSpan,
+    cfg: JudgeConfig,
+    gold: GoldInput,
+    steps: list[AgentStep],
+    task: str | None,
+    *,
+    scan_key: str,
+    input_tokens: int,
+) -> tuple[dict, str]:
+    """A non-JudgeError from judging one span: degrade to an error verdict
+    (masked, capped) plus the validation note. Re-derives the gate record
+    through the same helpers judge_span uses so the failed operation still
+    counts in the regime tallies; a scan span's chunk counters die with the
+    exception. The handler itself must never raise."""
+    masked = _mask_keys(f"{type(exc).__name__}: {exc}", (cfg.api_key, scan_key))[:2000]
+    verdict = blank_verdict()
+    verdict["error"] = f"judging failed unexpectedly: {masked}"
+    try:
+        over = _gate_over_budget(
+            _scoring_system(gold), span, steps, task, gold, input_tokens
+        )
+        verdict["input"] = _input_record("scan" if over else "full", gold)
+    except Exception:
+        pass
+    return verdict, f"{span.id}: judging failed unexpectedly: {masked}"
 
 
 def judge_span(

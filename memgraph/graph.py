@@ -17,7 +17,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-from memgraph.annotations import item_key, namespace_of
+from memgraph.annotations import item_ident
 from memgraph.model import Edge, MemoryOp, MemoryUnit, Trajectory
 from memgraph.parse_trajectory import parse_trajectory
 
@@ -159,7 +159,7 @@ def build_graph(
                 if not key:
                     note("warn", f"{op.id}: candidate without a key ignored")
                     continue
-                ident = (namespace_of(cand), item_key(cand))
+                ident = item_ident(cand)
                 if ident not in registry:
                     unit = _register(registry, ident, cand, key, "observed")
                     unit.created_status = cand.get("review_status")
@@ -245,7 +245,7 @@ def build_graph(
                     continue
                 key = str(target)
                 ref = deletion.get("ref")
-                ident = (namespace_of(ref), item_key(ref))
+                ident = item_ident(ref)
                 if ident not in registry:
                     # The delete change carries the exact before-ref (always a
                     # dict — ref_to_memory output): the memory predates the
@@ -275,7 +275,7 @@ def build_graph(
             if not key:
                 note("warn", f"{op.id}: delivered memory without a key ignored")
                 continue
-            ident = (namespace_of(delivered), item_key(delivered))
+            ident = item_ident(delivered)
             if ident in seen:
                 # one recall link per (op, memory) — judged once per item too;
                 # the collapse is noted, never silent (injudge warns for the

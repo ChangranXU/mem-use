@@ -816,6 +816,34 @@ def item_key(memory: Any) -> str | None:
     return key if isinstance(key, str) and key else None
 
 
+def item_ident(memory: Any) -> tuple[str | None, str | None]:
+    """The (namespace, item) grouping pair — the one construction the graph
+    registry, span set-diffs, and injudge usage rollups share, so the three
+    can never disagree about which recorded entry is which memory."""
+    return (namespace_of(memory), item_key(memory))
+
+
+def grouping_item_key(memory: Any) -> str | None:
+    """Item identity for comparison ACROSS operations (span fingerprints).
+
+    Same as item_key except when the display key IS an operation-local
+    version_id (no item_id, no real key recorded): that id names nothing
+    outside its own operation, so it is withheld — identical content
+    re-delivered under fresh local ids stays one span. The within-operation
+    twin (candidate dedupe) keeps item_key, where the local id names one
+    version.
+    """
+    item = item_key(memory)
+    if (
+        item is not None
+        and not memory.get("item_id")
+        and memory.get("identity_strength") == "operation_local"
+        and item == memory.get("version_id")
+    ):
+        return None
+    return item
+
+
 def version_identity(memory: Any, *, withhold_local: bool = False) -> tuple:
     """The gate's version-level identity of one MAPPED memory entry
     (ref_to_memory output): (namespace, identity_scheme, version_id,

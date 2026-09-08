@@ -55,7 +55,7 @@ from __future__ import annotations
 from injudge.judge import _ACCURACY, RUBRIC_SIGNALS
 from injudge.model import stamped_entry_id
 from injudge.steps import _mixed_sum, _token_share
-from memgraph.annotations import item_key, namespace_of
+from memgraph.annotations import item_ident
 
 _VERDICTS = ("positive", "negative", "neutral")
 _USAGES = ("used", "noted", "ignored", "misused", "unclear")
@@ -99,10 +99,8 @@ def _entry_records(op: dict) -> dict[str, tuple[tuple[str | None, str] | None, d
         entry_id = stamped_entry_id(m)
         if entry_id is None:
             continue
-        ident = None
-        item = item_key(m)
-        if item:
-            ident = (namespace_of(m), item)
+        ns, item = item_ident(m)
+        ident = (ns, item) if item else None
         out[entry_id] = (ident, m)
     return out
 
