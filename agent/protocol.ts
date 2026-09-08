@@ -15,7 +15,7 @@ export interface AgentJobConfig {
 	model: string;
 	api: JudgeApi;
 	base_url: string;
-	/** Total LLM-call cap for one conversation, forced final round included. */
+	/** Total LLM-call cap for this phase, forced final round included. */
 	max_steps: number;
 	/** Per-call output-token cap (maxTokens on every stream call). */
 	max_output_tokens: number;
@@ -32,14 +32,16 @@ export interface AgentJob {
 	evidence_dir: string;
 	/** The full scoring system prompt. */
 	system: string;
-	/** The first user message; on corrective retries, the corrective note. */
+	/** The opening, repair instruction, or missing-evidence follow-up. */
 	opening: string;
 	/** Injected as a user message when the step/context budget is exhausted. */
 	forced_message: string;
-	/** Prior conversation to continue (corrective retries); seeds the agent state verbatim. */
+	/** Prior conversation to continue across phases; seeds the agent state verbatim. */
 	history?: unknown[];
 	/** 1-based attempt number, recorded in the trajectory. */
 	attempt: number;
+	/** One model call with no evidence tools, to repair an invalid final answer. */
+	repair: boolean;
 	/** Absolute path of the trajectory JSONL this conversation appends to. */
 	trajectory_path: string;
 	config: AgentJobConfig;

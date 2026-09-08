@@ -7,25 +7,17 @@ Grouped by tool and purpose (new prompts get their own folder group):
   (the gold regime judges those two against the golden answer), the rest are
   shared by both regimes verbatim — a forked copy that could drift is not
   allowed.
-- `prompts/injudge/scoring/` — the one scoring frame (`system.md`) over the
-  shared preamble (`preamble.md`), with the gold regime's fills for its two
-  regime slots (`gold_note.md`, `score_inputs_gold.md` vs
-  `score_inputs_plain.md`), the shared input description
-  (`input.md` — the step stream's two arrival
-  shapes, verbatim and scanned evidence pack), the scan user's note, the
-  delivered-memories header note, the gold attachment frames
-  (`golden_block.md`, `correctness_block.md`), the shared binding rules,
-  the worked echo-trap example (`echo_example.md`), the shared answer
-  contract, the shared closing instruction, and the corrective-retry note.
-- `prompts/injudge/extraction/` — the overflow scan's chunk-extraction
-  prompt with its per-side guidance, the chunk header's evidence-target
-  note, the pre-filled anchors label, the chunk user's closing instruction,
-  the evidence-compression prompt, the corrective-retry note, and the one
-  shared output shape (`shape.md`).
+- `prompts/injudge/scoring/` — the scoring frame, shared input description,
+  delivered-memory and gold attachment labels, binding rules, worked echo
+  example, answer contract, and corrective-retry note. The gold frame fills
+  relevance and effect from its regime-specific signal files.
+- `prompts/injudge/agent/` — the evidence-search workflow in the opening
+  message, the targeted evidence-resumption follow-up, and the forced
+  final-answer instruction used by both budgets.
 
 Slots are `@name@` tokens filled at assembly time; the enum literals stay
 `@accuracy@`-style tokens that the judge's contract substitution fills from
-the same constants as VERDICT_SCHEMA, so prompt text and the parsed contract
+the same constants as the parser, so prompt text and the parsed contract
 can never drift apart.
 """
 
@@ -42,7 +34,7 @@ def load_prompt(name: str) -> str:
     suffix, e.g. `injudge/scoring/system`. Trailing newlines are stripped so
     the assembled prompt is independent of editor end-of-file conventions.
     An unreadable file is a broken checkout — a missing runtime input that
-    fails fast with a targeted message (the rule tqdm/tiktoken get), never a
+    fails fast with a targeted message (like a missing runtime dependency), never a
     raw FileNotFoundError traceback at import time."""
     path = _PROMPTS / f"{name}.md"
     try:

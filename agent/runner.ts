@@ -5,7 +5,7 @@
  * (JUDGE_API_KEY in the environment carries the credential; it never
  * touches the job/result files.)
  *
- * The agent is a plain pi Agent with exactly the three evidence tools —
+ * The agent is a plain pi Agent with exactly the two evidence tools —
  * no filesystem, no bash. Two budgets bound the conversation, both ending
  * in a FORCED final round instead of a crash (the pattern the collection
  * harness uses): the LLM-call cap (max_steps) and the context-window
@@ -13,8 +13,9 @@
  * budget trips, the overflowing round is rolled back, the job's
  * forced_message is appended, and any defiant tool call in the forced
  * round is blocked. The conversation's final assistant text is the judge
- * answer; Python owns the verdict contract and any corrective retries
- * (they re-enter through job.history, continuing this same conversation).
+ * answer; Python owns the verdict contract. A repair invocation restores
+ * job.history but disables tools and stops after one model call. Python
+ * reopens tools only after an explicit missing-evidence request.
  */
 
 import * as fs from "node:fs";
@@ -169,7 +170,7 @@ async function main(): Promise<number> {
 	}
 	const cfg = job.config;
 	const { model, models } = buildModel(job, apiKey);
-	const tools: AgentTool<any>[] = createEvidenceTools(job.evidence_dir);
+	const tools: AgentTool<any>[] = job.repair ? [] : createEvidenceTools(job.evidence_dir);
 	const trajectory = new TrajectoryLog(job.trajectory_path);
 
 	const budget: BudgetState = {
@@ -182,7 +183,8 @@ async function main(): Promise<number> {
 
 	const agent = new Agent({
 		initialState: {
-			systemPrompt: job.system,
+			// The repair control reply is authorized only in this phase.
+			systemPrompt: job.repair ? `${job.system}\n\n${job.opening}` : job.system,
 			model,
 			thinkingLevel: cfg.thinking_level as ThinkingLevel,
 			tools,
@@ -196,6 +198,10 @@ async function main(): Promise<number> {
 				timeoutMs: cfg.timeout_ms,
 			}),
 		shouldStopAfterTurn: ({ message, toolResults, context }) => {
+			if (job.repair) {
+				budget.stopReason = "answer";
+				return true; // repair is exactly one model call, even on a defiant tool call
+			}
 			if (budget.forcedInjected) {
 				budget.stopReason = hasUsableText(message) ? budget.forced!.reason : "format_error_forced";
 				// a defiant tool call in the forced round never reaches the
@@ -248,11 +254,11 @@ async function main(): Promise<number> {
 			return { context: { ...context, messages: [...keptContext, forcedMessage] } };
 		},
 		beforeToolCall: async () => {
-			if (!budget.forcedInjected) return undefined;
+			if (!job.repair && !budget.forcedInjected) return undefined;
 			return {
 				block: true,
 				terminate: true,
-				reason: "The budget for this judging run is exhausted; the forced final round must not call tools. Produce the final answer now.",
+				reason: job.repair ? job.opening : job.forced_message,
 			};
 		},
 	});
@@ -261,7 +267,7 @@ async function main(): Promise<number> {
 	// the loop appends (user opening, assistant turns with their tool calls,
 	// tool results), tombstones for what a budget rolled back, the injected
 	// forced message, and the attempt's diagnostics at the end
-	trajectory.attempt(job.attempt);
+	trajectory.attempt(job.attempt, job.repair);
 	agent.subscribe((e) => {
 		if (e.type === "message_end") {
 			trajectory.message(e.message);
@@ -270,6 +276,8 @@ async function main(): Promise<number> {
 
 	let error: string | null = null;
 	try {
+		// A saved final/repair answer has an assistant tail: bare continue()
+		// rejects it. prompt() appends the follow-up without resetting history.
 		await agent.prompt(job.opening);
 	} catch (e) {
 		error = `agent run failed: ${e instanceof Error ? e.message : String(e)}`;
@@ -288,8 +296,8 @@ async function main(): Promise<number> {
 	}, 0);
 	let stopReason: string = budget.stopReason ?? "no_answer";
 	if (error) stopReason = "error";
-	// a corrective retry continues this conversation in a fresh runner
-	// process whose budget starts over, so this reports this attempt's spend
+	// Counts and usage cover the retained conversation, including prior
+	// phases. Python records the final cumulative totals, not a sum of ends.
 	const result: AgentResult = {
 		answer: lastAssistantText(messages),
 		stop_reason: stopReason,

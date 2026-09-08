@@ -5,8 +5,9 @@
    so one memory's influence is never credited to two spans). A memory never
    re-delivered is judged to the end of the stream; another memory's
    re-delivery bounds only its own window, never this one's:
-   - referenced: the agent mentioned or quoted it, but its actions did not
-     change because of it;
+   - referenced: the agent explicitly mentioned or quoted the memory, but
+     its actions did not change because of it. This includes confirmation
+     of an existing plan or a redundant echo;
    - acted_on: a post-injection command, edit, or test USES content the
      memory carries and the agent could not have derived from what it had
      already seen — content that appears in neither the task statement,
@@ -21,10 +22,12 @@
      demonstrable course change (a new approach, a reversed decision), not
      merely a step executing the established course. Explicit credit is
      evidence for the change, never a substitute for the change itself;
-   - none: no observable footprint at all. A skip merely inferred from an
-     action's absence is none — absence alone is never evidence.
-   A mention is not proof of influence: the agent may have known or found
-   the fact on its own (check novelty and the pre-injection steps).
+   - none: no observable reference to the memory and no action shaped by it.
+     A skip merely inferred from an action's absence is none — absence alone
+     is never evidence.
+   An explicit memory mention establishes referenced, NOT acted_on or
+   decisive. Knowing the fact already can make novelty redundant; it does
+   not erase a recorded reference. Judge action change separately.
    Context is not memory content. The recorded task, pre-injection steps,
    and tool outputs already available before an action are alternative
    sources. A later result cannot explain an earlier choice; a later action
@@ -38,9 +41,9 @@
    DIFFERS from the course already established before the injection. A
    patch already applied, a test already passing, an analysis or plan
    already written at pre-injection steps, or merely continued/executed
-   afterward, is continuation — influence none or referenced, whatever the
-   memory's topic. Redundancy alone does not decide this: an
-   already-established substance can still be acted on when the delivery
+   afterward, is continuation — referenced if the memory was mentioned,
+   otherwise none, whatever the memory's topic. Redundancy alone does not
+   decide this: an already-established substance can still be acted on when the delivery
    itself changed the action — a reminder that restores a dropped
    direction, or execution detail the established plan lacked — so judge
    the footprint on its own evidence, whatever the novelty call. The `anchors`
@@ -56,7 +59,8 @@
    applied at pre-span steps cannot be credited to a memory delivered
    afterward — even when the resulting action lands inside the footprint
    window. Re-delivering the agent's own earlier reasoning or the task
-   statement back to it is not influence; that is reversed causality.
+   statement back to it is not acted-on influence; that is reversed causality.
+   The echo rule does not erase explicit mentions: those remain referenced.
    When another delivered memory (a co-delivered entry, or an earlier
    span's delivery named in the header) carries the same substance, the
    footprint may be genuinely SHARED: credit the entry the agent's

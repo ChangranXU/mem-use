@@ -34,7 +34,7 @@ cd agent && npm install    # TS 侧执行一次（需要 PATH 上有 node >= 22.
 
 | 键 | 默认值 | 用途 |
 |---|---|---|
-| `MAX_STEPS` | `40` | 每个区间对话的 LLM 调用上限（含强制作答轮）。 |
+| `MAX_STEPS` | `40` | 首次调查的 LLM 调用上限（含最终作答轮）。每次恢复调查最多 `min(MAX_STEPS, 4)` 次调用；修复仅一次。 |
 | `CONTEXT_WINDOW` | `131072` | 评审模型的上下文窗口（token）。水位线（窗口减 `MAX_OUTPUT_TOKENS`）在上下文溢出前触发强制作答。 |
 | `MAX_OUTPUT_TOKENS` | `65536` | 每次 LLM 调用的输出 token 上限。是上限不是预留：按实际生成计费。须在 `CONTEXT_WINDOW` 内留出空间。`--judge-max-tokens` 可覆盖。 |
 
@@ -44,7 +44,7 @@ cd agent && npm install    # TS 侧执行一次（需要 PATH 上有 node >= 22.
 
 | 键 | 默认值 | 用途 |
 |---|---|---|
-| `MAX_ATTEMPTS` | `5` | 每个评判区间的智能体对话数——第 1 次加上越约后继续同一对话的纠正重试。`--max-attempts` 可覆盖。 |
+| `MAX_ATTEMPTS` | `5` | 每个区间的运行器阶段总数：调查、单调用修复，以及仅在明确请求缺失证据后恢复的调查。修复仍不合法则停止。`--max-attempts` 可覆盖。 |
 | `TIMEOUT` | `300` | 单次 LLM 调用超时（秒）。`--timeout` 可覆盖。 |
 | `JUDGE_PARALLEL` | `1` | 同一轨迹内并行评判的区间数（上限 32）。每个在飞区间是一条独立的智能体对话。 |
 
@@ -55,7 +55,7 @@ cd agent && npm install    # TS 侧执行一次（需要 PATH 上有 node >= 22.
 | `--env PATH` | checkout 的 `.env` | 指定另一份 env 文件 |
 | `--judge-model` | `MODEL` | 覆盖评审模型 |
 | `--timeout` | `300` | 单次 LLM 调用超时（秒） |
-| `--max-attempts` | `MAX_ATTEMPTS` | 每区间的对话数（第 1 次 + 纠正重试） |
+| `--max-attempts` | `MAX_ATTEMPTS` | 每区间的调查/修复阶段总数 |
 | `--judge-max-tokens` | `MAX_OUTPUT_TOKENS` | 单次调用输出上限 |
 | `--limit N` | 不设 | 最多用智能体评判 *N* 个区间（其余为 `unjudged`）。必须为正。规则判定的 auto-neutral 区间仍会出判定；它们不消耗智能体运行。 |
 | `--dry-run` | 关 | 打印每个区间的证据文档、文件索引与开场消息；不发起调用、不写文件 |

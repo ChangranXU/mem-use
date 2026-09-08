@@ -337,9 +337,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--timeout", type=float, default=None,
                     help="per-LLM-call timeout seconds (default 300)")
     ap.add_argument("--max-attempts", type=int, default=None,
-                    help="agent conversations per judged span — an out-of-contract "
-                    "answer takes a corrective retry that continues the same "
-            "conversation (default: MAX_ATTEMPTS from .env, else 5)")
+                    help="total judge/repair phases per span; only an explicit "
+                    "missing-evidence request resumes investigation "
+                    "(default: MAX_ATTEMPTS from .env, else 5)")
     ap.add_argument("--judge-max-tokens", type=int, default=None,
                     help="max output tokens per LLM call (default: "
                     "MAX_OUTPUT_TOKENS from .env, else 65536)")

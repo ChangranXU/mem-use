@@ -1,8 +1,8 @@
 /**
  * The judge agent's only tools: read-only access to ONE evidence folder.
  *
- * The agent never gets the built-in filesystem/bash tools — these three
- * (list / read / search) are the whole surface, and every path is resolved
+ * The agent never gets the built-in filesystem/bash tools — these two
+ * (read / search) are the whole surface, and every path is resolved
  * inside the evidence root: absolute paths, ".." segments, and symlinks
  * pointing out of the root are refused. The judged evidence can therefore
  * never exceed what Python materialized into the folder.
@@ -11,9 +11,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { Type, type Static } from "typebox";
+import { Type } from "typebox";
 
-const LIST_CAP = 1000; // entries; beyond that the listing points at manifest.json
 const READ_CHAR_CAP = 200_000; // chars per read_evidence call
 const SEARCH_MATCH_CAP = 200; // matched lines per search_evidence call
 const SEARCH_LINE_CAP = 10_000; // chars of a line offered to the regex engine
@@ -62,8 +61,6 @@ function walkFiles(rootReal: string, rel = ""): string[] {
 	return out.sort();
 }
 
-const listSchema = Type.Object({});
-
 const readSchema = Type.Object({
 	path: Type.String({ description: "Evidence file path relative to the evidence folder, e.g. steps/step_000012.md" }),
 	offset: Type.Optional(
@@ -77,38 +74,17 @@ const readSchema = Type.Object({
 const searchSchema = Type.Object({
 	pattern: Type.String({ description: "Regular expression to match (per line)" }),
 	path: Type.Optional(
-		Type.String({ description: "Restrict the search to this file or subfolder (relative path)" }),
+		Type.String({ description: "Search this file or subfolder (relative path); default steps" }),
 	),
 	ignore_case: Type.Optional(Type.Boolean({ description: "Case-insensitive matching (default false)" })),
 });
 
 export function createEvidenceTools(root: string): AgentTool<any>[] {
-	const listEvidence: AgentTool<typeof listSchema, undefined> = {
-		label: "List evidence",
-		name: "list_evidence",
-		description:
-			"List every file in the evidence folder (path + size in chars), sorted. manifest.json indexes the per-step files with their step/turn/seq ranges and previews.",
-		parameters: listSchema,
-		execute: async () => {
-			const rootReal = fs.realpathSync(root);
-			const files = walkFiles(rootReal);
-			const lines = files.slice(0, LIST_CAP).map((f) => {
-				const size = fs.statSync(path.join(rootReal, f)).size;
-				return `${f} (${size} bytes)`;
-			});
-			let text = lines.join("\n") || "(the evidence folder is empty)";
-			if (files.length > LIST_CAP) {
-				text += `\n(... ${files.length - LIST_CAP} more files not shown; read manifest.json for the full index)`;
-			}
-			return { content: [{ type: "text", text }], details: undefined };
-		},
-	};
-
 	const readEvidence: AgentTool<typeof readSchema, { path: string }> = {
 		label: "Read evidence",
 		name: "read_evidence",
 		description:
-			"Read one evidence file, whole or by lines (offset/limit are 1-based line numbers). Use offset/limit for large step files.",
+			"Read one evidence file with 1-based line numbers. Use offset/limit to inspect the context around search hits; line numbers are not agent-step anchors.",
 		parameters: readSchema,
 		execute: async (_id, params) => {
 			const target = resolveInside(root, params.path);
@@ -122,7 +98,7 @@ export function createEvidenceTools(root: string): AgentTool<any>[] {
 				};
 			}
 			const selected = params.limit ? lines.slice(from, from + params.limit) : lines.slice(from);
-			let body = selected.join("\n");
+			let body = selected.map((line, i) => `${from + i + 1}: ${line}`).join("\n");
 			let note = "";
 			if (body.length > READ_CHAR_CAP) {
 				body = body.slice(0, READ_CHAR_CAP);
@@ -139,7 +115,7 @@ export function createEvidenceTools(root: string): AgentTool<any>[] {
 		label: "Search evidence",
 		name: "search_evidence",
 		description:
-			"Search a regular expression across the evidence folder (or one file/subfolder via `path`); returns `path:line: text` matches. The fastest way to find where a memory's value, a tool, or an error appears in the step stream.",
+			"Search a regular expression in the recorded steps (or one evidence file/subfolder via `path`). Returns `path:line: match excerpt`; read the surrounding lines before citing. No matches alone do not prove no influence.",
 		parameters: searchSchema,
 		execute: async (_id, params) => {
 			let regex: RegExp;
@@ -157,7 +133,7 @@ export function createEvidenceTools(root: string): AgentTool<any>[] {
 					? walkFiles(rootReal).filter((f) => f === rel || f.startsWith(rel + "/"))
 					: [rel];
 			} else {
-				files = walkFiles(rootReal);
+				files = walkFiles(rootReal).filter((f) => f.startsWith("steps/"));
 			}
 			const hits: string[] = [];
 			let truncated = false;
@@ -169,8 +145,15 @@ export function createEvidenceTools(root: string): AgentTool<any>[] {
 				const text = fs.readFileSync(path.join(rootReal, f), "utf8");
 				const lines = text.split("\n");
 				for (let i = 0; i < lines.length; i++) {
-					if (regex.test(lines[i].slice(0, SEARCH_LINE_CAP))) {
-						hits.push(`${f}:${i + 1}: ${lines[i].slice(0, 300)}`);
+					const match = regex.exec(lines[i].slice(0, SEARCH_LINE_CAP));
+					if (match) {
+						// Long reasoning paragraphs put the actual match well past
+						// the head of the line; show it, not an unrelated prefix.
+						const start = Math.max(0, match.index - 100);
+						const end = Math.max(start + 300, match.index + match[0].length);
+						const excerpt = (start ? "…" : "") + lines[i].slice(start, end)
+							+ (end < lines[i].length ? "…" : "");
+						hits.push(`${f}:${i + 1}: ${excerpt}`);
 						if (hits.length >= SEARCH_MATCH_CAP) {
 							truncated = true;
 							break;
@@ -186,5 +169,5 @@ export function createEvidenceTools(root: string): AgentTool<any>[] {
 		},
 	};
 
-	return [listEvidence, readEvidence, searchEvidence];
+	return [readEvidence, searchEvidence];
 }

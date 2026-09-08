@@ -1,4 +1,6 @@
-Answer with ONE JSON object and nothing else:
+Your entire final response must be ONE JSON object: start with { and end
+with }. No introduction, Markdown fences, or text outside the object.
+Use exactly this shape:
 {
   "memories": [
     {

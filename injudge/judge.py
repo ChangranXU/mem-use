@@ -427,19 +427,9 @@ def _render_span_header(span: InjectionSpan, task: str | None, memories_note: st
         )
     if span.removed_keys:
         parts.append(f"Removed vs the previous span: {span.removed_keys}.")
-    if span.step_first is not None and (
-        any(end is not None for end in span.memory_windows.values())
-        or span.memory_window_starts
-    ):
-        # footprint windows at the per-ENTRY granularity (span-local ids —
-        # identities sharing one display key keep their own bounds): each
-        # delivered memory is judged up to its next re-delivery (later steps
-        # belong to the re-delivery span); a memory never re-delivered keeps
-        # the rest of the stream, and one memory's bound never caps a
-        # co-delivered memory's window. Stated only when at least one memory
-        # is bounded (all-unbounded keeps the stream label's open wording) —
-        # a same-step-collision start override bounds a window too, so it
-        # also brings the line.
+    if span.step_first is not None:
+        # Every entry names its window, including an open-ended one. The
+        # last identical delivery is not necessarily the end of influence.
         frags = []
         for i, m in enumerate(span.memories):
             mid = memory_id(i)
@@ -475,7 +465,7 @@ def _render_span_header(span: InjectionSpan, task: str | None, memories_note: st
                     )
             else:
                 frags.append(
-                    f"{mid} ({label}) — steps {start} onward{bump} (never re-delivered)"
+                    f"{mid} ({label}) — steps {start} onward{bump} (not re-delivered in a later span)"
                 )
         parts.append("Footprint windows: " + "; ".join(frags) + ".")
     parts.append(memories_note)

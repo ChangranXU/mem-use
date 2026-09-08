@@ -1,17 +1,17 @@
 """Materialize one span's judge evidence as a folder of read-only files.
 
-The agentic judge never receives a monolithic prompt: Python writes
-everything the judge may see into one folder — the span header (task,
+Python writes everything the judge may see into one folder — the span header (task,
 placement, delivered memories with their exposure grounding, footprint
 windows), any gold attachments, and one file per recorded agent step —
 plus a manifest.json indexing it all (step/turn/seq ranges, sizes, and a
 one-line preview per step so the agent can triage without reading every
-file). The runner scopes the agent's three tools to that folder, so the
+file). The runner scopes the agent's two tools to that folder, so the
 judged evidence can never exceed what was materialized here.
 
-The file texts reuse judge's renderers verbatim (the same span header and
-step blocks the one-shot input carried), so the exposure contract — a
-clipped value shows only its exposed prefix, an unverifiable one withholds
+The opening includes span.md and the manifest verbatim; step bodies and
+gold remain available through tools. The file texts reuse judge's renderers,
+so the exposure contract — a clipped value shows only its exposed prefix,
+an unverifiable one withholds
 the canonical value — carries over unchanged.
 """
 
@@ -45,8 +45,7 @@ def _preview(text: str) -> str:
     return line[:_PREVIEW_CHARS]
 
 
-def _step_entry(name: str, st: AgentStep) -> dict:
-    text = _render_step(st)
+def _step_entry(name: str, st: AgentStep, text: str) -> dict:
     return {
         "path": name,
         "kind": "step",
@@ -54,7 +53,7 @@ def _step_entry(name: str, st: AgentStep) -> dict:
         "turn": st.turn,
         "seqs": [st.seq_start, st.seq_end],
         "chars": len(text),
-        "approx_tokens": len(text) // 4,
+        "lines": len(text.split("\n")),
         "preview": _preview(_step_text(st)),
     }
 
@@ -76,7 +75,6 @@ def build_evidence(
             "path": "span.md",
             "kind": "span",
             "chars": len(span_text),
-            "approx_tokens": len(span_text) // 4,
             "desc": (
                 "the span to evaluate: task statement, placement, delivered "
                 "memories ([mN] ids with exposure markers), footprint windows"
@@ -91,23 +89,26 @@ def build_evidence(
                 "path": "gold.md",
                 "kind": "gold",
                 "chars": len(gold_text),
-                "approx_tokens": len(gold_text) // 4,
                 "desc": "golden answer / recorded correctness attachments",
             }
         )
     for st in steps:
         name = f"steps/step_{st.step:06d}.md"
         files[name] = _render_step(st)
-        entries.append(_step_entry(name, st))
+        entries.append(_step_entry(name, st, files[name]))
     manifest = {
         "span_id": span.id,
         "n_steps": len(steps),
         # steps at or beyond this number are where the span's footprint may
         # appear; earlier steps are pre-injection context (span.md details)
         "footprint_from_step": span.step_first,
-        "files": entries,
     }
-    files["manifest.json"] = json.dumps(manifest, indent=1, ensure_ascii=False)
+    # One entry per line keeps the index compact in the opening and still
+    # lets read_evidence address individual entries by line.
+    header = json.dumps(manifest, ensure_ascii=False)
+    files["manifest.json"] = header[:-1] + ', "files": [\n' + ",\n".join(
+        json.dumps(entry, ensure_ascii=False) for entry in entries
+    ) + "\n]}"
     return files
 
 

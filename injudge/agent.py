@@ -1,7 +1,7 @@
 """The agentic judge: an LLM agent that searches a span's evidence folder.
 
 One span, one folder (injudge/evidence materializes it), one pi agent
-(agent/runner.ts) whose only tools are list/read/search scoped to that
+(agent/runner.ts) whose only tools are read/search scoped to that
 folder. The configuration is deliberately tiny — a model/endpoint triple,
 a max-steps cap, a context window, an output-token cap — because the
 agent loop absorbs what the one-shot architecture had to engineer around:
@@ -12,10 +12,10 @@ forced final round instead of an error.
 Python still owns the verdict contract: the runner reports the
 conversation's final assistant text, and _strict_parse /
 _verdict_semantics / _assemble_verdict (injudge.judge) decide whether it
-is a verdict. A violation takes the bounded corrective retry — the next
-runner invocation continues the SAME conversation through job.history, so
-the retry sees everything the failed attempt read. Exhaustion stays a
-visible error verdict, never a silent neutral.
+is a verdict. A violation gets one tool-free repair call over the SAME
+conversation through job.history. Only an explicit needs_evidence request
+reopens investigation; an invalid repair or exhausted phase budget stays
+a visible error verdict, never a silent neutral.
 
 The API key reaches the runner only through the JUDGE_API_KEY environment
 variable; it never rides the job/result temp files. Everything the
@@ -62,12 +62,25 @@ _RUNNER = _AGENT_DIR / "runner.ts"
 # subprocess plus its live LLM calls, so the ceiling is named once here.
 MAX_PARALLEL = 32
 
+# A named evidence gap gets a short follow-up, not another full investigation.
+_RESUME_MAX_STEPS = 4  # three tool rounds plus the forced final answer
+
 API_FORMATS = ("openai-chat", "anthropic")
 # pi's ThinkingLevel spellings, passed through to the agent state.
 THINKING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
 
 _OPENING = load_prompt("injudge/agent/opening")
 _FORCED = load_prompt("injudge/agent/forced")
+_RESUME = load_prompt("injudge/agent/resume")
+
+
+def _opening_message(span_id: str, files: dict[str, str]) -> str:
+    """Seed the judge with the exact indexed evidence, not discovery calls."""
+    return (
+        f"## span.md\n{files['span.md']}"
+        + f"\n\n## manifest.json\n{files['manifest.json']}"
+        + "\n\n## Judging request\n" + _OPENING.replace("@span_id@", span_id)
+    )
 
 
 def load_env(path: Path) -> dict[str, str]:
@@ -156,11 +169,11 @@ class AgentConfig:
     api_key: str
     model: str
     api: str = "openai-chat"  # one of API_FORMATS
-    max_steps: int = 40  # LLM-call cap per conversation attempt, forced round included
+    max_steps: int = 40  # initial LLM-call cap; resumed investigations are clamped
     max_output_tokens: int = 65536  # per-call output cap
     context_window: int = 131072  # the model's context window in tokens
     temperature: float = 0.0
-    max_attempts: int = 5  # corrective retries per span (attempt 1 included)
+    max_attempts: int = 5  # total judge/repair invocations per span
     timeout: float = 300.0  # per LLM call, seconds
     thinking_level: str = "off"
 
@@ -312,6 +325,8 @@ def _invoke_runner(
     message: str,
     history: list | None,
     warnings: list[str],
+    *,
+    repair: bool,
 ) -> dict | None:
     """One runner subprocess = one agent conversation round. Writes the job
     (secret-free), runs node (the runner records its own trajectory JSONL at
@@ -319,6 +334,11 @@ def _invoke_runner(
     warning when the subprocess itself failed (missing runner, bad job —
     setup faults the caller records as that span's error, never a retry:
     retrying an identical setup fault would only re-pay it)."""
+    max_steps = cfg.max_steps
+    if repair:
+        max_steps = 1
+    elif history is not None:
+        max_steps = min(max_steps, _RESUME_MAX_STEPS)
     evidence_dir.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".runner-", dir=str(evidence_dir.parent)) as tmp:
         job_path = Path(tmp) / "job.json"
@@ -329,12 +349,13 @@ def _invoke_runner(
             "opening": message,
             "forced_message": _FORCED,
             "attempt": attempt,
+            "repair": repair,
             "trajectory_path": str(trajectory_path),
             "config": {
                 "model": cfg.model,
                 "api": cfg.api,
                 "base_url": cfg.base_url,
-                "max_steps": cfg.max_steps,
+                "max_steps": max_steps,
                 "max_output_tokens": cfg.max_output_tokens,
                 "context_window": cfg.context_window,
                 "temperature": cfg.temperature,
@@ -351,13 +372,13 @@ def _invoke_runner(
                 capture_output=True,
                 # the structural bound: every call gets the per-call timeout,
                 # and the conversation cannot exceed max_steps calls
-                timeout=max(cfg.timeout * cfg.max_steps + 120.0, 600.0),
+                timeout=max(cfg.timeout * max_steps + 120.0, 600.0),
                 env={**os.environ, "JUDGE_API_KEY": cfg.api_key},
             )
         except subprocess.TimeoutExpired:
             warnings.append(
                 "the agent runner exceeded its wall-clock bound "
-                f"({cfg.timeout:.0f}s x {cfg.max_steps} steps + slack)"
+                f"({cfg.timeout:.0f}s x {max_steps} steps + slack)"
             )
             return None
         except OSError as e:
@@ -441,10 +462,9 @@ def judge_span(
     """Judge one span with the evidence-searching agent.
 
     Materializes the span's evidence folder, then runs the agent
-    conversation (opening message on attempt 1; the corrective note —
-    continuing the same conversation through job.history — on retries)
-    until its final answer parses into the verdict contract or the attempt
-    budget exhausts. The runner records each attempt as a pi event-sourced
+    conversation, then one tool-free repair if its answer is invalid.
+    Only a repair's explicit needs_evidence request resumes investigation.
+    All phases continue job.history within the total attempt budget. The runner records each attempt as a pi event-sourced
     trajectory (every appended message, budget-rollback tombstones, the
     forced-answer injection, per-attempt diagnostics) under
     `transcripts_root` — one JSONL per span, replaced per judging run like
@@ -456,7 +476,8 @@ def judge_span(
     system = _scoring_system(gold)
     span_dir = span_dir_name(span.id)
     dest = evidence_root / span_dir
-    write_evidence(dest, build_evidence(span, steps, task, gold))
+    files = build_evidence(span, steps, task, gold)
+    write_evidence(dest, files)
     # one trajectory per judging run: a re-judged span never mixes its old
     # conversation into the new audit trail
     trajectory_path = transcripts_root / _transcript_name(span_dir)
@@ -466,18 +487,20 @@ def judge_span(
     except OSError:
         pass
     transcript = f"{transcripts_root.name}/{_transcript_name(span_dir)}"
-    opening = _OPENING.replace("@span_id@", span.id)
+    opening = _opening_message(span.id, files)
     last_step = steps[-1].step if steps else None
     history: list | None = None
     last_text = ""
     last_error = "no answer"
     result: dict | None = None
     attempt = 0
+    repair = False
+    message = opening
     while attempt < cfg.max_attempts:
         attempt += 1
-        message = opening if history is None else _corrective_note(last_error)
         result = _invoke_runner(
-            cfg, dest, trajectory_path, attempt, system, message, history, warnings
+            cfg, dest, trajectory_path, attempt, system, message, history, warnings,
+            repair=repair,
         )
         if result is None:
             # setup/transport fault: an identical retry re-pays it. The
@@ -497,6 +520,23 @@ def judge_span(
             verdict["input"] = _input_record(gold, attempt, result, transcript)
             return verdict
         text = result["answer"]
+        if repair:
+            try:
+                request = json.loads(text)
+            except ValueError:
+                request = None
+            if (isinstance(request, dict) and set(request) == {"needs_evidence"}
+                    and isinstance(request["needs_evidence"], str)
+                    and request["needs_evidence"].strip()):
+                # The repair call cannot read files. Only an explicit missing-
+                # evidence request reopens tools, in this same conversation.
+                need = request["needs_evidence"].strip()
+                last_text, last_error = text, f"needs evidence: {need}"
+                history = result["messages"]
+                message = _RESUME.replace("@max_steps@", str(min(cfg.max_steps, _RESUME_MAX_STEPS)))
+                message = message.replace("@needs_evidence@", need)
+                repair = False
+                continue
         obj = None
         if not text.strip():
             # a forced round (or a server quirk) that never wrote a final
@@ -519,8 +559,12 @@ def judge_span(
             _echo_overlap_warnings(verdict, span, steps, task, warnings)
             return verdict
         last_text, last_error = text, error
+        if repair:
+            break  # a failed repair never triggers blind rewriting
         history = result["messages"]
-    # attempt budget exhausted on out-of-contract answers: the honest
+        repair = True
+        message = _corrective_note(last_error)
+    # repair failed or the attempt budget exhausted on out-of-contract answers: the honest
     # failure record, raw text kept (masked) — never a silent neutral
     verdict = _error_verdict(
         f"agent output {last_error} after {attempt} attempts", last_text, span,
@@ -536,28 +580,7 @@ def dry_run_print(
     task: str | None,
     gold: GoldInput | None,
 ) -> None:
-    """The --dry-run output for one span: the evidence the agent would
-    mount (the span document verbatim, the file index) plus the opening
-    message — surrogate-safe like every artifact-bound print, no calls, no
-    files written."""
+    """Print the exact opening of a real run, without calls or files."""
     files = build_evidence(span, steps, task, gold)
-    print_safe(files["span.md"])
-    manifest = json.loads(files["manifest.json"])
-    n_steps = manifest.get("n_steps")
-    print_safe(
-        f"\nEVIDENCE FOLDER for {span.id}: {len(files)} files "
-        f"(manifest.json + span.md + {n_steps} step files under steps/"
-        f"{'; gold.md' if 'gold.md' in files else ''})"
-    )
-    for entry in manifest.get("files") or ():
-        if isinstance(entry, dict) and entry.get("kind") == "step":
-            continue
-        print_safe(f"  {entry.get('path')}: {entry.get('desc')}")
-    preview = next(
-        (e for e in manifest.get("files") or []
-         if isinstance(e, dict) and e.get("kind") == "step"), None,
-    )
-    if isinstance(preview, dict):
-        print_safe("  steps/step_NNNNNN.md: one recorded agent step per file "
-                   f"({n_steps} files, manifest.json indexes step/turn/seq ranges and previews)")
-    print_safe(f"\nOPENING MESSAGE:\n{_OPENING.replace('@span_id@', span.id)}")
+    print_safe(f"EVIDENCE FOLDER for {span.id}: {len(files)} files")
+    print_safe(f"\nOPENING MESSAGE:\n{_opening_message(span.id, files)}")

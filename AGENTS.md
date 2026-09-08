@@ -219,8 +219,9 @@ reference is never misuse.
 The judge is an AGENT, not one prompt. Python materializes each span's
 evidence into a folder (`injudge/evidence.py`: manifest.json + span.md +
 gold.md + one file per recorded agent step, written under
-`<output>/evidence/`) and spawns `agent/runner.ts` — a pi agent whose only
-tools are list/read/search, scoped to that folder (absolute paths, `..`,
+`<output>/evidence/`) and spawns `agent/runner.ts` — a pi agent whose opening contains span.md
+and the compact manifest verbatim, and whose only tools are read/search,
+scoped to that folder (absolute paths, `..`,
 and out-of-root symlinks refused). The conversation is bounded by two
 budgets, both ending in a FORCED final answer (the harness pattern), never
 a mid-run failure: MAX_STEPS caps LLM calls, and the CONTEXT_WINDOW
@@ -238,9 +239,12 @@ Easy to get wrong:
   decisive claims cite step numbers inside that entry's footprint window,
   never past the step stream's end), and the anchor/influence shape
   (`anchors` stay empty when influence is `none`). A violation takes the
-  corrective retry, which CONTINUES the same conversation (the next runner
-  invocation seeds the prior transcript via job.history — no re-reading);
-  exhaustion is a visible `error` with the answer text kept (masked),
+  single-call repair with no evidence tools, continuing job.history. Only
+  an explicit `needs_evidence` repair reply reopens investigation, with a
+  follow-up prompt over that same history. Each resumed investigation gets
+  min(MAX_STEPS, 4) calls including its forced final answer; the initial
+  investigation keeps MAX_STEPS. MAX_ATTEMPTS bounds all phases;
+  an invalid repair or exhaustion is a visible `error` with text kept (masked),
   never a silently partial verdict. Novelty, accuracy, influence, and
   effect are ORTHOGONAL signals — no cross-signal combination is a
   contract violation.
@@ -376,7 +380,9 @@ trajectory so a crash keeps completed work.
   like the report does) — and `<output>/agent-runs/<span-id>.jsonl` — the
   pi event-sourced trajectory of each judging conversation (message lines
   as they happen, `tombstone` lines for budget rollbacks, the injected
-  forced message, per-attempt `attempt_end` diagnostics; recorded raw by
+  forced message, per-phase `attempt_end` diagnostics with cumulative
+  retained-conversation counts/usage; `attempt.phase` identifies judge or
+  repair; recorded raw by
   the runner, rewritten masked by Python after every attempt; `seq` is
   attempt-local).
 

@@ -53,7 +53,7 @@ Span construction, including the fingerprint fallback for undigested content, is
 
 Each span goes through three stages, each documented on its own page:
 
-1. **Materialize the evidence.** The recorded task statement (when present), the span document, any gold attachments, and one file per recorded agent step, written into a folder the agent reads with its three read-only tools. → [Judge evidence](scoring-input.md)
+1. **Materialize the evidence.** The recorded task statement (when present), the span document, any gold attachments, and one file per recorded agent step, written into a folder the agent reads with its two read-only tools. → [Judge evidence](scoring-input.md)
 2. **Score the rubric.** One agent conversation searches the evidence and answers with five signals per delivered memory — `relevance`, `accuracy`, `novelty`, `influence`, `positive_effect` — and never a verdict. → [Rubric and verdict derivation](verdict-derivation.md)
 3. **Derive the verdict in code.** Usage labels first, then the span verdict: any misused memory makes the span negative; otherwise any used memory makes it positive; otherwise it is neutral. → [Rubric and verdict derivation](verdict-derivation.md)
 

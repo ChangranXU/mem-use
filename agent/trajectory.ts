@@ -42,8 +42,8 @@ export class TrajectoryLog {
 		fs.appendFileSync(this.filePath, JSON.stringify({ seq: this.seq++, ...record }) + "\n");
 	}
 
-	attempt(n: number): void {
-		this.append({ type: "attempt", attempt: n });
+	attempt(n: number, repair: boolean): void {
+		this.append({ type: "attempt", attempt: n, phase: repair ? "repair" : "judge" });
 	}
 
 	message(message: AgentMessage): void {

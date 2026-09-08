@@ -34,7 +34,7 @@ Both budgets end in a **forced final answer** — the agent is told to stop call
 
 | Key | Default | Purpose |
 |---|---|---|
-| `MAX_STEPS` | `40` | Max LLM calls per span conversation, forced round included. |
+| `MAX_STEPS` | `40` | Initial investigation’s LLM-call cap, forced final round included. Each resumed investigation gets `min(MAX_STEPS, 4)` calls; repair gets one. |
 | `CONTEXT_WINDOW` | `131072` | The judge model's context window in tokens. The watermark (context window minus `MAX_OUTPUT_TOKENS`) trips the forced answer before the context overflows. |
 | `MAX_OUTPUT_TOKENS` | `65536` | Max output tokens per LLM call. A cap, not a reservation: billing is on tokens actually generated. Must leave room inside `CONTEXT_WINDOW`. `--judge-max-tokens` overrides. |
 
@@ -44,7 +44,7 @@ A verdict cut mid-answer is not a failure class: the answer simply fails the con
 
 | Key | Default | Purpose |
 |---|---|---|
-| `MAX_ATTEMPTS` | `5` | Agent conversations per judged span — attempt 1 plus corrective retries that continue the same conversation after an out-of-contract answer. `--max-attempts` overrides. |
+| `MAX_ATTEMPTS` | `5` | Total runner phases per span: investigation, single-call repair, and investigation resumed only for an explicit missing-evidence request. An invalid repair stops. `--max-attempts` overrides. |
 | `TIMEOUT` | `300` | Per-LLM-call timeout seconds. `--timeout` overrides. |
 | `JUDGE_PARALLEL` | `1` | Spans of one trajectory judged in parallel (cap 32). Each in-flight span is one agent conversation. |
 
@@ -55,7 +55,7 @@ A verdict cut mid-answer is not a failure class: the answer simply fails the con
 | `--env PATH` | checkout `.env` | Alternate env file |
 | `--judge-model` | `MODEL` | Override the judge model |
 | `--timeout` | `300` | Per-LLM-call timeout seconds |
-| `--max-attempts` | `MAX_ATTEMPTS` | Conversations per span (attempt 1 + corrective retries) |
+| `--max-attempts` | `MAX_ATTEMPTS` | Total judge/repair phases per span |
 | `--judge-max-tokens` | `MAX_OUTPUT_TOKENS` | Per-call output cap |
 | `--limit N` | unset | Judge at most *N* spans with the agent (the rest are `unjudged`). Must be positive. Rule-judged auto-neutral spans still verdict; they cost no agent run. |
 | `--dry-run` | off | Print each span's evidence document, file index, and opening message; no calls, no files |

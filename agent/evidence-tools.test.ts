@@ -46,9 +46,9 @@ test("read_evidence returns file text, offset/limit slices in lines", async () =
 	const read = tools.find((t) => t.name === "read_evidence")!;
 	const whole = await read.execute("t1", { path: "span.md" });
 	assert.equal(whole.content[0].type, "text");
-	assert.equal(whole.content[0].type === "text" ? whole.content[0].text : "", "the span\nsecond line\n");
+	assert.equal(whole.content[0].type === "text" ? whole.content[0].text : "", "1: the span\n2: second line\n3: ");
 	const sliced = await read.execute("t2", { path: "span.md", offset: 2, limit: 1 });
-	assert.equal(sliced.content[0].type === "text" ? sliced.content[0].text : "", "second line");
+	assert.equal(sliced.content[0].type === "text" ? sliced.content[0].text : "", "2: second line");
 	await assert.rejects(() => read.execute("t3", { path: "nope.md" }));
 	fs.rmSync(root, { recursive: true, force: true });
 });
@@ -57,10 +57,14 @@ test("search_evidence matches across files and honors scoping", async () => {
 	const root = makeRoot();
 	const tools = createEvidenceTools(root);
 	const search = tools.find((t) => t.name === "search_evidence")!;
+	fs.appendFileSync(path.join(root, "span.md"), "alpha metadata");
 	const all = await search.execute("t1", { pattern: "alpha|gamma" });
 	const text = all.content[0].type === "text" ? all.content[0].text : "";
 	assert.match(text, /steps\/step_000001\.md:1:/);
 	assert.match(text, /steps\/step_000002\.md:1:/);
+	assert.doesNotMatch(text, /span\.md/);
+	const metadata = await search.execute("metadata", { pattern: "alpha", path: "span.md" });
+	assert.match(metadata.content[0].type === "text" ? metadata.content[0].text : "", /alpha metadata/);
 	const scoped = await search.execute("t2", { pattern: "gamma", path: "steps" });
 	const scopedText = scoped.content[0].type === "text" ? scoped.content[0].text : "";
 	assert.doesNotMatch(scopedText, /step_000001/);
@@ -69,13 +73,14 @@ test("search_evidence matches across files and honors scoping", async () => {
 	fs.rmSync(root, { recursive: true, force: true });
 });
 
-test("list_evidence lists every file with sizes", async () => {
+test("search_evidence shows the match, not just the start of a long reasoning line", async () => {
 	const root = makeRoot();
-	const tools = createEvidenceTools(root);
-	const list = tools.find((t) => t.name === "list_evidence")!;
-	const out = await list.execute("t1", {});
-	const text = out.content[0].type === "text" ? out.content[0].text : "";
-	assert.match(text, /manifest\.json \(\d+ bytes\)/);
-	assert.match(text, /steps\/step_000002\.md \(\d+ bytes\)/);
+	// The recorded KMeans step 4 mentions random_state after column 300.
+	const line = "But wait, is that what the real scikit-learn PR did? Let me recall: This is scikit-learn issue about KMeans different results for n_jobs=1 vs >1. The fix probably in `_kmeans_parallel` etc. There was PR #14531? Actually, let's recall. The issue \"KMeans gives slightly different result for n_jobs=1 vs. n_jobs > 1\" - this is scikit-learn issue #14919? The fix likely changed `random_state` handling in `_kmeans_single_elkan`/lloyd to pass `random_state=seed` for both.";
+	fs.writeFileSync(path.join(root, "steps", "step_000004.md"), line);
+	const search = createEvidenceTools(root).find((t) => t.name === "search_evidence")!;
+	const result = await search.execute("t1", { pattern: "random_state", path: "steps" });
+	const text = result.content[0].type === "text" ? result.content[0].text : "";
+	assert.match(text, /step_000004\.md:1: .*random_state/);
 	fs.rmSync(root, { recursive: true, force: true });
 });

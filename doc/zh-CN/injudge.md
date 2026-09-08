@@ -53,7 +53,7 @@ uv run -m injudge <paths> --dry-run --limit 3
 
 每个区间经过三个阶段，各自单独成页：
 
-1. **物化证据。** 已录制的任务陈述（若有）、区间文档、gold 附件（若有），以及每个已录制 agent 步骤一个文件，写入一个由智能体用其三个只读工具读取的文件夹。→ [评审证据](scoring-input.md)
+1. **物化证据。** 已录制的任务陈述（若有）、区间文档、gold 附件（若有），以及每个已录制 agent 步骤一个文件，写入一个由智能体用其两个只读工具读取的文件夹。→ [评审证据](scoring-input.md)
 2. **按评分规则打分。** 一条智能体对话检索证据，为每条投递记忆返回五个信号——`relevance`、`accuracy`、`novelty`、`influence`、`positive_effect`——绝不返回判定。→ [评分规则与判定推导](verdict-derivation.md)
 3. **代码推导判定。** 先得出使用标签，再得出区间判定：任一误用即为 negative；否则任一采纳即为 positive；否则为 neutral。→ [评分规则与判定推导](verdict-derivation.md)
 

@@ -2535,6 +2535,36 @@ def _result(answer, *, error=None, forced=False, llm_calls=3, tool_calls=4,
     }
 
 
+@pytest.mark.parametrize("continued,repair,configured,expected", [
+    (False, False, 40, 40),
+    (True, False, 40, 4),
+    (True, False, 2, 2),
+    (True, True, 40, 1),
+])
+def test_runner_job_uses_the_phase_step_limit(monkeypatch, tmp_path, continued, repair, configured, expected):
+    """Continuing a named evidence gap must not regain the full initial budget."""
+    import subprocess
+    from pathlib import Path
+    from injudge.agent import _invoke_runner
+
+    def run(args, **kwargs):
+        job = json.loads(Path(args[args.index("--job") + 1]).read_text())
+        assert job["config"]["max_steps"] == expected
+        assert kwargs["timeout"] == max(300 * expected + 120, 600)
+        Path(args[args.index("--out") + 1]).write_text(json.dumps(_result(GOOD)))
+        return subprocess.CompletedProcess(args, 0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr("injudge.agent.subprocess.run", run)
+    cfg = _agent_cfg(max_steps=configured)
+    warnings = []
+    result = _invoke_runner(cfg, tmp_path / "evidence", tmp_path / "trace.jsonl",
+                            3 if continued else 1, "system", "message",
+                            [{"role": "assistant"}] if continued else None,
+                            warnings, repair=repair)
+    assert result["answer"] == GOOD and warnings == []
+    assert cfg.max_steps == configured  # the shared initial config is not mutated
+
+
 def stub_runner(monkeypatch, results):
     """Replace the runner subprocess with canned results consumed in call
     order; records every (message, history) invocation for assertions. Like
@@ -2544,8 +2574,8 @@ def stub_runner(monkeypatch, results):
     calls = []
 
     def _fake(cfg, evidence_dir, trajectory_path, attempt, system, message,
-              history, warnings):
-        calls.append({"message": message, "history": history,
+              history, warnings, *, repair):
+        calls.append({"message": message, "history": history, "repair": repair,
                       "system": system, "evidence_dir": evidence_dir,
                       "trajectory_path": trajectory_path, "attempt": attempt})
         if not results:
@@ -2615,6 +2645,15 @@ def test_agent_span_end_to_end(monkeypatch, tmp_path):
     assert manifest["footprint_from_step"] == 1
     # the evidence document carries the recorded task verbatim
     assert "the task" in (dest / "span.md").read_text()
+    # Setup evidence is already in context, not another discovery round.
+    assert (dest / "span.md").read_text() in calls[0]["message"]
+    assert (dest / "manifest.json").read_text() in calls[0]["message"]
+    for entry in manifest["files"]:
+        if entry["kind"] == "step":
+            body = (dest / entry["path"]).read_text()
+            assert entry["lines"] == len(body.split("\n"))
+            assert entry["chars"] == len(body)
+
 
 
 def test_agent_gold_attachments_ride_gold_md(monkeypatch, tmp_path):
@@ -2632,36 +2671,61 @@ def test_agent_gold_attachments_ride_gold_md(monkeypatch, tmp_path):
     assert calls[0]["system"] is GOLD_SYSTEM_PROMPT
 
 
-def test_agent_corrective_retry_continues_the_conversation(monkeypatch, tmp_path):
+@pytest.mark.parametrize("failure", ["format", "coverage"])
+def test_agent_corrective_retry_continues_the_conversation(monkeypatch, tmp_path, failure):
     """An out-of-contract answer takes one corrective retry that continues
     the SAME conversation: the retry's message is the corrective note naming
     the violation, and the history carries the failed attempt's transcript."""
     bad = json.loads(GOOD)
     bad["memories"] = bad["memories"][:1]  # missing m2 -> coverage violation
-    calls = stub_runner(monkeypatch, [_result(json.dumps(bad)), _result(GOOD)])
+    answer = "Evidence is clear.\n```json\n" + GOOD + "\n```" if failure == "format" else json.dumps(bad)
+    calls = stub_runner(monkeypatch, [_result(answer), _result(GOOD)])
     span, steps = _judge_input_fixture()
     verdict = judge_span(span, steps, _agent_cfg(max_attempts=3), [], None,
                          evidence_root=tmp_path, transcripts_root=tmp_path / "runs")
     assert verdict["verdict"] == "positive"
     assert verdict["input"]["attempts"] == 2
-    assert "covers ids" in calls[1]["message"]  # the corrective note
+    violation = "not valid JSON" if failure == "format" else "covers ids"
+    assert violation in calls[1]["message"]
     assert calls[1]["history"] == [{"role": "user"}, {"role": "assistant"}]
     assert calls[0]["history"] is None
+    assert [call["repair"] for call in calls] == [False, True]
 
 
-def test_agent_attempt_exhaustion_is_error_with_raw(monkeypatch, tmp_path):
-    """Exhausted corrective retries end in a visible error verdict with the
-    raw answer kept (masked) — never a silent neutral."""
+def test_agent_invalid_repair_stops_with_raw(monkeypatch, tmp_path):
+    """One failed repair is an error, not repeated blind rewriting."""
     calls = stub_runner(monkeypatch, [_result("nope")] * 5)
     span, steps = _judge_input_fixture()
     warnings: list[str] = []
     verdict = judge_span(span, steps, _agent_cfg(), warnings, None,
                          evidence_root=tmp_path, transcripts_root=tmp_path / "runs")
     assert verdict["verdict"] == "error"
-    assert "not valid JSON" in verdict["error"] and "5 attempts" in verdict["error"]
+    assert "not valid JSON" in verdict["error"] and "2 attempts" in verdict["error"]
     assert verdict["judge_raw"] == "nope"
-    assert len(calls) == 5
-    assert verdict["input"]["attempts"] == 5
+    assert len(calls) == 2
+    assert verdict["input"]["attempts"] == 2
+
+
+@pytest.mark.parametrize("max_attempts", [2, 3])
+def test_agent_repair_resumes_only_for_requested_evidence(monkeypatch, tmp_path, max_attempts):
+    history = [{"role": "user"}, {"role": "assistant"}, {"role": "user"},
+               {"role": "assistant", "content": "needs step 2's tool result"}]
+    request = json.dumps({"needs_evidence": "Read step 2's tool result to check the action."})
+    calls = stub_runner(monkeypatch, [_result("invalid"),
+                                      _result(request, messages=history), _result(GOOD)])
+    span, steps = _judge_input_fixture()
+    verdict = judge_span(span, steps, _agent_cfg(max_attempts=max_attempts), [], None,
+                         evidence_root=tmp_path, transcripts_root=tmp_path / "runs")
+    assert [call["repair"] for call in calls[:2]] == [False, True]
+    if max_attempts == 2:
+        assert len(calls) == 2 and verdict["verdict"] == "error"
+        assert "needs evidence" in verdict["error"]
+    else:
+        assert len(calls) == 3 and verdict["verdict"] == "positive"
+        assert calls[2]["repair"] is False
+        assert calls[2]["history"] == history
+        assert "Read step 2's tool result" in calls[2]["message"]
+        assert calls[2]["evidence_dir"] == calls[0]["evidence_dir"]
 
 
 def test_agent_runner_failure_is_an_error_verdict_not_a_retry(monkeypatch, tmp_path):
