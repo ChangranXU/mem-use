@@ -2910,3 +2910,168 @@ def test_config_validates_the_budget_knobs(monkeypatch):
     assert cfg.api == "openai-chat" and cfg.thinking_level == "off"
     with pytest.raises(SystemExit, match="API"):
         resolve_config({**base, "API": "responses"})
+
+
+@pytest.mark.parametrize("influence,effect,usage,verdict", [
+    ("none", None, "ignored", "neutral"),
+    ("referenced", None, "noted", "neutral"),
+    ("acted_on", "improved", "used", "positive"),
+    ("decisive", "harmed", "misused", "negative"),
+    ("acted_on", None, "unclear", "neutral"),
+])
+def test_agent_unknown_novelty_preserves_independent_signals(
+    monkeypatch, tmp_path, influence, effect, usage, verdict,
+):
+    payload = json.loads(GOOD)
+    entry = payload["memories"][0]
+    entry.update(_signals(nov=None, inf=influence, pe=effect))
+    entry["novelty"]["note"] = "The recording omits the initial knowledge baseline."
+    entry["anchors"] = [2] if influence in ("acted_on", "decisive") else []
+    calls = stub_runner(monkeypatch, [_result(json.dumps(payload))])
+    span, steps = _judge_input_fixture()
+    result = judge_span(span, steps, _agent_cfg(), [], evidence_root=tmp_path / "evidence",
+                        transcripts_root=tmp_path / "agent-runs")
+    assert len(calls) == 1
+    assert result["verdict"] == verdict
+    assert result["memory_usage"]["m1"]["usage"] == usage
+    assert result["rubric"]["m1"]["novelty"] == entry["novelty"]
+    if usage == "ignored":
+        assert result["memory_usage"]["m1"]["reason"] == "ignored_unknown_novelty"
+    op = operation_record(span, result, {})
+    artifact = build_artifact({}, [{"id": span.traj}], [op], [], {span.traj: 1}, [])
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps(artifact))
+    saved = json.loads(path.read_text())
+    assert saved["tool"]["schema"] == "injudge.report/v11"
+    assert saved["operations"][0]["rubric"]["m1"]["novelty"]["value"] is None
+    rub = saved["aggregates"]["overall"]["rubric"]
+    assert rub["deliveries"] == 2
+    assert rub["counts"]["novelty"] == {"null": 1, "novel": 1}
+    assert rub["rates"]["novelty"] == 1.0  # unknown does not dilute the rate
+    summary = build_summary(saved)
+    assert summary["tool"]["schema"] == "injudge.summary/v7"
+    assert summary["overall"]["rubric"]["counts"]["novelty"] == rub["counts"]["novelty"]
+    if usage == "ignored":
+        assert rub["no_footprint_reasons"] == {"ignored_unknown_novelty": 1, "irrelevant": 1}
+
+
+def test_unknown_novelty_is_visible_when_no_entry_has_an_assessed_tier():
+    signals = _signals(nov=None)
+    rub = aggregate([_op("s", "neutral", rubric={"m1": signals})], 1)["rubric"]
+    assert rub["rates"]["novelty"] is None
+    assert rub["counts"]["novelty"] == {"null": 1}
+    assert "novelty: undetermined 1/1" in _rubric_line(rub)
+
+
+@pytest.mark.parametrize("signal", ["relevance", "accuracy", "influence"])
+def test_repair_does_not_reinvite_a_forbidden_null(monkeypatch, tmp_path, signal):
+    from injudge.agent import _FORCED
+    from injudge.prompts import load_prompt
+
+    bad = json.loads(GOOD)
+    bad["memories"][0][signal]["value"] = None
+    calls = stub_runner(monkeypatch, [_result(json.dumps(bad)), _result(GOOD)])
+    span, steps = _judge_input_fixture()
+    result = judge_span(span, steps, _agent_cfg(), [], evidence_root=tmp_path / "evidence",
+                        transcripts_root=tmp_path / "runs")
+    assert result["input"]["attempts"] == 2
+    assert f"m1.{signal} value None outside the contract" in calls[1]["message"]
+    policy = load_prompt("injudge/scoring/uncertainty")
+    for prompt in (SYSTEM_PROMPT, GOLD_SYSTEM_PROMPT, calls[0]["message"],
+                   calls[1]["message"], _FORCED):
+        assert policy in prompt
+        assert "@uncertainty@" not in prompt
+    assert '"novel"|"confirming"|"redundant"|null' in SYSTEM_PROMPT
+    assert '"novel"|"confirming"|"redundant"|null' in calls[1]["message"]
+
+
+@pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
+def test_strict_parse_rejects_non_json_constants_in_display_fields(literal):
+    raw = GOOD[:-1] + ', "extra": ' + literal + '}'
+    obj, error = _strict_parse(raw)
+    assert obj is None and error == "is not valid JSON"
+
+
+def test_deeply_nested_repair_is_a_contract_error_with_input_record(monkeypatch, tmp_path):
+    deep = '{"extra":' + '[' * 200000 + '0' + ']' * 200000 + '}'
+    calls = stub_runner(monkeypatch, [_result("invalid"), _result(deep)])
+    span, steps = _judge_input_fixture()
+    result = judge_span(span, steps, _agent_cfg(), [], evidence_root=tmp_path / "evidence",
+                        transcripts_root=tmp_path / "runs")
+    assert result["verdict"] == "error" and "nests too deeply" in result["error"]
+    assert result["judge_raw"] == deep[:2000]
+    assert result["input"]["attempts"] == len(calls) == 2
+
+
+@pytest.mark.parametrize("failure", ["exit", "timeout", "missing_result"])
+def test_failed_subprocess_still_masks_its_transcript(monkeypatch, tmp_path, failure):
+    import subprocess
+    from pathlib import Path
+
+    key = "sk-secret-failed-run"
+    def run(args, **kwargs):
+        job = json.loads(Path(args[args.index("--job") + 1]).read_text())
+        Path(job["trajectory_path"]).write_text(json.dumps({"answer": key}) + "\n")
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(args, 1)
+        return subprocess.CompletedProcess(args, 1 if failure == "exit" else 0,
+                                           stdout=b"", stderr=key.encode())
+    monkeypatch.setattr("injudge.agent.subprocess.run", run)
+    span, steps = _judge_input_fixture()
+    warnings = []
+    result = judge_span(span, steps, _agent_cfg(api_key=key), warnings,
+                        evidence_root=tmp_path / "evidence", transcripts_root=tmp_path / "runs")
+    assert result["verdict"] == "error" and result["input"]["attempts"] == 1
+    trace = (tmp_path / result["input"]["transcript"]).read_text()
+    assert key not in trace and "***" in trace
+    assert key not in json.dumps(result) + str(warnings)
+
+
+@pytest.mark.parametrize("url", ["secret-in-invalid-url", "https://host:secret-port",
+                                  "https://host:99999", "https://[broken"])
+def test_config_rejects_bad_urls_without_echoing_values(monkeypatch, url):
+    monkeypatch.setattr("injudge.agent._check_runner", lambda: None)
+    with pytest.raises(SystemExit) as exc:
+        resolve_config({"BASE_URL": url, "API_KEY": "test-key", "MODEL": "m"})
+    assert "BASE_URL" in str(exc.value)
+    assert url not in str(exc.value) and "secret" not in str(exc.value)
+
+
+def test_unattributed_redelivery_never_backfills_an_earlier_hidden_placement(tmp_path):
+    b = TrajBuilder().agent_turn(with_task=True).recall(REF_A)
+    b.recall(REF_A)
+    ops = _recall_ops(b, tmp_path)
+    # The early delivery's placement is unrecorded. The tail's consumer never
+    # completed, so its visible full value cannot be assigned to that step.
+    ops[0].placement_text = None
+    ops[0].placement_kind = None
+    ops[0].exposure = [{"state": "unknown"}]
+    ops[1].step = None
+    spans = group_spans(ops, "T1")
+    assert len(spans) == 1 and spans[0].n_injections == 2
+    files = build_evidence(spans[0], [], None, None)
+    assert REF_A["content"]["text"] not in files["span.md"]
+    assert spans[0].placement_text is None and spans[0].placement_kind is None
+    assert spans[0].memory_exposure == [{"state": "unknown"}]
+
+
+@pytest.mark.parametrize("influence,anchors,violation", [
+    ("acted_on", [], "without action anchors"),
+    ("acted_on", [999], "outside its footprint window"),
+    ("none", [2], "influence 'none' but cites anchors"),
+])
+def test_unknown_novelty_does_not_relax_anchor_validation(
+    monkeypatch, tmp_path, influence, anchors, violation,
+):
+    bad = json.loads(GOOD)
+    bad["memories"][0]["novelty"]["value"] = None
+    bad["memories"][0]["influence"]["value"] = influence
+    bad["memories"][0]["anchors"] = anchors
+    repaired = json.loads(GOOD)
+    repaired["memories"][0]["novelty"]["value"] = None
+    calls = stub_runner(monkeypatch, [_result(json.dumps(bad)), _result(json.dumps(repaired))])
+    span, steps = _judge_input_fixture()
+    result = judge_span(span, steps, _agent_cfg(), [], evidence_root=tmp_path / "evidence",
+                        transcripts_root=tmp_path / "runs")
+    assert result["verdict"] == "positive" and result["input"]["attempts"] == 2
+    assert violation in calls[1]["message"]

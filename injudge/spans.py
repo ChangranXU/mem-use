@@ -168,8 +168,8 @@ def _merge_spans(
     span wherever it sits — it cannot break consecutiveness, and must never
     become a spurious null-step span judged auto-neutral on its own. Its
     exposure is never merged (unknown step, so nothing it showed can be
-    time-bounded — the span keeps the exposure its attributed deliveries
-    recorded, never widened backward). An attributed merge is the same
+    time-bounded — the span keeps the exposure AND placement its attributed
+    deliveries recorded, never widened or backfilled backward). An attributed merge is the same
     treatment by construction, so its exposure record equals the span's:
     nothing to merge. Delivery context rides the span: distinct queries
     (a query rewrite between identical deliveries is still the span's
@@ -204,10 +204,9 @@ def _merge_spans(
                 steps_seen[target].append(op.step)
             if op.query and op.query not in span.queries:
                 span.queries.append(op.query)
-            if span.placement_kind is None:
-                span.placement_kind = op.placement_kind
-            if span.placement_text is None:
-                span.placement_text = op.placement_text
+            # Attributed merges already have identical presentation. An
+            # unattributed tail must not backfill a missing placement: its
+            # text could expose content the earlier consumer never saw.
             continue
         latest[fp] = len(spans)
         spans.append(

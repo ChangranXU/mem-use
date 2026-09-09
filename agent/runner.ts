@@ -154,8 +154,9 @@ function lastAssistantText(messages: readonly AgentMessage[]): string {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const assistant = asAssistant(messages[i]);
 		if (!assistant) continue;
-		const text = textOf(assistant);
-		if (text.trim()) return text;
+		// An empty final message is a missing answer, not permission to reuse
+		// an earlier tool-round narrative or rejected answer.
+		return textOf(assistant);
 	}
 	return "";
 }
@@ -299,7 +300,7 @@ async function main(): Promise<number> {
 	// Counts and usage cover the retained conversation, including prior
 	// phases. Python records the final cumulative totals, not a sum of ends.
 	const result: AgentResult = {
-		answer: lastAssistantText(messages),
+		answer: lastAssistantText(messages.slice(job.history?.length ?? 0)),
 		stop_reason: stopReason,
 		forced: budget.forcedInjected,
 		llm_calls: assistantTurns,

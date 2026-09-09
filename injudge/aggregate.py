@@ -29,7 +29,10 @@ The counting rules:
   recorded identity (no item_id, no key) has no pair to join on: it tallies
   span-scoped, never merged across spans.
 - rubric signal rates are over judge-scored memory-deliveries (span × entry)
-  of judged spans only; null signals never dilute a rate. positive_effect is
+  of judged spans only; null signals never dilute a rate. Unknown novelty
+  stays in counts.novelty.null, out of the novelty-rate denominator, and an
+  ignored entry with unknown novelty is never tallied as ignored_novel.
+  positive_effect is
   rated over the influential only (it is null by contract otherwise), and
   accuracy is reported as the three-way split
   (corroborated/uncontradicted/contradicted), never one "accurate" rate —

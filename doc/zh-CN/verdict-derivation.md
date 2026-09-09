@@ -32,7 +32,7 @@ flowchart TD
 |---|---|---|
 | `relevance` | bool | 注入点上，记忆是否与任务及 agent 当前子目标主题相关？依据区间首步之前的步骤判断。 |
 | `accuracy` | enum | `corroborated`（有可观察证据为真）/ `uncontradicted`（无从判断）/ `contradicted`（有可观察证据为假）。 |
-| `novelty` | enum | `novel`（任务陈述与注入前步骤中都未出现）/ `confirming`（敲定 agent 明确表达过的疑点）/ `redundant`（早已确立，无疑点）。任务陈述与 agent 自己的注入前回合一律视为已在对话中。 |
+| `novelty` | enum 或 null | `novel`（已录制基线支持其内容是新的）/ `confirming`（敲定 agent 明确表达过的疑点）/ `redundant`（早已确立，无疑点）/ `null`（已录制基线无法区分这些档位）。任务陈述与 agent 自己的注入前回合一律视为已在对话中；不完整记录中的缺失不能证明新颖性。 |
 | `influence` | enum | `none` / `referenced`（仅被提及）/ `acted_on`（注入后的命令、编辑或测试用到了记忆所携带、且 agent 无法从已有信息推导出的内容，或 agent 明确引用了该记忆）/ `decisive`（该记忆改变了 agent 计划的方向——可论证的路线转变）。足迹是后续行为：从区间首步起算，以该记忆下一次被重投递处为界（重投递即取代；从未被重投递则无上界；其他记忆的重投递只收窄其自身窗口）。回声规则：agent 在区间之前已宣布、推理出或已应用的方向，不能归功于事后再投递的记忆——即使结果动作落在足迹窗口内。另有两条约束：上下文不是记忆内容，由来源的时间与角色判定——任务陈述与注入前步骤是 agent 在投递到达前已有的信息；搜索查询是检索元数据，主 agent 未必见过（它可能源自 memory 或 side lane，仅凭查询不能确立 agent 已知什么）；黄金答案是 agent 从未见过的评测方专有核验材料，而注入后步骤恰是评判足迹的证据所在；`acted_on`/`decisive` 要求一个**被改变的动作**，而非继续执行注入前已确立的计划。`redundant` 的记忆仍可能被 acted on——当投递本身改变了动作（提醒恢复了已放弃的方向，或补足了计划缺少的执行细节）：novelty 与 influence 相互正交。acted-on 或 decisive 断言必须携带**锚点**——足迹出现的 agent 步骤号，且落在该条目的窗口内；塑形动作恰好发生在投递步本身的那次响应时，投递步也算锚点。 |
 | `positive_effect` | enum 或 null | `improved` / `no_effect` / `harmed`，以该记忆窗口内可观察的下游事件判断（`improved`：下游事件把收益系于记忆塑形的动作；`no_effect`：该动作没有产生可观察的下游变化；`harmed`：错误位置、错误线索、回退正确工作）。仅当 influence 为 `acted_on` 或 `decisive` 时非空。 |
 
@@ -49,7 +49,7 @@ flowchart TD
 | 由 LLM 产出 | 由代码推导 |
 |---|---|
 | 逐记忆的 `relevance`、`accuracy`、`novelty`、`influence`、`positive_effect`（value + note） | 逐记忆的 `usage`（`used` / `misused` / `noted` / `ignored` / `unclear`） |
-| 区间级 `analysis`、`evidence[]`、`confidence` | 被忽略记忆的 `reason`（`irrelevant` / `redundant` / `confirming_ignored` / `ignored_novel`） |
+| 区间级 `analysis`、`evidence[]`、`confidence` | 被忽略记忆的 `reason`（`irrelevant` / `redundant` / `confirming_ignored` / `ignored_novel` / `ignored_unknown_novelty`） |
 | | 区间 `verdict`（`positive` / `negative` / `neutral`） |
 | | 投递成本、策略指标，以及全部 `summary.json` 比率 |
 
@@ -91,7 +91,7 @@ flowchart TD
 
 ## 足迹原因
 
-`_footprint_reason` 只对 `ignored` 记忆运行。严格解析保证此时 `novelty` 是枚举值（覆盖缺口的全空条目会推导为 `unclear`，不会变成 `ignored`）。
+`_footprint_reason` 只对 `ignored` 记忆运行。未知新颖性与 `ignored_novel` 分开统计：缺失的基线证据不能确立新颖性档位。只有 `novelty` 与 `positive_effect` 允许 null，其他信号仍须满足现有布尔/枚举契约。未知新颖性不决定 influence、usage 或区间判定。
 
 | `relevance` | `novelty` | `reason` |
 |---|---|---|
@@ -99,6 +99,7 @@ flowchart TD
 | `true` | `redundant` | `redundant` |
 | `true` | `confirming` | `confirming_ignored` — 敲定了未决疑点，但从未被归功 |
 | `true` | `novel` | `ignored_novel` |
+| `true` | `null` | `ignored_unknown_novelty` |
 
 这些原因填入 `rubric.no_footprint_reasons`。它们不改变区间判定：被忽略的记忆已经不在 `used` / `misused` 之列。
 

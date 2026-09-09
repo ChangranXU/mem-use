@@ -128,7 +128,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
       <div class="item"><svg width="14" height="14"><path d="M7,12 L2,2 L12,2 Z" fill="#e2a93b"/></svg><span><b>error</b> — judge failed (excluded from rates)</span></div>
       <div class="item"><svg width="14" height="14"><path d="M7,12 L2,2 L12,2 Z" fill="#3567d6"/></svg><span>blue = not judged (no verdicts merged)</span></div>
       <div class="note">click a recall node for the judge's analysis, cited evidence, and per-memory usage</div>
-      <div class="note">rubric marks: <b>R</b> relevance (bool ✓/✗), <b>A</b> accuracy (✓ corroborated · ≈ uncontradicted · ✗ contradicted), <b>N</b> novelty (✓ novel · ≈ confirming · ✗ redundant), <b>I</b> influence (— none · ◔ referenced · ◑ acted-on · ● decisive), <b>P</b> effect (+ improved · 0 no effect · ✗ harmed)</div>
+      <div class="note">rubric marks: <b>R</b> relevance (bool ✓/✗), <b>A</b> accuracy (✓ corroborated · ≈ uncontradicted · ✗ contradicted), <b>N</b> novelty (✓ novel · ≈ confirming · ✗ redundant · — undetermined), <b>I</b> influence (— none · ◔ referenced · ◑ acted-on · ● decisive), <b>P</b> effect (+ improved · 0 no effect · ✗ harmed)</div>
     </div>
     <div class="group">
       <h4>edges &amp; markers</h4>

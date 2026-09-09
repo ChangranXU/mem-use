@@ -9,7 +9,8 @@ Grouped by tool and purpose (new prompts get their own folder group):
   allowed.
 - `prompts/injudge/scoring/` — the scoring frame, shared input description,
   delivered-memory and gold attachment labels, binding rules, worked echo
-  example, answer contract, and corrective-retry note. The gold frame fills
+  example, answer contract, shared signal-specific uncertainty policy, and
+  corrective-retry note. The gold frame fills
   relevance and effect from its regime-specific signal files.
 - `prompts/injudge/agent/` — the evidence-search workflow in the opening
   message, the targeted evidence-resumption follow-up, and the forced

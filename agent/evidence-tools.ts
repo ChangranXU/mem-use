@@ -127,10 +127,10 @@ export function createEvidenceTools(root: string): AgentTool<any>[] {
 			const rootReal = fs.realpathSync(root);
 			let files: string[];
 			if (params.path) {
-				const rel = params.path.replace(/\\/g, "/").replace(/\/+$/, "");
-				const scope = resolveInside(root, rel);
+				const scope = resolveInside(root, params.path);
+				const rel = path.relative(rootReal, scope).split(path.sep).join("/");
 				files = fs.statSync(scope).isDirectory()
-					? walkFiles(rootReal).filter((f) => f === rel || f.startsWith(rel + "/"))
+					? walkFiles(rootReal).filter((f) => !rel || f.startsWith(rel + "/"))
 					: [rel];
 			} else {
 				files = walkFiles(rootReal).filter((f) => f.startsWith("steps/"));

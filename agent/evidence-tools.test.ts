@@ -84,3 +84,18 @@ test("search_evidence shows the match, not just the start of a long reasoning li
 	assert.match(text, /step_000004\.md:1: .*random_state/);
 	fs.rmSync(root, { recursive: true, force: true });
 });
+
+test("search_evidence resolves equivalent directory scopes before matching files", async () => {
+	const root = makeRoot();
+	try {
+		const search = createEvidenceTools(root).find((t) => t.name === "search_evidence")!;
+		fs.symlinkSync(path.join(root, "steps"), path.join(root, "alias"));
+		for (const scope of [".", "./steps", "steps/.", "steps//", "alias"]) {
+			const result = await search.execute("t", { pattern: "gamma", path: scope });
+			assert.match(result.content[0].type === "text" ? result.content[0].text : "", /step_000002\.md:1: gamma/);
+		}
+		await assert.rejects(() => search.execute("t", { pattern: "gamma", path: "../" }), /\.\./);
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});

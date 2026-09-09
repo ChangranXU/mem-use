@@ -1,5 +1,5 @@
 ---
-description: "injudge.report/v10, injudge.summary/v6, every field, and how every rate is counted."
+description: "injudge.report/v11, injudge.summary/v7, every field, and how every rate is counted."
 icon: box-archive
 ---
 
@@ -11,8 +11,8 @@ injudge writes all artifacts to the output folder (`-o DIR`, default `output/`).
 
 | File | Schema | Role |
 |---|---|---|
-| `injudge-report.json` | `injudge.report/v10` | Runtime judging record. Rewritten after every trajectory so a crash keeps completed work. Feed it to memgraph with `--verdicts`. |
-| `summary.json` | `injudge.summary/v6` | Final statistics set: counts, rates, and a narrative-free span index. |
+| `injudge-report.json` | `injudge.report/v11` | Runtime judging record. Rewritten after every trajectory so a crash keeps completed work. Feed it to memgraph with `--verdicts`. |
+| `summary.json` | `injudge.summary/v7` | Final statistics set: counts, rates, and a narrative-free span index. |
 | `memgraph-verdicts.html` | — | Only with `--html` (off by default): memgraph with recall nodes colored by span verdict. |
 | `evidence/<span-dir>/` | — | One folder per span sent to the judge agent (error outcomes included): the exact files the agent searched. |
 | `agent-runs/<span-dir>.jsonl` | — | One trajectory per span sent to the judge agent: the pi event-sourced recording of the judging conversation (see [Judge agent](judge-client.md#trajectory-recording)). |
@@ -113,7 +113,7 @@ Per aggregate block (`overall` and each trajectory):
 | `headline.caveat` | On every reported wasted share: names the span-level proxy coarseness and the verdict asymmetry |
 | `rubric.deliveries` | Judge-scored memory deliveries; the whole `rubric` is omitted when this is 0 |
 | `rubric.counts` / `rubric.rates` | Per-signal value distributions and projected rates |
-| `rubric.no_footprint_reasons` | Why ignored memories left no footprint: `irrelevant` / `redundant` / `confirming_ignored` / `ignored_novel` (omitted when empty) |
+| `rubric.no_footprint_reasons` | Why ignored memories left no footprint: `irrelevant` / `redundant` / `confirming_ignored` / `ignored_novel` / `ignored_unknown_novelty` (omitted when empty) |
 | `rubric.inaccurate_keys` / `irrelevant_keys` | Triage lists `{key, spans}` — memories the judge found contradicted / irrelevant; written only when non-empty |
 | `cost` | Deterministic delivery cost: `content_chars_total`, `approx_tokens_total` (`chars // 4`), `approx_tokens_by_verdict` charged by span verdict class (omitted when zero) |
 | `confidence.mean_by_verdict` / `confidence.buckets` | Per-verdict means (null classes omitted) and `[0,0.5)` / `[0.5,0.8)` / `[0.8,1.0]` bucket counts, over LLM-judged spans |
@@ -144,4 +144,21 @@ Each trajectory's `spans` is a narrative-free index into the report:
 
 The `injections` array lists every raw delivery with its span, `role` (`first` or `restated`), `verdict`, `content_chars`, and its `op_id` / `seq` / `step`.
 
-`injudge.report/v10` is the agentic judge: the per-operation `input` record becomes the agent-run record (`path: "agent"` with `attempts` / `llm_calls` / `tool_calls` and the `gold` / `forced` markers), `tool.config` becomes the resolved agent configuration, and `over_budget` gives way to `forced_answers`. The rubric and derivation chain are unchanged; only the current report schema is accepted.
+## Schema Change: Report v11 / Summary v7
+
+`novelty.value` now accepts `null` when the recorded baseline cannot establish
+novel, confirming, or redundant. This is missing evidence, not a fourth tier;
+forcing a tier would manufacture a finding. Only novelty and positive_effect
+allow null. Influence, action-anchor validation, usage derivation, and the
+span-verdict rule are unchanged.
+
+Both artifacts count assessed entries with unknown novelty under
+`rubric.counts.novelty.null`, exclude them from the novelty-rate denominator,
+and retain their other signals and usage tallies. Relevant ignored entries
+with null novelty use `ignored_unknown_novelty`, never `ignored_novel`.
+The stdout distribution names the assessed population and the undetermined
+count; an all-unknown novelty population has a null novelty rate.
+
+This replaces report v10 / summary v6. Only the current report schema is
+accepted by memgraph; there is no migration or compatibility reader. Rerun
+injudge to produce the new artifacts.

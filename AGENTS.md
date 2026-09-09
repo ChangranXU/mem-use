@@ -7,7 +7,7 @@ mem-eval scores memory-system quality from schema-v6 gate trajectories
   self-contained HTML/JSON graph.
 - **injudge** scores each recall injection's subsequent influence with an
   agentic LLM rubric (a pi agent searching one evidence folder per span)
-  and writes `injudge.report/v10`, which memgraph can overlay with
+  and writes `injudge.report/v11`, which memgraph can overlay with
   `--verdicts`.
 
 An injection is judged by its influence on later agent turns. The final
@@ -73,7 +73,7 @@ memgraph/model.py          # Trajectory / MemoryOp / MemoryUnit / Edge
 memgraph/parse_trajectory.py  # trajectory.jsonl → ops; shared step rule
 memgraph/graph.py          # path discovery, cross-trajectory linking, validation
 memgraph/html.py           # self-contained HTML (template + embedded graph JSON)
-memgraph/verdicts.py       # merge injudge.report/v10 onto recall ops
+memgraph/verdicts.py       # merge injudge.report/v11 onto recall ops
 memgraph/__main__.py       # python3 -m memgraph
 injudge/__init__.py        # REPORT_SCHEMA / SUMMARY_SCHEMA (writer + memgraph reader)
 injudge/model.py           # AgentStep / ToolExec / InjectionSpan
@@ -85,7 +85,7 @@ injudge/agent.py           # .env → AgentConfig, runner subprocess, corrective
 injudge/gold.py            # golden-answer / correctness sidecars and CLI joins
 injudge/prompts.py         # loads prompts/ (never inline prompts in code)
 injudge/aggregate.py       # verdict counts/rates, per-memory usage roll-ups
-injudge/report.py          # injudge.report/v10 + injudge.summary/v6 + stdout
+injudge/report.py          # injudge.report/v11 + injudge.summary/v7 + stdout
 injudge/__main__.py        # python3 -m injudge
 agent/                     # TS judge agent: runner.ts (pi Agent + budgets),
                            # evidence-tools.ts (scoped read-only tools),
@@ -244,7 +244,12 @@ Easy to get wrong:
   an invalid repair or exhaustion is a visible `error` with text kept (masked),
   never a silently partial verdict. Novelty, accuracy, influence, and
   effect are ORTHOGONAL signals — no cross-signal combination is a
-  contract violation.
+  contract violation. Only novelty and positive_effect accept null:
+  unknown novelty is missing baseline evidence, not a forced tier or an
+  influence verdict. Ignored relevant entries with null novelty carry
+  `ignored_unknown_novelty`; `counts.novelty.null` records them and novelty
+  rates exclude them. Scoring, opening, forced-answer, and repair prompts
+  share `prompts/injudge/scoring/uncertainty.md`.
 - The evidence grounds every memory to its recorded placement exposure
   (adapter-free value-vs-placement compare: full / whitespace-and-escape
   normalized full (`full_normalized`) — prose-safe values only — clipped
@@ -355,7 +360,7 @@ The HTML colors rewrite markers by each marker's own `on_memory_lane` flag,
 computed at parse time against the final lane set. Do not prune a field
 from one consumer only.
 
-**injudge** writes `injudge.report/v10` (`{tool, generated_at, trajectories,
+**injudge** writes `injudge.report/v11` (`{tool, generated_at, trajectories,
 operations, injections, aggregates, validation}`), rewritten after every
 trajectory so a crash keeps completed work.
 
@@ -391,7 +396,7 @@ trajectory so a crash keeps completed work.
   (non-`[A-Za-z0-9._-]` replaced by `_`, capped at 80 chars) plus an
   8-char digest suffix — `evidence.span_dir_name`.
 
-The companion `summary.json` (`injudge.summary/v6`) is the run's final
+The companion `summary.json` (`injudge.summary/v7`) is the run's final
 statistics: counts/rates, rubric distributions, cost, confidence, judge
 compliance (the positive_effect↔influence correction rate), per-trajectory
 extraction reliability (`n_extractions` / `extraction_failures`), and slim

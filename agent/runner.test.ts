@@ -143,3 +143,17 @@ for (const limit of [2, 4]) {
 		assert.deepEqual(requests.at(-1)!.messages.at(-1)!.content, [{ type: "text", text: "answer now" }]);
 	});
 }
+
+for (const repair of [false, true]) {
+	test(`an empty final answer never reuses earlier text (repair=${repair})`, async (t) => {
+		const { run, requests } = await fixture(t, [
+			{ content: "earlier answer" },
+			...(repair ? [] : [{ content: "investigating", tool_calls: [readStepTwo] }]),
+			{ content: "" },
+		]);
+		const prior = await run();
+		const result = await run({ repair, attempt: 2, history: prior.messages });
+		assert.equal(requests.length, repair ? 2 : 3);
+		assert.equal(result.answer, "");
+	});
+}

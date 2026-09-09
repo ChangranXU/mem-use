@@ -28,8 +28,8 @@ uv run -m injudge <paths> --dry-run --limit 3
 
 | 文件 | 内容 |
 |---|---|
-| `injudge-report.json` | 运行时评审记录（`injudge.report/v10`），每条轨迹后重写，崩溃也保留已完成部分 |
-| `summary.json` | 最终统计（`injudge.summary/v6`）：计数、比率、逐记忆使用 |
+| `injudge-report.json` | 运行时评审记录（`injudge.report/v11`），每条轨迹后重写，崩溃也保留已完成部分 |
+| `summary.json` | 最终统计（`injudge.summary/v7`）：计数、比率、逐记忆使用 |
 | `memgraph-verdicts.html` | 仅在 `--html` 时产出：召回节点按判定着色的 memgraph |
 | `evidence/` | 每个送入评审智能体的区间一个文件夹（含 error 结局）：智能体检索过的文件（区间文档、manifest、逐步骤文件、gold） |
 | `agent-runs/` | 每个送入评审智能体的区间一条轨迹 JSONL：判定如何得出的 pi 事件流记录 |

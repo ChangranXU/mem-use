@@ -13,5 +13,10 @@ Return the corrected verdict as ONE JSON object and nothing else. Start with
 Only if repair genuinely requires evidence not in this conversation, return
 instead exactly {"needs_evidence": "<specific missing fact and the step/file to inspect>"}.
 This requests renewed investigation; it is not a verdict. Formatting errors
-alone do not require more evidence. Use null for a signal the recording itself
-cannot establish, rather than requesting information the recording cannot contain.
+alone do not require more evidence. Do not request information the recording
+cannot contain, and never preserve a value the named validation error rejects.
+
+Allowed values: relevance true|false; accuracy @accuracy@; novelty @novelty@;
+influence @influence@; positive_effect @positive_effect@.
+
+@uncertainty@

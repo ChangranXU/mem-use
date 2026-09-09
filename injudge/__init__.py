@@ -20,18 +20,13 @@ from __future__ import annotations
 # (injudge.report.py) and the reader (memgraph/verdicts.py) so a bump can
 # never land on one side only and surface at read time. Tests pin the
 # literal deliberately — a bump must update them (see AGENTS.md).
-# injudge.report/v10: the agentic judge. Each judged operation's `input`
-# record becomes the agent-run record ({"path": "agent", "attempts",
-# "llm_calls", "tool_calls", "transcript", "forced"?, "gold"?} —
-# `transcript` points at the conversation's pi event-sourced trajectory
-# JSONL under agent-runs/); tool.config becomes the resolved agent
-# configuration (max_steps / max_output_tokens / context_window /
-# thinking_level, no scan block); aggregates replace input_paths'
-# full/scan regimes with the agent regime and over_budget with
-# forced_answers. The rubric, entry ids, verdicts and unassessable
-# accounting are unchanged.
-REPORT_SCHEMA = "injudge.report/v10"
+# injudge.report/v11: novelty can be null when its recorded baseline cannot
+# establish a tier. Other signals and the influence/effect verdict rule stay
+# unchanged. Ignored relevant entries with null novelty carry the reason
+# ignored_unknown_novelty, never ignored_novel.
+REPORT_SCHEMA = "injudge.report/v11"
 
-# injudge.summary/v6: input_paths carries the agent regime and forced
-# answers replaces over_budget (same rationale as the report bump).
-SUMMARY_SCHEMA = "injudge.summary/v6"
+# injudge.summary/v7: counts.novelty.null includes judged unknown novelty;
+# novelty rates exclude those entries, and no_footprint_reasons can include
+# ignored_unknown_novelty. Null is missing evidence, not a fourth tier.
+SUMMARY_SCHEMA = "injudge.summary/v7"

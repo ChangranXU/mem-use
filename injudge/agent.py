@@ -47,6 +47,7 @@ from injudge.judge import (
     _mask_key,
     _masked_head,
     _scoring_system,
+    _substitute_enums,
     _strict_parse,
     _verdict_semantics,
     blank_verdict,
@@ -69,8 +70,8 @@ API_FORMATS = ("openai-chat", "anthropic")
 # pi's ThinkingLevel spellings, passed through to the agent state.
 THINKING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
 
-_OPENING = load_prompt("injudge/agent/opening")
-_FORCED = load_prompt("injudge/agent/forced")
+_OPENING = _substitute_enums(load_prompt("injudge/agent/opening"))
+_FORCED = _substitute_enums(load_prompt("injudge/agent/forced"))
 _RESUME = load_prompt("injudge/agent/resume")
 
 
@@ -197,9 +198,11 @@ def _check_base_url(base_url: str, keys: str) -> None:
     not raise mid-run; the message names the env `keys`, never the value."""
     try:
         Request(base_url)
-    except ValueError as e:
-        raise SystemExit(f"error: {keys} is not a valid URL ({e})") from None
-    parts = urlsplit(base_url)
+        parts = urlsplit(base_url)
+        parts.port  # invalid/non-numeric ports fail before any paid call
+    except ValueError:
+        # urllib's error may echo the entire URL, including a credential.
+        raise SystemExit(f"error: {keys} is not a valid URL") from None
     if parts.scheme not in ("http", "https") or not parts.hostname:
         raise SystemExit(f"error: {keys} must be an http(s) URL")
 
@@ -498,10 +501,15 @@ def judge_span(
     message = opening
     while attempt < cfg.max_attempts:
         attempt += 1
-        result = _invoke_runner(
-            cfg, dest, trajectory_path, attempt, system, message, history, warnings,
-            repair=repair,
-        )
+        try:
+            result = _invoke_runner(
+                cfg, dest, trajectory_path, attempt, system, message, history, warnings,
+                repair=repair,
+            )
+        finally:
+            # A timeout/nonzero exit can leave a partial transcript containing
+            # endpoint echoes even though no result file ever became readable.
+            _mask_trajectory_file(trajectory_path, cfg.api_key)
         if result is None:
             # setup/transport fault: an identical retry re-pays it. The
             # runner-level detail (stderr, timeout) is already in warnings
@@ -511,7 +519,6 @@ def judge_span(
             verdict["error"] = "judge agent failed to run (see validation notes)"
             verdict["input"] = _input_record(gold, attempt, None, transcript)
             return verdict
-        _mask_trajectory_file(trajectory_path, cfg.api_key)
         if result.get("error"):
             masked = _mask_key(str(result["error"]), cfg.api_key)
             warnings.append(f"{span.id}: the judge agent run failed: {masked}")
@@ -523,7 +530,7 @@ def judge_span(
         if repair:
             try:
                 request = json.loads(text)
-            except ValueError:
+            except (ValueError, RecursionError):
                 request = None
             if (isinstance(request, dict) and set(request) == {"needs_evidence"}
                     and isinstance(request["needs_evidence"], str)

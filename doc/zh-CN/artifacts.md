@@ -1,5 +1,5 @@
 ---
-description: "injudge.report/v10、injudge.summary/v6、全部字段，以及每项比率如何计数。"
+description: "injudge.report/v11、injudge.summary/v7、全部字段，以及每项比率如何计数。"
 icon: box-archive
 ---
 
@@ -11,8 +11,8 @@ injudge 的全部产物写入输出目录（`-o DIR`，默认 `output/`）。
 
 | 文件 | Schema | 作用 |
 |---|---|---|
-| `injudge-report.json` | `injudge.report/v10` | 运行时评审记录。每条轨迹完成后重写，崩溃也保留已完成部分。用 `--verdicts` 喂给 memgraph。 |
-| `summary.json` | `injudge.summary/v6` | 最终统计集合：计数、比率，以及无叙述的区间索引。 |
+| `injudge-report.json` | `injudge.report/v11` | 运行时评审记录。每条轨迹完成后重写，崩溃也保留已完成部分。用 `--verdicts` 喂给 memgraph。 |
+| `summary.json` | `injudge.summary/v7` | 最终统计集合：计数、比率，以及无叙述的区间索引。 |
 | `memgraph-verdicts.html` | — | 仅在 `--html` 时产出（默认关闭）：召回节点按区间判定着色的 memgraph。 |
 | `evidence/<span-dir>/` | — | 每个送入评审智能体的区间一个文件夹（含 error 结局）：智能体检索过的原始文件。 |
 | `agent-runs/<span-dir>.jsonl` | — | 每个送入评审智能体的区间一条轨迹：评判对话的 pi 事件流记录（见[评审智能体](judge-client.md#轨迹记录)）。 |
@@ -113,7 +113,7 @@ $$
 | `headline.caveat` | 随行于每一个报告的浪费份额：指明区间级代理的粗糙性与判定的不对称 |
 | `rubric.deliveries` | 被打分的记忆投递数；为 0 时整个 `rubric` 省略 |
 | `rubric.counts` / `rubric.rates` | 各信号的取值分布与投影比率 |
-| `rubric.no_footprint_reasons` | 被忽略记忆未留足迹的原因：`irrelevant` / `redundant` / `confirming_ignored` / `ignored_novel`（空时省略） |
+| `rubric.no_footprint_reasons` | 被忽略记忆未留足迹的原因：`irrelevant` / `redundant` / `confirming_ignored` / `ignored_novel` / `ignored_unknown_novelty`（空时省略） |
 | `rubric.inaccurate_keys` / `irrelevant_keys` | 排查清单 `{key, spans}`——评审认定被证伪 / 不相关的记忆；仅在非空时写出 |
 | `cost` | 确定性投递成本：`content_chars_total`、`approx_tokens_total`（`chars // 4`）、按区间判定类别归集的 `approx_tokens_by_verdict`（为零时省略） |
 | `confidence.mean_by_verdict` / `confidence.buckets` | 按判定类别的均值（省略 null 类）与 `[0,0.5)` / `[0.5,0.8)` / `[0.8,1.0]` 分桶计数，覆盖 LLM 已评判区间 |
@@ -144,4 +144,18 @@ $$
 
 `injections` 数组列出每一次原始投递及其所属区间、`role`（`first` 或 `restated`）、`verdict`、`content_chars`，以及 `op_id` / `seq` / `step`。
 
-`injudge.report/v10` 是智能体评审：每个操作的 `input` 记录变为智能体运行记录（`path: "agent"`，带 `attempts` / `llm_calls` / `tool_calls` 与 `gold` / `forced` 标记），`tool.config` 变为已解析的智能体配置，`over_budget` 让位于 `forced_answers`。评分规则与推导链不变；仅接受当前报告 schema。
+## Schema 变更：Report v11 / Summary v7
+
+当已录制基线无法确立 novel、confirming 或 redundant 时，`novelty.value`
+现在允许 `null`。这表示证据缺失，不是第四个档位；强行指定档位会制造结论。
+仅 novelty 和 positive_effect 允许 null。影响判断、动作锚点校验、usage
+推导与区间判定规则保持不变。
+
+两个产物都将已评审条目的未知新颖性计入 `rubric.counts.novelty.null`，
+从 novelty 比率分母中排除这些条目，同时保留其其他信号和 usage 统计。
+相关但被忽略且 novelty 为 null 的条目使用 `ignored_unknown_novelty`，
+不再误计为 `ignored_novel`。标准输出明确列出已判定档位的总体与未知数量；
+全部未知时 novelty 比率为 null。
+
+本次取代 report v10 / summary v6。memgraph 仅接受当前报告 schema，
+不提供迁移或兼容读取层；重新运行 injudge 生成新产物。

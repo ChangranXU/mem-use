@@ -32,7 +32,7 @@ Each delivered ENTRY is scored independently under its span-local id (`m1`, `m2`
 |---|---|---|
 | `relevance` | bool | Is the memory topically related to the task and to the agent's current subgoal at the injection point? Judged from the steps before the span's first step. |
 | `accuracy` | enum | `corroborated` (observable evidence it is right) / `uncontradicted` (no evidence either way) / `contradicted` (observable evidence it is wrong). |
-| `novelty` | enum | `novel` (substance appeared neither in the task statement nor the pre-injection steps) / `confirming` (settles an open doubt the agent had articulated) / `redundant` (already established, no open doubt). The task statement counts as already-in-conversation, exactly like the agent's own pre-injection turns. |
+| `novelty` | enum or null | `novel` (the recorded baseline supports that the substance was new) / `confirming` (settles an open doubt the agent had articulated) / `redundant` (already established, no open doubt) / `null` (the recorded baseline cannot distinguish these tiers). The task statement counts as already-in-conversation, exactly like the agent's own pre-injection turns; absence from an incomplete record does not prove novelty. |
 | `influence` | enum | `none` / `referenced` (mentioned only) / `acted_on` (a post-injection command, edit, or test uses content the memory carries and the agent could not have derived from what it had already seen, or the agent explicitly cites the memory) / `decisive` (the memory changed the direction of the agent's plan — a demonstrable course change). Footprint is subsequent behavior: from the span's first step onward, bounded where that memory is next re-delivered (a re-delivery supersedes; never re-delivered = unbounded; another memory's re-delivery bounds only its own window). The echo rule: a direction the agent had already announced, reasoned out, or applied before the span cannot be credited to a memory delivered afterward — even when the resulting action lands inside the window. Two further bindings: context is not memory content, where a source's time and role decide — the task statement and the pre-injection steps are what the agent already had, the search query is retrieval metadata the main agent may never have seen (it can originate in a memory or side lane, so a query alone establishes nothing), while the golden answer is evaluator-only verification it never saw and the post-injection steps are exactly where the footprint is judged — and `acted_on`/`decisive` require a CHANGED action, not continuation of an already-established plan. A `redundant` memory CAN still be acted on when the delivery itself changed the action (a reminder restoring a dropped direction, or execution detail the plan lacked): novelty and influence are orthogonal. An acted-on or decisive claim must carry **anchors** — the agent-step numbers where the footprint appears, inside that entry's window; the span's delivery step counts when the shaped action happened in that very response. |
 | `positive_effect` | enum or null | `improved` / `no_effect` / `harmed`, judged by observable downstream events inside the memory's window (`improved`: a downstream event ties the benefit to the memory-shaped action; `no_effect`: the action produced no observable downstream change; `harmed`: a wrong location, false lead, reverted correct work). Non-null only when influence is `acted_on` or `decisive`. Accuracy never decides this signal: a memory carrying a false claim can still have set off the diagnostic that found the fix. |
 
@@ -49,7 +49,7 @@ The final task result, when discernible, may raise or lower confidence. It canno
 | Produced by the LLM | Derived in code |
 |---|---|
 | Per-memory `relevance`, `accuracy`, `novelty`, `influence`, `positive_effect` (value + note) | Per-memory `usage` (`used` / `misused` / `noted` / `ignored` / `unclear`) |
-| Span-level `analysis`, `evidence[]`, `confidence` | Per-ignored-memory `reason` (`irrelevant` / `redundant` / `confirming_ignored` / `ignored_novel`) |
+| Span-level `analysis`, `evidence[]`, `confidence` | Per-ignored-memory `reason` (`irrelevant` / `redundant` / `confirming_ignored` / `ignored_novel` / `ignored_unknown_novelty`) |
 | | Span `verdict` (`positive` / `negative` / `neutral`) |
 | | Delivery cost, policy metrics, and all `summary.json` rates |
 
@@ -91,7 +91,7 @@ The evidence string on a usage entry is the first non-empty note among `positive
 
 ## Footprint Reasons
 
-`_footprint_reason` runs only for `ignored` memories. Strict parsing guarantees `novelty` is an enum in that case (nulled coverage-gap entries derive `unclear`, not `ignored`).
+`_footprint_reason` runs only for `ignored` memories. Unknown novelty is kept separate from `ignored_novel`: missing baseline evidence cannot establish a novelty tier. Only `novelty` and `positive_effect` allow null; all other signals keep their existing bool/enum contract. Unknown novelty never decides influence, usage, or the span verdict.
 
 | `relevance` | `novelty` | `reason` |
 |---|---|---|
@@ -99,6 +99,7 @@ The evidence string on a usage entry is the first non-empty note among `positive
 | `true` | `redundant` | `redundant` |
 | `true` | `confirming` | `confirming_ignored` — settled an open suspicion, never credited |
 | `true` | `novel` | `ignored_novel` |
+| `true` | `null` | `ignored_unknown_novelty` |
 
 These reasons populate `rubric.no_footprint_reasons`. They do not change the span verdict: an ignored memory is already outside `used` / `misused`.
 

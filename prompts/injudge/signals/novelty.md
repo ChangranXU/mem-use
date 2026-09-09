@@ -16,8 +16,11 @@
      redundant/late;
    - novel: the available baseline supports that the substance was new to
      the agent. Mere absence from an incomplete transcript or evidence
-     summary is not enough; use null when novelty cannot be established.
-   The note must cite what the tier rests on: the task statement (it has no
+     summary is not enough;
+   - null: the recorded baseline cannot establish which tier applies. Name
+     the specific missing context in the note; this is unassessed novelty,
+     not a fourth tier and not evidence for or against influence.
+   For an assessed tier, the note must cite what it rests on: the task statement (it has no
    step number — naming it as the task statement is the correct citation) or
    the specific pre-injection step. When the header says a memory was
    delivered in an earlier span, or carries the same key with a changed

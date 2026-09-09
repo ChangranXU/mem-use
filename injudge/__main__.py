@@ -81,10 +81,8 @@ def _safe_endpoint(url: str) -> str:
     Query strings and userinfo are dropped — either can carry a secret (a
     proxy token in ?key=, credentials in user@host), and the manifest
     exists to make the run reproducible, never to leak them. An unparseable
-    or non-HTTP(S) value reads as "(unparsed)" — resolve's URL check
-    (Request construction) rejects bracket-mangled pastes but not a
-    non-numeric/out-of-range port, whose `.port` access raises ValueError
-    only here."""
+    or non-HTTP(S) value reads as "(unparsed)". resolve_config rejects these
+    before paid calls; directly constructed configs still need this guard."""
     try:
         parts = urlsplit(url)
         port = parts.port

@@ -9,7 +9,7 @@ Use exactly this shape:
       "accuracy":        {"value": @accuracy@,
                           "note": "<one sentence>"},
       "novelty":         {"value": @novelty@,
-                          "note": "<one sentence citing the task statement or the pre-injection step>"},
+                          "note": "<one sentence citing the baseline, or the specific gap for null>"},
       "influence":       {"value": @influence@,
                           "note": "<one sentence>"},
       "positive_effect": {"value": @positive_effect@,

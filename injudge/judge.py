@@ -63,6 +63,7 @@ _ACCURACY = ("corroborated", "uncontradicted", "contradicted")
 _NOVELTY = ("novel", "confirming", "redundant")
 _INFLUENCE = ("none", "referenced", "acted_on", "decisive")
 _POS_EFFECT = ("improved", "no_effect", "harmed")
+_NULLABLE_SIGNALS = ("novelty", "positive_effect")
 _ACTED = ("acted_on", "decisive")  # influence levels where positive_effect applies
 
 
@@ -77,13 +78,13 @@ def _quoted_or(values: tuple[str, ...]) -> str:
 # instructed to emit values the contract rejects).
 def _substitute_enums(text: str) -> str:
     """Fill the `@accuracy@`-style enum tokens from the contract constants."""
-    for token, literals in (
-        ("@accuracy@", _quoted_or(_ACCURACY)),
-        ("@novelty@", _quoted_or(_NOVELTY)),
-        ("@influence@", _quoted_or(_INFLUENCE)),
-        ("@positive_effect@", _quoted_or(_POS_EFFECT) + "|null"),
+    text = text.replace("@uncertainty@", load_prompt("injudge/scoring/uncertainty"))
+    for signal, values in (
+        ("accuracy", _ACCURACY), ("novelty", _NOVELTY),
+        ("influence", _INFLUENCE), ("positive_effect", _POS_EFFECT),
     ):
-        text = text.replace(token, literals)
+        literals = _quoted_or(values) + ("|null" if signal in _NULLABLE_SIGNALS else "")
+        text = text.replace(f"@{signal}@", literals)
     return text
 
 
@@ -144,7 +145,7 @@ _CORRECTNESS_BLOCK = load_prompt("injudge/scoring/correctness_block")
 # The corrective retry note's frame (the @error@ slot takes the contract
 # violation) — one module-level load like every other prompt file here,
 # never a re-read per corrective retry.
-_CORRECTIVE_NOTE = load_prompt("injudge/scoring/corrective")
+_CORRECTIVE_NOTE = _substitute_enums(load_prompt("injudge/scoring/corrective"))
 
 
 def _scoring_system(gold: GoldInput) -> str:
@@ -507,12 +508,21 @@ def _gold_blocks(gold: GoldInput | None) -> str:
 
 def _valid_value(signal: str, value: object) -> bool:
     """A signal value against its contract type/enum — no coercion."""
+    if value is None:
+        return signal in _NULLABLE_SIGNALS
     if signal == "relevance":
         return isinstance(value, bool)
-    if signal == "positive_effect":
-        return value is None or value in _POS_EFFECT
-    allowed = {"accuracy": _ACCURACY, "novelty": _NOVELTY, "influence": _INFLUENCE}[signal]
+    allowed = {
+        "accuracy": _ACCURACY, "novelty": _NOVELTY,
+        "influence": _INFLUENCE, "positive_effect": _POS_EFFECT,
+    }[signal]
     return isinstance(value, str) and value in allowed
+
+
+def _reject_json_constant(value: str) -> None:
+    # json.loads otherwise accepts JavaScript's non-JSON NaN/Infinity literals,
+    # including in display-only fields the signal validator never examines.
+    raise ValueError("non-JSON numeric constant")
 
 
 def _strict_parse(text: str) -> tuple[dict | None, str | None]:
@@ -533,7 +543,7 @@ def _strict_parse(text: str) -> tuple[dict | None, str | None]:
     truncation forensics are needed.
     """
     try:
-        obj = json.loads(text)
+        obj = json.loads(text, parse_constant=_reject_json_constant)
     except RecursionError:
         return None, "nests too deeply to parse"
     except ValueError:
@@ -684,12 +694,13 @@ def _derive_usage(signals: dict) -> str:
 
 def _footprint_reason(signals: dict) -> str:
     """Why an ignored memory left no footprint (the neutral taxonomy). Only
-    an ignored usage reaches here, and strict parsing guarantees its novelty
-    is an enum value (nulled coverage-gap entries derive unclear, never
-    ignored) — so every case is decided."""
+    an ignored usage reaches here. Unknown novelty is missing baseline
+    evidence, never proof of novelty; keep it apart from ignored_novel."""
     if signals["relevance"]["value"] is False:
         return "irrelevant"
     nov = signals["novelty"]["value"]
+    if nov is None:
+        return "ignored_unknown_novelty"
     if nov == "redundant":
         return "redundant"
     if nov == "confirming":

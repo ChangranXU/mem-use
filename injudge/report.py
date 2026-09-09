@@ -1,5 +1,5 @@
-"""Report assembly: the `injudge.report/v10` JSON artifact, the statistics-only
-`injudge.summary/v6` distillation, and the stdout summary.
+"""Report assembly: the `injudge.report/v11` JSON artifact, the statistics-only
+`injudge.summary/v7` distillation, and the stdout summary.
 
 The runtime artifact's output contract: per operation
 {operation_id, kind, seq, payload_summary, verdict, confidence, evidence[]}
@@ -29,7 +29,7 @@ narrative-free span index (verdict / confidence / per-memory usage labels —
 no recorded memory text, no validation log.
 
 All rubric signals but relevance are enums (accuracy 3-state, novelty
-3-tier, influence 4-level, positive_effect 3-state-or-null); verdicts are
+3-tier-or-null, influence 4-level, positive_effect 3-state-or-null); verdicts are
 derived in code (see judge.derive_verdict) and mere reference never yields
 negative.
 """
@@ -212,10 +212,15 @@ def _rubric_line(rub: dict) -> str | None:
     # distribution itself
     nov = (rub.get("counts") or {}).get("novelty") or {}
     n_nov = sum(nov.get(v, 0) for v in _NOVELTY)
-    if n_nov:
-        txt += "; novelty: " + ", ".join(
+    if n_nov or nov.get("null"):
+        novelty = ", ".join(
             f"{v} {nov.get(v, 0) / n_nov:.0%}" for v in _NOVELTY
-        )
+        ) if n_nov else ""
+        if nov.get("null"):
+            if novelty:
+                novelty += f" (of {n_nov} assessed); "
+            novelty += f"undetermined {nov['null']}/{n_nov + nov['null']}"
+        txt += "; novelty: " + novelty
     if rates.get("positive_effect") is not None:
         # the exact population, never a bare percentage: "of the influential"
         # has read as every referenced entry when the rate is judged effects
@@ -538,7 +543,7 @@ def _summary_span_index(op: dict) -> dict:
 
 
 def build_summary(artifact: dict) -> dict:
-    """The `injudge.summary/v6` artifact: the final statistics set of a run —
+    """The `injudge.summary/v7` artifact: the final statistics set of a run —
     the combined overall aggregate, and per trajectory the trajectory-level
     aggregate plus a narrative-free span index. The report artifact stays the
     judging record (rubric notes, analysis, judge_raw, the validation log);
