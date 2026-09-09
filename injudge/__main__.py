@@ -757,7 +757,7 @@ def main(argv: list[str] | None = None) -> int:
     # (per-trajectory rewrites would re-walk every operation per trajectory)
     atomic_write(
         summary_path,
-        json.dumps(build_summary(artifact), indent=1, ensure_ascii=False) + "\n",
+        json.dumps(build_summary(artifact), indent=2, ensure_ascii=False) + "\n",
     )
     if args.html:
         # the memgraph visualization with the verdicts merged onto the graph

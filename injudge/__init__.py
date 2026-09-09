@@ -26,7 +26,8 @@ from __future__ import annotations
 # ignored_unknown_novelty, never ignored_novel.
 REPORT_SCHEMA = "injudge.report/v11"
 
-# injudge.summary/v7: counts.novelty.null includes judged unknown novelty;
-# novelty rates exclude those entries, and no_footprint_reasons can include
-# ignored_unknown_novelty. Null is missing evidence, not a fourth tier.
-SUMMARY_SCHEMA = "injudge.summary/v7"
+# injudge.summary/v8: results-first layout, grouped counts/verdicts/delivery/
+# judge statistics, compact trajectory rows, and an id-keyed details section.
+# Source report schema is retained; scoring and null-novelty semantics do not
+# change (null counts as unknown and stays out of novelty-rate denominators).
+SUMMARY_SCHEMA = "injudge.summary/v8"

@@ -1,5 +1,5 @@
 """Report assembly: the `injudge.report/v11` JSON artifact, the statistics-only
-`injudge.summary/v7` distillation, and the stdout summary.
+`injudge.summary/v8` distillation, and the stdout summary.
 
 The runtime artifact's output contract: per operation
 {operation_id, kind, seq, payload_summary, verdict, confidence, evidence[]}
@@ -22,11 +22,12 @@ configuration is better than another. The tool block carries the resolved,
 secret-free judge configuration so the run is reproducible from its own
 artifact.
 
-The summary artifact is the final statistics set of the run: the combined
-overall aggregate, and per trajectory the trajectory-level aggregate plus a
-narrative-free span index (verdict / confidence / per-memory usage labels —
-`operation_id` points into the report for the full record). No rubric notes,
-no recorded memory text, no validation log.
+The summary puts the combined results and compact trajectory comparisons
+before the detailed statistics. Rubric distributions, memory tallies and
+the narrative-free span index live under `details` (`operation_id` points
+into the report for the full record). No rubric notes, no recorded memory
+text, no validation log. Judge configuration and source-report provenance
+follow the results rather than interrupting them.
 
 All rubric signals but relevance are enums (accuracy 3-state, novelty
 3-tier-or-null, influence 4-level, positive_effect 3-state-or-null); verdicts are
@@ -441,19 +442,16 @@ def _slim_aggregate(a: dict) -> dict:
     null means, zero cost, empty triage) are omitted — the same rule empty
     `low_confidence` already followed."""
     out = {
-        "n_injections": a["n_injections"],
-        "n_spans": a["n_spans"],
-        "restated_injections": a["restated_injections"],
-        "positive": a["positive"],
-        "negative": a["negative"],
-        "neutral": a["neutral"],
-        "error": a["error"],
-        "unjudged": a["unjudged"],
-        "unassessable": a["unassessable"],
+        "counts": {k: a[k] for k in (
+            "n_trajectories", "n_injections", "n_spans", "restated_injections",
+        ) if k in a},
+        "verdicts": {"counts": {k: a[k] for k in (
+            "positive", "negative", "neutral", "error", "unjudged", "unassessable",
+        )}},
     }
     rates = a.get("rates") or {}
     if any(v is not None for v in rates.values()):
-        out["rates"] = rates
+        out["verdicts"]["rates"] = rates
     headline = a.get("headline") or {}
     judged = headline.get("judged_spans") or 0
     if judged:
@@ -482,7 +480,30 @@ def _slim_aggregate(a: dict) -> dict:
                 h["unassessable_tokens"] = headline["unassessable_tokens"]
         if headline.get("caveat"):
             h["caveat"] = headline["caveat"]
-        out["headline"] = h
+        out = {"headline": h, **out}
+    delivery = {}
+    cost = a.get("cost") or {}
+    if cost.get("approx_tokens_total") or cost.get("content_chars_total"):
+        delivery["cost"] = cost
+    if a.get("policy"):
+        delivery["policy"] = a["policy"]
+    if delivery:
+        out["delivery"] = delivery
+    judge = {}
+    means = {k: v for k, v in (a.get("mean_confidence_by_verdict") or {}).items()
+             if v is not None}
+    buckets = a.get("confidence_buckets") or {}
+    if means or any(buckets.values()):
+        judge["confidence"] = {"mean_by_verdict": means, "buckets": buckets}
+    for opt in ("input_paths", "gold_scored", "forced_answers"):
+        if opt in a:
+            judge[opt] = a[opt]
+    if a.get("judge_compliance"):
+        judge["compliance"] = a["judge_compliance"]
+    if a.get("low_confidence"):
+        judge["low_confidence"] = a["low_confidence"]
+    if judge:
+        out["judge"] = judge
     rub = a.get("rubric") or {}
     if rub.get("deliveries"):
         rubric = {
@@ -497,24 +518,8 @@ def _slim_aggregate(a: dict) -> dict:
             if entries:
                 rubric[name] = _slim_key_list(entries)
         out["rubric"] = rubric
-    cost = a.get("cost") or {}
-    if cost.get("approx_tokens_total") or cost.get("content_chars_total"):
-        out["cost"] = cost
-    means = {k: v for k, v in (a.get("mean_confidence_by_verdict") or {}).items()
-             if v is not None}
-    buckets = a.get("confidence_buckets") or {}
-    if means or any(buckets.values()):
-        out["confidence"] = {"mean_by_verdict": means, "buckets": buckets}
-    for opt in ("n_trajectories", "input_paths", "gold_scored", "forced_answers",
-                "judge_compliance"):
-        if opt in a:
-            out[opt] = a[opt]
-    if a.get("policy"):
-        out["policy"] = a["policy"]
     if a.get("memory_usage"):
         out["memory_usage"] = _slim_usage_rollup(a["memory_usage"])
-    if a.get("low_confidence"):
-        out["low_confidence"] = a["low_confidence"]
     return out
 
 
@@ -543,33 +548,42 @@ def _summary_span_index(op: dict) -> dict:
 
 
 def build_summary(artifact: dict) -> dict:
-    """The `injudge.summary/v7` artifact: the final statistics set of a run —
-    the combined overall aggregate, and per trajectory the trajectory-level
-    aggregate plus a narrative-free span index. The report artifact stays the
-    judging record (rubric notes, analysis, judge_raw, the validation log);
-    the summary is for reading and comparing numbers. The judge identity
-    (model + resolved, secret-free config) rides the tool block so a summary
-    never presents rates whose judge configuration is unrecoverable."""
+    """Results first, drilldown second, provenance last. Trajectory rows
+    compare populations and verdicts; their ids join to detailed aggregates
+    and spans without repeating the rows.
+    This is a projection of saved statistics, never a re-judgment; retain
+    the source schema and timestamp alongside the secret-free judge config.
+    """
     spans_by_traj: dict[str, list[dict]] = {}
     for op in artifact["operations"]:
         spans_by_traj.setdefault(op["traj"], []).append(_summary_span_index(op))
+    overall = _slim_aggregate(artifact["aggregates"]["overall"])
+    overall_details = {k: overall.pop(k) for k in ("rubric", "memory_usage") if k in overall}
+    trajectories = []
+    trajectory_details = {}
+    for t in artifact["trajectories"]:
+        stats = _slim_aggregate(artifact["aggregates"]["per_trajectory"][t["id"]])
+        if t.get("policy"):
+            stats.setdefault("delivery", {})["policy"] = t["policy"]
+        trajectories.append({
+            "id": t["id"],
+            **{k: t[k] for k in ("instance_id", "model", "adapter") if t.get(k)},
+            "counts": stats.pop("counts"),
+            "verdicts": stats.pop("verdicts"),
+        })
+        trajectory_details[t["id"]] = {
+            **stats, "spans": spans_by_traj.get(t["id"], []),
+        }
     tool = dict(artifact.get("tool") or {})
     return {
-        "tool": {"name": "injudge", "schema": SUMMARY_SCHEMA, **{
+        "overall": overall,
+        "trajectories": trajectories,
+        "details": {"overall": overall_details, "trajectories": trajectory_details},
+        "generated_at": artifact["generated_at"],
+        "tool": {"name": "injudge", "schema": SUMMARY_SCHEMA,
+                 "source_report_schema": tool["schema"], **{
             k: v for k, v in tool.items() if k not in ("name", "schema")
         }},
-        "generated_at": artifact["generated_at"],
-        "overall": _slim_aggregate(artifact["aggregates"]["overall"]),
-        "trajectories": [
-            {
-                "id": t["id"],
-                **{k: t[k] for k in ("instance_id", "model", "adapter") if t.get(k)},
-                **_slim_aggregate(artifact["aggregates"]["per_trajectory"][t["id"]]),
-                **({"policy": t["policy"]} if t.get("policy") else {}),
-                "spans": spans_by_traj.get(t["id"], []),
-            }
-            for t in artifact["trajectories"]
-        ],
     }
 
 

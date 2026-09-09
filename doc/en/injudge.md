@@ -29,7 +29,7 @@ Each run writes into `-o DIR` (default `output/`):
 | File | Contents |
 |---|---|
 | `injudge-report.json` | The runtime judging record (`injudge.report/v11`), rewritten after every trajectory so a crash keeps completed work |
-| `summary.json` | The final statistics (`injudge.summary/v7`): counts, rates, per-memory usage |
+| `summary.json` | The final statistics (`injudge.summary/v8`): counts, rates, per-memory usage |
 | `memgraph-verdicts.html` | Only with `--html`: memgraph with recall nodes colored by verdict |
 | `evidence/` | One folder per span sent to the judge agent (error outcomes included): the files the agent searched (span document, manifest, per-step files, gold) |
 | `agent-runs/` | One trajectory JSONL per span sent to the judge agent: the pi event-sourced recording of how each verdict was reached |

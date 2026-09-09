@@ -1,5 +1,5 @@
 ---
-description: "injudge.report/v11, injudge.summary/v7, every field, and how every rate is counted."
+description: "injudge.report/v11, injudge.summary/v8, every field, and how every rate is counted."
 icon: box-archive
 ---
 
@@ -12,7 +12,7 @@ injudge writes all artifacts to the output folder (`-o DIR`, default `output/`).
 | File | Schema | Role |
 |---|---|---|
 | `injudge-report.json` | `injudge.report/v11` | Runtime judging record. Rewritten after every trajectory so a crash keeps completed work. Feed it to memgraph with `--verdicts`. |
-| `summary.json` | `injudge.summary/v7` | Final statistics set: counts, rates, and a narrative-free span index. |
+| `summary.json` | `injudge.summary/v8` | Final statistics set: counts, rates, and a narrative-free span index. |
 | `memgraph-verdicts.html` | — | Only with `--html` (off by default): memgraph with recall nodes colored by span verdict. |
 | `evidence/<span-dir>/` | — | One folder per span sent to the judge agent (error outcomes included): the exact files the agent searched. |
 | `agent-runs/<span-dir>.jsonl` | — | One trajectory per span sent to the judge agent: the pi event-sourced recording of the judging conversation (see [Judge agent](judge-client.md#trajectory-recording)). |
@@ -93,42 +93,72 @@ Overall only: spans carrying an `input` record — every span the agent ran for,
 
 ## summary.json Fields
 
-Top level: `tool.schema`, `tool.judge_model`, `tool.config` (the resolved, secret-free judge-agent configuration the run judged with — never the API key, never a URL's userinfo or query), `generated_at`, `overall` (all trajectories combined), `trajectories` (per-trajectory blocks with the same statistics plus a span index). Each trajectory carries `instance_id` / `model` / `adapter` when recorded.
+Read the file from results to detail; it uses two-space indentation:
 
-Per aggregate block (`overall` and each trajectory):
+| Section | What to read here |
+|---|---|
+| `overall` | Headline first, then run counts, verdict counts/rates, delivery cost/policy, and judge diagnostics. No long memory lists. |
+| `trajectories` | Compact comparison rows in input order: `id`, recorded `instance_id` / `model` / `adapter`, `counts`, and `verdicts`. |
+| `details.overall` | Combined rubric distributions, triage lists, and memory-usage tallies. |
+| `details.trajectories.<id>` | Look up a row's `id` for its headline, delivery statistics, judge diagnostics, rubric, memory usage, and span index. Row counts/verdicts are not repeated here. |
+| `generated_at` | The source report's timestamp, not a new judging time. |
+| `tool` | `schema`, `source_report_schema`, `judge_model`, and resolved, secret-free `config`. No API key or URL userinfo/query. |
+
+For example, compare `trajectories[0].verdicts.counts`, then use that row's
+`id` (such as `T1`) to read `details.trajectories.T1.spans` and find an
+`operation_id` in the full report. Rates remain numeric fractions, not
+formatted percentage strings; `null` still means unassessed, not zero.
+
+### Counts and Verdicts
+
+These fields live under `overall` and in every trajectory comparison row:
 
 | Field | Meaning |
 |---|---|
-| `n_injections` | Recall injections delivered, restated re-deliveries included |
-| `n_spans` | Injection spans — the judged unit |
-| `restated_injections` | `n_injections − n_spans` |
-| `positive` / `negative` / `neutral` | Span verdicts: the injection's footprint improved / harmed / did not show in the work |
-| `error` / `unjudged` | Spans the judge failed to score / skipped by `--limit` |
-| `rates` | Verdict shares over judged spans (omitted when nothing was judged) |
+| `counts.n_trajectories` | Number of trajectories; overall only |
+| `counts.n_injections` | Recall injections delivered, restated re-deliveries included |
+| `counts.n_spans` | Injection spans — the judged unit |
+| `counts.restated_injections` | `n_injections − n_spans` |
+| `verdicts.counts.positive` / `negative` / `neutral` | Span verdicts: beneficial acted-on influence / non-beneficial acted-on influence / neither established. Mere reference is never negative. |
+| `verdicts.counts.error` / `unjudged` / `unassessable` | Judge failures / skipped by `--limit` / no observable downstream turn; these remain visible but are excluded from directional rates. |
+| `verdicts.rates` | Positive/negative/neutral shares over judged spans; omitted when none were judged |
+
+### Headline, Delivery, and Judge
+
+These blocks live under `overall` and `details.trajectories.<id>`:
+
+| Field | Meaning |
+|---|---|
 | `headline.judged_spans` | The rate denominator (the whole `headline` is omitted when this is 0) |
 | `headline.positive_span_rate` / `negative_span_rate` | The verdict rates, always presented together; the wasted-token share rides beside them whenever it is representable |
 | `headline.wasted_token_share` | Neutral + negative injected-token cost as a share of judged spans' cost, with `wasted_tokens` / `judged_tokens` named beside it |
 | `headline.error_unjudged_tokens` | The error/unjudged token bucket no rate or share counts (written only when non-zero) |
 | `headline.unassessable_spans` / `unassessable_tokens` | Rule-judged no-subsequent-turn spans and their delivery cost (written only when non-zero); in no directional denominator |
 | `headline.caveat` | On every reported wasted share: names the span-level proxy coarseness and the verdict asymmetry |
+| `delivery.cost` | Deterministic delivery cost: `content_chars_total`, `approx_tokens_total` (`chars // 4`), `approx_tokens_by_verdict` charged by span verdict class (omitted when zero) |
+| `delivery.policy` | `n_injections`, `n_steps`, `injection_density`, `restated_ratio`, `est_injected_tokens`, `prompt_tokens_total`, `injected_token_share`, `n_searches`, and `n_extractions` / `extraction_failures`. Overall also has `est_injected_tokens_billed`, the share's numerator when only some trajectories have usage records. Extraction failures are separate from judge errors. |
+| `judge.confidence.mean_by_verdict` / `buckets` | Non-null per-verdict means and `[0,0.5)` / `[0.5,0.8)` / `[0.8,1.0]` bucket counts over LLM-judged spans |
+| `judge.input_paths` | Overall only: spans run through the judge agent (`agent`), error outcomes included |
+| `judge.gold_scored` | Overall only: spans run with a golden answer attached |
+| `judge.forced_answers` | Overall only: spans whose final answer came from a budget-exhausted forced round, error outcomes included |
+| `judge.compliance` | `pe_pairing_corrected_spans` / `llm_judged_spans` / `pe_pairing_correction_rate`; present whenever LLM-judged spans exist |
+| `judge.low_confidence` | Span ids with confidence `< 0.5`; omitted when empty |
+
+### Rubric and Memory Details
+
+These blocks live under `details.overall` and `details.trajectories.<id>`:
+
+| Field | Meaning |
+|---|---|
 | `rubric.deliveries` | Judge-scored memory deliveries; the whole `rubric` is omitted when this is 0 |
 | `rubric.counts` / `rubric.rates` | Per-signal value distributions and projected rates |
-| `rubric.no_footprint_reasons` | Why ignored memories left no footprint: `irrelevant` / `redundant` / `confirming_ignored` / `ignored_novel` / `ignored_unknown_novelty` (omitted when empty) |
-| `rubric.inaccurate_keys` / `irrelevant_keys` | Triage lists `{key, spans}` — memories the judge found contradicted / irrelevant; written only when non-empty |
-| `cost` | Deterministic delivery cost: `content_chars_total`, `approx_tokens_total` (`chars // 4`), `approx_tokens_by_verdict` charged by span verdict class (omitted when zero) |
-| `confidence.mean_by_verdict` / `confidence.buckets` | Per-verdict means (null classes omitted) and `[0,0.5)` / `[0.5,0.8)` / `[0.8,1.0]` bucket counts, over LLM-judged spans |
-| `input_paths` | Overall only: spans run through the judge agent (`agent`), error outcomes included |
-| `gold_scored` | Overall only: spans run with a golden answer attached (the gold rubric) |
-| `forced_answers` | Overall only: spans whose final answer came from a budget-exhausted forced round, error outcomes included |
-| `judge_compliance` | Judge-contract compliance: `pe_pairing_corrected_spans` / `llm_judged_spans` / `pe_pairing_correction_rate` — the share of LLM-judged spans whose rubric needed the positive_effect↔influence pairing correction (present whenever LLM-judged spans exist) |
-| `n_trajectories` | Overall only |
-| `memory_usage` | Per-memory usage tallies: `key` + non-zero `tallies`, plus `value_drift: true` when recorded content changed across spans. Labels are defined in [Verdict derivation](verdict-derivation.md#usage-labels). |
-| `low_confidence` | Span ids with confidence `< 0.5` (only when non-empty) |
-| `policy` | Delivery policy: `n_injections`, `n_steps`, `injection_density` (injections per agent step), `restated_ratio`, `est_injected_tokens`, `prompt_tokens_total` (billed usage), `injected_token_share`, `n_searches`, and `n_extractions` / `extraction_failures` (generations recorded vs flagged as failed/incomplete — extraction reliability; rolled up overall too, separate from the judge's error spans). Overall also has `est_injected_tokens_billed` — the share's numerator when only some trajectories have usage records. |
+| `rubric.no_footprint_reasons` | `irrelevant` / `redundant` / `confirming_ignored` / `ignored_novel` / `ignored_unknown_novelty`; omitted when empty |
+| `rubric.inaccurate_keys` / `irrelevant_keys` | Triage lists `{key, spans}` for contradicted / irrelevant memories; omitted when empty |
+| `memory_usage` | `key` + non-zero `tallies`, plus `value_drift: true` when recorded content changed across spans. Labels are defined in [Verdict derivation](verdict-derivation.md#usage-labels). |
 
 ## Span Index
 
-Each trajectory's `spans` is a narrative-free index into the report:
+`details.trajectories.<id>.spans` is a narrative-free index into the report:
 
 | Field | Meaning |
 |---|---|
@@ -144,7 +174,15 @@ Each trajectory's `spans` is a narrative-free index into the report:
 
 The `injections` array lists every raw delivery with its span, `role` (`first` or `restated`), `verdict`, `content_chars`, and its `op_id` / `seq` / `step`.
 
-## Schema Change: Report v11 / Summary v7
+## Schema Change: Summary v8
+
+Summary v8 changes layout only: result-first ordering, grouped fields,
+compact trajectory comparisons, an id-keyed `details` section, and source
+report provenance. It replaces summary v7; consumers must use the paths
+above. Verdicts, denominators, null handling, and the report v11 contract
+are unchanged. There is no compatibility reader or migration layer.
+
+## Scoring Change: Report v11 / Summary v7
 
 `novelty.value` now accepts `null` when the recorded baseline cannot establish
 novel, confirming, or redundant. This is missing evidence, not a fourth tier;
@@ -159,6 +197,6 @@ with null novelty use `ignored_unknown_novelty`, never `ignored_novel`.
 The stdout distribution names the assessed population and the undetermined
 count; an all-unknown novelty population has a null novelty rate.
 
-This replaces report v10 / summary v6. Only the current report schema is
-accepted by memgraph; there is no migration or compatibility reader. Rerun
-injudge to produce the new artifacts.
+This scoring change replaced report v10 / summary v6. Only the current
+report schema is accepted by memgraph; there is no migration or
+compatibility reader. New injudge runs write report v11 and summary v8.

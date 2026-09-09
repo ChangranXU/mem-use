@@ -85,7 +85,7 @@ injudge/agent.py           # .env → AgentConfig, runner subprocess, corrective
 injudge/gold.py            # golden-answer / correctness sidecars and CLI joins
 injudge/prompts.py         # loads prompts/ (never inline prompts in code)
 injudge/aggregate.py       # verdict counts/rates, per-memory usage roll-ups
-injudge/report.py          # injudge.report/v11 + injudge.summary/v7 + stdout
+injudge/report.py          # injudge.report/v11 + injudge.summary/v8 + stdout
 injudge/__main__.py        # python3 -m injudge
 agent/                     # TS judge agent: runner.ts (pi Agent + budgets),
                            # evidence-tools.ts (scoped read-only tools),
@@ -396,15 +396,21 @@ trajectory so a crash keeps completed work.
   (non-`[A-Za-z0-9._-]` replaced by `_`, capped at 80 chars) plus an
   8-char digest suffix — `evidence.span_dir_name`.
 
-The companion `summary.json` (`injudge.summary/v7`) is the run's final
+The companion `summary.json` (`injudge.summary/v8`) is the run's final
 statistics: counts/rates, rubric distributions, cost, confidence, judge
 compliance (the positive_effect↔influence correction rate), per-trajectory
 extraction reliability (`n_extractions` / `extraction_failures`), and slim
-per-memory usage tallies. Each trajectory block carries `instance_id` /
-`model` / `adapter` when recorded, plus a narrative-free span index
-(verdict / confidence / usage labels); empty rate / headline / rubric /
-confidence / cost shells are omitted when a trajectory had no judged
-spans.
+per-memory usage tallies. The results-first layout is `overall` (headline,
+`counts`, `verdicts`, `delivery`, `judge`), compact `trajectories` comparison
+rows, then `details`. Rows carry `instance_id` / `model` / `adapter` when
+recorded, plus `counts` and `verdicts`. `details.overall` holds rubric and
+memory usage; `details.trajectories` is keyed by trajectory id and holds
+headline, delivery, judge, rubric, usage, and a narrative-free `spans` index
+(verdict / confidence / usage labels). `generated_at` and `tool` follow the
+results; `tool.source_report_schema` records the source report's version.
+Empty rate / headline / rubric / confidence shells are omitted with no
+judged population; zero-cost shells are omitted, but error-only delivery
+cost remains visible. The JSON uses two-space indentation.
 The headline binds span rates to the wasted-token share, names
 `wasted_tokens` / `judged_tokens`, shows `error_unjudged_tokens` when
 non-zero, and states the proxy caveat on every reported share. Rule-judged
