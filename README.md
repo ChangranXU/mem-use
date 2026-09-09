@@ -31,10 +31,10 @@ uv run -m memgraph <paths> -o memgraph.html --json memgraph.json
 # 2. Judge recall injections — runs an LLM agent, so configure the endpoint first
 cp .env.example .env                       # judge endpoint credentials
 uv run -m injudge <paths> --dry-run --limit 3   # preview each span's evidence folder
-uv run -m injudge <paths>                  # writes output/injudge-report.json + summary.json
+uv run -m injudge <paths>                  # writes output/<run-stamp>/injudge-report.json + summary.json
 
 # 3. Overlay the verdicts on the graph (or rerun injudge with --html)
-uv run -m memgraph <paths> --verdicts output/injudge-report.json -o memgraph-verdicts.html
+uv run -m memgraph <paths> --verdicts output/<run-stamp>/injudge-report.json -o memgraph-verdicts.html
 ```
 
 Each `<path>` is a trajectory dir (containing `trajectory.jsonl`), a

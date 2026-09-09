@@ -16,7 +16,7 @@ Each delivered entry's judged footprint window runs from the span's first step t
 ## The Folder
 
 ```
-<output>/evidence/<span-dir>/
+<output>/<run-stamp>/evidence/<span-dir>/
   manifest.json        # the index: every file, its size, and per step
                        # the step and turn, its seq range, a one-line preview
   span.md              # task statement + the span document above

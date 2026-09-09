@@ -10,7 +10,7 @@ injudge classifies each recall injection as **positive**, **negative**, or **neu
 {% endhint %}
 
 ```bash
-uv run -m injudge <paths>    # writes output/injudge-report.json + output/summary.json
+uv run -m injudge <paths>    # writes output/<run-stamp>/injudge-report.json + summary.json
 
 # The TS half of the judge (a pi agent) needs its packages once:
 cd agent && npm install && cd ..
@@ -24,7 +24,7 @@ Progress renders on stderr with tqdm: a trajectories bar plus the current trajec
 
 ## Outputs
 
-Each run writes into `-o DIR` (default `output/`):
+Each run writes its own `<run-stamp>/` folder (`YYYYMMDD-HHMMSS-<hex>`) under `-o DIR` (default `output/`), so consecutive or concurrent runs never overwrite or mix each other's artifacts:
 
 | File | Contents |
 |---|---|

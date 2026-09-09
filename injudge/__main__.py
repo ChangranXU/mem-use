@@ -5,7 +5,7 @@ into spans, then score every delivered memory on a five-signal rubric
 (relevance / accuracy / novelty / influence / positive_effect). The judge
 is an AGENT, not one prompt: each span's evidence (task, span header,
 gold attachments, one file per recorded agent step) is materialized into a
-folder under <output>/evidence/, and a pi agent with read-only tools
+folder under <output>/<run-stamp>/evidence/, and a pi agent with read-only tools
 scoped to that folder searches it and answers with the rubric JSON. Two
 simple budgets bound every conversation — a max-steps LLM-call cap and
 the context window — and both end in a forced final answer, never a
@@ -13,12 +13,15 @@ mid-run failure. The span verdict is derived in code from the rubric —
 never asked of the LLM, never read off the final task result.
 
 One agent conversation per span (plus corrective retries that continue
-the same conversation). Outputs land in the -o/--output folder (default
-output/): injudge-report.json (the runtime report), summary.json (the
-rubric statistics), evidence/ (the judged folders), agent-runs/ (one
-transcript JSONL per span — the audit trail of how each verdict was
-reached), plus memgraph-verdicts.html with --html. --dry-run prints each
-span's evidence document and file index without any network access.
+the same conversation). Each run writes its own <run-stamp>/ folder under
+the -o/--output container (default output/): injudge-report.json (the
+runtime report), summary.json (the rubric statistics), evidence/ (the
+judged folders), agent-runs/ (one transcript JSONL per span — the audit
+trail of how each verdict was reached), plus memgraph-verdicts.html with
+--html. No two runs share a folder, so consecutive or concurrent runs
+over different inputs never overwrite or mix artifacts, and the folder
+name traces every artifact to its run. --dry-run prints each span's
+evidence document and file index without any network access.
 """
 
 from __future__ import annotations
@@ -29,8 +32,10 @@ import json
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
+from uuid import uuid4
 
 try:
     from tqdm import tqdm
@@ -101,6 +106,14 @@ def _safe_endpoint(url: str) -> str:
     else:
         netloc = host
     return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+
+
+def _run_stamp() -> str:
+    """One run's folder name under the output container: a sortable local
+    timestamp plus a random tail, so runs started in the same second —
+    concurrently or back-to-back — never share a folder and a re-run over
+    the same input never silently overwrites the previous run's report."""
+    return f"{datetime.now():%Y%m%d-%H%M%S}-{uuid4().hex[:8]}"
 
 
 def _run_manifest(cfg: AgentConfig, judge_parallel: int) -> dict:
@@ -392,7 +405,8 @@ def main(argv: list[str] | None = None) -> int:
         "--output",
         type=Path,
         default=Path("output"),
-        help="output folder for the artifacts (default: output/) — always "
+        help="output container for the artifacts (default: output/) — each "
+        "run writes its own <run-stamp>/ subfolder holding "
         "injudge-report.json (the runtime report) and summary.json (the "
         "rubric statistics), plus evidence/ (the judged folders) and "
         "agent-runs/ (one transcript JSONL per span); "
@@ -454,11 +468,15 @@ def main(argv: list[str] | None = None) -> int:
 
     cfg: AgentConfig | None = None
     judge_parallel = 1  # JUDGE_PARALLEL: spans of one trajectory judged in parallel
-    report_path = args.output / "injudge-report.json"
-    summary_path = args.output / "summary.json"
-    html_path = args.output / "memgraph-verdicts.html"
-    evidence_root = args.output / "evidence"
-    transcripts_root = args.output / "agent-runs"
+    # run isolation: every artifact of this run lands in its own folder
+    # under the output container, so another run — earlier, later, or
+    # concurrently in the same container — is never overwritten or mixed in
+    run_dir = args.output / _run_stamp()
+    report_path = run_dir / "injudge-report.json"
+    summary_path = run_dir / "summary.json"
+    html_path = run_dir / "memgraph-verdicts.html"
+    evidence_root = run_dir / "evidence"
+    transcripts_root = run_dir / "agent-runs"
     env_path = args.env or _DEFAULT_ENV
     if not args.dry_run:
         # fail fast on an unwritable output folder, before any paid judge
@@ -466,13 +484,13 @@ def main(argv: list[str] | None = None) -> int:
         # so an output that cannot be written would abort the run mid-way
         # and lose the completed judging.
         try:
-            args.output.mkdir(parents=True, exist_ok=True)
+            run_dir.mkdir(parents=True, exist_ok=True)
         except OSError as e:
             raise SystemExit(
-                f"error: cannot create output folder {args.output}: {e}"
+                f"error: cannot create output folder {run_dir}: {e}"
             ) from e
-        if not args.output.is_dir():
-            raise SystemExit(f"error: output path {args.output} is not a directory")
+        if not run_dir.is_dir():
+            raise SystemExit(f"error: output path {run_dir} is not a directory")
         out_paths = [report_path, summary_path] + ([html_path] if args.html else [])
         for out_path in out_paths:
             check_writable(out_path)

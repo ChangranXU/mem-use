@@ -16,7 +16,7 @@ icon: align-left
 ## 文件夹
 
 ```
-<output>/evidence/<span-dir>/
+<output>/<run-stamp>/evidence/<span-dir>/
   manifest.json        # 索引：每个文件、其大小，以及每个步骤文件的
                        # step 与 turn、seq 范围和一行预览
   span.md              # 任务陈述 + 上文的区间文档

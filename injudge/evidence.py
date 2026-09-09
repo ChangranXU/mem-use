@@ -121,8 +121,8 @@ def span_dir_name(span_id: str) -> str:
 
 
 def write_evidence(dest: Path, files: dict[str, str]) -> None:
-    """Materialize the evidence map under `dest`, replacing any prior run's
-    folder (a re-judged span must never read stale files)."""
+    """Materialize the evidence map under `dest`, replacing whatever is
+    there (a re-judged span must never read stale files)."""
     shutil.rmtree(dest, ignore_errors=True)
     dest.mkdir(parents=True, exist_ok=True)
     for rel, text in sorted(files.items()):

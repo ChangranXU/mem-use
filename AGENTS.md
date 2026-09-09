@@ -35,7 +35,7 @@ cd agent && npm install                 # once: the pi agent packages (node >= 2
 uv run pytest tests -q                  # full suite (offline; also runs node --test)
 uv run pytest tests/test_injudge.py -q  # one file
 uv run -m memgraph <paths> -o memgraph.html --json memgraph.json
-uv run -m injudge <paths> -o output/    # injudge-report.json + summary.json + evidence/
+uv run -m injudge <paths> -o output/    # one <run-stamp>/ subfolder per run: report + summary + evidence/
 uv run -m injudge <paths> --html        # also memgraph-verdicts.html
 uv run -m injudge <paths> --dry-run     # print each span's evidence; no calls, no files
 ```
@@ -43,10 +43,12 @@ uv run -m injudge <paths> --dry-run     # print each span's evidence; no calls, 
 `<paths>` are trajectory dirs (containing `trajectory.jsonl`),
 `trajectory.jsonl` files, or roots scanned recursively. A path that matches
 nothing is a usage error, named explicitly. memgraph's HTML default is
-`memory-graph.html`. injudge's default output dir is `output/`; it exits 2
-if any span errored.
+`memory-graph.html`. injudge's default output container is `output/`, one
+`<run-stamp>/` subfolder per run (`YYYYMMDD-HHMMSS-<8 hex>` — runs never
+share a folder); it exits 2 if any span errored.
 
-`--verdicts output/injudge-report.json` merges injudge onto a memgraph
+`--verdicts output/<run-stamp>/injudge-report.json` merges injudge onto a
+memgraph
 render. injudge also accepts `--golden`, `--correctness`, `--gold-metadata`,
 `--harness-report`, `--limit`, and `--env` (see `doc/en/configuration.md`).
 
@@ -215,7 +217,7 @@ acted-on influence with `positive_effect` `no_effect` or `harmed`. Mere
 reference is never misuse.
 
 The judge is an AGENT, not one prompt. Python materializes each span's
-evidence into a folder under `<output>/evidence/` (`injudge/evidence.py`:
+evidence into a folder under `<output>/<run-stamp>/evidence/` (`injudge/evidence.py`:
 manifest.json + span.md + gold.md + one file per recorded agent step) and
 spawns `agent/runner.ts` — a pi agent whose opening contains span.md and
 the compact manifest verbatim, and whose only tools are read/search scoped
@@ -362,7 +364,10 @@ from one consumer only.
 
 **injudge** writes `injudge.report/v11` (`{tool, generated_at, trajectories,
 operations, injections, aggregates, validation}`), rewritten after every
-trajectory so a crash keeps completed work.
+trajectory so a crash keeps completed work. All of a run's artifacts land
+in that run's own `<output>/<run-stamp>/` folder — no run overwrites or
+mixes another run's artifacts, and the folder name traces every artifact
+to its run.
 
 - Rubric and `memory_usage` are keyed by span-local entry ids (`m1`, `m2`,
   …), stamped on the operation's `memories`. Display keys are labels only,
@@ -383,9 +388,10 @@ trajectory so a crash keeps completed work.
   Only rule-judged auto-neutral spans and unjudged spans omit it.
 - `aggregates.overall` counts the regimes: `input_paths`, `gold_scored`,
   `forced_answers`.
-- The run also writes `<output>/evidence/<span-dir>/` — the exact folders
-  the agents read (audit/replay value; they embed recorded memory values
-  like the report does) — and `<output>/agent-runs/<span-dir>.jsonl` — the
+- The run also writes `<output>/<run-stamp>/evidence/<span-dir>/` — the
+  exact folders the agents read (audit/replay value; they embed recorded
+  memory values like the report does) — and
+  `<output>/<run-stamp>/agent-runs/<span-dir>.jsonl` — the
   pi event-sourced trajectory of each judging conversation (message lines
   as they happen, `tombstone` lines for budget rollbacks, the injected
   forced message, per-phase `attempt_end` diagnostics with cumulative

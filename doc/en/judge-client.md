@@ -17,7 +17,7 @@ One span, one conversation. Python materializes the span's [evidence folder](sco
 
 ## Trajectory Recording
 
-Every conversation is recorded as a pi event-sourced trajectory: the runner subscribes to the agent's event stream and appends each completed message to `<output>/agent-runs/<span-dir>.jsonl` as it happens. One JSONL per span, replaced per judging run; each line is `{seq, type, …}` with attempt-local `seq`:
+Every conversation is recorded as a pi event-sourced trajectory: the runner subscribes to the agent's event stream and appends each completed message to `<output>/<run-stamp>/agent-runs/<span-dir>.jsonl` as it happens. One JSONL per span, replaced per judging run; each line is `{seq, type, …}` with attempt-local `seq`:
 
 - `attempt` — opens each runner process's lines, with `phase: "judge"` or `"repair"`. Phases append to the same file; seeded history fires no events, so no duplication.
 - `message` — one full message (user opening, assistant turns with their tool calls and per-call usage, tool results), including turns a budget later rolled back.

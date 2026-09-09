@@ -1723,9 +1723,10 @@ def test_cli_writes_results_first_summary(monkeypatch, tmp_path):
     output = tmp_path / "output"
     assert injudge_main.main([str(source), "--env", str(env), "-o", str(output)]) == 0
     assert len(calls) == 1
-    text = (output / "summary.json").read_text()
+    (run_dir,) = output.iterdir()  # one run folder per run, nothing else
+    text = (run_dir / "summary.json").read_text()
     summary = json.loads(text)
-    report = json.loads((output / "injudge-report.json").read_text())
+    report = json.loads((run_dir / "injudge-report.json").read_text())
     assert text.startswith('{\n  "overall": {\n') and text.endswith("\n")
     assert summary["tool"]["schema"] == "injudge.summary/v8"
     assert summary["tool"]["source_report_schema"] == report["tool"]["schema"]
@@ -1737,6 +1738,37 @@ def test_cli_writes_results_first_summary(monkeypatch, tmp_path):
     assert span["operation_id"] == report["operations"][0]["operation_id"]
     assert span["usage"] == {"m1": "used", "m2": "ignored"}
     assert summary["details"]["overall"]["rubric"]["deliveries"] == 2
+
+
+def test_cli_runs_share_the_container_without_clobbering(monkeypatch, tmp_path):
+    """Two runs into one -o container each get their own <run-stamp>/
+    folder: the second run leaves the first run's report, summary,
+    evidence, and transcript intact. The span id (T1:S1) is identical
+    across the runs — the folders prove same-named span artifacts coexist
+    instead of the later run rmtree-ing the earlier one's evidence."""
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.recall([REF_A, REF_B]).agent_turn()
+    source = b.write(tmp_path / "trajectory")
+    env = tmp_path / ".env"
+    env.write_text("BASE_URL=https://judge.invalid\nAPI_KEY=test-key-only\nMODEL=test-judge\n")
+    monkeypatch.setattr("injudge.agent._check_runner", lambda: None)
+    calls = stub_runner(monkeypatch, [_result(GOOD), _result(GOOD)])
+    output = tmp_path / "output"
+    assert injudge_main.main([str(source), "--env", str(env), "-o", str(output)]) == 0
+    assert injudge_main.main([str(source), "--env", str(env), "-o", str(output)]) == 0
+    assert len(calls) == 2
+    run_dirs = sorted(p for p in output.iterdir() if p.is_dir())
+    assert len(run_dirs) == 2  # distinct stamps even for same-second runs
+    for run_dir in run_dirs:
+        report = json.loads((run_dir / "injudge-report.json").read_text())
+        assert report["tool"]["schema"] == "injudge.report/v11"
+        assert (run_dir / "summary.json").is_file()
+        (span_evidence,) = (run_dir / "evidence").iterdir()
+        assert (span_evidence / "manifest.json").is_file()
+        (transcript,) = (run_dir / "agent-runs").iterdir()
+        assert transcript.suffix == ".jsonl"
+    names = [[p.name for p in (d / "evidence").iterdir()] for d in run_dirs]
+    assert names[0] == names[1]  # the identical span id, isolated per run
 
 
 def test_summary_display_keys_never_conflate_shared_id_prefixes():

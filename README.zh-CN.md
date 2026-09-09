@@ -27,10 +27,10 @@ uv run -m memgraph <paths> -o memgraph.html --json memgraph.json
 # 2. 评审召回注入——会运行 LLM 智能体，先配置评审端点
 cp .env.example .env                       # 填写评审端点凭据
 uv run -m injudge <paths> --dry-run --limit 3   # 先预览每个区间的证据文件夹
-uv run -m injudge <paths>                  # 输出 output/injudge-report.json 与 summary.json
+uv run -m injudge <paths>                  # 输出 output/<run-stamp>/injudge-report.json 与 summary.json
 
 # 3. 把判定结果叠加到图上（或用 injudge --html 一并产出）
-uv run -m memgraph <paths> --verdicts output/injudge-report.json -o memgraph-verdicts.html
+uv run -m memgraph <paths> --verdicts output/<run-stamp>/injudge-report.json -o memgraph-verdicts.html
 ```
 
 每个 `<path>` 可以是轨迹目录（含 `trajectory.jsonl`）、`trajectory.jsonl`

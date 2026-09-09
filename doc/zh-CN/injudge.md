@@ -10,7 +10,7 @@ injudge 根据召回注入在后续 agent 回合中的足迹，将其判为 **po
 {% endhint %}
 
 ```bash
-uv run -m injudge <paths>    # 写出 output/injudge-report.json 与 output/summary.json
+uv run -m injudge <paths>    # 写出 output/<run-stamp>/injudge-report.json 与 summary.json
 
 # 评审的 TS 半边（一个 pi 智能体）需要先安装一次依赖：
 cd agent && npm install && cd ..
@@ -24,7 +24,7 @@ uv run -m injudge <paths> --dry-run --limit 3
 
 ## 产物
 
-每次运行写入 `-o DIR`（默认 `output/`）：
+每次运行都在 `-o DIR`（默认 `output/`）下写入自己的 `<run-stamp>/` 文件夹（`YYYYMMDD-HHMMSS-<hex>`），连续或并发运行互不覆盖、互不混淆：
 
 | 文件 | 内容 |
 |---|---|

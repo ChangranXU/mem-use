@@ -6,7 +6,7 @@ icon: box-archive
 # Artifacts
 
 {% hint style="info" %}
-injudge writes all artifacts to the output folder (`-o DIR`, default `output/`).
+injudge writes all artifacts of a run to that run's own `<run-stamp>/` folder under the output container (`-o DIR`, default `output/`) — a run never overwrites another run's artifacts.
 {% endhint %}
 
 | File | Schema | Role |

@@ -63,7 +63,7 @@ A verdict cut mid-answer is not a failure class: the answer simply fails the con
 | `--correctness resolved\|unresolved` | sidecar | Recorded task outcome, corroboration only |
 | `--gold-metadata PATH` | unset | verified-metadata.json: per-instance gold patches joined by each trajectory's recorded `instance_id` (sits between `--golden` and the sidecar) |
 | `--harness-report PATH` | unset | One SWE-bench-style harness report for the run, joined per trajectory by `instance_id` (sits between `--correctness` and the sidecar) |
-| `-o DIR` | `output/` | Artifact directory (also receives `evidence/`, the folders the agents read) |
+| `-o DIR` | `output/` | Artifact container — each run writes its own `<run-stamp>/` subfolder (holding `evidence/`, the folders the agents read) |
 | `--html` | off | Also write `memgraph-verdicts.html` |
 
 {% hint style="warning" %}

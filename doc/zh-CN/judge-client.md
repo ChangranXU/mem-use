@@ -17,7 +17,7 @@ icon: plug
 
 ## 轨迹记录
 
-每条对话都以 pi 事件流的形式记录为轨迹：运行器订阅智能体的事件流，把每条完成的消息即时追加到 `<output>/agent-runs/<span-dir>.jsonl`。每个区间一个 JSONL，每次评判运行整体替换；每行为 `{seq, type, …}`，`seq` 在 attempt 内局部编号：
+每条对话都以 pi 事件流的形式记录为轨迹：运行器订阅智能体的事件流，把每条完成的消息即时追加到 `<output>/<run-stamp>/agent-runs/<span-dir>.jsonl`。每个区间一个 JSONL，每次评判运行整体替换；每行为 `{seq, type, …}`，`seq` 在 attempt 内局部编号：
 
 - `attempt`——开启每个运行器进程的行，并记录 `phase: "judge"` 或 `"repair"`。各阶段追加到同一文件；种入的 history 不触发事件，因此不会重复。
 - `message`——一条完整消息（用户开场、含工具调用与单次调用用量的 assistant 回合、工具结果），包括随后被预算回滚的回合。

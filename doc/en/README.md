@@ -38,7 +38,7 @@ uv run -m memgraph runs/ -o memgraph.html --json memgraph.json
 uv run -m injudge runs/ -o output/
 
 # 3 — Overlay the verdicts onto the graph
-uv run -m memgraph runs/ -o memgraph-verdicts.html --verdicts output/injudge-report.json
+uv run -m memgraph runs/ -o memgraph-verdicts.html --verdicts output/<run-stamp>/injudge-report.json
 ```
 
 {% hint style="tip" %}

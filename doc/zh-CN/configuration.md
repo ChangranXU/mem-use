@@ -63,7 +63,7 @@ cd agent && npm install    # TS 侧执行一次（需要 PATH 上有 node >= 22.
 | `--correctness resolved\|unresolved` | 边车 | 已记录的任务结果，仅作佐证 |
 | `--gold-metadata PATH` | 不设 | verified-metadata.json：按各轨迹记录的 `instance_id` 连接该实例的 gold patch（优先级介于 `--golden` 与边车之间） |
 | `--harness-report PATH` | 不设 | 整个运行共用一份 SWE-bench 风格评测报告，按 `instance_id` 逐轨迹连接（优先级介于 `--correctness` 与边车之间） |
-| `-o DIR` | `output/` | 产物目录（同时接收 `evidence/`，即智能体读取的各文件夹） |
+| `-o DIR` | `output/` | 产物容器——每次运行写入自己的 `<run-stamp>/` 子目录（内含 `evidence/`，即智能体读取的各文件夹） |
 | `--html` | 关 | 同时写出 `memgraph-verdicts.html` |
 
 {% hint style="warning" %}

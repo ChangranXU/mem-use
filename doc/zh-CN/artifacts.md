@@ -6,7 +6,7 @@ icon: box-archive
 # 产物
 
 {% hint style="info" %}
-injudge 的全部产物写入输出目录（`-o DIR`，默认 `output/`）。
+injudge 把一次运行的全部产物写入输出容器（`-o DIR`，默认 `output/`）下该次运行自己的 `<run-stamp>/` 文件夹——一次运行绝不覆盖另一次运行的产物。
 {% endhint %}
 
 | 文件 | Schema | 作用 |
