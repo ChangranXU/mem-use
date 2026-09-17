@@ -43,7 +43,7 @@ class ToolExec:
 
     `result`/`status` come from the first tool_execution_end with this
     tool_call_id, except that a `completed` close supersedes a
-    no_result/interrupted one (schema v6's late-result pair); both are None
+    no_result/interrupted one (the recorder's late-result pair); both are None
     when the execution never ended (interrupted/truncated trajectory). A
     structured (non-string) recorded result is spelled back as JSON, so
     `result` is always text for every reader.

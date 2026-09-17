@@ -1,6 +1,6 @@
 """Fixture tests for injudge: step stream, spans, evidence, verdicts.
 
-Fixtures are schema-v6 annotated trajectories (tests/annotated_fixtures.py):
+Fixtures are schema-v9 annotated trajectories (tests/annotated_fixtures.py):
 memory actions are memory_* events, and the step stream consumes the ordinary
 turn/message/tool events. The step-stream quirks verified against real runs
 still apply: origin-history re-records after MAIN-lane rewrites, turn-less
@@ -299,7 +299,7 @@ def test_turnless_tool_end_never_joins_another_lane():
 def _pipelined_same_id_turns(b: TrajBuilder):
     """Two pipelined MAIN turns whose responses recycle one wire tool_call_id;
     turn 2's response folds FIRST, revealing the id before turn 1's does.
-    Both turns close without their results (the schema-v6 late-result path),
+    Both turns close without their results (the recorder's late-result path),
     so the closes arrive turn-less afterwards — the client answers calls in
     reveal order, so the first turn-less result answers turn 2's execution."""
     b._emit("message_end", proxy_source="MAIN", role="user", msg=1, content=TASK)
@@ -837,7 +837,7 @@ def test_spans_seq_range_brackets_every_op(tmp_path):
             self.id, self.step, self.seq = id, step, seq
             self.memories = ops[0].memories
             self.exposure = []
-            self.query = None
+            self.queries = []
             self.placement_kind = None
             self.placement_text = None
     (merged,) = group_spans([_Op("R1", 2, 90), _Op("R2", 3, 40)], "T1")

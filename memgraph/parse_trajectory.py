@@ -1,6 +1,6 @@
 """Parse one gate `trajectory.jsonl` into memory operations.
 
-Runs recorded through the traj-recorder (schema v6) carry explicit `memory_*`
+Runs recorded through the traj-recorder (schema v9) carry explicit `memory_*`
 annotation events — the memory system's logical actions, recorded at the
 boundary by the system itself (see extension/traj-recorder "Annotating memory
 actions" and `memgraph/annotations.py`). This parser consumes exactly
@@ -21,8 +21,8 @@ names, or label conventions.
   only record of what landed) — delete changes as deletions with exact
   refs, per-reason rejection counts, trigger and status.
 - **Recall ops** come from `memory_delivery` events: exact delivered refs,
-  the linked search's query and returned set, placement size, and the bound
-  call that carried the injection.
+  the linked per-lane searches' queries and returned sets, placement size,
+  and the bound call that carried the injection.
 
 Step semantics: agent step = count of completed main-lane (non-memory,
 non-side) turns, 1-based. A side lane is one observed classifying turns but
@@ -377,9 +377,10 @@ def _delivery_step(
 def list_field(holder: dict[str, Any], key: str) -> list[Any]:
     """A list field of a recorded payload; [] when absent or a corrupt
     non-list — a truthy scalar on a hand-edited artifact must degrade, never
-    crash the parse (the never-raises rule). The schema-v6 payload list
+    crash the parse (the never-raises rule). The schema-v9 payload list
     fields the tools iterate (memories / before / after / produced /
-    returned / error_codes) get their non-list corruption reported in
+    retired / returned / error_codes / searches / placements) get their
+    non-list corruption reported in
     build_annotation_index, so this empty-list degrade is never the only
     trace. Shared with injudge's step stream, which applies the same guard
     to a message's tool_calls."""
@@ -548,6 +549,21 @@ def _extract_op_from_generation(
     return op
 
 
+def _placements_chars(placements: list[dict]) -> int | None:
+    """Total declared content size of a delivery's placements: each slot's
+    ContentRef size (declared chars, else inline text length), summed. None
+    when no slot recorded one — a redacted/locator placement carries no
+    size, and 0 would silently understate that delivery's injected cost."""
+    total = 0
+    seen = False
+    for placement in placements:
+        chars = content_chars(placement.get("content"))
+        if chars is not None:
+            seen = True
+            total += chars
+    return total if seen else None
+
+
 def _recall_op_from_delivery(
     event: dict,
     op_id: str,
@@ -561,8 +577,9 @@ def _recall_op_from_delivery(
 ) -> MemoryOp:
     """One recall op from a memory_delivery annotation event."""
     payload = event["payload"]
-    placement = payload.get("placement")
-    placement = placement if isinstance(placement, dict) else None
+    # one placement per rendered slot, recorded order; a corrupt non-object
+    # entry degrades away (the annotation index reported the field shape)
+    placements = [p for p in list_field(payload, "placements") if isinstance(p, dict)]
     op = MemoryOp(
         id=op_id,
         kind="recall",
@@ -573,14 +590,14 @@ def _recall_op_from_delivery(
         turn=_bound_turn(table, event.get("terminal_call_ref")),
         status=payload.get("status"),
         binding_status=event.get("binding_status"),
-        content_chars=content_chars(placement.get("content") if placement else None),
+        content_chars=_placements_chars(placements),
     )
     # a trajectory_message locator resolves through the delivery's own
     # session bindings — the same per-session resolver the session task uses
     # (no bindings resolves nothing). Computed before the memories loop: a
     # delivered value recorded as a locator (not inline text) resolves
     # through it too — without this the entry's value reads None while the
-    # placement and query do resolve, and exposure grounding compares
+    # placements and queries do resolve, and exposure grounding compares
     # nothing (the judge would see an empty value for a delivered memory)
     locator_lanes = index.binds.get(payload.get("trace_session_id"), {})
     for ref in list_field(payload, "memories"):
@@ -597,52 +614,76 @@ def _recall_op_from_delivery(
                 ref.get("content"), events, locator_lanes, slots
             )
         op.memories.append(memory)
-    search_id = payload.get("search_operation_id")
-    op.search_operation_id = search_id if isinstance(search_id, str) else None
-    search = index.operations.get(search_id) if isinstance(search_id, str) else None
-    # the placement's full text, resolved once: the presentation
-    # and the per-entry exposure both read it — the annotation's
-    # canonical values are what the delivery REFERENCES, the placement is
+    # the placements' full texts, each resolved once: the presentation
+    # and the per-entry exposure both read them — the annotation's
+    # canonical values are what the delivery REFERENCES, the placements are
     # what the agent actually saw (a bridge may clip a rendered line to its
-    # recall budget while the ref keeps the full value)
-    placement_text = (
-        resolved_content_text(placement.get("content"), events, locator_lanes, slots)
-        if placement is not None
-        else None
-    )
+    # recall budget while the ref keeps the full value). Slots render in
+    # their own place; the span/exposure compare treats the concatenation
+    # (recorded slot order) as the delivered presentation.
+    placement_texts = [
+        text
+        for text in (
+            resolved_content_text(p.get("content"), events, locator_lanes, slots)
+            for p in placements
+        )
+        if text
+    ]
+    placement_text = "\n".join(placement_texts) or None
     op.exposure = [exposure_state(m.get("value"), placement_text) for m in op.memories]
-    if placement is not None:
+    if placements:
         # Compare and show the whole presentation: a changed instruction at
         # the end of a long block must not merge into an earlier treatment.
-        kind = placement.get("kind")
-        if isinstance(kind, str) and kind:
-            op.placement_kind = kind
+        kinds = [k for k in (p.get("kind") for p in placements) if isinstance(k, str) and k]
+        if kinds:
+            op.placement_kind = "+".join(dict.fromkeys(kinds))
         if placement_text:
             op.placement_text = placement_text
-    if search is not None and search.kind == "search":
-        # the same resolution rule as the session task: inline text, or a
-        # trajectory_message locator against this event stream — the
-        # other locator kinds carry no text resolvable here
-        query = resolved_content_text(
-            search.start["payload"].get("query"), events, locator_lanes, slots
+    # The reads that produced the delivery, one {lane_id, operation_id}
+    # entry per read lane in profile order (schema v9's `searches`): the
+    # per-entry query resolution and match count follow the same rules the
+    # single-search shape had, aggregated over the linked searches.
+    entries = list_field(payload, "searches")
+    matched: int | None = None
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue  # the annotation index reported the corrupt entry
+        search_id = entry.get("operation_id")
+        if not isinstance(search_id, str):
+            continue
+        lane_id = entry.get("lane_id")
+        op.searches.append(
+            {
+                "lane_id": lane_id if isinstance(lane_id, str) else None,
+                "operation_id": search_id,
+            }
         )
-        if query is not None:
-            op.query = query
-        if search.end is not None:
-            end_payload = search.end["payload"]
-            # the protocol's own match count first: `returned` is the top-k
-            # subset actually handed back, so len(returned) understates a
-            # truncated search (matched_count.precision "lower_bound" exists
-            # for exactly that)
-            matched = end_payload.get("matched_count")
-            value = matched.get("value") if isinstance(matched, dict) else None
-            if is_int(value):
-                op.matched = value
-            else:
-                returned = end_payload.get("returned")
-                op.matched = len(returned) if isinstance(returned, list) else None
-    elif isinstance(search_id, str):
-        if search is not None:
+        search = index.operations.get(search_id)
+        if search is not None and search.kind == "search":
+            # the same resolution rule as the session task: inline text, or a
+            # trajectory_message locator against this event stream — the
+            # other locator kinds carry no text resolvable here
+            query = resolved_content_text(
+                search.start["payload"].get("query"), events, locator_lanes, slots
+            )
+            if query is not None:
+                op.queries.append(query)
+            if search.end is not None:
+                end_payload = search.end["payload"]
+                # the protocol's own match count first: `returned` is the
+                # top-k subset actually handed back, so len(returned)
+                # understates a truncated search (matched_count.precision
+                # "lower_bound" exists for exactly that). Per search, then
+                # summed across the linked lanes.
+                matched_ref = end_payload.get("matched_count")
+                value = matched_ref.get("value") if isinstance(matched_ref, dict) else None
+                if is_int(value):
+                    matched = (matched or 0) + value
+                else:
+                    returned = end_payload.get("returned")
+                    if isinstance(returned, list):
+                        matched = (matched or 0) + len(returned)
+        elif search is not None:
             # the id names a recorded operation, but a generation one — a kind
             # mismatch, not an unknown search (the annotations index reports
             # the structural side; here the recall op just gets no query)
@@ -655,12 +696,13 @@ def _recall_op_from_delivery(
                 f"{run_id}: delivery {payload.get('delivery_id')} references unknown "
                 f"search operation {search_id}"
             )
-    else:
-        # schema v6 requires the link (the gate rejects a delivery whose
-        # search is missing or incomplete) — absent is not "unknown"
+    op.matched = matched
+    if not entries:
+        # schema v9 requires the links (the gate rejects a delivery whose
+        # searches are missing) — absent is not "unknown"
         warnings.append(
             f"{run_id}: delivery {payload.get('delivery_id')} is missing its "
-            "search operation link (search_operation_id)"
+            "search links (searches)"
         )
     return op
 
@@ -704,6 +746,17 @@ def parse_trajectory(
             else:
                 warnings.append(f"{run_json}: run.json is not a JSON object; using directory name")
         if meta is not None:
+            # v9-only reader: an older recorder's run parses wrongly (its
+            # deliveries carry no `searches`/`placements`), so the version
+            # gap is named up front — a warning, never a crash (corrupt
+            # input is tolerated; the run continues with degraded ops)
+            schema = meta.get("schema_version")
+            if schema is not None and schema != 9:
+                warnings.append(
+                    f"{run_json}: run.json schema_version {schema!r} is not 9; "
+                    "these tools read schema-v9 annotations only — an older "
+                    "recorder's traces will misparse"
+                )
             # only a non-empty string names a run (the verdict join and the
             # HTML's run-id parsing both assume one); a corrupt value keeps
             # the directory name
@@ -823,7 +876,7 @@ def parse_trajectory(
             traj.instance_id = instance_id
         # the exact task the memory system scoped against — the relevance
         # rubric is judged on it. A locator-recorded task is carried too
-        # (schema v6 allows any ContentRef): a trajectory_message locator
+        # (schema v9 allows any ContentRef): a trajectory_message locator
         # resolves against this event stream; the kinds pointing outside
         # trajectory.jsonl resolve to None, with a note — never silent.
         # Redacted/unavailable content stays None by design.

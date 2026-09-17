@@ -1,10 +1,11 @@
-"""Shared synthetic-fixture builder for schema-v6 annotated trajectories.
+"""Shared synthetic-fixture builder for schema-v9 annotated trajectories.
 
-Fixtures mirror the annotation protocol emitted by traj-recorder schema v6
-(see extension/traj-recorder README "Annotating memory actions"): a
-memory_session, role bindings, generation operations (start / change / end),
-search operations, and bound deliveries — plus the ordinary turn/message/
-tool events the step stream consumes.
+Fixtures mirror the annotation protocol emitted by traj-recorder schema v9
+(see extension/traj-recorder "Annotating memory actions"): a
+memory_session, role bindings, generation operations (start / change /
+end), per-lane search operations, and bound deliveries (per-lane `searches`
+links, per-slot `placements`) — plus the ordinary turn/message/tool events
+the step stream consumes.
 """
 
 from __future__ import annotations
@@ -16,10 +17,11 @@ MAIN = "MAIN"
 MEM = "EXTRACT"
 SID = "11111111-2222-4333-8444-555555555555"
 TASK = "<pr_description>fix the bug</pr_description>"
+LANE = "default"  # the single read lane the fixture's searches record under
 
 
 def ev(seq, type, **kw):
-    return {"seq": seq, "type": type, **kw}
+    return {"seq": seq, "schema_version": 9, "type": type, **kw}
 
 
 def _placement_line(ref) -> str | None:
@@ -58,6 +60,7 @@ def cure_ref(key, value="v", memory_type="insight", confidence=0.9,
         "identity_strength": "native_stable",
         "identity_scheme": "cure-sqlite-row-version-v1",
         "item_id": item_id or f"item-{key}",
+        "lane_id": LANE,
         "namespace": namespace,
         "content": {"availability": "inline", "text": value, "sha256": digest},
         "extensions": {
@@ -74,7 +77,7 @@ def cure_ref(key, value="v", memory_type="insight", confidence=0.9,
 
 
 class AnnotatedBuilder:
-    """Assembles a synthetic annotated (schema v6) trajectory.jsonl."""
+    """Assembles a synthetic annotated (schema v9) trajectory.jsonl."""
 
     def __init__(self, main=MAIN, mem=MEM, adapter=None, task_ref=None,
                  instance_id="pydata__xarray-2905"):
@@ -201,7 +204,8 @@ class AnnotatedBuilder:
         }
 
     def generate(self, produced=(), rejections=None, status="completed",
-                 extraction_step="10", changes=(), error_codes=(), bind=None):
+                 extraction_step="10", changes=(), error_codes=(), bind=None,
+                 retired=()):
         """One generation operation (start → changes → end); returns its
         operation_id (e.g. for a delivery naming it by mistake)."""
         header = self._op_header()
@@ -234,6 +238,7 @@ class AnnotatedBuilder:
                 **header,
                 "status": status,
                 "produced": list(produced),
+                "retired": list(retired),
                 "change_count": len(changes),
                 "state_evidence": "complete",
                 "error_codes": list(error_codes),
@@ -254,19 +259,22 @@ class AnnotatedBuilder:
         return header["operation_id"]
 
     def search(self, returned=(), query="the task query", with_end=True,
-               matched_count=None):
-        """One search operation; returns its operation_id for deliveries.
-        `matched_count` is the protocol's {value, precision} field (None =
-        not recorded)."""
+               matched_count=None, lane=LANE):
+        """One per-lane search operation; returns its operation_id for
+        deliveries. `matched_count` is the protocol's {value, precision}
+        field (None = not recorded); `lane` is the read lane the search
+        records under (schema v9's lane_id)."""
         header = self._op_header()
         self.annotation(
             "memory_search_start",
-            {**header, "query": {"availability": "inline", "text": query}},
+            {**header, "lane_id": lane,
+             "query": {"availability": "inline", "text": query}},
             lane=self.mem,
         )
         if with_end:
             payload = {
                 **header,
+                "lane_id": lane,
                 "status": "completed",
                 "returned": [
                     {"ordinal": i, "memory": ref} for i, ref in enumerate(returned)
@@ -278,24 +286,43 @@ class AnnotatedBuilder:
             self.annotation("memory_search_end", payload, lane=self.mem)
         return header["operation_id"]
 
-    def delivery(self, search_operation_id, memories=(), bind=None, main_step=None,
-                 status="placed", content="## CURE Memory Policy\n…"):
-        """One memory_delivery on the main lane (bound when `bind` is given);
-        content=None records a redacted placement (no text, no chars)."""
-        ref = ({"availability": "redacted", "reason": "policy"} if content is None
-               else {"availability": "inline", "text": content, "chars": len(content)})
-        payload = {
-            "trace_session_id": SID,
-            "delivery_id": f"d-{self.seq:04d}",
-            "search_operation_id": search_operation_id,
-            "from_role": "memory",
-            "to_role": "main",
-            "status": status,
-            "placement": {
+    def delivery(self, searches, memories=(), bind=None, main_step=None,
+                 status="placed", content="## CURE Memory Policy\n…",
+                 placements=None, lane=LANE):
+        """One memory_delivery on the main lane (bound when `bind` is given).
+        `searches` is one search operation id, or a list of them, or a list
+        of (lane_id, operation_id) pairs — recorded as the delivery's
+        per-lane read links. `placements` overrides the default single-slot
+        placement (a list of {slot, kind, content, proof_kind} dicts); by
+        default one prompt_message slot carries `content` (content=None
+        records a redacted placement: no text, no chars)."""
+        if isinstance(searches, (str, tuple)):
+            searches = [searches]
+        entries = []
+        for item in searches:
+            if isinstance(item, dict):
+                entries.append(dict(item))
+            elif isinstance(item, tuple):
+                entries.append({"lane_id": item[0], "operation_id": item[1]})
+            else:
+                entries.append({"lane_id": lane, "operation_id": item})
+        if placements is None:
+            ref = ({"availability": "redacted", "reason": "policy"} if content is None
+                   else {"availability": "inline", "text": content, "chars": len(content)})
+            placements = [{
+                "slot": "memory_block",
                 "kind": "prompt_message",
                 "content": ref,
                 "proof_kind": "canonical_message",
-            },
+            }]
+        payload = {
+            "trace_session_id": SID,
+            "delivery_id": f"d-{self.seq:04d}",
+            "searches": entries,
+            "from_role": "memory",
+            "to_role": "main",
+            "status": status,
+            "placements": placements,
             "memories": list(memories),
         }
         if main_step is not None:
@@ -333,7 +360,7 @@ class AnnotatedBuilder:
             "\n".join(json.dumps(e) for e in self.events) + "\n", encoding="utf-8"
         )
         (directory / "run.json").write_text(json.dumps(
-            {"run_id": run_id, "model_name": "test-model",
+            {"schema_version": 9, "run_id": run_id, "model_name": "test-model",
              "started_at": "2026-01-01T00:00:00Z", "status": "stopped",
              "task": task_preview}
         ), encoding="utf-8")

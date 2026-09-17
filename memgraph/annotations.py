@@ -1,6 +1,6 @@
-"""Schema-v6 memory-annotation reader: explicit memory actions, no guessing.
+"""Schema-v9 memory-annotation reader: explicit memory actions, no guessing.
 
-The traj-recorder gate (schema v6) records the memory system's *logical*
+The traj-recorder gate (schema v9) records the memory system's *logical*
 actions as first-class `memory_*` events in the same `trajectory.jsonl`
 (see extension/traj-recorder README "Annotating memory actions"):
 
@@ -10,11 +10,18 @@ actions as first-class `memory_*` events in the same `trajectory.jsonl`
   (`proxy_source`), replacing any label convention;
 - `memory_generate_start` / `memory_change` / `memory_generate_end` — one
   extraction (generation) operation: inputs, native state effects (create /
-  update / delete / noop with before/after MemoryRefs), status, produced refs;
+  update / delete / noop with before/after MemoryRefs), status, produced and
+  retired refs;
 - `memory_search_start` / `memory_search_end` — one recall query and its
-  ordered results;
-- `memory_delivery` — returned memories placed into a main-lane input, with
-  the exact placement content and a cursor binding to the transporting calls.
+  ordered results, recorded per LANE (`lane_id` names the read lane);
+- `memory_delivery` — returned memories placed into a main-lane input: one
+  `searches` entry per read lane (profile order), one `placements` entry per
+  rendered slot (the exact placement content and proof kind), and a cursor
+  binding with per-slot proofs to the transporting calls.
+
+The same log may also carry the recorder's `bridge_*` lifecycle family
+(schema v7+); this reader indexes the `memory_*` provider actions only and
+skips the rest — a run without `memory_*` events yields an empty index.
 
 This module indexes those events in one tolerant pass. It never reconstructs
 memory actions from prompt text, role names, or adapter vocabulary — a run
@@ -34,8 +41,10 @@ corruption), the payload field shapes the consumers read (the iterated list
 fields, the search's matched_count object with its integer value, and
 usable returned-entry identities — none ever passed the gate's ingest in
 another shape),
-and the delivery↔search integrity (session scoping, recording order,
-delivered identities an ordered subsequence of the search's returned set).
+and the delivery↔search integrity (session scoping, per-lane link agreement
+— a search named under a different lane than it recorded — recording order,
+and delivered identities an ordered subsequence of the concatenated per-lane
+returned sets).
 
 Stdlib only, like the rest of the tools. Every entry carries the recorder's
 portable memory identity (namespace / item_id / identity_scheme /
@@ -270,10 +279,13 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
             if annotation_id is not None:
                 seen_annotation_ids.add(annotation_id)
             seen_delivery_ids.add(delivery_id)
-            # the delivered set the recall op and the subsequence check below
+            # the delivered set and the per-lane search links / per-slot
+            # placements the recall op and the subsequence check below
             # iterate: a corrupt non-list must surface, not silently become
-            # zero delivered memories
+            # zero delivered memories or an unlinkable delivery
             _check_payload_list(event, "memories", index.problems)
+            _check_payload_list(event, "searches", index.problems)
+            _check_payload_list(event, "placements", index.problems)
             index.deliveries.append(event)
             continue
 
@@ -341,7 +353,7 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
                 seen_annotation_ids.add(annotation_id)
             operation.end = event
             list_keys = (
-                ("produced", "error_codes")
+                ("produced", "retired", "error_codes")
                 if event_type == "memory_generate_end"
                 else ("returned",)
             )
@@ -436,37 +448,68 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
                     )
     for event in index.deliveries:
         # Delivery↔search integrity, the property the recall ops and span
-        # fingerprints trust: the delivery follows its search's end, and the
-        # delivered memories are an ordered subsequence of the search's
-        # returned set (the same checks the recorder's retrieval index runs).
+        # fingerprints trust: every per-lane search link resolves to this
+        # session's search recorded under the entry's lane, the delivery
+        # follows each linked search's end, and the delivered memories are
+        # an ordered subsequence of the concatenated per-lane results in
+        # profile order (the same checks the recorder's retrieval index
+        # runs).
         payload = event["payload"]  # the pass guaranteed a dict payload here
         delivery_id = payload.get("delivery_id")
-        search_id = payload.get("search_operation_id")
-        search = index.operations.get(search_id) if isinstance(search_id, str) else None
-        if search is None or search.kind != "search":
-            continue  # op assembly warns about the missing/unknown link
-        if search.start["payload"].get("trace_session_id") != payload.get("trace_session_id"):
-            # The search is keyed through its own session's operations: a
-            # corrupted cross-session link must not subsequence-check against
-            # another session's results (the recorder's retrieval refuses it).
-            index.problems.append(
-                f"delivery {delivery_id}: references a search outside its session"
-            )
-            continue
-        if search.end is None:
-            continue  # the operation's "missing end event" is already reported
-        delivery_seq, end_seq = event.get("seq"), search.end.get("seq")
-        if not all(is_int(value) for value in (delivery_seq, end_seq)):
-            index.problems.append(f"delivery {delivery_id}: missing or non-integer seq")
-        elif delivery_seq < end_seq or (
-            # on an exact seq tie only the file position can call the order
-            # (see the positions map above): a delivery sitting AFTER its
-            # search end in the stream followed it — the tie is the synthetic
-            # collision's or a hand-duplicate's artifact, not a violation
-            delivery_seq == end_seq
-            and positions[id(event)] < positions[id(search.end)]
-        ):
-            index.problems.append(f"delivery {delivery_id}: recorded before its search end")
+        entries = payload.get("searches")
+        entries = entries if isinstance(entries, list) else []
+        resolved: list[AnnotatedOperation] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                # the gate's ingest records one {lane_id, operation_id}
+                # object per read lane: a corrupt entry only reaches the log
+                # through hand-editing — report it, never crash the pass
+                index.problems.append(
+                    f"delivery {delivery_id}: searches entry is not an object"
+                )
+                continue
+            search_id = entry.get("operation_id")
+            search = index.operations.get(search_id) if isinstance(search_id, str) else None
+            if search is None or search.kind != "search":
+                continue  # op assembly warns about the missing/unknown link
+            if search.start["payload"].get("trace_session_id") != payload.get("trace_session_id"):
+                # The search is keyed through its own session's operations: a
+                # corrupted cross-session link must not subsequence-check against
+                # another session's results (the recorder's retrieval refuses it).
+                index.problems.append(
+                    f"delivery {delivery_id}: references a search outside its session"
+                )
+                continue
+            lane_id = entry.get("lane_id")
+            recorded_lane = search.start["payload"].get("lane_id")
+            if (
+                isinstance(lane_id, str)
+                and isinstance(recorded_lane, str)
+                and lane_id != recorded_lane
+            ):
+                # a search named under a different lane than it recorded —
+                # the lane-scoped read the recorder's ingest refuses; only a
+                # search with no lane recorded (itself corrupt) skips the
+                # compare, the same tolerance retrieval makes
+                index.problems.append(
+                    f"delivery {delivery_id}: search {search_id} recorded under "
+                    f"lane {recorded_lane!r}, not {lane_id!r}"
+                )
+            if search.end is None:
+                continue  # the operation's "missing end event" is already reported
+            delivery_seq, end_seq = event.get("seq"), search.end.get("seq")
+            if not all(is_int(value) for value in (delivery_seq, end_seq)):
+                index.problems.append(f"delivery {delivery_id}: missing or non-integer seq")
+            elif delivery_seq < end_seq or (
+                # on an exact seq tie only the file position can call the order
+                # (see the positions map above): a delivery sitting AFTER its
+                # search end in the stream followed it — the tie is the synthetic
+                # collision's or a hand-duplicate's artifact, not a violation
+                delivery_seq == end_seq
+                and positions[id(event)] < positions[id(search.end)]
+            ):
+                index.problems.append(f"delivery {delivery_id}: recorded before its search end")
+            resolved.append(search)
         memories = payload.get("memories")
         # A total map, like the recorder's memory_identity: a malformed
         # delivered entry degrades to a null identity that then fails to
@@ -481,19 +524,24 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
             index.problems.append(
                 f"delivery {delivery_id}: memory entry has no usable identity fields"
             )
-        returned_items = search.end["payload"].get("returned")
+        if len(resolved) != len(entries):
+            # a link that failed to resolve already reported its own problem;
+            # subsequence-checking against a truncated haystack would let a
+            # broken reference smuggle its delivery's mismatch past the check
+            continue
         # Total map, like the delivered side above: a corrupt returned entry
         # degrades to a null identity (already reported at the search end)
         # rather than vanishing from the haystack — filtering it out would
         # let the check pass vacuously over a shortened haystack.
-        returned = (
-            [
-                _ref_identity(item.get("memory") if isinstance(item, dict) else None)
-                for item in returned_items
-            ]
-            if isinstance(returned_items, list)
-            else []
-        )
+        returned = [
+            _ref_identity(item.get("memory") if isinstance(item, dict) else None)
+            for search in resolved
+            for item in (
+                search.end["payload"].get("returned")
+                if isinstance(search.end["payload"].get("returned"), list)
+                else []
+            )
+        ]
         if not _is_subsequence(delivered, returned):
             index.problems.append(
                 f"delivery {delivery_id}: memories are not an ordered search subsequence"
@@ -802,7 +850,7 @@ def item_key(memory: Any) -> str | None:
     own version-level identity tuple changes per version, so it cannot group
     a lifecycle), else the entry's display key as the best available
     fallback. An adapter projecting only a human-readable key may let one
-    store hold several items under it (nothing in schema v6 makes a display
+    store hold several items under it (nothing in schema v9 makes a display
     key item-unique), so grouping on the display key alone would merge
     distinct memories; grouping on the version tuple would split one memory
     per version. The one rule the graph registry, the span set-diff, and

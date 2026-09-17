@@ -73,14 +73,16 @@ class MemoryOp:
         `status`/`trigger` from the operation record; `flagged` is set for
         failed/incomplete generations.
     kind == "recall": one delivered memory injection (a memory_delivery
-        event) — `memories` from its MemoryRefs, `query`/`matched` from the
-        linked search operation, `content_chars`/`binding_status` from the
-        placement record, plus the internal `placement_kind`/`placement_text`
-        (how the injection was presented; injudge's span header — never
-        serialized into the graph artifact) and `exposure` (per delivered
-        entry: what the placement actually showed of the canonical value —
-        annotations.exposure_state; the refs keep their canonical identity,
-        the exposure records what the agent could have seen).
+        event) — `memories` from its MemoryRefs, `queries`/`matched`
+        aggregated from the linked per-lane search operations, `searches`
+        carrying the recorded `{lane_id, operation_id}` links, `content_chars`/
+        `binding_status` from the placement records, plus the internal
+        `placement_kind`/`placement_text` (how the injection was presented;
+        injudge's span header — never serialized into the graph artifact)
+        and `exposure` (per delivered entry: what the placement actually
+        showed of the canonical value — annotations.exposure_state; the refs
+        keep their canonical identity, the exposure records what the agent
+        could have seen).
     """
 
     id: str  # e.g. "T1:E2" / "T1:R1"
@@ -100,15 +102,21 @@ class MemoryOp:
     flagged: str | None = None
     # recall payload
     memories: list[dict] = field(default_factory=list)
-    search_operation_id: str | None = None  # linked search operation
-    query: str | None = None  # exact recorded search query text
-    matched: int | None = None  # memories the search matched (the protocol's
-    # matched_count — may exceed the returned top-k subset it falls back to)
-    content_chars: int | None = None  # placement content size
+    # the delivery's per-lane read links as recorded ({lane_id,
+    # operation_id}, profile order — schema v9's `searches`)
+    searches: list[dict] = field(default_factory=list)
+    # each linked search's resolved query text, in link order
+    queries: list[str] = field(default_factory=list)
+    matched: int | None = None  # memories the linked searches matched (the
+    # protocol's matched_count values summed across lanes — may exceed the
+    # returned top-k subsets the per-search fallback counts)
+    content_chars: int | None = None  # total placement content size (all slots)
     binding_status: str | None = None  # delivery cursor-binding status
     # how the injection was presented (internal — injudge's span header;
     # never serialized into the graph artifact): the protocol's placement
-    # kind and full resolved placement text (None when unavailable)
+    # kinds (one per rendered slot, distinct in recorded order, "+"
+    # -joined) and the full resolved placement text — all slots'
+    # concatenation (None when unavailable)
     placement_kind: str | None = None
     placement_text: str | None = None
     # per-delivered-entry placement exposure (internal like placement_text;
@@ -149,10 +157,10 @@ class MemoryOp:
                 d["declared_step"] = self.declared_step
         else:
             d.update({"memories": self.memories})
-            if self.search_operation_id is not None:
-                d["search_operation_id"] = self.search_operation_id
-            if self.query is not None:
-                d["query"] = self.query
+            if self.searches:
+                d["searches"] = self.searches
+            if self.queries:
+                d["queries"] = self.queries
             if self.matched is not None:
                 d["matched"] = self.matched
             if self.content_chars is not None:

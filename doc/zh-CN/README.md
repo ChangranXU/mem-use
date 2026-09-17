@@ -9,7 +9,7 @@ icon: book-open
 **mem-eval 是什么？** 一套只读分析工具，度量 agent 记忆系统的实际效果——可视化全部记忆操作，并以 LLM 评分规则为每次召回注入打分。
 {% endhint %}
 
-**mem-eval** 以 traj-recorder 录制的 schema-v6 `trajectory.jsonl` 轨迹为输入——其中每个记忆动作都作为显式的 `memory_*` 注解事件记录在案——将其转化为可操作的质量指标。
+**mem-eval** 以 traj-recorder 录制的 schema-v9 `trajectory.jsonl` 轨迹为输入——其中每个记忆动作都作为显式的 `memory_*` 注解事件记录在案——将其转化为可操作的质量指标。
 
 记忆动作绝不从提示词、角色名或标签约定中推断。没有注解的轨迹是合法输入，运行得到零个记忆操作。
 

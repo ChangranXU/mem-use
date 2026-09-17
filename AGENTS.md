@@ -1,6 +1,6 @@
 # mem-eval
 
-mem-eval scores memory-system quality from schema-v6 gate trajectories
+mem-eval scores memory-system quality from schema-v9 gate trajectories
 (extension/traj-recorder). Two read-only tools share one parsing core:
 
 - **memgraph** renders every memory operation and its relationships as a
@@ -70,7 +70,7 @@ build step); `npm install` there once.
 pyproject.toml + uv.lock   # uv env; package = false; tools run as uv run -m …
 util.py                    # atomic_write, tmp_sibling, utf8_safe, check_writable,
                            # print_safe, print_validation
-memgraph/annotations.py    # schema-v6 annotation index + MemoryRef mapping
+memgraph/annotations.py    # schema-v9 annotation index + MemoryRef mapping
 memgraph/model.py          # Trajectory / MemoryOp / MemoryUnit / Edge
 memgraph/parse_trajectory.py  # trajectory.jsonl → ops; shared step rule
 memgraph/graph.py          # path discovery, cross-trajectory linking, validation
@@ -96,7 +96,7 @@ prompts/                   # every LLM prompt, grouped by tool/purpose
 doc/                       # GitBook: LANGS.md + en/ + zh-CN/, each with SUMMARY.md
 data/                      # SWE-bench Verified streams; data/utils build stack
 tests/conftest.py          # checkout root on sys.path
-tests/annotated_fixtures.py  # schema-v6 synthetic-trajectory builder
+tests/annotated_fixtures.py  # schema-v9 synthetic-trajectory builder
 tests/test_*.py            # pytest suite
 ```
 
@@ -106,7 +106,18 @@ Memory actions come only from recorded `memory_*` annotation events:
 `memory_session`, `memory_role_bind`, `memory_generate_*`, `memory_change`,
 `memory_search_*`, `memory_delivery`. Never reconstruct them from prompt
 text, role names, or label conventions. A run without annotations is valid:
-zero memory operations plus a validation note.
+zero memory operations plus a validation note. The recorder's `bridge_*`
+lifecycle family is tolerated and skipped; an older recorder's run is
+warned about from its run.json schema version (the tools are v9-only, no
+compatibility path).
+
+Schema v9's lane-aware shape: searches record a `lane_id`; a delivery
+names one `searches` entry per read lane (profile order) and one
+`placements` entry per rendered slot — the recall op's presentation is the
+slots' concatenation in recorded order, its queries/matched are aggregated
+across the linked searches, and the delivery↔search integrity check
+verifies lane agreement plus the ordered subsequence over the concatenated
+per-lane results.
 
 Identity and grouping use the recorder's portable MemoryRef fields, never
 adapter vocabulary.
@@ -288,14 +299,14 @@ Easy to get wrong:
 3. `pathlib` instead of `os.path`. Artifacts go through `atomic_write`.
 4. Data containers are plain dataclasses with `to_dict()`. Parameterize
    generics (`set[str | None]`, not bare `set`).
-5. Module docstrings and comments explain *why* — protocol rules, schema-v6
+5. Module docstrings and comments explain *why* — protocol rules, schema-v9
    semantics, what the recorder guarantees — not what the code does.
 6. Concise, short, minimal code. No features, abstractions, or knobs beyond
    the request.
 
 ## Tests
 
-Fixtures are synthetic schema-v6 trajectories from
+Fixtures are synthetic schema-v9 trajectories from
 `tests/annotated_fixtures.py` (`AnnotatedBuilder`). No network, no node:
 stub the agent runner by monkeypatching `injudge.agent._invoke_runner`
 with canned results (the corrective loop, input records, and evidence
@@ -355,9 +366,12 @@ artifact-format change in the PR. Schema strings live in
 the memgraph reader cannot desync.
 
 **memgraph** (`--json`; also embedded verbatim in the HTML) is `{tool,
-trajectories, ops, memories, edges, validation}`. Fields the HTML does not
-read (e.g. `edges`, recall `content_chars`, the per-injection verdict role
-marker, the singular `memory_lane`) are still part of the JSON contract.
+trajectories, ops, memories, edges, validation}`. Recall ops carry `searches`
+(the delivery's per-lane `{lane_id, operation_id}` links, schema v9) and
+`queries` (each linked search's resolved query) — never a single
+search-operation id or query. Fields the HTML does not read (e.g. `edges`,
+recall `content_chars`, the per-injection verdict role marker, the singular
+`memory_lane`) are still part of the JSON contract.
 The HTML colors rewrite markers by each marker's own `on_memory_lane` flag,
 computed at parse time against the final lane set. Do not prune a field
 from one consumer only.

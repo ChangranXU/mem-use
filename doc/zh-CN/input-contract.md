@@ -6,7 +6,7 @@ icon: file-lines
 # 输入约定
 
 {% hint style="info" %}
-两个工具都读取 **schema-v6 gate 轨迹**。记忆动作完全来自录制器的 `memory_*` 注解事件——绝不解析提示词、角色名或标签约定。
+两个工具都读取 **schema-v9 gate 轨迹**。记忆动作完全来自录制器的 `memory_*` 注解事件——绝不解析提示词、角色名或标签约定。录制器的 `bridge_*` 生命周期事件被容忍并跳过；更老录制器的 run 会按 run.json 的 schema 版本给出告警并降级解析。
 {% endhint %}
 
 没有注解的轨迹是合法输入：运行得到零个记忆操作，外加一条 validation 说明，而不是报错。
@@ -16,10 +16,10 @@ icon: file-lines
 | 事件族 | 记录的动作 |
 |---|---|
 | `memory_session` / `memory_role_bind` | 会话元数据与泳道绑定 |
-| `memory_generate_*` | 记忆创建 |
+| `memory_generate_*` | 记忆创建（produced 与 retired 引用） |
 | `memory_change` | 生命周期更新与删除 |
-| `memory_search_*` | 检索 |
-| `memory_delivery` | 向 agent 上下文注入召回内容 |
+| `memory_search_*` | 检索，每个读取泳道一个操作（`lane_id`） |
+| `memory_delivery` | 召回注入：每个读取泳道一条 `searches` 条目，每个渲染槽位一条 `placements` 条目 |
 
 ## 记忆身份
 

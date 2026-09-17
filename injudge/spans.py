@@ -202,8 +202,11 @@ def _merge_spans(
             span.seq_last = max(span.seq_last, op.seq)
             if op.step is not None:
                 steps_seen[target].append(op.step)
-            if op.query and op.query not in span.queries:
-                span.queries.append(op.query)
+            # per-delivery queries are already per-search (one query per read
+            # lane, schema v9): each distinct one rides the span
+            for query in op.queries:
+                if query and query not in span.queries:
+                    span.queries.append(query)
             # Attributed merges already have identical presentation. An
             # unattributed tail must not backfill a missing placement: its
             # text could expose content the earlier consumer never saw.
@@ -222,7 +225,10 @@ def _merge_spans(
                 fingerprint=fp,
                 memories=op.memories,
                 memory_exposure=list(op.exposure),
-                queries=[op.query] if op.query else [],
+                # dict.fromkeys: one delivery's lanes may share one query
+                # text (per-lane searches over one query) — the span lists
+                # the DISTINCT queries, like the merge below
+                queries=list(dict.fromkeys(q for q in op.queries if q)),
                 placement_kind=op.placement_kind,
                 placement_text=op.placement_text,
             )

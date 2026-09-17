@@ -246,7 +246,7 @@ def _render_step(st: AgentStep) -> str:
         lines.append(f"content: {st.content}")
     for t in st.tools:
         lines.append(f"command: {t.name} — {_cmd_of(t.args)}")
-        # a late close (schema v6's turn-less late-result path) joins its
+        # a late close (the recorder's turn-less late-result path) joins its
         # initiating step by tool_call_id: name the actual availability seq,
         # or the rendered order would present the result as known at this
         # turn's range while later turns were really its first readers

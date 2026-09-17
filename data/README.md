@@ -299,7 +299,7 @@ The script reproduces all artifacts byte-for-byte and finishes with the full ver
 
 ## Intended Use
 
-Run the agent once per instance, in file order, keeping the memory system live across the stream. Then feed the recorded schema-v6 trajectories to mem-eval (memgraph + injudge) to watch memory creation, recall, reuse, and drift over realistic task sequences:
+Run the agent once per instance, in file order, keeping the memory system live across the stream. Then feed the recorded schema-v9 trajectories to mem-eval (memgraph + injudge) to watch memory creation, recall, reuse, and drift over realistic task sequences:
 
 1. **Canonical streams** — the default; natural evolution, comparability across repos.
 2. **`run-order.txt`** — optional single continuous stream per neighbor folder for cross-repo transfer/hygiene analysis.

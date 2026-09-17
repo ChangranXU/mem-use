@@ -1,9 +1,9 @@
-"""Fixture tests for schema-v6 annotation-driven parsing (memgraph + injudge).
+"""Fixture tests for schema-v9 annotation-driven parsing (memgraph + injudge).
 
-Fixtures mirror the annotation protocol emitted by traj-recorder schema v6
-(see extension/traj-recorder README "Annotating memory actions"): a
+Fixtures mirror the annotation protocol emitted by traj-recorder schema v9
+(see extension/traj-recorder "Annotating memory actions"): a
 memory_session, role bindings, generation operations (start / change / end),
-search operations, and bound deliveries. Memory actions come from the
+per-lane search operations, and bound deliveries. Memory actions come from the
 annotation events alone — never from prompt text or label conventions.
 """
 
@@ -20,6 +20,7 @@ from memgraph.annotations import (
 from memgraph.graph import load_and_build
 from memgraph.parse_trajectory import parse_trajectory
 from annotated_fixtures import (
+    LANE,
     MAIN,
     MEM,
     SID,
@@ -79,7 +80,7 @@ def test_annotated_run_parses_from_annotations_alone(tmp_path):
     assert recall.step == 13  # the bound call's agent step, not a guess
     assert recall.turn == 14  # gate turn (the memory turn consumed one)
     assert recall.binding_status == "bound"
-    assert recall.matched == 1 and recall.query == "the task query"
+    assert recall.matched == 1 and recall.queries == ["the task query"]
     assert recall.content_chars == len("## CURE Memory Policy\n…")
     assert [m["key"] for m in recall.memories] == ["k1"]
 
@@ -123,8 +124,180 @@ def test_search_matched_count_absent_falls_back_to_returned(tmp_path):
     assert recall.matched == 2
 
 
+def test_multi_lane_delivery_aggregates_searches(tmp_path):
+    """Schema v9's delivery names one search per read lane: the recall op
+    carries every {lane_id, operation_id} link in profile order, one query
+    per linked search, and the matched totals summed across lanes."""
+    b = AnnotatedBuilder().agent_turn(with_task=True)
+    hits = [cure_ref("k1", "v1")]
+    docs = [cure_ref("k2", "v2")]
+    sid_h = b.search(returned=hits, query="the query", lane="hits",
+                     matched_count={"value": 7, "precision": "exact"})
+    sid_d = b.search(returned=docs, query="the query", lane="docs",
+                     matched_count={"value": 3, "precision": "exact"})
+    b.agent_turn()
+    b.delivery([("hits", sid_h), ("docs", sid_d)], memories=hits + docs,
+               bind=b.last_call)
+    _, ops, warnings = parse(b, tmp_path)
+    recall = next(o for o in ops if o.kind == "recall")
+    assert recall.searches == [
+        {"lane_id": "hits", "operation_id": sid_h},
+        {"lane_id": "docs", "operation_id": sid_d},
+    ]
+    assert recall.queries == ["the query", "the query"]  # per linked search
+    assert recall.matched == 10  # the per-lane declared totals, summed
+    assert not any("not an ordered search subsequence" in w for w in warnings)
+
+
+def test_delivery_naming_a_search_under_the_wrong_lane_is_a_problem():
+    """A searches entry naming a search recorded under a different lane is
+    the lane-scoped read the recorder's ingest refuses: reported like the
+    recorder's retrieval index does, while a lane-less corrupt search (no
+    lane_id recorded) skips the compare instead of false-firing."""
+    v1 = {"version_id": "v1", "namespace": "ns", "lane_id": "hits"}
+    idx = build_annotation_index([
+        *_structural_events(),
+        {"seq": 4, "type": "memory_search_start", "proxy_source": MEM,
+         "binding_status": "not_requested",
+         "payload": {"trace_session_id": "S", "operation_id": "op-h",
+                     "lane_id": "hits", "query": {}}},
+        {"seq": 5, "type": "memory_search_end", "proxy_source": MEM,
+         "binding_status": "no_call",
+         "payload": {"trace_session_id": "S", "operation_id": "op-h",
+                     "lane_id": "hits", "status": "completed",
+                     "returned": [{"ordinal": 0, "memory": v1}]}},
+        {"seq": 6, "type": "memory_delivery", "proxy_source": MAIN,
+         "binding_status": "no_call",
+         "payload": {"trace_session_id": "S", "delivery_id": "d-wrong-lane",
+                     "searches": [{"lane_id": "docs", "operation_id": "op-h"}],
+                     "status": "placed", "memories": [v1]}},
+        {"seq": 7, "type": "memory_search_start", "proxy_source": MEM,
+         "binding_status": "not_requested",
+         "payload": {"trace_session_id": "S", "operation_id": "op-laneless",
+                     "query": {}}},  # corrupt: no lane_id recorded
+        {"seq": 8, "type": "memory_search_end", "proxy_source": MEM,
+         "binding_status": "no_call",
+         "payload": {"trace_session_id": "S", "operation_id": "op-laneless",
+                     "status": "completed",
+                     "returned": [{"ordinal": 0, "memory": v1}]}},
+        {"seq": 9, "type": "memory_delivery", "proxy_source": MAIN,
+         "binding_status": "no_call",
+         "payload": {"trace_session_id": "S", "delivery_id": "d-laneless",
+                     "searches": [{"lane_id": "anywhere",
+                                   "operation_id": "op-laneless"}],
+                     "status": "placed", "memories": [v1]}},
+    ])
+    assert any("op-h" in p and "recorded under lane 'hits', not 'docs'" in p
+               for p in idx.problems)
+    assert not any("d-laneless" in p for p in idx.problems)
+
+
+def test_multi_lane_delivery_subsequence_spans_lanes():
+    """The delivered set is an ordered subsequence of the CONCATENATED
+    per-lane results in profile order: a delivery spanning two lanes'
+    results passes, and one breaking the concatenated order is a problem."""
+    v1 = {"version_id": "v1", "namespace": "ns"}
+    v2 = {"version_id": "v2", "namespace": "ns"}
+    idx = build_annotation_index([
+        *_structural_events(),
+        {"seq": 4, "type": "memory_search_start", "proxy_source": MEM,
+         "binding_status": "not_requested",
+         "payload": {"trace_session_id": "S", "operation_id": "op-a",
+                     "lane_id": "a", "query": {}}},
+        {"seq": 5, "type": "memory_search_end", "proxy_source": MEM,
+         "binding_status": "no_call",
+         "payload": {"trace_session_id": "S", "operation_id": "op-a",
+                     "lane_id": "a", "status": "completed",
+                     "returned": [{"ordinal": 0, "memory": v1}]}},
+        {"seq": 6, "type": "memory_search_start", "proxy_source": MEM,
+         "binding_status": "not_requested",
+         "payload": {"trace_session_id": "S", "operation_id": "op-b",
+                     "lane_id": "b", "query": {}}},
+        {"seq": 7, "type": "memory_search_end", "proxy_source": MEM,
+         "binding_status": "no_call",
+         "payload": {"trace_session_id": "S", "operation_id": "op-b",
+                     "lane_id": "b", "status": "completed",
+                     "returned": [{"ordinal": 0, "memory": v2}]}},
+        {"seq": 8, "type": "memory_delivery", "proxy_source": MAIN,
+         "binding_status": "no_call",
+         "payload": {"trace_session_id": "S", "delivery_id": "d-span",
+                     "searches": [{"lane_id": "a", "operation_id": "op-a"},
+                                  {"lane_id": "b", "operation_id": "op-b"}],
+                     "status": "placed", "memories": [v1, v2]}},
+        {"seq": 9, "type": "memory_delivery", "proxy_source": MAIN,
+         "binding_status": "no_call",
+         "payload": {"trace_session_id": "S", "delivery_id": "d-inverted",
+                     "searches": [{"lane_id": "a", "operation_id": "op-a"},
+                                  {"lane_id": "b", "operation_id": "op-b"}],
+                     "status": "placed", "memories": [v2, v1]}},
+    ])
+    assert not any("d-span" in p for p in idx.problems)
+    assert any("d-inverted" in p and "not an ordered search subsequence" in p
+               for p in idx.problems)
+
+
+def test_multi_slot_placements_join_into_one_presentation(tmp_path):
+    """Schema v9 records one placement per rendered slot: the recall op's
+    presentation is the slots' concatenation (recorded order) — kinds
+    distinct-joined, chars summed, and the exposure compare runs over the
+    joined text (a value inside either slot is exposed in full)."""
+    b = AnnotatedBuilder().agent_turn(with_task=True)
+    ref = cure_ref("k1", "the delivered value")
+    sid = b.search(returned=[ref])
+    b.agent_turn()
+    b.delivery(sid, memories=[ref], bind=b.last_call, content=None, placements=[
+        {"slot": "outbound_tail", "kind": "prompt_message",
+         "content": {"availability": "inline", "text": "- the delivered value",
+                     "chars": 19},
+         "proof_kind": "canonical_message"},
+        {"slot": "system_suffix", "kind": "system_context",
+         "content": {"availability": "inline", "text": "(no other notes)",
+                     "chars": 15},
+         "proof_kind": "canonical_message"},
+    ])
+    _, ops, _ = parse(b, tmp_path)
+    recall = next(o for o in ops if o.kind == "recall")
+    assert recall.placement_kind == "prompt_message+system_context"
+    assert recall.placement_text == "- the delivered value\n(no other notes)"
+    assert recall.content_chars == 34
+    assert recall.exposure[0]["state"] == "full"
+
+
+def test_non_list_retired_is_a_problem():
+    """memory_generate_end's retired list (schema v9) is an iterated payload
+    field: a corrupt non-list is reported like produced/error_codes."""
+    idx = build_annotation_index([
+        *_structural_events(),
+        {"seq": 4, "type": "memory_generate_start", "proxy_source": MEM,
+         "binding_status": "not_requested",
+         "payload": {"trace_session_id": "S", "operation_id": "op-g",
+                     "trigger": "step", "inputs": []}},
+        {"seq": 5, "type": "memory_generate_end", "proxy_source": MEM,
+         "binding_status": "no_call",
+         "payload": {"trace_session_id": "S", "operation_id": "op-g",
+                     "status": "completed", "produced": [], "retired": "oops",
+                     "change_count": 0, "error_codes": []}},
+    ])
+    assert any("payload.retired is not a list" in p for p in idx.problems)
+
+
+def test_non_v9_run_json_schema_version_is_warned(tmp_path):
+    """The tools read schema-v9 annotations only: an older recorder's run
+    says so in run.json, and the version gap is named up front — a warning,
+    never a crash (the run continues with degraded ops)."""
+    b = AnnotatedBuilder().agent_turn(with_task=True)
+    b.recall(cure_ref("k1", "v"))
+    d = b.write(tmp_path / "t")
+    meta = json.loads((d / "run.json").read_text(encoding="utf-8"))
+    meta["schema_version"] = 6
+    (d / "run.json").write_text(json.dumps(meta), encoding="utf-8")
+    warnings: list[str] = []
+    parse_trajectory(d, warnings)
+    assert any("schema_version 6 is not 9" in w for w in warnings)
+
+
 def test_task_trajectory_message_locator_resolves_from_events(tmp_path):
-    """A locator-recorded task is carried too (schema v6 allows any
+    """A locator-recorded task is carried too (schema v9 allows any
     ContentRef): a trajectory_message locator resolves against the same
     event stream through the role bindings — the judge keeps its ground
     truth. msg_index 1 is the main lane's first user message."""
@@ -153,7 +326,7 @@ def test_search_query_locator_resolves_like_the_task(tmp_path):
     }
     b.annotation(
         "memory_search_start",
-        {"trace_session_id": SID, "operation_id": "op-q",
+        {"trace_session_id": SID, "operation_id": "op-q", "lane_id": LANE,
          "requested_by": "main", "handled_by": "memory",
          "query": locator_query},
         lane=b.mem,
@@ -162,7 +335,8 @@ def test_search_query_locator_resolves_like_the_task(tmp_path):
     # inline-text queries)
     b.annotation(
         "memory_search_end",
-        {"trace_session_id": SID, "operation_id": "op-q", "status": "completed",
+        {"trace_session_id": SID, "operation_id": "op-q", "lane_id": LANE,
+         "status": "completed",
          "returned": [], "error_codes": []},
         lane=b.mem,
     )
@@ -170,7 +344,7 @@ def test_search_query_locator_resolves_like_the_task(tmp_path):
     b.delivery("op-q", memories=[cure_ref("k1", "v")], bind=b.last_call)
     traj, ops, _ = parse(b, tmp_path)
     (recall,) = [o for o in ops if o.kind == "recall"]
-    assert recall.query == TASK
+    assert recall.queries == [TASK]
 
 
 def test_delivery_placement_fields_and_the_redacted_guard(tmp_path):
@@ -837,24 +1011,24 @@ def test_annotation_structural_problems_surface_as_warnings(tmp_path):
     _, ops, warnings = parse(b, tmp_path)
     assert any("references unknown search operation" in w for w in warnings)
     (recall,) = [o for o in ops if o.kind == "recall"]
-    assert recall.matched is None and recall.query is None
+    assert recall.matched is None and recall.queries == []
 
 
 def test_delivery_missing_search_link_is_not_reported_as_unknown(tmp_path):
-    """Schema v6 requires the delivery→search link, so an absent one is a
+    """Schema v9 requires the delivery→search links, so an absent one is a
     problem — but missing is not unknown: the warning must say which."""
     b = AnnotatedBuilder()
     b.agent_turn(with_task=True)
-    b.delivery(None, memories=[cure_ref("k1")], main_step=1)
+    b.delivery([], memories=[cure_ref("k1")], main_step=1)
     _, ops, warnings = parse(b, tmp_path)
-    assert any("missing its search operation link" in w for w in warnings)
+    assert any("missing its search links" in w for w in warnings)
     assert not any("unknown search operation" in w for w in warnings)
     (recall,) = [o for o in ops if o.kind == "recall"]
-    assert recall.search_operation_id is None
+    assert recall.searches == []
 
 
 def test_delivery_naming_a_generation_op_is_not_reported_as_unknown(tmp_path):
-    """A delivery whose search_operation_id names a recorded GENERATION
+    """A delivery whose searches entry names a recorded GENERATION
     operation is a kind mismatch, not an unknown search — the warning must
     say which (the id visibly exists in the log)."""
     b = AnnotatedBuilder()
@@ -866,7 +1040,7 @@ def test_delivery_naming_a_generation_op_is_not_reported_as_unknown(tmp_path):
                for w in warnings)
     assert not any("unknown search operation" in w for w in warnings)
     (recall,) = [o for o in ops if o.kind == "recall"]
-    assert recall.matched is None and recall.query is None
+    assert recall.matched is None and recall.queries == []
 
 
 def _reader_events(*payloads):
@@ -885,7 +1059,7 @@ def _reader_events(*payloads):
 
 
 def test_delivery_missing_or_duplicate_id_is_a_problem_not_confusion():
-    # id-less deliveries violate schema v6: each is dropped with its own
+    # id-less deliveries violate schema v9: each is dropped with its own
     # problem — never silently deduped against each other
     idx = build_annotation_index(_reader_events({"status": "placed"}, {"status": "placed"}))
     assert idx.deliveries == []
@@ -1286,7 +1460,7 @@ def test_lane_placement_violations_are_problems():
         {"seq": 6, "type": "memory_delivery", "proxy_source": MEM,  # wrong lane
          "annotation_id": "a-3", "binding_status": "no_call",
          "payload": {"trace_session_id": "S", "delivery_id": "d-wrong-lane",
-                     "search_operation_id": "op-s", "status": "placed", "memories": []}},
+                     "searches": [{"lane_id": "default", "operation_id": "op-s"}], "status": "placed", "memories": []}},
     ])
     assert any("op-s" in p and "outside the bound memory lane" in p for p in idx.problems)
     assert any(
@@ -1399,7 +1573,7 @@ def test_search_end_corrupt_returned_entry_is_reported():
         return {"seq": seq, "type": "memory_delivery", "proxy_source": MAIN,
                 "annotation_id": f"a-{seq}", "binding_status": "no_call",
                 "payload": {"trace_session_id": "S", "delivery_id": delivery_id,
-                            "search_operation_id": op, "status": "placed",
+                            "searches": [{"lane_id": "default", "operation_id": op}], "status": "placed",
                             "memories": memories}}
 
     idx = build_annotation_index([
@@ -1452,7 +1626,7 @@ def test_non_list_payload_list_fields_are_problems():
         {"seq": 9, "type": "memory_delivery", "proxy_source": MAIN,
          "annotation_id": "a-6", "binding_status": "no_call",
          "payload": {"trace_session_id": "S", "delivery_id": "d-oops",
-                     "search_operation_id": "op-s", "status": "placed",
+                     "searches": [{"lane_id": "default", "operation_id": "op-s"}], "status": "placed",
                      "memories": "oops"}},
     ])
     for field in ("before", "produced", "error_codes", "returned", "memories"):
@@ -1610,7 +1784,7 @@ def test_synthetic_seq_collision_no_false_order_problem(tmp_path):
         {"seq": 5, "type": "memory_delivery", "proxy_source": MAIN,
          "binding_status": "no_call", "annotation_id": "a-del",
          "payload": {"trace_session_id": "S", "delivery_id": "d-1",
-                     "search_operation_id": "op-1", "status": "placed",
+                     "searches": [{"lane_id": "default", "operation_id": "op-1"}], "status": "placed",
                      "memories": []}},
     ]
     d = tmp_path / "t1"
@@ -1686,12 +1860,12 @@ def test_deliveries_keep_file_order_under_a_regressed_seq():
         {"seq": 20, "type": "memory_delivery", "proxy_source": MAIN,  # forged: recorded first
          "binding_status": "no_call",
          "payload": {"trace_session_id": "S", "delivery_id": "d-first",
-                     "search_operation_id": "op-1", "status": "placed",
+                     "searches": [{"lane_id": "default", "operation_id": "op-1"}], "status": "placed",
                      "memories": [v1]}},
         {"seq": 12, "type": "memory_delivery", "proxy_source": MAIN,  # regressed seq
          "binding_status": "no_call",
          "payload": {"trace_session_id": "S", "delivery_id": "d-second",
-                     "search_operation_id": "op-1", "status": "placed",
+                     "searches": [{"lane_id": "default", "operation_id": "op-1"}], "status": "placed",
                      "memories": [v2]}},
     ])
     assert [d["payload"]["delivery_id"] for d in idx.deliveries] == [
@@ -1732,7 +1906,7 @@ def test_delivery_search_integrity_problems():
         return {"seq": seq, "type": "memory_delivery", "proxy_source": MAIN,
                 "binding_status": "no_call",
                 "payload": {"trace_session_id": "S", "delivery_id": delivery_id,
-                            "search_operation_id": op, "status": "placed",
+                            "searches": [{"lane_id": "default", "operation_id": op}], "status": "placed",
                             "memories": memories}}
 
     v1 = {"version_id": "v1", "namespace": "ns"}
@@ -1777,7 +1951,7 @@ def test_delivery_order_seq_tie_defers_to_file_position():
         return {"seq": seq, "type": "memory_delivery", "proxy_source": MAIN,
                 "binding_status": "no_call",
                 "payload": {"trace_session_id": "S", "delivery_id": delivery_id,
-                            "search_operation_id": op, "status": "placed",
+                            "searches": [{"lane_id": "default", "operation_id": op}], "status": "placed",
                             "memories": []}}
 
     s = search_events("op-1", 5)
@@ -1829,7 +2003,7 @@ def test_delivery_linking_another_sessions_search_is_a_problem():
         {"seq": 50, "type": "memory_delivery", "proxy_source": MAIN,
          "binding_status": "no_call",
          "payload": {"trace_session_id": "S2", "delivery_id": "d-cross",
-                     "search_operation_id": "op-s", "status": "placed",
+                     "searches": [{"lane_id": "default", "operation_id": "op-s"}], "status": "placed",
                      "memories": [v1]}},
     ])
     assert any("d-cross" in p and "outside its session" in p for p in idx.problems)
@@ -1882,7 +2056,7 @@ def test_delivery_malformed_memory_entry_surfaces_not_vacuous_pass():
         {"seq": 12, "type": "memory_delivery", "proxy_source": MAIN,
          "binding_status": "no_call",
          "payload": {"trace_session_id": "S", "delivery_id": "d-bad",
-                     "search_operation_id": "op-1", "status": "placed",
+                     "searches": [{"lane_id": "default", "operation_id": "op-1"}], "status": "placed",
                      "memories": [{"content": {"availability": "redacted"}}]}},
     ])
     assert any("d-bad" in p and "no usable identity fields" in p for p in idx.problems)
@@ -1918,7 +2092,7 @@ def test_search_query_locator_uses_the_delivery_session_binds(tmp_path):
         ann(9, "memory_search_end", {"trace_session_id": "S2", "operation_id": "op-q",
                                      "status": "completed", "returned": []}, "M2"),
         ann(10, "memory_delivery", {"trace_session_id": "S2", "delivery_id": "d1",
-                                    "search_operation_id": "op-q", "status": "placed",
+                                    "searches": [{"lane_id": "default", "operation_id": "op-q"}], "status": "placed",
                                     "memories": []}, "A2"),
     ]
     d = tmp_path / "t1"
@@ -1927,7 +2101,7 @@ def test_search_query_locator_uses_the_delivery_session_binds(tmp_path):
         "\n".join(json.dumps(e) for e in events) + "\n", encoding="utf-8")
     _, ops, _ = parse_trajectory(d, [])
     (recall,) = [o for o in ops if o.kind == "recall"]
-    assert recall.query == "the second session's query"
+    assert recall.queries == ["the second session's query"]
 
 
 # ------------------------------------------------- span grouping (injudge)

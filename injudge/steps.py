@@ -19,13 +19,13 @@ bindings — the same set memgraph's _TurnTable uses):
   rewrite may fall between a start and its end, and the next step's
   injection may precede the previous turn_end — never join by seq
   adjacency. First end wins, except that a `completed` close supersedes a
-  no_result/interrupted one: schema v6's late-result path pairs a
+  no_result/interrupted one: the recorder's late-result path pairs a
   turn-scoped non-completed close with a turn-less completed close under
   one tool_call_id, in either order, and consumers prefer the completed
   close;
-- a turn-less tool_execution_end is a late closing (schema v6's late-result
+- a turn-less tool_execution_end is a late closing (the recorder's late-result
   path, or an at-least-once duplicate of one — deduped like any close):
-  attributed by (lane, tool_call_id) — schema-v6 closes are lane-local, so
+  attributed by (lane, tool_call_id) — recorded closes are lane-local, so
   an id colliding with another lane's execution never joins it. An id
   colliding across SAME-lane turns pairs in reveal order: the close claims
   the earliest-revealed execution still pending a result (the recorder's
@@ -287,7 +287,7 @@ def build_step_stream(
                 ex.status == "completed" or e2.get("status") != "completed"
             ):
                 # first end wins (later ones are re-closings) — except that a
-                # completed close supersedes a non-completed one: schema v6
+                # completed close supersedes a non-completed one: the recorder
                 # pairs a turn-scoped no_result/interrupted close with a later
                 # turn-less completed close under one tool_call_id, in either
                 # order, and consumers prefer the completed close

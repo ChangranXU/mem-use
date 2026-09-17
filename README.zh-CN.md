@@ -2,7 +2,7 @@
 
 [English](README.md) | 简体中文
 
-从录制的 agent 轨迹评估记忆系统质量。两个只读工具消费 schema-v6 gate 轨迹
+从录制的 agent 轨迹评估记忆系统质量。两个只读工具消费 schema-v9 gate 轨迹
 （extension/traj-recorder）：
 
 - **memgraph** — 把每次记忆操作及其关系渲染成自包含、可离线打开的 HTML 图。

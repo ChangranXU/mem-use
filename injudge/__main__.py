@@ -331,7 +331,7 @@ def main(argv: list[str] | None = None) -> int:
             "identical injections, judge its footprint in the turns that follow "
             "(positive/negative/neutral, evidence-cited). Verdicts rest on "
             "subsequent influence, never on the final task result alone. "
-            "Injections come from the schema-v6 memory "
+            "Injections come from the schema-v9 memory "
             "annotations (memory_delivery events linked to their searches)."
         ),
     )

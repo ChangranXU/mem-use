@@ -655,10 +655,11 @@ function showOp(opId){
     const n=g?g.ids.length:1, steps=g?g.steps:[o.step];
     const keys=new Set(o.memories.map(memId)).size;
     body={steps,injections:g?g.ids:[o.id],memories:o.memories,
-          search_operation_id:o.search_operation_id,query:o.query,matched:o.matched,binding_status:o.binding_status};
+          searches:o.searches,queries:o.queries,matched:o.matched,binding_status:o.binding_status};
     h+=`<div class="kv">${n} injection${n>1?"s":""} · steps ${steps[0]==null?"?":steps[0]}${steps[1]>steps[0]?"–"+steps[1]:""} · ${keys} distinct memor${keys>1?"ies":"y"}</div>`;
-    if(o.matched!=null||o.binding_status||o.query!=null)
-      h+=`<div class="kv">${o.matched!=null?`search returned ${o.matched}`:""}${o.binding_status?` · binding ${esc(o.binding_status)}`:""}${o.query!=null?` · query “${esc(shorten(o.query,120))}”`:""}</div>`;
+    const qs=o.queries||[];
+    if(o.matched!=null||o.binding_status||qs.length)
+      h+=`<div class="kv">${o.matched!=null?`search returned ${o.matched}`:""}${o.binding_status?` · binding ${esc(o.binding_status)}`:""}${qs.length?` · quer${qs.length>1?"ies":"y"} ${qs.map(q=>`“${esc(shorten(q,120))}”`).join("; ")}`:""}</div>`;
     const df=spanDiff[opId];
     if(df) h+=`<div class="kv">set change: ${df.added.map(id=>memChip(id,"+",dispKey(id))).join(" ")}${df.added.length&&df.removed.length?" ":""}${df.removed.map(id=>memChip(id,"−",dispKey(id))).join(" ")}</div>`;
     if(o.memories.length){

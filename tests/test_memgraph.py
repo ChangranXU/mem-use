@@ -1,6 +1,6 @@
 """Fixture tests for memgraph: parsing, step attribution, linking, verdicts.
 
-Fixtures are schema-v6 annotated trajectories (see
+Fixtures are schema-v9 annotated trajectories (see
 tests/annotated_fixtures.py): memory actions come from memory_* events,
 never from prompt text or label conventions.
 """
@@ -621,7 +621,7 @@ def test_later_session_divergent_task_is_noted(tmp_path):
 
 def test_corrupt_field_values_degrade_never_crash(tmp_path):
     """Hand-corrupted container/scalar fields must degrade, never raise: a
-    truthy non-dict extensions/placement and a non-string `at` are for the
+    truthy non-dict extensions/placements and a non-string `at` are for the
     tolerant reader to absorb — load_events only normalizes seq."""
     cand = cure_ref("k1", "v")
     cand["extensions"] = "corrupt"  # truthy non-dict
@@ -634,7 +634,7 @@ def test_corrupt_field_values_degrade_never_crash(tmp_path):
             e["payload"]["extensions"] = "corrupt"
             e["at"] = 123  # not a timestamp string
         if e["type"] == "memory_delivery":
-            e["payload"]["placement"] = "corrupt"
+            e["payload"]["placements"] = "corrupt"
     d = tmp_path / "t"
     d.mkdir()
     (d / "trajectory.jsonl").write_text("\n".join(json.dumps(e) for e in b.events), encoding="utf-8")
@@ -748,7 +748,7 @@ def test_same_key_in_different_namespaces_is_two_memories(tmp_path):
 
 def test_same_key_two_items_in_one_store_are_two_memories(tmp_path):
     """Memory identity is (namespace, item): one store holding two items
-    under the same display key (nothing in schema v6 makes a display key
+    under the same display key (nothing in schema v9 makes a display key
     item-unique — the CURE store keys rows by id and can hold the same key
     at another scope or memory_type) must not merge them: their portable
     item_ids are distinct, so creation/recall edges must never cross."""

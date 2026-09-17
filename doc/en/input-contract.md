@@ -6,7 +6,7 @@ icon: file-lines
 # Input Contract
 
 {% hint style="info" %}
-Both tools read **schema-v6 gate trajectories**. Memory actions come exclusively from the recorder's `memory_*` annotation events — prompt text, role names, and label conventions are never parsed.
+Both tools read **schema-v9 gate trajectories**. Memory actions come exclusively from the recorder's `memory_*` annotation events — prompt text, role names, and label conventions are never parsed. The recorder's `bridge_*` lifecycle events are tolerated and skipped; an older recorder's run is warned about from its `run.json` schema version and parses degraded.
 {% endhint %}
 
 A trajectory without annotations is valid input: the run yields zero memory operations plus a validation note, not an error.
@@ -16,10 +16,10 @@ A trajectory without annotations is valid input: the run yields zero memory oper
 | Event family | Recorded action |
 |---|---|
 | `memory_session` / `memory_role_bind` | Session metadata and lane bindings |
-| `memory_generate_*` | Memory creation |
+| `memory_generate_*` | Memory creation (produced and retired refs) |
 | `memory_change` | Lifecycle updates and deletions |
-| `memory_search_*` | Retrieval |
-| `memory_delivery` | Recall injection into the agent context |
+| `memory_search_*` | Retrieval, one operation per read lane (`lane_id`) |
+| `memory_delivery` | Recall injection: one `searches` entry per read lane, one `placements` entry per rendered slot |
 
 ## Memory Identity
 
