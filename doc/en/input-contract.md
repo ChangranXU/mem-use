@@ -6,7 +6,7 @@ icon: file-lines
 # Input Contract
 
 {% hint style="info" %}
-Both tools read **schema-v9 gate trajectories**. Memory actions come exclusively from the recorder's `memory_*` annotation events — prompt text, role names, and label conventions are never parsed. The recorder's `bridge_*` lifecycle events are tolerated and skipped; an older recorder's run is warned about from its `run.json` schema version and parses degraded.
+Both tools read **schema-v9 gate trajectories**. Memory actions come exclusively from the recorder's `memory_*` annotation events — prompt text, role names, and label conventions are never parsed. The recorder's `bridge_*` lifecycle events do not create memory operations. A successful bridge delete without its same-operation `memory_*` retirement record produces a warning, since bridge-native revision IDs cannot substitute for portable MemoryRefs. Other bridge events are skipped; a non-v9 run produces a version warning, with no compatibility parser.
 {% endhint %}
 
 A trajectory without annotations is valid input: the run yields zero memory operations plus a validation note, not an error.
@@ -20,6 +20,10 @@ A trajectory without annotations is valid input: the run yields zero memory oper
 | `memory_change` | Lifecycle updates and deletions |
 | `memory_search_*` | Retrieval, one operation per read lane (`lane_id`) |
 | `memory_delivery` | Recall injection: one `searches` entry per read lane, one `placements` entry per rendered slot |
+
+Placement slots retain their recorded order, names, kinds, and text (or content digest when text is unavailable). Different slot arrangements never merge into one judged treatment; exposure is compared within each slot, not across concatenated messages. Empty `searches` is valid when no lane was read. An empty `placements` list records zero content; partially sized deliveries count known sizes and warn about omitted cost.
+
+Generation `retired` refs supplement delete-change records without counting the same revision twice. Retiring a distinguishably older revision leaves the current item alive: the raw retirement stays on the operation, but creates no item-deletion edge or history entry. Retiring the current revision still deletes the item. State follows the latest observed candidate; a differing retirement is noted explicitly because opaque revision IDs cannot order unobserved updates.
 
 ## Memory Identity
 

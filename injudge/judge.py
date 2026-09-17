@@ -398,12 +398,18 @@ def _render_span_header(span: InjectionSpan, task: str | None, memories_note: st
         # Retrieval provenance is not necessarily part of the main agent's
         # context. Keep every query; the agent reads what it needs.
         shown = "; ".join(f'"{q}"' for q in span.queries)
-        noun = "query" if len(span.queries) == 1 else "queries (distinct, per injection)"
+        noun = "query" if len(span.queries) == 1 else "queries (distinct, across lane reads)"
         parts.append(f"Search {noun} that produced the injection: {shown}")
-    if span.placement_kind or span.placement_text:
-        parts.append(f"Presentation: {span.placement_kind or '(kind unrecorded)'}.")
-        if span.placement_text:
-            parts.append(f"DELIVERED PLACEMENT (verbatim):\n{span.placement_text}")
+    for placement in span.placements:
+        parts.append(
+            f"Presentation slot {placement.get('slot')!r} "
+            f"({placement.get('kind') or 'kind unrecorded'}):"
+        )
+        text = placement.get("text")
+        parts.append(
+            f"DELIVERED PLACEMENT (verbatim):\n{text}"
+            if text is not None else "(content unrecorded)"
+        )
     if span.step_gaps:
         parts.append(f"NOTE: the memory was NOT delivered at steps {span.step_gaps}.")
     if span.new_keys:
@@ -447,7 +453,12 @@ def _render_span_header(span: InjectionSpan, task: str | None, memories_note: st
                     f" (also delivered at step {start - 1} — an earlier span's "
                     "delivery of this same memory owns that shared step)"
                 )
-            if end is not None:
+            if end is not None and start > end:
+                frags.append(
+                    f"{mid} ({label}) — no eligible action steps{bump} "
+                    f"(re-delivered from step {end + 1})"
+                )
+            elif end is not None:
                 if span.same_step_bound == end and not bump:
                     # the bound came from a same-step collision (a later
                     # span delivered this memory at this span's last delivery

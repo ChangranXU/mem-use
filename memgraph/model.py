@@ -68,7 +68,7 @@ class MemoryOp:
         item's versions in the two records' merged landing order — a
         partial record on either side leaves the other as the only record
         of what landed), `deletions`
-        from delete changes (exact before-refs attached as `ref`),
+        from delete changes and end-event retired refs, deduplicated per revision,
         `rejection_counts` from the end event's adapter extension,
         `status`/`trigger` from the operation record; `flagged` is set for
         failed/incomplete generations.
@@ -77,7 +77,7 @@ class MemoryOp:
         aggregated from the linked per-lane search operations, `searches`
         carrying the recorded `{lane_id, operation_id}` links, `content_chars`/
         `binding_status` from the placement records, plus the internal
-        `placement_kind`/`placement_text` (how the injection was presented;
+        `placements` (ordered slots with their kinds and resolved texts;
         injudge's span header — never serialized into the graph artifact)
         and `exposure` (per delivered entry: what the placement actually
         showed of the canonical value — annotations.exposure_state; the refs
@@ -112,14 +112,10 @@ class MemoryOp:
     # returned top-k subsets the per-search fallback counts)
     content_chars: int | None = None  # total placement content size (all slots)
     binding_status: str | None = None  # delivery cursor-binding status
-    # how the injection was presented (internal — injudge's span header;
-    # never serialized into the graph artifact): the protocol's placement
-    # kinds (one per rendered slot, distinct in recorded order, "+"
-    # -joined) and the full resolved placement text — all slots'
-    # concatenation (None when unavailable)
-    placement_kind: str | None = None
-    placement_text: str | None = None
-    # per-delivered-entry placement exposure (internal like placement_text;
+    # Slot boundaries and kinds are treatment identity, not display-only.
+    # Unresolved content keeps its digest so distinct hidden blocks stay distinct.
+    placements: list[dict] = field(default_factory=list)  # internal: slot/kind/text/content_sha256
+    # per-delivered-entry placement exposure (internal like placements;
     # injudge's span carries the merged form): annotations.exposure_state
     # records {"state": full|clipped|unknown, "exposed_chars", "value_chars"}
     # — the canonical value was NOT necessarily what the agent saw

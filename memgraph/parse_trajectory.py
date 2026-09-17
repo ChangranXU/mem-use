@@ -18,8 +18,8 @@ names, or label conventions.
   merged with the end event's produced MemoryRefs as candidates —
   version-level dedupe, each item's versions in the two records' merged
   landing order (a partial record on either side leaves the other as the
-  only record of what landed) — delete changes as deletions with exact
-  refs, per-reason rejection counts, trigger and status.
+  only record of what landed) — delete changes merged with end-event retired
+  refs as deletions, per-reason rejection counts, trigger and status.
 - **Recall ops** come from `memory_delivery` events: exact delivered refs,
   the linked per-lane searches' queries and returned sets, placement size,
   and the bound call that carried the injection.
@@ -488,6 +488,15 @@ def _extract_op_from_generation(
         op.status = payload.get("status")
         op.declared_step = operation_extraction_step(operation)
         produced = [ref_to_memory(ref) for ref in list_field(payload, "produced")]
+        # The summary can be the only surviving retirement record, just as
+        # produced can recover a missing change after-ref. One revision once.
+        deleted = {_version_ident(d["ref"]) for d in op.deletions}
+        for ref in list_field(payload, "retired"):
+            entry = ref_to_memory(ref)
+            ident = _version_ident(entry)
+            if ident not in deleted:
+                op.deletions.append({"target": ref_key(ref), "ref": entry})
+                deleted.add(ident)
         op.rejection_counts = operation_rejection_counts(operation)
         if op.status and op.status != "completed":
             codes = list_field(payload, "error_codes")
@@ -549,19 +558,19 @@ def _extract_op_from_generation(
     return op
 
 
-def _placements_chars(placements: list[dict]) -> int | None:
-    """Total declared content size of a delivery's placements: each slot's
-    ContentRef size (declared chars, else inline text length), summed. None
-    when no slot recorded one — a redacted/locator placement carries no
-    size, and 0 would silently understate that delivery's injected cost."""
-    total = 0
-    seen = False
-    for placement in placements:
-        chars = content_chars(placement.get("content"))
-        if chars is not None:
-            seen = True
-            total += chars
-    return total if seen else None
+def _placements_chars(
+    placements: list[Any], warnings: list[str], label: str,
+) -> int | None:
+    """Keep known cost without disguising unsized slots as a complete total.
+    An explicitly empty placement list records zero rendered content."""
+    sizes = [content_chars(p.get("content")) if isinstance(p, dict) else None for p in placements]
+    known = [n for n in sizes if n is not None]
+    if known and len(known) < len(sizes):
+        warnings.append(
+            f"{label}: partial placement content size; {len(sizes) - len(known)} "
+            "slot(s) record no size, so delivery cost counts only the known slots"
+        )
+    return sum(known) if known or not placements else None
 
 
 def _recall_op_from_delivery(
@@ -577,9 +586,14 @@ def _recall_op_from_delivery(
 ) -> MemoryOp:
     """One recall op from a memory_delivery annotation event."""
     payload = event["payload"]
-    # one placement per rendered slot, recorded order; a corrupt non-object
-    # entry degrades away (the annotation index reported the field shape)
-    placements = [p for p in list_field(payload, "placements") if isinstance(p, dict)]
+    # A corrupt entry is unresolvable, not evidence of an empty placement.
+    raw_placements = list_field(payload, "placements")
+    placements = [p for p in raw_placements if isinstance(p, dict)]
+    if len(placements) != len(raw_placements):
+        warnings.append(
+            f"{run_id}: delivery {payload.get('delivery_id')}: placements contain "
+            "a non-object entry; its presentation and size are unknown"
+        )
     op = MemoryOp(
         id=op_id,
         kind="recall",
@@ -590,7 +604,12 @@ def _recall_op_from_delivery(
         turn=_bound_turn(table, event.get("terminal_call_ref")),
         status=payload.get("status"),
         binding_status=event.get("binding_status"),
-        content_chars=_placements_chars(placements),
+        content_chars=(
+            _placements_chars(
+                raw_placements, warnings, f"{run_id}: delivery {payload.get('delivery_id')}",
+            )
+            if isinstance(payload.get("placements"), list) else None
+        ),
     )
     # a trajectory_message locator resolves through the delivery's own
     # session bindings — the same per-session resolver the session task uses
@@ -614,31 +633,26 @@ def _recall_op_from_delivery(
                 ref.get("content"), events, locator_lanes, slots
             )
         op.memories.append(memory)
-    # the placements' full texts, each resolved once: the presentation
-    # and the per-entry exposure both read them — the annotation's
-    # canonical values are what the delivery REFERENCES, the placements are
-    # what the agent actually saw (a bridge may clip a rendered line to its
-    # recall budget while the ref keeps the full value). Slots render in
-    # their own place; the span/exposure compare treats the concatenation
-    # (recorded slot order) as the delivered presentation.
-    placement_texts = [
-        text
-        for text in (
-            resolved_content_text(p.get("content"), events, locator_lanes, slots)
-            for p in placements
-        )
-        if text
-    ]
-    placement_text = "\n".join(placement_texts) or None
-    op.exposure = [exposure_state(m.get("value"), placement_text) for m in op.memories]
-    if placements:
-        # Compare and show the whole presentation: a changed instruction at
-        # the end of a long block must not merge into an earlier treatment.
-        kinds = [k for k in (p.get("kind") for p in placements) if isinstance(k, str) and k]
-        if kinds:
-            op.placement_kind = "+".join(dict.fromkeys(kinds))
-        if placement_text:
-            op.placement_text = placement_text
+    # A slot's location and kind affect treatment. Joining slots would also
+    # let a suffix in one message complete a clipped value in another.
+    for placement in placements:
+        content = placement.get("content")
+        text = resolved_content_text(content, events, locator_lanes, slots)
+        sha = content.get("sha256") if isinstance(content, dict) else None
+        slot, kind = placement.get("slot"), placement.get("kind")
+        op.placements.append({
+            "slot": slot if isinstance(slot, str) else None,
+            "kind": kind if isinstance(kind, str) else None,
+            "text": text,
+            "content_sha256": sha if text is None and isinstance(sha, str) else None,
+        })
+    for memory in op.memories:
+        exposures = [exposure_state(memory.get("value"), p["text"]) for p in op.placements]
+        op.exposure.append(max(
+            exposures,
+            key=lambda exp: (exp.get("exposed_chars") or 0, exp["state"] == "full"),
+            default=exposure_state(memory.get("value"), None),
+        ))
     # The reads that produced the delivery, one {lane_id, operation_id}
     # entry per read lane in profile order (schema v9's `searches`): the
     # per-entry query resolution and match count follow the same rules the
@@ -697,9 +711,8 @@ def _recall_op_from_delivery(
                 f"search operation {search_id}"
             )
     op.matched = matched
-    if not entries:
-        # schema v9 requires the links (the gate rejects a delivery whose
-        # searches are missing) — absent is not "unknown"
+    if "searches" not in payload:
+        # An empty list is valid when no lane was read; an absent field is not.
         warnings.append(
             f"{run_id}: delivery {payload.get('delivery_id')} is missing its "
             "search links (searches)"

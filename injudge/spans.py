@@ -42,7 +42,7 @@ keeps the rest of the stream. The one bound a clean re-delivery never sets:
 a LATER span starting at this span's last delivery step (two memory blocks
 placed in one call, or a declared step collision) that also carries one of
 this span's entries. The collision step is then credited exactly ONCE under
-a first-carrier rule: this span's still-open window closes at that step
+a first-carrier rule: this span's window caps at that step
 inclusive (`same_step_bound`), the later span's window for the same entry
 opens only AFTER it (`memory_window_starts`), and the collision is noted in
 warnings — so one action at the shared step can never anchor both spans.
@@ -123,9 +123,8 @@ def _same_treatment(span: InjectionSpan, op: MemoryOp) -> bool:
 
     - entry ORDER (the fingerprint is order-insensitive, but the delivered
       order is presentation: a re-ranked bundle is not the same treatment);
-    - placement presentation (the protocol's kind plus the full recorded
-      text — a re-framed or re-positioned block is not the same
-      treatment);
+    - placement presentation (ordered slot names, kinds and full texts,
+      or recorded digests for unresolved texts — reframing is a new treatment);
     - per-entry EXPOSURE (state and exposed length): merging a wider later
       exposure backward would show the judge content the span's early
       anchors predate — the clipped→full leak. A corrupt exposure record
@@ -134,7 +133,7 @@ def _same_treatment(span: InjectionSpan, op: MemoryOp) -> bool:
     """
     if [_canon_entry(m) for m in op.memories] != [_canon_entry(m) for m in span.memories]:
         return False
-    if op.placement_kind != span.placement_kind or op.placement_text != span.placement_text:
+    if op.placements != span.placements:
         return False
     if not op.exposure or len(op.exposure) != len(span.memory_exposure):
         return True
@@ -148,7 +147,7 @@ def group_spans(
 
     `warnings`, when given, receives the same-step delivery collision notes
     (a later span delivering different content at this span's last delivery
-    step): the earlier span's still-open window for a memory the colliding
+    step): the earlier span's window for a memory the colliding
     span also carries is then bounded at that step, and the colliding span's
     window for that memory opens only after it — the shared step is credited
     exactly once, and the bound is named."""
@@ -229,8 +228,7 @@ def _merge_spans(
                 # text (per-lane searches over one query) — the span lists
                 # the DISTINCT queries, like the merge below
                 queries=list(dict.fromkeys(q for q in op.queries if q)),
-                placement_kind=op.placement_kind,
-                placement_text=op.placement_text,
+                placements=list(op.placements),
             )
         )
         steps_seen.append([op.step] if op.step is not None else [])
@@ -318,17 +316,13 @@ def _stamp_windows(
     entry_idents: list[list[_Ident | None]],
     warnings: list[str] | None,
 ) -> None:
-    """Per-entry footprint windows: each delivered memory's window ends at
-    THAT memory's first re-delivery starting strictly after this span's
-    last delivery step (a re-delivery supersedes). An overlapping
-    re-delivery is skipped, never terminal (overlap means declared-back or
-    corrupt steps; the deferral past it is deliberate). A later span
-    starting AT this span's last delivery step that also carries the same
-    entry would leave that memory open in both spans — the shared step is
-    then credited once under a first-carrier rule (`same_step_bound` /
-    `memory_window_starts`): this span's still-open window closes at that
-    step inclusive, the later span's window for the same entry opens only
-    after it, and an entry no colliding span carries keeps the stream.
+    """A re-delivery bounds only the entries it carries. Strictly later
+    re-deliveries end the earlier window before their first step. A same-step
+    collision instead allocates the shared step to its first carrier and
+    the following steps to its last carrier. Both bounds must change even
+    when a still-later delivery already set a finite end, or actions before
+    that end remain creditable to both spans. Unrelated entries keep their
+    windows; intervening same-step carriers can have empty windows.
     """
     carriers: dict[_Ident, list[int]] = {}
     for j, idents in enumerate(entry_idents):
@@ -358,31 +352,32 @@ def _stamp_windows(
             windows[memory_id(j)] = end
         if span.step_last is not None:
             collisions = [j for j in starts.get(span.step_last, ()) if j > i]
-            closed = False
+            corrected = False
             if collisions:
                 for j_pos, ident in enumerate(entry_idents[i]):
-                    mid = memory_id(j_pos)
-                    if ident is None or windows[mid] is not None:
+                    if ident is None:
                         continue
                     carriers_hit = [j for j in collisions if ident in entry_idents[j]]
                     if not carriers_hit:
                         continue
-                    windows[mid] = span.step_last
-                    closed = True
+                    # A finite end can still overlap the later carrier;
+                    # capping and advancing must always happen together.
+                    windows[memory_id(j_pos)] = span.step_last
+                    corrected = True
                     for j in carriers_hit:
                         for j_later, later_ident in enumerate(entry_idents[j]):
                             if later_ident == ident:
                                 spans[j].memory_window_starts[memory_id(j_later)] = (
                                     span.step_last + 1
                                 )
-            if closed:
+            if corrected:
                 span.same_step_bound = span.step_last
                 if warnings is not None:
                     warnings.append(
                         f"{span.id}: same-step delivery collision with later "
                         f"span(s) {', '.join(spans[j].id for j in collisions)} at "
-                        f"step {span.step_last}; this span's still-open footprint "
-                        f"windows for the re-delivered memories are bounded at step "
+                        f"step {span.step_last}; this span's footprint windows "
+                        f"for the re-delivered memories are bounded at step "
                         f"{span.step_last} and the colliding span's window for the "
                         "same memory opens only after it, so one memory is never "
                         "credited to two spans"

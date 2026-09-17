@@ -824,6 +824,73 @@ def test_recall_of_unknown_key_is_dangling_not_error(tmp_path):
     assert any("origin not observed" in v["msg"] for v in graph["validation"])
 
 
+@pytest.mark.parametrize("record_change", [False, True])
+def test_generation_recovers_and_deduplicates_retired_refs(tmp_path, record_change):
+    ref = cure_ref("k", "old value")
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.generate(produced=[ref], extraction_step="1")
+    b.generate(retired=[ref], changes=[("delete", [ref], [])] if record_change else [],
+               extraction_step="1")
+    graph = load_and_build([b.write(tmp_path / "run")])
+    assert len(graph["ops"][-1]["deletions"]) == 1
+    assert graph["memories"][0]["deleted"] is True
+    assert [e["kind"] for e in graph["edges"]] == ["creates", "deletes"]
+
+
+@pytest.mark.parametrize("timing", ["delete_first", "delete_last", "later_operation"])
+def test_retiring_an_old_revision_keeps_its_replacement_alive(tmp_path, timing):
+    old = cure_ref("k", "old value", version_id="v1")
+    new = cure_ref("k", "new value", version_id="v2")
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.generate(produced=[old], extraction_step="1")
+    changes = [("create", [], [new]), ("delete", [old], [])]
+    if timing == "delete_first":
+        changes.reverse()
+    if timing == "later_operation":
+        b.generate(produced=[new], extraction_step="1")
+        changes = [("delete", [old], [])]
+    b.generate(produced=[] if timing == "later_operation" else [new], retired=[old],
+               changes=changes, extraction_step="1")
+    graph = load_and_build([b.write(tmp_path / "run")])
+    (memory,) = graph["memories"]
+    assert memory["value"] == "new value"
+    assert memory["deleted"] is False and memory["revived"] is False
+    assert memory["deletions"] == []
+    assert [e["kind"] for e in graph["edges"]] == ["creates", "supersedes"]
+    assert len(graph["ops"][-1]["deletions"]) == 1
+    assert any("different revision from the latest observed" in v["msg"] for v in graph["validation"])
+
+
+@pytest.mark.parametrize("strength", ["native_stable", "operation_local"])
+def test_revision_retirement_uses_only_comparable_recorded_identity(tmp_path, strength):
+    old = cure_ref("k", "old value", version_id="v1")
+    new = cure_ref("k", "new value", version_id="v2")
+    old["identity_strength"] = new["identity_strength"] = strength
+    retired = json.loads(json.dumps(new))
+    if strength == "native_stable":
+        retired["content"] = {"availability": "redacted", "reason": "policy"}
+    else:
+        retired["version_id"] = "different-operation-local-id"
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.generate(produced=[old], extraction_step="1")
+    b.generate(produced=[new], retired=[old], extraction_step="1")
+    b.generate(retired=[retired], extraction_step="1")
+    graph = load_and_build([b.write(tmp_path / "run")])
+    (memory,) = graph["memories"]
+    assert memory["deleted"] is True
+    assert [d["op"] for d in memory["deletions"]] == ["T1:E3"]
+
+
+def test_unobserved_retired_memory_is_registered_from_the_end_ref(tmp_path):
+    ref = cure_ref("k", "old value")
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.generate(retired=[ref], extraction_step="1")
+    graph = load_and_build([b.write(tmp_path / "run")])
+    (memory,) = graph["memories"]
+    assert memory["origin"] == "not_observed" and memory["deleted"] is True
+    assert [e["kind"] for e in graph["edges"]] == ["deletes"]
+
+
 def test_deletion_of_observed_and_unobserved_memory(tmp_path):
     cand = cure_ref("dtype_fix", "preserve dtype on copy")
     old = cure_ref("old_k", "old value", store_id=9)

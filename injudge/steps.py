@@ -84,7 +84,7 @@ def _name_of(e: dict) -> str | None:
 
 def _lane_key_of(e: dict) -> tuple[str | None, str] | None:
     """The (lane, tool_call_id) join key of a tool event; None when either
-    half is corrupt. Schema-v6 closes are lane-local (a tool result closes
+    half is corrupt. Recorded closes are lane-local (a tool result closes
     only an execution pending in its own lane), so the join must be too —
     a bare-id map would let a synthesized id colliding across lanes steal
     another lane's execution and then vanish with it (memory-lane turns

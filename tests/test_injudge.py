@@ -12,7 +12,6 @@ without spawning a single agent.
 """
 
 import json
-import re
 
 import pytest
 
@@ -23,16 +22,13 @@ from injudge.evidence import build_evidence, span_dir_name, write_evidence
 from injudge.judge import (
     GOLD_SYSTEM_PROMPT,
     SYSTEM_PROMPT,
-    _ACCURACY,
-    _INFLUENCE,
-    _NOVELTY,
-    _POS_EFFECT,
     _assemble_verdict,
     _error_verdict,
     _strict_parse,
+    _verdict_semantics,
     auto_verdict_no_subsequent_turn,
 )
-from injudge.model import AgentStep, InjectionSpan, ToolExec
+from injudge.model import AgentStep, InjectionSpan, ToolExec, memory_id
 from injudge import SUMMARY_SCHEMA
 from injudge.report import (
     _policy_line,
@@ -45,8 +41,8 @@ from injudge.report import (
     print_summary,
 )
 from injudge.spans import content_fingerprint, group_spans
-from injudge.steps import build_step_stream, prompt_tokens_total
-from memgraph.parse_trajectory import load_events, parse_trajectory
+from injudge.steps import build_step_stream
+from memgraph.parse_trajectory import parse_trajectory
 from annotated_fixtures import MEM, TASK
 from annotated_fixtures import AnnotatedBuilder as TrajBuilder
 from annotated_fixtures import cure_ref
@@ -184,7 +180,7 @@ def test_turnless_tool_end_attributed_by_id():
 
 
 def test_late_completed_close_supersedes_the_interrupted_close():
-    """Schema v6's late-result path: an execution whose turn closed before its
+    """The recorder's late-result path: an execution whose turn closed before its
     result arrived carries a turn-scoped no_result/interrupted close AND a
     turn-less completed close under one tool_call_id — in either event order.
     The completed close wins either way: the judge sees the recorded result,
@@ -211,7 +207,7 @@ def test_late_completed_close_supersedes_the_interrupted_close():
 
 
 def test_turnless_late_close_after_a_rewrite_is_attributed():
-    """Schema v6's late-result path can flush a turn-less completed close
+    """The recorder's late-result path can flush a turn-less completed close
     between a history_rewritten and the next turn (a rewrite during
     next-request prep): that is genuine evidence, never a replay copy — it
     must join its execution by tool_call_id."""
@@ -274,7 +270,7 @@ def test_turn_scoped_tool_events_with_corrupt_ids_warn():
 
 
 def test_turnless_tool_end_never_joins_another_lane():
-    """Schema-v6 closes are lane-local: a turn-less end whose tool_call_id
+    """Recorded closes are lane-local: a turn-less end whose tool_call_id
     collides with a MEMORY-lane turn's execution must not resolve there (the
     memory lane consumes no step, so the close would silently vanish). It is
     an unknown id on its own lane — warned like any other anomaly — while a
@@ -703,14 +699,17 @@ def test_spans_window_defers_past_an_overlapping_redelivery(tmp_path):
     assert (spans[0].step_first, spans[0].step_last) == (2, 3)
     assert (spans[1].step_first, spans[1].step_last) == (3, 8)
     # the middle span's first step (3) does not clear the first span's last
-    # delivery step (3) — skipped, not terminal; the re-delivery at step 8
-    # is the first cleanly separated one → the bound is 8 − 1
-    assert spans[0].memory_windows == {"m1": 7}
+    # delivery step (3) — skipped as a re-delivery bound — but it is a
+    # same-step collision carrying A: the first-carrier rule caps the
+    # window at 3 (never the 8 − 1 a clean step-8 re-delivery would set),
+    # and the colliding span opens only at 4
+    assert spans[0].memory_windows == {"m1": 3}
+    assert spans[1].memory_window_starts == {"m1": 4}
     # the last span's first step (8) does not clear the middle span's OWN
     # last step (8): the re-delivery bound is refused — but the same-step
-    # collision closes the still-open window for A (the span the later
-    # carrier re-delivers) at the span's own last delivery step, exactly
-    # the supersession a cleanly separated re-delivery would have set; B,
+    # collision caps the window for A (the span the later carrier
+    # re-delivers) at the span's own last delivery step, exactly the
+    # supersession a cleanly separated re-delivery would have set; B,
     # which no later span carries, keeps the rest of the stream
     assert spans[1].memory_windows == {"m1": 8, "m2": None}
     assert spans[2].memory_windows == {"m1": None}
@@ -748,6 +747,93 @@ def test_spans_window_same_step_collision_closes_only_carried_entries(tmp_path):
     assert any("same-step delivery collision" in w for w in warnings)
 
 
+def _acted_claim(span, mid, anchors, last_step):
+    """A full-coverage verdict claiming one entry acted_on at `anchors`
+    (every other entry influence none); None when _verdict_semantics
+    accepts it — the anchors fall inside that entry's footprint window."""
+    entries = [
+        {
+            "id": memory_id(i),
+            "anchors": anchors if memory_id(i) == mid else [],
+            "influence": {"value": "acted_on" if memory_id(i) == mid else "none"},
+        }
+        for i in range(len(span.memories))
+    ]
+    return _verdict_semantics({"memories": entries}, span, last_step)
+
+
+def test_spans_window_same_step_collision_opens_later_span_despite_finite_bound(
+    tmp_path,
+):
+    """Two memory blocks placed in one call, A re-delivered from the very
+    next step: the first-carrier correction must not be skipped for an
+    entry whose window is already finite (that re-delivery's bound) — the
+    colliding span still opens after the shared step, or one action there
+    anchors the memory in both spans."""
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.agent_turn()
+    b.agent_turn()  # step 3 exists for the declared same-step deliveries
+    sid_ab = b.search(returned=[REF_A, REF_B])
+    b.delivery(sid_ab, memories=[REF_A, REF_B], main_step=3)
+    sid_ba = b.search(returned=[REF_B, REF_A])
+    b.delivery(sid_ba, memories=[REF_B, REF_A], main_step=3)  # re-ranked @3
+    b.agent_turn()
+    b.agent_turn()  # steps 4-5 (declared step 4 in observed range)
+    sid_a = b.search(returned=[REF_A])
+    b.delivery(sid_a, memories=[REF_A], main_step=4)
+    warnings: list[str] = []
+    spans = group_spans(_recall_ops(b, tmp_path), "T1", warnings)
+    assert len(spans) == 3
+    # A (m1) was already bounded at 3 by the step-4 re-delivery; B (m2)
+    # was open — both cap at the shared step, and the colliding span's
+    # entries open after it (A superseded from 4, so its window is empty)
+    assert spans[0].memory_windows == {"m1": 3, "m2": 3}
+    assert spans[0].same_step_bound == 3
+    assert any("same-step delivery collision" in w for w in warnings)
+    assert spans[1].memory_window_starts == {"m1": 4, "m2": 4}
+    assert spans[1].memory_windows == {"m1": None, "m2": 3}
+    assert spans[2].memory_windows == {"m1": None}
+    # the shared step anchors A in the FIRST span only
+    assert _acted_claim(spans[0], "m1", [3], 5) is None
+    assert _acted_claim(spans[1], "m2", [3], 5) is not None
+
+
+def test_spans_window_same_step_collision_three_carriers_disjoint(tmp_path):
+    """Three spans delivering A at one step, cleanly re-delivered only
+    later: first [3,3], middle [4,3] (empty — shadowed before and after),
+    last [4,5]. No step anchors the same memory in two spans."""
+    ref_c = cure_ref("key_c", "dims order matters in concat")
+    b = TrajBuilder().agent_turn(with_task=True)
+    for _ in range(5):
+        b.agent_turn()  # steps 2-6 exist for the declared deliveries
+    sid_ab = b.search(returned=[REF_A, REF_B])
+    b.delivery(sid_ab, memories=[REF_A, REF_B], main_step=3)
+    sid_ba = b.search(returned=[REF_B, REF_A])
+    b.delivery(sid_ba, memories=[REF_B, REF_A], main_step=3)
+    sid_a = b.search(returned=[REF_A])
+    b.delivery(sid_a, memories=[REF_A], main_step=3)
+    sid_ac = b.search(returned=[REF_A, ref_c])
+    b.delivery(sid_ac, memories=[REF_A, ref_c], main_step=6)  # A from step 6
+    spans = group_spans(_recall_ops(b, tmp_path), "T1")
+    assert len(spans) == 4
+    assert all((s.step_first, s.step_last) == (3, 3) for s in spans[:3])
+    assert (spans[3].step_first, spans[3].step_last) == (6, 6)
+    assert spans[0].memory_windows == {"m1": 3, "m2": 3}
+    assert spans[1].memory_window_starts == {"m1": 4, "m2": 4}
+    assert spans[1].memory_windows == {"m1": None, "m2": 3}  # A's window empty
+    assert spans[2].memory_window_starts == {"m1": 4}
+    assert spans[2].memory_windows == {"m1": 5}
+    assert spans[3].memory_windows == {"m1": None, "m2": None}
+    # pairwise disjoint for A: {3} / {} / {4,5} / {6…}
+    assert _acted_claim(spans[0], "m1", [3], 6) is None
+    assert _acted_claim(spans[0], "m1", [4], 6) is not None
+    assert _acted_claim(spans[1], "m2", [3, 4, 5], 6) is not None
+    assert _acted_claim(spans[2], "m1", [4, 5], 6) is None
+    assert _acted_claim(spans[2], "m1", [3], 6) is not None
+    assert _acted_claim(spans[3], "m1", [6], 6) is None
+    assert _acted_claim(spans[3], "m1", [5], 6) is not None
+
+
 def test_spans_thread_the_delivery_context(tmp_path):
     """The span carries the delivery context the judge input renders: the
     distinct recorded search queries (a rewrite between identical
@@ -759,9 +845,9 @@ def test_spans_thread_the_delivery_context(tmp_path):
     b.recall(REF_A, query="the dtype bug")  # a repeat stays distinct-listed once
     (span,) = group_spans(_recall_ops(b, tmp_path), "T1")
     assert span.queries == ["the dtype bug", "the dtype bug, narrowed"]
-    assert span.placement_kind == "prompt_message"
+    assert span.placements[0]["kind"] == "prompt_message"
     # recall's default placement renders the delivered values in full
-    assert span.placement_text == (
+    assert span.placements[0]["text"] == (
         "- [insight] key_a: Use xarray/core/variable.py apply_ufunc carefully"
     )
 
@@ -838,8 +924,7 @@ def test_spans_seq_range_brackets_every_op(tmp_path):
             self.memories = ops[0].memories
             self.exposure = []
             self.queries = []
-            self.placement_kind = None
-            self.placement_text = None
+            self.placements = []
     (merged,) = group_spans([_Op("R1", 2, 90), _Op("R2", 3, 40)], "T1")
     assert (merged.seq_first, merged.seq_last) == (40, 90)
 
@@ -3175,15 +3260,14 @@ def test_unattributed_redelivery_never_backfills_an_earlier_hidden_placement(tmp
     ops = _recall_ops(b, tmp_path)
     # The early delivery's placement is unrecorded. The tail's consumer never
     # completed, so its visible full value cannot be assigned to that step.
-    ops[0].placement_text = None
-    ops[0].placement_kind = None
+    ops[0].placements = []
     ops[0].exposure = [{"state": "unknown"}]
     ops[1].step = None
     spans = group_spans(ops, "T1")
     assert len(spans) == 1 and spans[0].n_injections == 2
     files = build_evidence(spans[0], [], None, None)
     assert REF_A["content"]["text"] not in files["span.md"]
-    assert spans[0].placement_text is None and spans[0].placement_kind is None
+    assert spans[0].placements == []
     assert spans[0].memory_exposure == [{"state": "unknown"}]
 
 

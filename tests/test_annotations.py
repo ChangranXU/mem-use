@@ -10,6 +10,9 @@ annotation events alone — never from prompt text or label conventions.
 import hashlib
 import json
 
+import pytest
+
+from injudge.evidence import build_evidence, write_evidence
 from injudge.spans import content_fingerprint, group_spans
 from injudge.steps import build_step_stream
 from memgraph.annotations import (
@@ -149,6 +152,39 @@ def test_multi_lane_delivery_aggregates_searches(tmp_path):
     assert not any("not an ordered search subsequence" in w for w in warnings)
 
 
+@pytest.mark.parametrize("same_operation", [False, True])
+def test_duplicate_delivery_search_links_are_reported(tmp_path, same_operation):
+    """Repeated search results can make reordered memories pass the
+    subsequence check; each operation and lane must be unique per delivery."""
+    refs = [cure_ref("k1", "v1"), cure_ref("k2", "v2")]
+    b = AnnotatedBuilder().agent_turn(with_task=True)
+    search = b.search(returned=refs)
+    searches = [search, search if same_operation else b.search(returned=refs)]
+    b.agent_turn()
+    b.delivery(searches, memories=refs[::-1], bind=b.last_call)
+    graph = load_and_build([b.write(tmp_path / "t")])
+    field = "operation_id" if same_operation else "lane_id"
+    assert any(f"duplicate searches {field}" in note["msg"]
+               for note in graph["validation"])
+    recall = next(op for op in graph["ops"] if op["kind"] == "recall")
+    assert recall["searches"] == [
+        {"lane_id": LANE, "operation_id": search_id} for search_id in searches
+    ]
+    assert [memory["key"] for memory in recall["memories"]] == ["k2", "k1"]
+
+
+@pytest.mark.parametrize("corrupt_field", ["lane_id", "operation_id"])
+def test_duplicate_search_check_tolerates_unhashable_fields(tmp_path, corrupt_field):
+    b = AnnotatedBuilder().agent_turn(with_task=True)
+    search = b.search()
+    link = {"lane_id": LANE, "operation_id": search}
+    b.delivery([link, {**link, corrupt_field: []}], bind=b.last_call)
+    _, (recall,), warnings = parse(b, tmp_path)
+    field = "operation_id" if corrupt_field == "lane_id" else "lane_id"
+    assert any(f"duplicate searches {field}" in warning for warning in warnings)
+    assert recall.memories == []
+
+
 def test_delivery_naming_a_search_under_the_wrong_lane_is_a_problem():
     """A searches entry naming a search recorded under a different lane is
     the lane-scoped read the recorder's ingest refuses: reported like the
@@ -236,11 +272,9 @@ def test_multi_lane_delivery_subsequence_spans_lanes():
                for p in idx.problems)
 
 
-def test_multi_slot_placements_join_into_one_presentation(tmp_path):
-    """Schema v9 records one placement per rendered slot: the recall op's
-    presentation is the slots' concatenation (recorded order) — kinds
-    distinct-joined, chars summed, and the exposure compare runs over the
-    joined text (a value inside either slot is exposed in full)."""
+def test_multi_slot_placements_keep_their_presentation(tmp_path):
+    """Slots keep their recorded kinds and texts; a full value in either
+    slot is exposed, and delivery cost sums the actual slot sizes."""
     b = AnnotatedBuilder().agent_turn(with_task=True)
     ref = cure_ref("k1", "the delivered value")
     sid = b.search(returned=[ref])
@@ -257,10 +291,192 @@ def test_multi_slot_placements_join_into_one_presentation(tmp_path):
     ])
     _, ops, _ = parse(b, tmp_path)
     recall = next(o for o in ops if o.kind == "recall")
-    assert recall.placement_kind == "prompt_message+system_context"
-    assert recall.placement_text == "- the delivered value\n(no other notes)"
+    assert [(p["slot"], p["kind"], p["text"]) for p in recall.placements] == [
+        ("outbound_tail", "prompt_message", "- the delivered value"),
+        ("system_suffix", "system_context", "(no other notes)"),
+    ]
     assert recall.content_chars == 34
     assert recall.exposure[0]["state"] == "full"
+
+
+@pytest.mark.parametrize("change", ["slot", "kind", "boundary", "hidden_digest"])
+def test_distinct_slot_presentations_never_merge(tmp_path, change):
+    ref = cure_ref("k1", "the delivered value")
+    placements = [
+        {"slot": "tail", "kind": "prompt_message",
+         "content": {"availability": "inline", "text": ref["content"]["text"]},
+         "proof_kind": "adapter_defined"},
+        {"slot": "system", "kind": "system_context",
+         "content": {"availability": "inline", "text": "guard"},
+         "proof_kind": "adapter_defined"},
+        {"slot": "extra", "kind": "prompt_message",
+         "content": {"availability": "inline", "text": "additional framing"},
+         "proof_kind": "adapter_defined"},
+    ]
+    if change == "hidden_digest":
+        placements[-1]["content"] = {
+            "availability": "redacted", "reason": "policy", "sha256": "a" * 64,
+        }
+    changed = json.loads(json.dumps(placements))
+    if change == "slot":
+        changed[-1]["slot"] = "different_slot"
+    elif change == "kind":
+        changed[-1]["kind"] = "system_context"
+    elif change == "boundary":
+        changed[0]["content"]["text"] += "\nguard"
+        changed[1]["content"]["text"] = ""
+    else:
+        changed[-1]["content"]["sha256"] = "b" * 64
+    b = AnnotatedBuilder().agent_turn(with_task=True)
+    search = b.search(returned=[ref])
+    for slots in (placements, changed, changed):
+        b.agent_turn()
+        b.delivery(search, memories=[ref], bind=b.last_call, placements=slots)
+    _, ops, _ = parse(b, tmp_path)
+    spans = group_spans(ops, "T1")
+    assert [span.n_injections for span in spans] == [1, 2]
+    for i, span in enumerate(spans):
+        dest = tmp_path / f"evidence-{i}"
+        write_evidence(dest, build_evidence(span, [], TASK, None))
+    before = (tmp_path / "evidence-0" / "span.md").read_text()
+    after = (tmp_path / "evidence-1" / "span.md").read_text()
+    assert "slot 'tail' (prompt_message)" in before
+    if change == "kind":
+        assert "slot 'extra' (prompt_message)" in before
+        assert "slot 'extra' (system_context)" in after
+    elif change == "hidden_digest":
+        assert "content unrecorded" in before
+        assert "additional framing" not in before + after
+
+
+def test_corrupt_placement_labels_do_not_leak_unrecorded_content(tmp_path):
+    ref = cure_ref("k1", "canonical secret")
+    b = AnnotatedBuilder().agent_turn(with_task=True)
+    search = b.search(returned=[ref])
+    b.agent_turn()
+    b.delivery(search, memories=[ref], bind=b.last_call, placements=[
+        {"slot": {"hidden": "unexpected secret"}, "kind": ["unexpected secret"],
+         "content": {"availability": "redacted", "reason": "policy"},
+         "proof_kind": "adapter_defined"},
+    ])
+    _, ops, _ = parse(b, tmp_path)
+    (span,) = group_spans(ops, "T1")
+    dest = tmp_path / "evidence"
+    write_evidence(dest, build_evidence(span, [], TASK, None))
+    text = (dest / "span.md").read_text()
+    assert "unexpected secret" not in text and "canonical secret" not in text
+
+
+def test_concurrent_slot_evidence_reports_an_empty_action_window(tmp_path):
+    ref = cure_ref("k1", "the delivered value")
+    b = AnnotatedBuilder().agent_turn(with_task=True)
+    search = b.search(returned=[ref])
+    for content in ("first framing", "second framing"):
+        b.delivery(search, memories=[ref], bind=b.last_call, content=content)
+    b.agent_turn()
+    b.delivery(search, memories=[ref], bind=b.last_call, content="third framing")
+    _, ops, _ = parse(b, tmp_path)
+    spans = group_spans(ops, "T1")
+    dest = tmp_path / "evidence"
+    write_evidence(dest, build_evidence(spans[1], [], TASK, None))
+    text = (dest / "span.md").read_text()
+    assert "no eligible action steps" in text
+    assert "steps 2–1" not in text
+
+
+def test_exposure_never_matches_across_slot_boundaries(tmp_path):
+    value = "first part of the value\nsecond part of the value"
+    ref = cure_ref("k1", value)
+    b = AnnotatedBuilder().agent_turn(with_task=True)
+    search = b.search(returned=[ref])
+    b.agent_turn()
+    b.delivery(search, memories=[ref], bind=b.last_call, placements=[
+        {"slot": "tail", "kind": "prompt_message",
+         "content": {"availability": "inline", "text": value.split("\n")[0]},
+         "proof_kind": "adapter_defined"},
+        {"slot": "system", "kind": "system_context",
+         "content": {"availability": "inline", "text": value.split("\n")[1]},
+         "proof_kind": "adapter_defined"},
+    ])
+    _, (op,), _ = parse(b, tmp_path)
+    assert op.exposure == [{"state": "clipped", "value_chars": len(value),
+                            "exposed_chars": len(value.split("\n")[0])}]
+
+
+def test_partial_slot_size_is_reported_without_discarding_known_cost(tmp_path):
+    b = AnnotatedBuilder().agent_turn(with_task=True)
+    search = b.search()
+    b.agent_turn()
+    b.delivery(search, bind=b.last_call, placements=[
+        {"slot": "tail", "kind": "prompt_message",
+         "content": {"availability": "inline", "text": "known content"},
+         "proof_kind": "adapter_defined"},
+        {"slot": "system", "kind": "system_context",
+         "content": {"availability": "redacted", "reason": "policy"},
+         "proof_kind": "adapter_defined"},
+    ])
+    _, (op,), warnings = parse(b, tmp_path)
+    assert op.content_chars == len("known content")
+    assert any("partial placement content size" in w and "1 slot" in w for w in warnings)
+    graph = load_and_build([tmp_path])
+    assert any("partial placement content size" in v["msg"] for v in graph["validation"])
+
+
+@pytest.mark.parametrize("mixed", [False, True])
+def test_corrupt_placement_entries_are_unsized_not_empty(tmp_path, mixed):
+    placements = [123]
+    if mixed:
+        placements.insert(0, {
+            "slot": "known", "kind": "prompt_message",
+            "content": {"availability": "inline", "text": "known content"},
+        })
+    b = AnnotatedBuilder().agent_turn(with_task=True)
+    b.delivery([], memories=[], placements=placements, bind=b.last_call)
+    _, (op,), warnings = parse(b, tmp_path)
+    assert op.content_chars == (len("known content") if mixed else None)
+    assert any("non-object entry" in w for w in warnings)
+    if mixed:
+        assert any("partial placement content size" in w for w in warnings)
+
+
+def test_no_read_delivery_is_valid_and_has_zero_size(tmp_path):
+    b = AnnotatedBuilder().agent_turn(with_task=True)
+    b.delivery([], memories=[], placements=[], bind=b.last_call)
+    _, (op,), warnings = parse(b, tmp_path)
+    assert warnings == []
+    assert op.searches == [] and op.content_chars == 0
+
+
+@pytest.mark.parametrize("generation", ["matching", "missing", "other_session", "unrelated"])
+def test_bridge_forget_requires_its_portable_deletion_record(tmp_path, generation):
+    ref = cure_ref("k", "old value")
+    b = AnnotatedBuilder().agent_turn(with_task=True)
+    op_id = "absent"
+    if generation != "missing":
+        op_id = b.generate(retired=[ref] if generation != "unrelated" else [],
+                           extraction_step="1")
+    sid = SID
+    if generation == "other_session":
+        sid = "22222222-2222-4333-8444-555555555555"
+        b.annotation("memory_session", {"trace_session_id": sid, "adapter": b.adapter},
+                     lane=b.main)
+    b.annotation("bridge_memory_delete_completed", {
+        "trace_session_id": sid, "operation_id": op_id, "status": "ok",
+        "visibility_confirmed": True,
+        "retired_items": [{"lane_id": LANE, "item_id": ref["item_id"],
+                           "revision_id": ref["version_id"]}],
+    }, lane=b.mem)
+    _, _, warnings = parse(b, tmp_path)
+    assert any("no recorded memory retirement" in w for w in warnings) == (generation != "matching")
+
+
+def test_failed_bridge_forget_does_not_claim_a_missing_retirement(tmp_path):
+    b = AnnotatedBuilder().agent_turn(with_task=True)
+    b.annotation("bridge_memory_delete_completed", {
+        "trace_session_id": SID, "operation_id": "absent", "status": "failed",
+    }, lane=b.mem)
+    _, ops, warnings = parse(b, tmp_path)
+    assert not ops and not any("memory retirement" in w for w in warnings)
 
 
 def test_non_list_retired_is_a_problem():
@@ -362,12 +578,12 @@ def test_delivery_placement_fields_and_the_redacted_guard(tmp_path):
     b.delivery(sid, memories=[cure_ref("k3", "v3")], bind=b.last_call, content=None)
     _, ops, _ = parse(b, tmp_path)
     recalls = [o for o in ops if o.kind == "recall"]
-    assert recalls[0].placement_kind == "prompt_message"
-    assert recalls[0].placement_text == "## Policy header\n- the memories"
-    assert recalls[1].placement_text == "x" * 2100
-    assert recalls[2].placement_kind == "prompt_message"
-    assert recalls[2].placement_text is None  # redacted: no content recorded
-    assert "placement_kind" not in recalls[0].to_dict()
+    assert recalls[0].placements[0]["kind"] == "prompt_message"
+    assert recalls[0].placements[0]["text"] == "## Policy header\n- the memories"
+    assert recalls[1].placements[0]["text"] == "x" * 2100
+    assert recalls[2].placements[0]["kind"] == "prompt_message"
+    assert recalls[2].placements[0]["text"] is None  # redacted: no content recorded
+    assert "placements" not in recalls[0].to_dict()
 
 
 def test_task_locator_to_unresolvable_content_warns(tmp_path):
@@ -1019,7 +1235,8 @@ def test_delivery_missing_search_link_is_not_reported_as_unknown(tmp_path):
     problem — but missing is not unknown: the warning must say which."""
     b = AnnotatedBuilder()
     b.agent_turn(with_task=True)
-    b.delivery([], memories=[cure_ref("k1")], main_step=1)
+    b.delivery([], memories=[], main_step=1)
+    del b.events[-1]["payload"]["searches"]
     _, ops, warnings = parse(b, tmp_path)
     assert any("missing its search links" in w for w in warnings)
     assert not any("unknown search operation" in w for w in warnings)

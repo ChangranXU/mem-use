@@ -107,17 +107,30 @@ Memory actions come only from recorded `memory_*` annotation events:
 `memory_search_*`, `memory_delivery`. Never reconstruct them from prompt
 text, role names, or label conventions. A run without annotations is valid:
 zero memory operations plus a validation note. The recorder's `bridge_*`
-lifecycle family is tolerated and skipped; an older recorder's run is
-warned about from its run.json schema version (the tools are v9-only, no
-compatibility path).
+lifecycle family does not supply portable memory operations. A successful
+bridge delete missing its same-session, same-operation memory retirement
+is warned about; never reconstruct MemoryRefs from bridge-native ids.
+Other bridge events are skipped. Non-v9 runs get a run.json version warning,
+not a compatibility parser.
 
 Schema v9's lane-aware shape: searches record a `lane_id`; a delivery
 names one `searches` entry per read lane (profile order) and one
-`placements` entry per rendered slot — the recall op's presentation is the
-slots' concatenation in recorded order, its queries/matched are aggregated
-across the linked searches, and the delivery↔search integrity check
-verifies lane agreement plus the ordered subsequence over the concatenated
-per-lane results.
+`placements` entry per rendered slot. Its presentation preserves ordered
+slot names, kinds, and resolved texts (content digests when unresolved),
+never a flattened string. Exposure is checked within each slot, not across
+message boundaries. Queries/matched aggregate the linked searches, and the
+delivery↔search integrity check verifies lane agreement plus the ordered
+subsequence over concatenated per-lane results. Empty searches are valid
+when no lane was read. Empty placements cost zero; partially sized slots
+retain known cost with a warning.
+
+Generation retirements merge delete-change before-refs with end-event
+`retired` refs, deduplicated per revision. Retiring a distinguishably older
+revision keeps the current item alive: the operation retains the retirement,
+but the item gets no deletion edge/history. State follows the latest
+observed candidate; differing retirements note that unobserved revisions
+cannot be ordered. Native version ids compare across operations;
+operation-local ids compare through content digests only.
 
 Identity and grouping use the recorder's portable MemoryRef fields, never
 adapter vocabulary.

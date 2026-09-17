@@ -19,9 +19,10 @@ actions as first-class `memory_*` events in the same `trajectory.jsonl`
   rendered slot (the exact placement content and proof kind), and a cursor
   binding with per-slot proofs to the transporting calls.
 
-The same log may also carry the recorder's `bridge_*` lifecycle family
-(schema v7+); this reader indexes the `memory_*` provider actions only and
-skips the rest — a run without `memory_*` events yields an empty index.
+The same log may also carry the recorder's `bridge_*` lifecycle family.
+Only `memory_*` records supply portable actions. A successful bridge delete
+without its same-operation memory retirement is warned about, not reconstructed
+from native bridge ids; other lifecycle records are skipped.
 
 This module indexes those events in one tolerant pass. It never reconstructs
 memory actions from prompt text, role names, or adapter vocabulary — a run
@@ -400,6 +401,33 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
                         "has no usable identity fields"
                     )
 
+    # Bridge revisions are not portable MemoryRef ids. A confirmed forget
+    # needs its provider's memory_* record; report an omission, never guess
+    # a namespace or reconstruct a deletion from the bridge's native ids.
+    for event in events:
+        if event.get("type") != "bridge_memory_delete_completed":
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, dict) or payload.get("status") != "ok":
+            continue
+        operation_id = payload.get("operation_id")
+        operation = index.operations.get(operation_id) if isinstance(operation_id, str) else None
+        covered = False
+        if (operation is not None and operation.kind == "generation"
+                and operation.start["payload"].get("trace_session_id") == payload.get("trace_session_id")):
+            retired = operation.end["payload"].get("retired") if operation.end else None
+            covered = (isinstance(retired, list) and any(isinstance(r, dict) for r in retired)) or any(
+                c["payload"].get("action") == "delete"
+                and isinstance(c["payload"].get("before"), list)
+                and any(isinstance(r, dict) for r in c["payload"]["before"])
+                for c in operation.changes
+            )
+        if not covered:
+            index.problems.append(
+                f"seq {event.get('seq')}: successful bridge delete {operation_id!r} has "
+                "no recorded memory retirement in the same session/operation; "
+                "its deletion cannot be graphed"
+            )
     for operation in index.operations.values():
         if operation.end is None:
             index.problems.append(f"operation {operation.operation_id}: missing end event")
@@ -459,6 +487,9 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
         entries = payload.get("searches")
         entries = entries if isinstance(entries, list) else []
         resolved: list[AnnotatedOperation] = []
+        # Repeated links widen the subsequence haystack; the gate requires
+        # both operation_id and lane_id to be unique within a delivery.
+        seen_links: dict[str, set[str]] = {"operation_id": set(), "lane_id": set()}
         for entry in entries:
             if not isinstance(entry, dict):
                 # the gate's ingest records one {lane_id, operation_id}
@@ -468,6 +499,14 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
                     f"delivery {delivery_id}: searches entry is not an object"
                 )
                 continue
+            for key, seen in seen_links.items():
+                value = entry.get(key)
+                if isinstance(value, str):
+                    if value in seen:
+                        index.problems.append(
+                            f"delivery {delivery_id}: duplicate searches {key} {value!r}"
+                        )
+                    seen.add(value)
             search_id = entry.get("operation_id")
             search = index.operations.get(search_id) if isinstance(search_id, str) else None
             if search is None or search.kind != "search":

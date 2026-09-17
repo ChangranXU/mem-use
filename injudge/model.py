@@ -118,10 +118,9 @@ class InjectionSpan:
     truncated-tail op merged across newer spans can make the range overlap
     a neighbor's.
     `queries` is the distinct recorded search queries that produced the
-    span's injections (in delivery order); `placement_kind`/`placement_text`
-    describe how the injections were presented (the protocol's placement
-    kind and full resolved placement text; None when
-    the placement recorded no content). `position`/`total` locate the span
+    span's injections (in delivery order); `placements` keeps each rendered
+    slot's kind and full resolved text in recorded order, with the digest
+    retained when text is unavailable. `position`/`total` locate the span
     among the trajectory's spans (0/0 when built directly, not via
     group_spans). `memory_windows` bounds each delivered memory's judged
     footprint window individually, keyed by the entry's span-local id
@@ -148,9 +147,9 @@ class InjectionSpan:
     one call, or a declared step collision) that also carries one of this
     span's entries would leave that memory's window open in both spans — one
     memory, two windows, the same action creditable twice — so the entry's
-    still-open window closes at that step inclusive (the steps beyond are
-    the later carrier's to claim). The collision is named in the run's
-    validation notes.
+    window caps at that step inclusive, even if already finitely bounded
+    (the steps beyond are the later carrier's to claim). The collision is
+    named in the run's validation notes.
     `previous_partial_keys` qualifies `previous_keys`: the identities whose
     every EARLIER delivery was clipped or exposure-unverifiable, so the
     "delivered in an earlier span (not new)" cue cannot mean the agent saw
@@ -176,8 +175,7 @@ class InjectionSpan:
     changed_keys: list[str] = field(default_factory=list)
     previous_partial_keys: list[str] = field(default_factory=list)
     queries: list[str] = field(default_factory=list)
-    placement_kind: str | None = None
-    placement_text: str | None = None
+    placements: list[dict] = field(default_factory=list)
     position: int = 0
     total: int = 0
     memory_windows: dict[str, int | None] = field(default_factory=dict)

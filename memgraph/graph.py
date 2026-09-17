@@ -17,7 +17,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-from memgraph.annotations import item_ident
+from memgraph.annotations import item_ident, version_identity
 from memgraph.model import Edge, MemoryOp, MemoryUnit, Trajectory
 from memgraph.parse_trajectory import parse_trajectory
 
@@ -143,6 +143,7 @@ def build_graph(
         note("warn", w)
 
     registry: dict[tuple[str | None, str], MemoryUnit] = {}
+    current_refs: dict[tuple[str | None, str], dict] = {}
     edges: list[Edge] = []
     all_ops: list[MemoryOp] = []
 
@@ -160,6 +161,7 @@ def build_graph(
                     note("warn", f"{op.id}: candidate without a key ignored")
                     continue
                 ident = item_ident(cand)
+                current_refs[ident] = cand
                 if ident not in registry:
                     unit = _register(registry, ident, cand, key, "observed")
                     unit.created_status = cand.get("review_status")
@@ -257,6 +259,25 @@ def build_graph(
                         f"{op.id}: deleted memory {key!r} has no observed creation in "
                         "the loaded trajectories (origin not observed)",
                     )
+                # Retiring an older revision does not delete its replacement.
+                # Missing digest metadata cannot contradict the same native id;
+                # operation-local ids compare only through content across ops.
+                current = version_identity(current_refs.get(ident), withhold_local=True)
+                retired = version_identity(ref, withhold_local=True)
+                if all(v is not None for v in (current[2], retired[2])):
+                    different = current[1:3] != retired[1:3]
+                else:
+                    different = (
+                        current[3] is not None and retired[3] is not None
+                        and current[3] != retired[3]
+                    )
+                if different:
+                    note(
+                        "info", f"{op.id}: retired a different revision from the latest "
+                        f"observed candidate for memory {key!r}; the graph's item state "
+                        "is unchanged (unobserved revisions cannot be ordered)",
+                    )
+                    continue
                 mem = registry[ident]
                 mem.deletions.append(
                     {"op": op.id, "traj": op.traj, "step": op.step, "target": target}
