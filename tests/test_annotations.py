@@ -299,6 +299,27 @@ def test_multi_slot_placements_keep_their_presentation(tmp_path):
     assert recall.exposure[0]["state"] == "full"
 
 
+def test_tool_result_placement_keeps_agent_directed_exposure(tmp_path):
+    """A search action can fold its memory into a tool result; the placement
+    kind is presentation data, so exposure and span identity stay slot-driven."""
+    b = AnnotatedBuilder().agent_turn(with_task=True)
+    ref = cure_ref("k1", "the delivered value")
+    sid = b.search(returned=[ref])
+    b.agent_turn()
+    b.delivery(sid, memories=[ref], bind=b.last_call, content=None, placements=[{
+        "slot": "memory_search", "kind": "tool_result",
+        "content": {"availability": "inline", "text": "- the delivered value",
+                    "chars": 19},
+        "proof_kind": "canonical_message",
+    }])
+    _, ops, _ = parse(b, tmp_path)
+    recall = next(o for o in ops if o.kind == "recall")
+    assert [(p["slot"], p["kind"], p["text"]) for p in recall.placements] == [
+        ("memory_search", "tool_result", "- the delivered value")
+    ]
+    assert recall.exposure[0]["state"] == "full"
+
+
 @pytest.mark.parametrize("change", ["slot", "kind", "boundary", "hidden_digest"])
 def test_distinct_slot_presentations_never_merge(tmp_path, change):
     ref = cure_ref("k1", "the delivered value")
@@ -447,14 +468,16 @@ def test_no_read_delivery_is_valid_and_has_zero_size(tmp_path):
     assert op.searches == [] and op.content_chars == 0
 
 
-@pytest.mark.parametrize("generation", ["matching", "missing", "other_session", "unrelated"])
+@pytest.mark.parametrize("generation", ["matching", "missing", "other_session", "unrelated", "unconfirmed"])
 def test_bridge_forget_requires_its_portable_deletion_record(tmp_path, generation):
     ref = cure_ref("k", "old value")
     b = AnnotatedBuilder().agent_turn(with_task=True)
     op_id = "absent"
     if generation != "missing":
-        op_id = b.generate(retired=[ref] if generation != "unrelated" else [],
-                           extraction_step="1")
+        op_id = b.generate(
+            retired=[ref] if generation not in {"unrelated", "unconfirmed"} else [],
+            extraction_step="1",
+        )
     sid = SID
     if generation == "other_session":
         sid = "22222222-2222-4333-8444-555555555555"
@@ -462,12 +485,14 @@ def test_bridge_forget_requires_its_portable_deletion_record(tmp_path, generatio
                      lane=b.main)
     b.annotation("bridge_memory_delete_completed", {
         "trace_session_id": sid, "operation_id": op_id, "status": "ok",
-        "visibility_confirmed": True,
+        "visibility_confirmed": generation != "unconfirmed",
         "retired_items": [{"lane_id": LANE, "item_id": ref["item_id"],
                            "revision_id": ref["version_id"]}],
     }, lane=b.mem)
     _, _, warnings = parse(b, tmp_path)
-    assert any("no recorded memory retirement" in w for w in warnings) == (generation != "matching")
+    assert any("no recorded memory retirement" in w for w in warnings) == (
+        generation != "matching"
+    )
 
 
 def test_failed_bridge_forget_does_not_claim_a_missing_retirement(tmp_path):

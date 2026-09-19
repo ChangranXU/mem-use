@@ -401,9 +401,10 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
                         "has no usable identity fields"
                     )
 
-    # Bridge revisions are not portable MemoryRef ids. A confirmed forget
-    # needs its provider's memory_* record; report an omission, never guess
-    # a namespace or reconstruct a deletion from the bridge's native ids.
+    # Bridge revisions are not portable MemoryRef ids. A successful provider
+    # delete needs its memory_* retirement; visibility is confirmed separately,
+    # so it does not gate this portable-record guard. Report an omission,
+    # never guess a namespace or reconstruct a deletion from bridge-native ids.
     for event in events:
         if event.get("type") != "bridge_memory_delete_completed":
             continue
