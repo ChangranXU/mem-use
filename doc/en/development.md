@@ -15,7 +15,7 @@ uv run pytest tests/test_injudge.py -q # single file
 ```
 
 {% hint style="info" %}
-The suite does not use the network or node: the judge agent's runner is stubbed with canned results, and the TypeScript evidence tools run under `node --test` (skipped when node is missing). Fixtures are synthetic schema-v9 trajectories built by `tests/annotated_fixtures.py`.
+The suite does not use the network. The judge agent's runner is stubbed with canned results. The TypeScript evidence tools run under `node --test` (skipped when node is missing). Fixtures are synthetic schema-v9 trajectories built by `tests/annotated_fixtures.py`.
 {% endhint %}
 
 ## Project Layout
@@ -29,7 +29,6 @@ The suite does not use the network or node: the judge agent's runner is stubbed 
 | `prompts/` | Every LLM prompt as a file, grouped by tool and purpose (loaded via `injudge/prompts.py`) |
 | `tests/` | pytest suite and shared schema-v9 fixture builder |
 | `doc/` | This book (GitBook layout: `LANGS.md` + `en/` + `zh-CN/`) |
-| `data/` | SWE-bench Verified instance streams and analysis sidecars for memory-system evaluation |
 
 ## Contributing
 

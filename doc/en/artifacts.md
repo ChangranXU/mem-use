@@ -67,7 +67,7 @@ The population is judge-scored deliveries (`span × delivered entry`, keyed by t
 | `influence` | `referenced` + `acted_on` + `decisive` | those + `none` | any-footprint share |
 | `positive_effect` | `improved` | `improved` + `no_effect` + `harmed` | improved share among deliveries that have an effect |
 
-`positive_effect` is rated only over deliveries that have an effect judgment — the signal is null unless influence is acted-on. The signal enums in `rubric.counts` are those in the [rubric table](verdict-derivation.md#rubric-signals).
+`positive_effect` is rated only over deliveries that have an effect judgment — the signal is null unless influence is acted-on. Unknown novelty (`null`) is counted in `rubric.counts.novelty.null` and stays out of the novelty-rate denominator; an all-unknown novelty population has a null novelty rate. Relevant ignored entries with null novelty use `ignored_unknown_novelty`. The signal enums in `rubric.counts` are those in the [rubric table](verdict-derivation.md#rubric-signals).
 
 ### Triage Lists
 
@@ -173,30 +173,3 @@ These blocks live under `details.overall` and `details.trajectories.<id>`:
 `injudge-report.json` additionally carries, per operation: `memories` (full recorded refs, each stamped with its span-local `id`), `memory_exposure` (per entry: whether the placement showed the value `full`, `full_normalized` — whole, but only up to whitespace-run or markdown-escape normalization —, `clipped` to a prefix of N chars, or `unknown` — unverifiable, so the canonical value is withheld from the judge input; prose-unsafe values (quotes, backslashes, line structure) compare verbatim only), `memory_windows` (per entry id: the footprint-window end step the entry's action `anchors` were validated against — `null` when the entry was never re-delivered, so its bound was the step stream's end; a same-step delivery collision caps the window at the span's own last delivery step, including a previously finite window; omitted when no agent turn classified), `memory_window_starts` (only when a same-step collision bumped an entry: its window opens after the shared step the earlier carrier owns), rubric notes and each entry's action `anchors`, `analysis`, `evidence`, `step_gaps`, `new_keys` / `removed_keys` / `previous_keys` / `changed_keys`, `auto`, `error`, `judge_raw`, `pe_pairing_corrections` (when any), and `input` on spans the agent ran for, error outcomes included (`path`: `agent`, plus `attempts`, `llm_calls`, `tool_calls`, `transcript` — the conversation's trajectory JSONL under `agent-runs/`, relative to the output dir — and `"gold"` / `"forced"` when they apply — `forced` marks a conversation the step or context budget ended with a forced final answer).
 
 The `injections` array lists every raw delivery with its span, `role` (`first` or `restated`), `verdict`, `content_chars`, and its `op_id` / `seq` / `step`.
-
-## Schema Change: Summary v8
-
-Summary v8 changes layout only: result-first ordering, grouped fields,
-compact trajectory comparisons, an id-keyed `details` section, and source
-report provenance. It replaces summary v7; consumers must use the paths
-above. Verdicts, denominators, null handling, and the report v11 contract
-are unchanged. There is no compatibility reader or migration layer.
-
-## Scoring Change: Report v11 / Summary v7
-
-`novelty.value` now accepts `null` when the recorded baseline cannot establish
-novel, confirming, or redundant. This is missing evidence, not a fourth tier;
-forcing a tier would manufacture a finding. Only novelty and positive_effect
-allow null. Influence, action-anchor validation, usage derivation, and the
-span-verdict rule are unchanged.
-
-Both artifacts count assessed entries with unknown novelty under
-`rubric.counts.novelty.null`, exclude them from the novelty-rate denominator,
-and retain their other signals and usage tallies. Relevant ignored entries
-with null novelty use `ignored_unknown_novelty`, never `ignored_novel`.
-The stdout distribution names the assessed population and the undetermined
-count; an all-unknown novelty population has a null novelty rate.
-
-This scoring change replaced report v10 / summary v6. Only the current
-report schema is accepted by memgraph; there is no migration or
-compatibility reader. New injudge runs write report v11 and summary v8.

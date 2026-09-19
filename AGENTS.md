@@ -57,12 +57,10 @@ commit `.env`). Every key the tools consume is validated; the API key
 reaches the runner only through the `JUDGE_API_KEY` environment variable.
 `--dry-run` needs no `.env`, no node, and makes no calls.
 
-`uv sync` installs runtime (`tqdm`), `dev` (pytest), and `data`
-(pandas/numpy/pyarrow/huggingface_hub for `data/utils` only). memgraph is
-stdlib-only; the data group is never imported by the tools or tests. The
-judge agent is TypeScript under `agent/` (`@earendil-works/pi-agent-core`
-+ `@earendil-works/pi-ai`, ESM, node >= 22.19 with type stripping, no
-build step); `npm install` there once.
+`uv sync` creates `.venv` from `pyproject.toml` (runtime `tqdm`; tests use
+pytest). memgraph is stdlib-only. The judge agent is TypeScript under
+`agent/` (`@earendil-works/pi-agent-core` + `@earendil-works/pi-ai`, ESM,
+node >= 22.19 with type stripping, no build step); `npm install` there once.
 
 ## Layout
 
@@ -94,7 +92,6 @@ agent/                     # TS judge agent: runner.ts (pi Agent + budgets),
                            # trajectory.ts (pi event-sourced recording), protocol.ts
 prompts/                   # every LLM prompt, grouped by tool/purpose
 doc/                       # GitBook: LANGS.md + en/ + zh-CN/, each with SUMMARY.md
-data/                      # SWE-bench Verified streams; data/utils build stack
 tests/conftest.py          # checkout root on sys.path
 tests/annotated_fixtures.py  # schema-v9 synthetic-trajectory builder
 tests/test_*.py            # pytest suite
@@ -306,9 +303,8 @@ Easy to get wrong:
    `tests/annotated_fixtures.py` use it).
 2. Python runtime is stdlib plus tqdm (CLI progress bars); the judge agent
    is the TypeScript pi stack under `agent/` (no new Python dependencies;
-   no SDK on either side). The `data` group is for `data/utils` only. TS
-   side: erasable-typestrip TypeScript, ESM, tabs, node:test for tests, no
-   build step.
+   no SDK on either side). TS side: erasable-typestrip TypeScript, ESM,
+   tabs, node:test for tests, no build step.
 3. `pathlib` instead of `os.path`. Artifacts go through `atomic_write`.
 4. Data containers are plain dataclasses with `to_dict()`. Parameterize
    generics (`set[str | None]`, not bare `set`).
@@ -482,7 +478,6 @@ Components for `fix` / `feat` / `enh` / `ref`:
 - `injudge` — `injudge/`: step stream, spans, judge client, aggregates,
   report
 - `util` — shared step rule, `util.py`, the fixture builder
-- `data` — `data/` streams and `data/utils` build stack
 
 ## Rules
 

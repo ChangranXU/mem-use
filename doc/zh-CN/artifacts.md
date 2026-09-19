@@ -67,7 +67,7 @@ $$
 | `influence` | `referenced` + `acted_on` + `decisive` | 上述 + `none` | 有任何足迹的占比 |
 | `positive_effect` | `improved` | `improved` + `no_effect` + `harmed` | 有 effect 的投递中 improved 的占比 |
 
-`positive_effect` 只在有 effect 判断的投递上计算——除非 influence 为 acted-on，该信号为 null。`rubric.counts` 中的信号枚举即[评分信号表](verdict-derivation.md#评分信号)中的值。
+`positive_effect` 只在有 effect 判断的投递上计算——除非 influence 为 acted-on，该信号为 null。未知新颖性（`null`）计入 `rubric.counts.novelty.null`，不进入 novelty 比率分母；全部未知时 novelty 比率为 null。相关但被忽略且 novelty 为 null 的条目使用 `ignored_unknown_novelty`。`rubric.counts` 中的信号枚举即[评分信号表](verdict-derivation.md#评分信号)中的值。
 
 ### 排查清单
 
@@ -172,26 +172,3 @@ $$
 `injudge-report.json` 每个操作还带有：`memories`（完整已录制引用，每条标注其区间本地 `id`）、`memory_exposure`（逐条目：placement 对该值是 `full`、`full_normalized`——整体载入但仅在空白符折叠 / markdown 转义剥离后匹配——、`clipped` 到 N 字符前缀，还是 `unknown`——无法核实，故评审输入中隐去规范值；含引号、反斜杠或换行结构的值只做逐字比对）、`memory_windows`（逐条目 id：该条目动作 `anchors` 校验所依据的足迹窗口结束步——从未被重投递时为 `null`，即其上界是步骤流末尾；同一步投递冲突会把窗口截断在该区间自己的末次投递步，即使此前已有更晚的有限上界；无 agent 回合归类时省略）、评分 note 与各条目的动作 `anchors`、`analysis`、`evidence`、`step_gaps`、`new_keys` / `removed_keys` / `previous_keys` / `changed_keys`、`auto`、`error`、`judge_raw`、`pe_pairing_corrections`（若有），以及送入智能体运行的区间（含 error 结局）上的 `input`（`path` 为 `agent`，外加 `attempts`、`llm_calls`、`tool_calls`、`transcript`——指向 `agent-runs/` 下该对话的轨迹 JSONL，相对输出目录——适用时还有 `"gold"` / `"forced"`——`forced` 标记步数或上下文预算以强制作答轮结束的对话）。`tool.config` 记录已解析、无密钥的评审智能体配置（净化为 `scheme://host[:port][/path]`），便于从产物本身复现运行。
 
 `injections` 数组列出每一次原始投递及其所属区间、`role`（`first` 或 `restated`）、`verdict`、`content_chars`，以及 `op_id` / `seq` / `step`。
-
-## Schema 变更：Summary v8
-
-Summary v8 仅调整布局：结果优先、字段分组、精简轨迹对比、按 id 索引的
-`details` 区域，以及源报告版本信息。它取代 summary v7；消费者需使用上文的
-新字段路径。判定、分母、null 语义以及 report v11 契约均不变，
-不提供兼容读取器或迁移层。
-
-## 评分变更：Report v11 / Summary v7
-
-当已录制基线无法确立 novel、confirming 或 redundant 时，`novelty.value`
-现在允许 `null`。这表示证据缺失，不是第四个档位；强行指定档位会制造结论。
-仅 novelty 和 positive_effect 允许 null。影响判断、动作锚点校验、usage
-推导与区间判定规则保持不变。
-
-两个产物都将已评审条目的未知新颖性计入 `rubric.counts.novelty.null`，
-从 novelty 比率分母中排除这些条目，同时保留其其他信号和 usage 统计。
-相关但被忽略且 novelty 为 null 的条目使用 `ignored_unknown_novelty`，
-不再误计为 `ignored_novel`。标准输出明确列出已判定档位的总体与未知数量；
-全部未知时 novelty 比率为 null。
-
-该评分变更取代了 report v10 / summary v6。memgraph 仅接受当前报告 schema，
-不提供迁移或兼容读取层。新的 injudge 运行写出 report v11 与 summary v8。

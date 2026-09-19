@@ -15,7 +15,7 @@ uv run pytest tests/test_injudge.py -q # 单个文件
 ```
 
 {% hint style="info" %}
-测试套件不走网络、不启动 node：评审智能体的运行器用预制结果打桩，TypeScript 证据工具在 `node --test` 下运行（缺 node 时跳过）。夹具由 `tests/annotated_fixtures.py` 合成 schema-v9 轨迹。
+测试套件不走网络。评审智能体的运行器用预制结果打桩。TypeScript 证据工具在 `node --test` 下运行（缺 node 时跳过）。夹具由 `tests/annotated_fixtures.py` 合成 schema-v9 轨迹。
 {% endhint %}
 
 ## 项目结构
@@ -29,7 +29,6 @@ uv run pytest tests/test_injudge.py -q # 单个文件
 | `prompts/` | 所有 LLM 提示词文件，按工具与用途分目录（经 `injudge/prompts.py` 加载） |
 | `tests/` | pytest 测试套件与共享的 schema-v9 合成轨迹构造器 |
 | `doc/` | 本书（GitBook 布局：`LANGS.md` + `en/` + `zh-CN/`） |
-| `data/` | SWE-bench Verified 实例流与记忆系统评估分析边车 |
 
 ## 贡献约定
 
