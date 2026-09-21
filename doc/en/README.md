@@ -42,7 +42,7 @@ uv run -m memgraph runs/ -o memgraph-verdicts.html --verdicts output/<run-stamp>
 ```
 
 {% hint style="tip" %}
-A path may be a trajectory directory, a `trajectory.jsonl` file, or a root directory scanned recursively — see [Input contract](input-contract.md#input-paths).
+A path may be a trajectory directory, a `trajectory.jsonl` file, or a root directory scanned recursively — see [Input contract](input-contract.md#input-paths). Use `--dry-run` to preview every span that would be sent to the judge, without making calls or writing files.
 {% endhint %}
 
 ## Workflow
@@ -57,7 +57,7 @@ memgraph shows which `(trajectory, step)` created each memory and which `(trajec
 {% step %}
 ### Judge
 
-injudge groups identical re-injections into **spans** and scores every delivered memory with an LLM — a span with no observable downstream turn is rule-judged neutral without one. The span verdict is then derived in code. Harm dominates: any misused memory makes the span negative; otherwise any used memory makes it positive; otherwise it is neutral.
+injudge groups same-treatment re-injections into **spans** and scores every delivered memory with an LLM. A span with no attributed agent step is rule-judged without an LLM call and tallied as **unassessable**. The span verdict is then derived in code. Harm dominates: any misused memory makes the span negative; otherwise any used memory makes it positive; otherwise it is neutral.
 {% endstep %}
 
 {% step %}
@@ -105,7 +105,7 @@ A correct final patch can still contain harmful injections the agent happened to
     </tr>
     <tr>
       <td><strong>Judge evidence</strong></td>
-      <td>One evidence folder per span, searched by the agent with read-only tools.</td>
+      <td>One evidence folder per LLM-judged span, available through read-only tools.</td>
       <td><a href="scoring-input.md">scoring-input</a></td>
     </tr>
     <tr>

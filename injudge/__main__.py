@@ -1,27 +1,29 @@
 """CLI: python3 -m injudge <path>... [options]
 
-Judge recall injections in gate trajectories: group identical injections
-into spans, then score every delivered memory on a five-signal rubric
-(relevance / accuracy / novelty / influence / positive_effect). The judge
-is an AGENT, not one prompt: each span's evidence (task, span header,
-gold attachments, one file per recorded agent step) is materialized into a
-folder under <output>/<run-stamp>/evidence/, and a pi agent with read-only tools
-scoped to that folder searches it and answers with the rubric JSON. Two
-simple budgets bound every conversation — a max-steps LLM-call cap and
+Judge recall injections in gate trajectories: group same-treatment
+re-injections into spans, then score every delivered memory on a five-signal
+rubric (relevance / accuracy / novelty / influence / positive_effect). The judge
+is an AGENT, not one prompt: each agent-judged span's evidence (task, span
+header, gold attachments, one file per recorded agent step) is materialized
+into a folder under <output>/<run-stamp>/evidence/, and a pi agent with
+read-only tools scoped to that folder searches it and answers with the
+rubric JSON. Two simple budgets bound every conversation — a max-steps LLM-call cap and
 the context window — and both end in a forced final answer, never a
 mid-run failure. The span verdict is derived in code from the rubric —
 never asked of the LLM, never read off the final task result.
 
-One agent conversation per span (plus corrective retries that continue
+One agent conversation per judged span (plus corrective retries that continue
 the same conversation). Each run writes its own <run-stamp>/ folder under
 the -o/--output container (default output/): injudge-report.json (the
-runtime report), summary.json (the rubric statistics), evidence/ (the
-judged folders), agent-runs/ (one transcript JSONL per span — the audit
-trail of how each verdict was reached), plus memgraph-verdicts.html with
+runtime report), summary.json (the rubric statistics), plus evidence/ and
+agent-runs/ entries for spans sent to the agent (the judged folder and one
+transcript JSONL per span — the audit trail of how each verdict was reached),
+and memgraph-verdicts.html with
 --html. No two runs share a folder, so consecutive or concurrent runs
 over different inputs never overwrite or mix artifacts, and the folder
-name traces every artifact to its run. --dry-run prints each span's
-evidence document and file index without any network access.
+name traces every artifact to its run. --dry-run prints the evidence
+document and file index for each span that would use the agent, without
+network access or file writes.
 """
 
 from __future__ import annotations
@@ -328,8 +330,10 @@ def main(argv: list[str] | None = None) -> int:
         prog="python3 -m injudge",
         description=(
             "Verdict recall injections in gate trajectories: for each span of "
-            "identical injections, judge its footprint in the turns that follow "
-            "(positive/negative/neutral, evidence-cited). Verdicts rest on "
+            "same-treatment injections, judge its footprint in the turns "
+            "that follow "
+            "(positive/negative/neutral, evidence-cited); spans without an "
+            "attributed agent step are unassessable. Verdicts rest on "
             "subsequent influence, never on the final task result alone. "
             "Injections come from the schema-v9 memory "
             "annotations (memory_delivery events linked to their searches)."
@@ -357,23 +361,24 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--dry-run",
         action="store_true",
-        help="print each span's evidence document and file index (the folder "
-        "the agent would search) plus the opening message; no judge calls, "
-        "no files written",
+        help="print each span that would use the agent: its evidence document "
+        "and file index (the folder the agent would search), plus the opening "
+        "message; no judge calls, no files written",
     )
     ap.add_argument(
         "--golden",
         type=Path,
         default=None,
         help="golden answer file (reference solution): its body is attached to "
-        "every span's evidence and switches it to the gold rubric; overrides a "
+        "every agent-judged span's evidence and switches it to the gold rubric; "
+        "overrides a "
         "trajectory's golden.txt/golden.md sidecar",
     )
     ap.add_argument(
         "--correctness",
         choices=("resolved", "unresolved"),
         default=None,
-        help="recorded task outcome attached to every span's evidence "
+        help="recorded task outcome attached to every agent-judged span's evidence "
         "(corroboration only — it never selects the gold rubric); overrides a "
         "trajectory's correctness.json sidecar",
     )
@@ -408,8 +413,8 @@ def main(argv: list[str] | None = None) -> int:
         help="output container for the artifacts (default: output/) — each "
         "run writes its own <run-stamp>/ subfolder holding "
         "injudge-report.json (the runtime report) and summary.json (the "
-        "rubric statistics), plus evidence/ (the judged folders) and "
-        "agent-runs/ (one transcript JSONL per span); "
+        "rubric statistics); spans sent to the agent add evidence/ folders "
+        "and agent-runs/ transcript JSONL files; "
         "memgraph-verdicts.html with --html",
     )
     ap.add_argument(

@@ -27,8 +27,8 @@ The JSON artifact — the same dict embedded in the HTML — is:
 
 | Collection | Contents |
 |---|---|
-| `ops` | Memory operations. `kind` is `extract` (generation) or `recall` (delivery); each op is anchored at `(traj, step, seq)`. |
-| `memories` | One record per `(namespace, item_id)` identity: origin, creation site, later updates, recalls, and the deletion history — `deletions` lists every observed deletion (a re-creation marks `revived` and never erases it), `deleted` is the terminal state. |
+| `ops` | Memory operations. `kind` is `extract` (generation) or `recall` (delivery); each op is anchored at `(traj, step, seq)`. Recall ops carry `searches` (the delivery's per-lane `{lane_id, operation_id}` links) and `queries` (each linked search's resolved query). Candidate, delivered, and deletion refs carry `grouping_id` for the registry join. |
+| `memories` | One record per stable item identity: normally `(namespace, item_id)`, otherwise the documented display-key or content-digest fallback. Each record carries origin, creation site, later updates, recalls, and deletion history — `deletions` lists every observed deletion (a re-creation marks `revived` and never erases it), while `deleted` is the terminal state. |
 | `edges` | Relationships from an op to a memory: `creates`, `supersedes`, `deletes`, `recalls`. |
 
 Two chronology notes — both valid input rather than errors:
@@ -40,10 +40,13 @@ Two chronology notes — both valid input rather than errors:
 
 The rendered page provides:
 
-- One lane per trajectory, ordered by `run.json` `started_at` when present
-- Creation → recall edges, plus lifecycle chains (updates and deletions)
-- A memory sidebar and per-operation popovers
-- Filters and zoom
+- One lane per trajectory (x = agent step), ordered by `run.json` `started_at` when present
+- Extraction (▲) and recall (▼) ops; consecutive-step recalls with the same delivered memory set collapse into ×n display spans
+- Creation → recall edges, plus dashed lifecycle chains (updates and deletions)
+- Ghost creation markers for memories whose origin is not in the loaded set
+- History-rewrite markers, collapsed into bands when they sit at consecutive steps (memory-lane rewrites use a distinct color)
+- A memory sidebar, per-operation detail, an on-page legend, filters, and zoom
+- Step-less ops parked in a gutter to the right of the last step
 
 ## Options
 

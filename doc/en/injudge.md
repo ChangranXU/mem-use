@@ -6,7 +6,7 @@ icon: gavel
 # injudge
 
 {% hint style="info" %}
-injudge classifies each recall injection as **positive**, **negative**, or **neutral** based on its footprint in the agent turns that follow.
+injudge classifies assessable recall spans as **positive**, **negative**, or **neutral** from their footprint in later agent turns. Spans with no attributed agent step are reported separately as **unassessable**.
 {% endhint %}
 
 ```bash
@@ -15,8 +15,8 @@ uv run -m injudge <paths>    # writes output/<run-stamp>/injudge-report.json + s
 # The TS half of the judge (a pi agent) needs its packages once:
 npm --prefix agent install
 
-# Preview mode: print each span's evidence document, file index, and opening
-# message with no network access, no node, no files written:
+# Preview mode: print every span's evidence document, file index, and opening
+# message when that span would use the agent; no network, node, or file writes:
 uv run -m injudge <paths> --dry-run --limit 3
 ```
 
@@ -31,14 +31,16 @@ Each run writes its own `<run-stamp>/` folder (`YYYYMMDD-HHMMSS-<hex>`) under `-
 | `injudge-report.json` | The runtime judging record (`injudge.report/v11`), rewritten after every trajectory so a crash keeps completed work |
 | `summary.json` | The final statistics (`injudge.summary/v9`): counts, rates, per-memory usage |
 | `memgraph-verdicts.html` | Only with `--html`: memgraph with recall nodes colored by verdict |
-| `evidence/` | One folder per span sent to the judge agent (error outcomes included): the files the agent searched (span document, manifest, per-step files, gold) |
+| `evidence/` | One folder per span sent to the judge agent (error outcomes included): the files available to it (span document, manifest, per-step files, gold) |
 | `agent-runs/` | One trajectory JSONL per span sent to the judge agent: the pi event-sourced recording of how each verdict was reached |
 
 Delivery cost and delivery-policy metrics are computed deterministically from the recordings, not judged — see [Artifacts](artifacts.md#delivery-cost-and-policy). The full field reference lives there too.
 
+The process exits `2` if any span ended in `error`.
+
 ## Injection Spans
 
-Identical content is often re-injected, so the judged unit is the **injection span**: a maximal run of consecutive recall ops delivering the same set under the same treatment — identical entries in the same order, the same placement presentation, and the same per-entry exposure.
+The same content is often re-injected, so the judged unit is the **injection span**: a maximal run of recall ops using the same treatment — identical entries in the same order, the same placement presentation, and the same per-entry exposure.
 
 - Step gaps do not break a span; they are recorded in `step_gaps` and shown to the judge.
 - A content or treatment change does break a span — a re-ranked bundle, a re-framed block, or a changed per-entry exposure starts a new span even when the delivered content is identical. Each delivered entry's judged footprint window runs from the span's first step to that entry's next re-delivery (a re-delivery supersedes — a memory delivered in two spans is never credited in both); an entry never re-delivered keeps the rest of the stream, an unrelated span in between bounds nothing, and one entry's window ending never caps a co-delivered entry's window. Windows are per delivered ENTRY (the span-local id the rubric keys on): identities sharing one display key keep their own bounds, and every entry — keyed or not — is judged.

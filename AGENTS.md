@@ -13,6 +13,9 @@ mem-eval scores memory-system quality from schema-v9 gate trajectories
 An injection is judged by its influence on later agent turns. The final
 task result is never the verdict.
 
+User documentation is in [README.md](README.md) and [`doc/`](doc/). This
+file is the working contract for contributors and coding agents.
+
 ## How to work here
 
 The user's request takes precedence over this file and over `CLAUDE.md`.
@@ -30,14 +33,14 @@ the user approves is a concrete result.
 From the checkout root:
 
 ```bash
-uv sync                                 # once: .venv from pyproject.toml + uv.lock
-npm --prefix agent install                 # once: the pi agent packages (node >= 22.19)
+uv sync                                 # once: create .venv from pyproject.toml
+npm --prefix agent install              # once: the pi agent packages (node >= 22.19)
 uv run pytest tests -q                  # full suite (offline; also runs node --test)
 uv run pytest tests/test_injudge.py -q  # one file
 uv run -m memgraph <paths> -o memgraph.html --json memgraph.json
-uv run -m injudge <paths> -o output/    # one <run-stamp>/ subfolder per run: report + summary + evidence/
+uv run -m injudge <paths> -o output/    # one run folder: report + summary; judged-span evidence/transcripts
 uv run -m injudge <paths> --html        # also memgraph-verdicts.html
-uv run -m injudge <paths> --dry-run     # print each span's evidence; no calls, no files
+uv run -m injudge <paths> --dry-run     # preview spans that use the agent; no calls or files
 ```
 
 `<paths>` are trajectory dirs (containing `trajectory.jsonl`),
@@ -65,7 +68,7 @@ node >= 22.19 with type stripping, no build step); `npm install` there once.
 ## Layout
 
 ```
-pyproject.toml + uv.lock   # uv env; package = false; tools run as uv run -m …
+pyproject.toml             # uv env; package = false; tools run as uv run -m …
 util.py                    # atomic_write, tmp_sibling, utf8_safe, check_writable,
                            # print_safe, print_validation
 memgraph/annotations.py    # schema-v9 annotation index + MemoryRef mapping
@@ -313,9 +316,8 @@ Easy to get wrong:
   retry; a missing node, runner, or agent-package tree is setup misuse
   that fails fast with a targeted SystemExit before any paid call
   (`_check_runner`).
-- Out-of-contract answers, empty final texts, and output-budget cuts are
-  all one corrective-retry class — there are no conformance tiers, no
-  truncation forensics, no input budget gates, and no tiktoken anywhere.
+- Out-of-contract answers, empty final texts, and output-budget cuts all
+  take the same corrective retry.
 
 ## Style
 
@@ -471,8 +473,8 @@ The headline binds span rates to the wasted-token share, names
 non-zero, and states the proxy caveat on every reported share. Rule-judged
 auto-neutral (no-subsequent-turn) spans tally as `unassessable`, out of
 every directional denominator and the wasted-token share, with
-`unassessable_spans` / `unassessable_tokens` named in the headline when
-non-zero — observation missingness is not a measured null effect.
+`unassessable_spans` / `unassessable_tokens` named in an existing headline
+when non-zero — observation missingness is not a measured null effect.
 Identities sharing one display key carry a `key#<item-or-namespace>`
 suffix (8-char prefix, full base on a prefix collision). Narrative and
 process detail stays in the report artifact alone.

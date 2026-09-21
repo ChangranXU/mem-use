@@ -58,12 +58,12 @@ npm --prefix agent install    # TS 侧执行一次（需要 PATH 上有 node >= 
 | `--max-attempts` | `MAX_ATTEMPTS` | 每区间的调查/修复阶段总数 |
 | `--judge-max-tokens` | `MAX_OUTPUT_TOKENS` | 单次调用输出上限 |
 | `--limit N` | 不设 | 最多用智能体评判 *N* 个区间（其余为 `unjudged`）。必须为正。规则判定的 auto-neutral 区间仍会出判定；它们不消耗智能体运行。 |
-| `--dry-run` | 关 | 打印每个区间的证据文档、文件索引与开场消息；不发起调用、不写文件 |
-| `--golden PATH` | 边车 | 每个区间证据附上的 golden answer 正文 |
-| `--correctness resolved\|unresolved` | 边车 | 已记录的任务结果，仅作佐证 |
+| `--dry-run` | 关 | 打印每个原本会使用智能体的区间的证据文档、文件索引与开场消息；不发起调用、不写文件 |
+| `--golden PATH` | 边车 | 每个智能体评审区间的证据所附 golden answer 正文 |
+| `--correctness resolved\|unresolved` | 边车 | 每个智能体评审区间所附的任务结果，仅作佐证 |
 | `--gold-metadata PATH` | 不设 | verified-metadata.json：按各轨迹记录的 `instance_id` 连接该实例的 gold patch（优先级介于 `--golden` 与边车之间） |
 | `--harness-report PATH` | 不设 | 整个运行共用一份 SWE-bench 风格评测报告，按 `instance_id` 逐轨迹连接（优先级介于 `--correctness` 与边车之间） |
-| `-o DIR` | `output/` | 产物容器——每次运行写入自己的 `<run-stamp>/` 子目录（内含 `evidence/`，即智能体读取的各文件夹） |
+| `-o DIR` | `output/` | 产物容器——每次运行写入自己的 `<run-stamp>/` 子目录；送入智能体的区间会增加 `evidence/` 与 `agent-runs/` 条目 |
 | `--html` | 关 | 同时写出 `memgraph-verdicts.html` |
 
 {% hint style="warning" %}

@@ -117,7 +117,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
     <div class="group">
       <h4>▼ recall <span>— memories delivered to the agent</span></h4>
       <div class="item"><svg width="14" height="14"><path d="M7,12 L2,2 L12,2 Z" fill="#3567d6"/></svg><span>one injection at this step; number = distinct memories delivered</span></div>
-      <div class="item"><svg width="32" height="14"><rect x="1" y="2" width="30" height="10" rx="5" fill="#3567d6" fill-opacity="0.85"/><text x="16" y="11" font-size="8" fill="#fff" text-anchor="middle">×n</text></svg><span>span of n consecutive steps with identical injections</span></div>
+      <div class="item"><svg width="32" height="14"><rect x="1" y="2" width="30" height="10" rx="5" fill="#3567d6" fill-opacity="0.85"/><text x="16" y="11" font-size="8" fill="#fff" text-anchor="middle">×n</text></svg><span>n consecutive-step recalls with the same delivered memory set</span></div>
       <div class="item"><svg width="32" height="14"><rect x="1" y="2" width="30" height="10" rx="5" fill="#3567d6" stroke="#101828" stroke-width="1"/></svg><span>outlined span = delivered the selected/hovered memory</span></div>
     </div>
     <div class="group" id="legend-verdicts" style="display:none">

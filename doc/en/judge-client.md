@@ -13,7 +13,7 @@ See [Configuration](configuration.md) for endpoint setup (`npm --prefix agent in
 
 ## The Conversation
 
-One span, one conversation. Python materializes the span's [evidence folder](scoring-input.md), assembles the system prompt (the same five-signal rubric text as always), and writes a secret-free job file; the runner builds the pi agent with exactly the two evidence tools, seeds it with the opening message containing the exact span document and file index, and lets it run until the model produces a final message with no tool calls. That final text is the judge answer. The result file returns call counts, token usage, and stop diagnostics to Python. The operation's `input` records attempts, LLM/tool calls, the forced marker when applicable, and a transcript path; per-call token usage and stop diagnostics stay in that transcript.
+One span, one conversation. Python materializes the span's [evidence folder](scoring-input.md), assembles the system prompt from the five-signal rubric, and writes a secret-free job file; the runner builds the pi agent with exactly the two evidence tools, seeds it with the opening message containing the exact span document and file index, and lets it run until the model produces a final message with no tool calls. That final text is the judge answer. The result file returns call counts, token usage, and stop diagnostics to Python. The operation's `input` records attempts, LLM/tool calls, the forced marker when applicable, and a transcript path; per-call token usage and stop diagnostics stay in that transcript.
 
 ## Trajectory Recording
 
@@ -30,7 +30,7 @@ When a forced answer also contains blocked tool calls, the runner records the re
 
 ## Budgets and Forced Answers
 
-Two budgets bound every conversation, and both end in a **forced final answer** instead of a failure (the pattern the collection harness uses):
+Two budgets bound every conversation, and both end in a **forced final answer** instead of a failure:
 
 - **Step budget** (`MAX_STEPS`): when the LLM-call count reaches the cap, the conversation is cut to one final round: the forced-answer message is appended ("stop calling tools; answer from what you have gathered"), and any defiant tool call in the forced round is blocked.
 - **Context budget** (`CONTEXT_WINDOW`): the estimate uses the last applicable assistant usage plus trailing messages; without usable input usage (including output-only usage), it estimates that content from messages, the system prompt, and tool schemas. The watermark reserves `MAX_OUTPUT_TOKENS` and the forced message's estimated size. Crossing it rolls back the overflowing round and injects the forced message.
@@ -47,9 +47,9 @@ An invalid answer gets **one repair call with no evidence tools**, using the ful
 
 Only an explicit repair control reply, `{"needs_evidence": "specific missing fact and step/file"}`, reopens investigation. It is not a verdict. The next runner restores the complete `job.history`, enables the evidence tools, and adds the targeted follow-up with `agent.prompt(...)`. This is pi's native continuation with a new instruction: it preserves existing messages. Bare `agent.continue()` adds no message and rejects a completed assistant tail unless a follow-up is queued, so it is not used here.
 
-`MAX_ATTEMPTS` bounds all runner phases (initial investigation, repairs, and resumed investigations). Exhaustion keeps a visible error and the masked answer text. No parser tolerance, format-stripping fallback, or extra model call on already-valid results is introduced.
+`MAX_ATTEMPTS` bounds all runner phases (initial investigation, repairs, and resumed investigations). Exhaustion keeps a visible error and the masked answer text. The parser is strict: no format-stripping fallback, and a valid answer is not sent back to the model.
 
-There are no conformance tiers, no truncation classes, no input budget gates: an answer cut at the output cap simply fails the parse and takes the corrective retry; an oversized trajectory simply means the agent reads selectively.
+An answer cut at the output cap fails the contract parse and takes the corrective retry. An oversized trajectory means the agent reads the evidence folder selectively.
 
 ## Failure Handling
 

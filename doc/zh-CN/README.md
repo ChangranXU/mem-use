@@ -42,7 +42,7 @@ uv run -m memgraph runs/ -o memgraph-verdicts.html --verdicts output/<run-stamp>
 ```
 
 {% hint style="tip" %}
-路径可以是轨迹目录、`trajectory.jsonl` 文件，或递归扫描的根目录——见[输入约定](input-contract.md#输入路径)。
+路径可以是轨迹目录、`trajectory.jsonl` 文件，或递归扫描的根目录——见[输入约定](input-contract.md#输入路径)。`--dry-run` 可预览每个原本会送入评审的区间，不发起调用、不写文件。
 {% endhint %}
 
 ## 工作流
@@ -57,7 +57,7 @@ memgraph 展示每条记忆由哪个 `(轨迹, 步骤)` 创建、随后被哪个
 {% step %}
 ### 评审
 
-injudge 把内容相同的重复注入归并为**区间（span）**，由 LLM 为每条投递记忆打分——观察不到下游回合的区间不经 LLM，按规则判为 neutral——再由代码推导区间判定。损害优先：任一误用即为 negative；否则任一采纳即为 positive；否则为 neutral。
+injudge 把处理方式相同的重复注入归并为**区间（span）**，由 LLM 为每条投递记忆打分。没有可归属 agent 步骤的区间不经 LLM，按规则判定并计为 **unassessable**。区间判定再由代码推导。损害优先：任一误用即为 negative；否则任一采纳即为 positive；否则为 neutral。
 {% endstep %}
 
 {% step %}
@@ -105,7 +105,7 @@ LLM 从不直接给出区间判定。它为每条投递记忆打五个信号—�
     </tr>
     <tr>
       <td><strong>评审证据</strong></td>
-      <td>每个区间一个证据文件夹，由智能体用只读工具检索。</td>
+      <td>每个 LLM 评审区间一个证据文件夹，通过只读工具提供给智能体。</td>
       <td><a href="scoring-input.md">scoring-input</a></td>
     </tr>
     <tr>

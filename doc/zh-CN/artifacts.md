@@ -14,7 +14,7 @@ injudge 把一次运行的全部产物写入输出容器（`-o DIR`，默认 `ou
 | `injudge-report.json` | `injudge.report/v11` | 运行时评审记录。每条轨迹完成后重写，崩溃也保留已完成部分。用 `--verdicts` 喂给 memgraph。 |
 | `summary.json` | `injudge.summary/v9` | 最终统计集合：计数、比率，以及无叙述的区间索引。 |
 | `memgraph-verdicts.html` | — | 仅在 `--html` 时产出（默认关闭）：召回节点按区间判定着色的 memgraph。 |
-| `evidence/<span-dir>/` | — | 每个送入评审智能体的区间一个文件夹（含 error 结局）：智能体检索过的原始文件。 |
+| `evidence/<span-dir>/` | — | 每个送入评审智能体的区间一个文件夹（含 error 结局）：向智能体提供的原始文件。 |
 | `agent-runs/<span-dir>.jsonl` | — | 每个送入评审智能体的区间一条轨迹：评判对话的 pi 事件流记录（见[评审智能体](judge-client.md#轨迹记录)）。 |
 
 `<span-dir>` 是文件系统安全的区间 id——非 `[A-Za-z0-9._-]` 字符替换为 `_`、截到 80 字符，再加 8 字符摘要后缀（`span_dir_name`）——任意区间 id 都不会冲突。report 的 `input.transcript` 指向同一个派生名称。
@@ -38,7 +38,7 @@ memgraph 的 `--json` 产物是 `{tool, trajectories, ops, memories, edges, vali
 | 总体 | 成员 |
 |---|---|
 | 已评判区间 | `positive` + `negative` + `neutral`。判定率的分母。 |
-| `unassessable` | 规则判定的 auto-neutral 区间（所有投递都无法归属到 agent 步骤——无法确定下游足迹）。只计数，其投递成本计入独立的 token 桶：观察缺失不等于测得的零效应，因此不进入任何方向性分母，也不计入浪费 token 份额。非零时由 `headline.unassessable_spans` / `unassessable_tokens` 标出。 |
+| `unassessable` | 规则判定的 auto-neutral 区间（所有投递都无法归属到 agent 步骤——无法确定下游足迹）。只计数，其投递成本计入独立的 token 桶：观察缺失不等于测得的零效应，因此不进入任何方向性分母，也不计入浪费 token 份额。有已评判总体、因而存在 `headline` 时，由其中的 `unassessable_spans` / `unassessable_tokens` 标出。 |
 | LLM 已评判区间 | 无 `auto` 标记的已评判区间。评分比率、使用汇总与置信度的总体。 |
 | `error` / `unjudged` | 只计数。永远不是比率分母。 |
 | 重述注入 | 并入所属区间。计入 `n_injections` 与投递成本。不出现在比率中。 |
@@ -123,7 +123,7 @@ $$
 | `counts.n_spans` | 注入区间数——评审单元 |
 | `counts.restated_injections` | `n_injections − n_spans` |
 | `verdicts.counts.positive` / `negative` / `neutral` | 区间判定：已采取行动且有益 / 已采取行动但无益 / 两者均未建立。仅引用记忆不构成 negative。 |
-| `verdicts.counts.error` / `unjudged` / `unassessable` | 评审失败 / 被 `--limit` 跳过 / 无可观察的后续回合；保留计数，但不进入方向性比率。 |
+| `verdicts.counts.error` / `unjudged` / `unassessable` | 评审失败 / 被 `--limit` 跳过 / 没有可归属的 agent 步骤；保留计数，但不进入方向性比率。 |
 | `verdicts.rates` | 已评判区间中 positive/negative/neutral 的占比；无已评判区间时省略 |
 
 ### Headline、投递与评审
@@ -136,7 +136,7 @@ $$
 | `headline.positive_span_rate` / `negative_span_rate` | 两者始终一起呈现；wasted-token share 可表示时随行于旁 |
 | `headline.wasted_token_share` | neutral + negative 的注入 token 成本占已评判区间成本的份额，随行命名 `wasted_tokens` / `judged_tokens` |
 | `headline.error_unjudged_tokens` | 不进入任何比率或份额的 error/unjudged token 桶；仅非零时写出 |
-| `headline.unassessable_spans` / `unassessable_tokens` | 规则判定的无后续回合区间及其投递成本；仅非零时写出，不进入方向性分母 |
+| `headline.unassessable_spans` / `unassessable_tokens` | 规则判定的无后续回合区间及其投递成本；仅非零且 `headline` 存在时写出，不进入方向性分母 |
 | `headline.caveat` | 每一个浪费份额都附带的说明：区间级代理的粗糙性与判定的不对称 |
 | `delivery.cost` | 确定性投递成本：`content_chars_total`、`approx_tokens_total`（`chars // 4`）、按区间判定归类的 `approx_tokens_by_verdict`；总量为零时省略 |
 | `delivery.policy` | `n_injections`、`n_steps`、`injection_density`、`restated_ratio`、`est_injected_tokens`、`prompt_tokens_total`、`injected_token_share`、`n_searches`、`n_extractions` / `extraction_failures`。全局另含 `est_injected_tokens_billed`，用于只有部分轨迹有 usage 记录时的份额分子。提取失败与评审失败分开统计。 |
@@ -174,6 +174,6 @@ $$
 
 ## 仅 Report 中的字段
 
-`injudge-report.json` 每个操作还带有：`memories`（完整已录制引用，每条标注其区间本地 `id`）、`memory_exposure`（逐条目：placement 对该值是 `full`、`full_normalized`——整体载入但仅在空白符折叠 / markdown 转义剥离后匹配——、`clipped` 到 N 字符前缀，还是 `unknown`——无法核实，故评审输入中隐去规范值；含引号、反斜杠或换行结构的值只做逐字比对）、`memory_windows`（逐条目 id：该条目动作 `anchors` 校验所依据的足迹窗口结束步——从未被重投递时为 `null`，即其上界是步骤流末尾；同一步投递冲突会把窗口截断在该区间自己的末次投递步，即使此前已有更晚的有限上界；所有投递都无法归属到 agent 步骤时省略）、评分 note 与各条目的动作 `anchors`、`analysis`、`evidence`、`step_gaps`、`new_keys` / `removed_keys` / `previous_keys` / `changed_keys`、`auto`、`error`、`judge_raw`、`pe_pairing_corrections`（若有），以及送入智能体运行的区间（含 error 结局）上的 `input`（`path` 为 `agent`，外加 `attempts`、`llm_calls`、`tool_calls`、`transcript`——指向 `agent-runs/` 下该对话的轨迹 JSONL，相对输出目录——适用时还有 `"gold"` / `"forced"`——`forced` 标记步数或上下文预算以强制作答轮结束的对话）。`tool.config` 记录已解析、无密钥的评审智能体配置（净化为 `scheme://host[:port][/path]`），便于从产物本身复现运行。
+`injudge-report.json` 每个操作还带有：`memories`（完整已录制引用，每条标注其区间本地 `id`）、`memory_exposure`（逐条目：placement 对该值是 `full`、`full_normalized`——整体载入但仅在空白符折叠 / markdown 转义剥离后匹配——、`clipped` 到 N 字符前缀，还是 `unknown`——无法核实，故评审输入中隐去规范值；含引号、反斜杠或换行结构的值只做逐字比对）、`memory_windows`（逐条目 id：该条目动作 `anchors` 校验所依据的足迹窗口结束步——从未被重投递时为 `null`，即其上界是步骤流末尾；同一步投递冲突会把窗口截断在该区间自己的末次投递步，即使此前已有更晚的有限上界；所有投递都无法归属到 agent 步骤时省略）、`memory_window_starts`（仅在同一步投递冲突抬高某条目窗口时出现：该条目窗口自共享步骤之后才开始，共享步骤归先 carrier）、评分 note 与各条目的动作 `anchors`、`analysis`、`evidence`、`step_gaps`、`new_keys` / `removed_keys` / `previous_keys` / `changed_keys`、`auto`、`error`、`judge_raw`、`pe_pairing_corrections`（若有），以及送入智能体运行的区间（含 error 结局）上的 `input`（`path` 为 `agent`，外加 `attempts`、`llm_calls`、`tool_calls`、`transcript`——指向 `agent-runs/` 下该对话的轨迹 JSONL，相对输出目录——适用时还有 `"gold"` / `"forced"`——`forced` 标记步数或上下文预算以强制作答轮结束的对话）。`tool.config` 记录已解析、无密钥的评审智能体配置（净化为 `scheme://host[:port][/path]`），便于从产物本身复现运行。
 
 `injections` 数组列出每一次原始投递及其所属区间、`role`（`first` 或 `restated`）、`verdict`、`content_chars`，以及 `op_id` / `seq` / `step`。

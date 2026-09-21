@@ -11,15 +11,19 @@
 
 > 注入由它对 agent 的**后续影响**评判——绝不看最终任务结果。
 
+## 环境
+
+- Python 3.11+ 与 [uv](https://docs.astral.sh/uv/)
+- Node.js ≥ 22.19（injudge 智能体运行与 TypeScript 测试需要）
+
+Python 依赖声明在 `pyproject.toml`（memgraph 只用标准库，injudge 另需
+`tqdm`）。评审是 `agent/` 下的 TypeScript 智能体，构建于
+[pi](https://github.com/earendil-works/pi)，用 npm 安装。
+
 ## 快速开始
 
-需要 Python 3.11+ 与 [uv](https://docs.astral.sh/uv/)。injudge 另需
-node ≥ 22.19。Python 依赖声明在 `pyproject.toml`（memgraph 只用标准库，
-injudge 另需 `tqdm`）。评审本身是 `agent/` 下的 TypeScript 智能体，构建于
-[pi](https://github.com/earendil-works/pi) 包，用 npm 安装。
-
 ```bash
-uv sync                     # 首次——创建 .venv
+uv sync                        # 首次——创建 .venv
 npm --prefix agent install     # 首次——pi 智能体包（需要 node >= 22.19）
 
 # 1. 可视化记忆操作——离线，不调用评审
@@ -28,7 +32,7 @@ uv run -m memgraph <paths> -o memgraph.html --json memgraph.json
 # 2. 评审召回注入——先配置评审端点
 cp .env.example .env
 uv run -m injudge <paths> --dry-run --limit 3   # 预览证据；不发请求、不写文件
-uv run -m injudge <paths>                       # output/<run-stamp>/injudge-report.json + summary.json
+uv run -m injudge <paths>                       # 单独运行目录；已评审区间另有 evidence/ 与 agent-runs/
 
 # 3. 把判定结果叠加到图上（或给 injudge 加 --html）
 uv run -m memgraph <paths> --verdicts output/<run-stamp>/injudge-report.json -o memgraph-verdicts.html
@@ -39,12 +43,14 @@ uv run -m memgraph <paths> --verdicts output/<run-stamp>/injudge-report.json -o 
 
 ## 工作原理
 
-injudge 把内容相同的重复注入归并为**区间（span）**，把每个区间的证据
-（任务、区间文档、gold 附件、每个已录制 agent 步骤一个文件）写入一个
-文件夹。一个工具只读且限定在该文件夹内的 pi 智能体，对投递的记忆条目
-打五个信号（relevance、accuracy、novelty、influence、positive effect），
-按稳定的区间本地 id 逐条评分。再由代码推导区间判定：任一记忆被误用 →
-**negative**，否则任一被采纳 → **positive**，否则 **neutral**。
+injudge 把处理方式相同的重复注入归并为**区间（span）**：条目顺序、
+placement 呈现和逐条目曝光都必须一致。它为每个送入评审的区间建立证据
+文件夹（任务、区间文档、gold 附件、每个已录制 agent 步骤一个文件）。
+一个工具只读且限定在该文件夹内的 pi 智能体，对投递的记忆条目打五个信号
+（relevance、accuracy、novelty、influence、positive effect），按稳定的
+区间本地 id 逐条评分。再由代码推导区间判定：任一记忆被误用 →
+**negative**，否则任一被采纳 → **positive**，否则 **neutral**。没有可归属
+agent 步骤的区间不送评审，计为 **unassessable**。
 
 被评判的证据不超出录制 placement 实际曝光的内容。acted-on 的影响力断言
 必须携带落在该记忆足迹窗口内的动作步骤锚点。映射、示例与汇总公式见
@@ -75,8 +81,9 @@ injudge 把内容相同的重复注入归并为**区间（span）**，把每个�
 
 ```bash
 uv sync
+npm --prefix agent install     # 首次，供 TypeScript 智能体测试
 uv run pytest tests -q
 ```
 
-测试不走网络：评审运行器打了桩，TypeScript 证据工具经 `node --test` 由
-`tests/test_agent_tools.py` 驱动。
+测试不走网络：Python 测试会替换付费评审调用，TypeScript 运行器与证据工具
+经 `node --test` 由 `tests/test_agent_tools.py` 驱动。

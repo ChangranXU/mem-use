@@ -6,7 +6,7 @@ icon: gavel
 # injudge
 
 {% hint style="info" %}
-injudge 根据召回注入在后续 agent 回合中的足迹，将其判为 **positive**、**negative** 或 **neutral**。
+injudge 根据召回区间在后续 agent 回合中的足迹，将可评判区间判为 **positive**、**negative** 或 **neutral**。没有可归属 agent 步骤的区间单独报告为 **unassessable**。
 {% endhint %}
 
 ```bash
@@ -15,7 +15,7 @@ uv run -m injudge <paths>    # 写出 output/<run-stamp>/injudge-report.json 与
 # 评审的 TS 半边（一个 pi 智能体）需要先安装一次依赖：
 npm --prefix agent install
 
-# 预览模式：打印每个区间的证据文档、文件索引与开场消息，
+# 预览模式：打印每个原本会送入智能体的区间的证据文档、文件索引与开场消息，
 # 全程不访问网络、不启动 node、不写文件：
 uv run -m injudge <paths> --dry-run --limit 3
 ```
@@ -31,14 +31,16 @@ uv run -m injudge <paths> --dry-run --limit 3
 | `injudge-report.json` | 运行时评审记录（`injudge.report/v11`），每条轨迹后重写，崩溃也保留已完成部分 |
 | `summary.json` | 最终统计（`injudge.summary/v9`）：计数、比率、逐记忆使用 |
 | `memgraph-verdicts.html` | 仅在 `--html` 时产出：召回节点按判定着色的 memgraph |
-| `evidence/` | 每个送入评审智能体的区间一个文件夹（含 error 结局）：智能体检索过的文件（区间文档、manifest、逐步骤文件、gold） |
+| `evidence/` | 每个送入评审智能体的区间一个文件夹（含 error 结局）：向智能体提供的文件（区间文档、manifest、逐步骤文件、gold） |
 | `agent-runs/` | 每个送入评审智能体的区间一条轨迹 JSONL：判定如何得出的 pi 事件流记录 |
 
 投递成本与投递策略指标由录制数据按确定性规则计算，不经评审——见[产物](artifacts.md#交付成本与策略)。完整字段说明也在该页。
 
+任一区间以 `error` 结束时，进程以退出码 `2` 退出。
+
 ## 注入区间
 
-相同内容常常被重复注入，因此评审单元是**注入区间（span）**：以相同处理方式投递相同集合的连续召回操作的最大段——相同条目按相同顺序、相同 placement 呈现、且每条目的曝光相同。
+相同内容常常被重复注入，因此评审单元是**注入区间（span）**：采用同一处理方式的召回操作最大段——相同条目按相同顺序、相同 placement 呈现、且每条目的曝光相同。
 
 - 步骤间隔不切段；记入 `step_gaps` 并展示给评审。
 - 内容或处理方式的变化都会切段——重新排序的包、重新框定的块、或单条目曝光的变化都会开启新区间，即使投递内容完全相同。每个投递条目的足迹评判窗口各自从区间首步到该条目下一次被重投递处（重投递即取代——同一条记忆在两个区间投递，不会被重复归功）；从未被重投递的条目窗口直到步骤流末尾，中间内容无关的区间不构成上界，同区间其他条目的窗口结束也不收窄本条目的窗口。窗口按投递条目（rubric 键用的区间本地 id）计算：共用一个显示键的多个身份各自保有自己的边界，每个条目——无论有无键——都参与评分。

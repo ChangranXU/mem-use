@@ -13,16 +13,19 @@ read-only tools consume schema-v9 gate trajectories (extension/traj-recorder):
 > An injection is judged by its *subsequent influence* on the agent — never by
 > the final task result.
 
+## Requirements
+
+- Python 3.11+ and [uv](https://docs.astral.sh/uv/)
+- Node.js ≥ 22.19 (injudge agent runs and TypeScript tests)
+
+Python dependencies are in `pyproject.toml` (memgraph is stdlib-only; injudge
+adds `tqdm`). The judge is a TypeScript agent under `agent/`, built on
+[pi](https://github.com/earendil-works/pi) and installed with npm.
+
 ## Quick start
 
-Python 3.11+ and [uv](https://docs.astral.sh/uv/). injudge also needs
-node ≥ 22.19. Python dependencies live in `pyproject.toml` (memgraph is
-stdlib-only; injudge adds `tqdm`). The judge itself is a TypeScript agent
-under `agent/`, built on the [pi](https://github.com/earendil-works/pi)
-packages and installed with npm.
-
 ```bash
-uv sync                     # once — creates .venv
+uv sync                        # once — creates .venv
 npm --prefix agent install     # once — pi agent packages (node >= 22.19)
 
 # 1. Visualize memory operations — offline, no judge calls
@@ -31,7 +34,7 @@ uv run -m memgraph <paths> -o memgraph.html --json memgraph.json
 # 2. Judge recall injections — configure the endpoint first
 cp .env.example .env
 uv run -m injudge <paths> --dry-run --limit 3   # preview evidence; no calls, no files
-uv run -m injudge <paths>                       # output/<run-stamp>/injudge-report.json + summary.json
+uv run -m injudge <paths>                       # one run folder; judged spans add evidence/ and agent-runs/
 
 # 3. Overlay verdicts on the graph (or pass --html to injudge)
 uv run -m memgraph <paths> --verdicts output/<run-stamp>/injudge-report.json -o memgraph-verdicts.html
@@ -42,13 +45,16 @@ Each `<path>` is a trajectory dir (containing `trajectory.jsonl`), a
 
 ## How it works
 
-injudge groups identical re-injections into **spans** and writes each span's
-evidence (task, span document, gold attachments, one file per recorded
-agent step) into a folder. A pi agent with read-only tools scoped to that
-folder scores every delivered memory on five signals — relevance, accuracy,
-novelty, influence, positive effect — under a stable span-local id. Python
-then derives the span verdict: any misused memory → **negative**, else any
-used → **positive**, else **neutral**.
+injudge groups same-treatment re-injections into **spans**: the ordered
+entries, placement presentation, and per-entry exposure must match. For each
+span sent to the judge, it writes the evidence (task, span document, gold
+attachments, and one file per recorded agent step) into a folder. A pi agent
+with read-only tools scoped to that folder scores every delivered memory on
+five signals — relevance, accuracy, novelty, influence, positive effect —
+under a stable span-local id. Python then derives the span verdict: any
+misused memory → **negative**, else any used → **positive**, else **neutral**.
+A span with no attributed agent step is not sent to the judge; it is counted
+as **unassessable**.
 
 Judged evidence stays inside what the recorded placement actually exposed.
 Acted-on influence claims must cite action-step anchors inside the memory's
@@ -83,8 +89,10 @@ layout) — start at the [English book](doc/en/README.md) or the
 
 ```bash
 uv sync
+npm --prefix agent install     # once, for the TypeScript agent tests
 uv run pytest tests -q
 ```
 
-The suite is offline: the judge runner is stubbed, and the TypeScript
-evidence tools run under `node --test` through `tests/test_agent_tools.py`.
+The suite is offline: Python tests stub paid judge calls, and the TypeScript
+runner and evidence tools run under `node --test` through
+`tests/test_agent_tools.py`.

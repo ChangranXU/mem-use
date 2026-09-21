@@ -57,11 +57,13 @@ Operations are attributed to **agent steps**: the 1-based ordinal of a completed
 
 A lane that carries main traffic in **any** session is not a memory lane: it is dropped from the memory-lane set with a warning, and its turns count as agent steps.
 
+A side lane (bound as neither main nor memory — for example an unbound query-rewrite lane) counts as neither an agent step nor a memory turn. Each such lane is listed in `validation`.
+
 Attribution rules:
 
 - An extraction observed before the first agent turn completes is step `0`.
 - Later extractions and rewrite markers use the ordinal of the most recently classified agent turn, including when pipelined responses complete out of turn order.
-- A delivery that cannot be attributed to any agent turn has `step = None` and merges into a matching-content span wherever it sits; a span whose deliveries are all unattributable has no subsequent behavior to judge and is rule-judged neutral (see [injudge](injudge.md#injection-spans)).
+- A delivery that cannot be attributed to any agent turn has `step = None` and merges into a matching-content span wherever it sits; a span whose deliveries are all unattributable has no grounded downstream footprint and is rule-judged neutral (see [injudge](injudge.md#injection-spans)).
 
 A delivery naming a consumer call whose turn is missing or unclassified stays unattributable. It cannot fall back to an earlier or declared step.
 
