@@ -31,7 +31,7 @@ From the checkout root:
 
 ```bash
 uv sync                                 # once: .venv from pyproject.toml + uv.lock
-cd agent && npm install                 # once: the pi agent packages (node >= 22.19)
+npm --prefix agent install                 # once: the pi agent packages (node >= 22.19)
 uv run pytest tests -q                  # full suite (offline; also runs node --test)
 uv run pytest tests/test_injudge.py -q  # one file
 uv run -m memgraph <paths> -o memgraph.html --json memgraph.json
@@ -85,7 +85,7 @@ injudge/agent.py           # .env → AgentConfig, runner subprocess, corrective
 injudge/gold.py            # golden-answer / correctness sidecars and CLI joins
 injudge/prompts.py         # loads prompts/ (never inline prompts in code)
 injudge/aggregate.py       # verdict counts/rates, per-memory usage roll-ups
-injudge/report.py          # injudge.report/v11 + injudge.summary/v8 + stdout
+injudge/report.py          # injudge.report/v11 + injudge.summary/v9 + stdout
 injudge/__main__.py        # python3 -m injudge
 agent/                     # TS judge agent: runner.ts (pi Agent + budgets),
                            # evidence-tools.ts (scoped read-only tools),
@@ -121,6 +121,16 @@ subsequence over concatenated per-lane results. Empty searches are valid
 when no lane was read. Empty placements cost zero; partially sized slots
 retain known cost with a warning.
 
+The optional `embedding` role binds a distinct proxy lane. An operation-end
+`embedding_after_role_call_index` requires `embedding_binding_status` and
+`embedding_call_refs` (including an explicit empty list for `no_call`). These
+refs never replace memory-call attribution or create agent steps. Billing
+uses the largest valid prompt-token total from run.json, agent_end, and live
+message usage; inconsistent smaller snapshots warn. Without snapshots,
+message usage misses embedding calls and warns when that role is bound.
+Duplicate search links remain visible but contribute query/matched once per
+operation.
+
 Generation retirements merge delete-change before-refs with end-event
 `retired` refs, deduplicated per revision. Retiring a distinguishably older
 revision keeps the current item alive: the operation retains the retirement,
@@ -132,9 +142,14 @@ operation-local ids compare through content digests only.
 Identity and grouping use the recorder's portable MemoryRef fields, never
 adapter vocabulary.
 
-- **Item grouping** (graph registry, span set-diffs, injudge usage rollups)
+- **Item grouping** (graph registry, span set-diffs, injudge usage rollups,
+  footprint windows)
   is `(namespace, item_id)`, stable across versions of one item. Fall back
-  to the display key when `item_id` was not recorded. The same display key
+  to a stable display key when `item_id` was not recorded. An operation-local
+  id posing as the display key is withheld: use the canonical entry's
+  version/content identity instead. Graph/rollup item ids encode this fallback
+  as `content:<sha256>`; graph refs carry `grouping_id` for the browser join
+  while retaining their recorded fields. The same display key
   from two stores, or two items in one store, is two memories.
 - **Span fingerprints** use the gate's version tuple — `namespace` /
   `identity_scheme` / `version_id` / content sha256 — plus the recorded
@@ -147,6 +162,9 @@ adapter vocabulary.
     When the display "key" IS that local id (no `item_id`, no real key
     recorded), it is no item identity either, and the item half reads
     as absent.
+    Set-diffs and footprint windows follow the same content identity when
+    no stable item is known: a fresh local id does not reopen the earlier
+    treatment's window or fabricate a new memory.
   - With neither a withheld-adjusted version_id nor a digest, the
     fingerprint is the delivered `(namespace, item, value)`. Redacted
     content records no value, so redacted bodies indistinguishable
@@ -187,7 +205,8 @@ Both tools attribute steps through one rule:
 - A delivery with no classified agent turn has `step = None`, and its span
   is rule-judged auto-neutral with no LLM call. When the consumer is KNOWN
   but unobserved — the bound call's turn classified as memory/side lane or
-  never completed — never fall back to a declared or most-recent step:
+  never completed, or a claimed call id has no observed turn_start — never
+  fall back to a declared or most-recent step:
   that would make a pre-exposure action eligible as downstream evidence.
   The delivery stays unattributable with a warning. The observed-turn
   fallback (no binding, no declared step) is an attribution assumption,
@@ -245,8 +264,11 @@ the compact manifest verbatim, and whose only tools are read/search scoped
 to that folder (absolute paths, `..`, and out-of-root symlinks refused).
 Two budgets bound the conversation, both ending in a FORCED final answer
 (the harness pattern), never a mid-run failure: MAX_STEPS caps LLM calls,
-and the CONTEXT_WINDOW watermark (minus the reserved MAX_OUTPUT_TOKENS)
-rolls back the overflowing round and injects the forced message. A defiant
+and the CONTEXT_WINDOW watermark (minus MAX_OUTPUT_TOKENS and the forced
+message's estimated size) rolls back the overflowing round and injects the
+forced message. Context estimates include system/tools; output-only usage
+cannot stand in for measured input. Python rejects configurations that leave
+no input room after both reservations before parsing trajectories. A defiant
 tool call in the forced round is blocked.
 
 Easy to get wrong:
@@ -381,6 +403,8 @@ trajectories, ops, memories, edges, validation}`. Recall ops carry `searches`
 search-operation id or query. Fields the HTML does not read (e.g. `edges`,
 recall `content_chars`, the per-injection verdict role marker, the singular
 `memory_lane`) are still part of the JSON contract.
+Candidate, delivered, and deletion refs carry `grouping_id`, the registry's
+item identity, so content-grouped local refs link correctly in HTML.
 The HTML colors rewrite markers by each marker's own `on_memory_lane` flag,
 computed at parse time against the final lane set. Do not prune a field
 from one consumer only.
@@ -425,7 +449,7 @@ to its run.
   (non-`[A-Za-z0-9._-]` replaced by `_`, capped at 80 chars) plus an
   8-char digest suffix — `evidence.span_dir_name`.
 
-The companion `summary.json` (`injudge.summary/v8`) is the run's final
+The companion `summary.json` (`injudge.summary/v9`) is the run's final
 statistics: counts/rates, rubric distributions, cost, confidence, judge
 compliance (the positive_effect↔influence correction rate), per-trajectory
 extraction reliability (`n_extractions` / `extraction_failures`), and slim
@@ -435,7 +459,9 @@ rows, then `details`. Rows carry `instance_id` / `model` / `adapter` when
 recorded, plus `counts` and `verdicts`. `details.overall` holds rubric and
 memory usage; `details.trajectories` is keyed by trajectory id and holds
 headline, delivery, judge, rubric, usage, and a narrative-free `spans` index
-(verdict / confidence / usage labels). `generated_at` and `tool` follow the
+(verdict / confidence / usage labels). Auto-neutral index rows use
+`verdict: "unassessable"` and retain the `auto` reason, matching the counts.
+`generated_at` and `tool` follow the
 results; `tool.source_report_schema` records the source report's version.
 Empty rate / headline / rubric / confidence shells are omitted with no
 judged population; zero-cost shells are omitted, but error-only delivery
@@ -473,11 +499,11 @@ lines.
 
 Components for `fix` / `feat` / `enh` / `ref`:
 
-- `memgraph` — `memgraph/`: annotation index, parsing, linking, HTML,
-  verdict merge
+- `memgraph` — `memgraph/`: annotation index, parsing, shared step rule,
+  linking, HTML, verdict merge
 - `injudge` — `injudge/`: step stream, spans, judge client, aggregates,
   report
-- `util` — shared step rule, `util.py`, the fixture builder
+- `util` — `util.py`, the fixture builder
 
 ## Rules
 

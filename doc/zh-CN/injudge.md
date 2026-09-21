@@ -13,7 +13,7 @@ injudge 根据召回注入在后续 agent 回合中的足迹，将其判为 **po
 uv run -m injudge <paths>    # 写出 output/<run-stamp>/injudge-report.json 与 summary.json
 
 # 评审的 TS 半边（一个 pi 智能体）需要先安装一次依赖：
-cd agent && npm install && cd ..
+npm --prefix agent install
 
 # 预览模式：打印每个区间的证据文档、文件索引与开场消息，
 # 全程不访问网络、不启动 node、不写文件：
@@ -29,7 +29,7 @@ uv run -m injudge <paths> --dry-run --limit 3
 | 文件 | 内容 |
 |---|---|
 | `injudge-report.json` | 运行时评审记录（`injudge.report/v11`），每条轨迹后重写，崩溃也保留已完成部分 |
-| `summary.json` | 最终统计（`injudge.summary/v8`）：计数、比率、逐记忆使用 |
+| `summary.json` | 最终统计（`injudge.summary/v9`）：计数、比率、逐记忆使用 |
 | `memgraph-verdicts.html` | 仅在 `--html` 时产出：召回节点按判定着色的 memgraph |
 | `evidence/` | 每个送入评审智能体的区间一个文件夹（含 error 结局）：智能体检索过的文件（区间文档、manifest、逐步骤文件、gold） |
 | `agent-runs/` | 每个送入评审智能体的区间一条轨迹 JSONL：判定如何得出的 pi 事件流记录 |

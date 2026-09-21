@@ -41,7 +41,7 @@ from injudge.report import (
     print_summary,
 )
 from injudge.spans import content_fingerprint, group_spans
-from injudge.steps import build_step_stream
+from injudge.steps import build_step_stream, prompt_tokens_total
 from memgraph.parse_trajectory import parse_trajectory
 from annotated_fixtures import MEM, TASK
 from annotated_fixtures import AnnotatedBuilder as TrajBuilder
@@ -1755,7 +1755,7 @@ def test_summary_keeps_comparisons_ahead_of_drilldown(tmp_path):
     assert list(summary) == ["overall", "trajectories", "details", "generated_at", "tool"]
     assert list(summary["overall"])[0] == "headline"
     assert summary["tool"] == {
-        "name": "injudge", "schema": "injudge.summary/v8",
+        "name": "injudge", "schema": "injudge.summary/v9",
         "source_report_schema": "injudge.report/v11",
         "judge_model": "judge", "config": {"max_steps": 4},
     }
@@ -1813,7 +1813,7 @@ def test_cli_writes_results_first_summary(monkeypatch, tmp_path):
     summary = json.loads(text)
     report = json.loads((run_dir / "injudge-report.json").read_text())
     assert text.startswith('{\n  "overall": {\n') and text.endswith("\n")
-    assert summary["tool"]["schema"] == "injudge.summary/v8"
+    assert summary["tool"]["schema"] == "injudge.summary/v9"
     assert summary["tool"]["source_report_schema"] == report["tool"]["schema"]
     assert "test-key-only" not in text
     (row,) = summary["trajectories"]
@@ -1823,6 +1823,93 @@ def test_cli_writes_results_first_summary(monkeypatch, tmp_path):
     assert span["operation_id"] == report["operations"][0]["operation_id"]
     assert span["usage"] == {"m1": "used", "m2": "ignored"}
     assert summary["details"]["overall"]["rubric"]["deliveries"] == 2
+
+
+@pytest.mark.parametrize("source_kind", ["manifest", "agent_end"])
+def test_cli_counts_embedding_billing_without_golden_answers(monkeypatch, tmp_path, source_kind):
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.recall([REF_A, REF_B]).agent_turn()
+    for event in b.events:
+        if event["type"] == "message_end" and event.get("role") == "assistant":
+            event["usage"] = {"prompt_tokens": 100}
+    b._emit("agent_end", usage={"prompt_tokens": 325})
+    source = b.write(tmp_path / "trajectory")
+    if source_kind == "manifest":
+        manifest = source / "run.json"
+        # A late completion can update run.json after agent_end is sealed.
+        meta = json.loads(manifest.read_text())
+        meta["usage"] = {"prompt_tokens": 350}
+        manifest.write_text(json.dumps(meta))
+    env = tmp_path / ".env"
+    env.write_text("BASE_URL=https://judge.invalid\nAPI_KEY=test-key-only\nMODEL=test-judge\n")
+    monkeypatch.setattr("injudge.agent._check_runner", lambda: None)
+    calls = stub_runner(monkeypatch, [_result(GOOD)])
+    output = tmp_path / "output"
+    assert injudge_main.main([str(source), "--env", str(env), "-o", str(output)]) == 0
+    assert len(calls) == 1 and calls[0]["system"] is SYSTEM_PROMPT
+    (run_dir,) = output.iterdir()
+    summary = json.loads((run_dir / "summary.json").read_text())
+    policy = summary["overall"]["delivery"]["policy"]
+    expected = 350 if source_kind == "manifest" else 325
+    assert policy["prompt_tokens_total"] == expected
+    assert policy["injected_token_share"] == round(policy["est_injected_tokens"] / expected, 4)
+
+
+@pytest.mark.parametrize("usage", [[], {"prompt_tokens": True}, {"prompt_tokens": "99"},
+                                  {"prompt_tokens": float("inf")}, {"prompt_tokens": -1}])
+def test_corrupt_run_usage_falls_back_to_live_message_billing(usage):
+    events = [
+        {"type": "message_end", "role": "assistant", "msg": 0, "turn": 1,
+         "usage": {"prompt_tokens": 100}},
+        {"type": "message_retracted", "msg": 0},
+        {"type": "message_end", "role": "assistant", "msg": 0,
+         "usage": {"prompt_tokens": 100}},
+        {"type": "agent_end", "usage": usage},
+    ]
+    warnings = []
+    assert prompt_tokens_total(events, warnings) == 100
+    assert any("agent_end" in w and "invalid" in w for w in warnings)
+
+
+def test_invalid_manifest_billing_uses_terminal_snapshot():
+    warnings = []
+    events = [{"type": "agent_end", "usage": {"prompt_tokens": 25}}]
+    assert prompt_tokens_total(events, warnings, {"prompt_tokens": True}) == 25
+    assert any("run.json" in w and "invalid" in w for w in warnings)
+
+
+@pytest.mark.parametrize("manifest,ended", [(100, 300), (300, 100)])
+def test_billing_uses_the_largest_snapshot(manifest, ended):
+    events = [{"type": "message_end", "role": "assistant", "msg": 0,
+               "usage": {"prompt_tokens": 100}},
+              {"type": "agent_end", "usage": {"prompt_tokens": ended}}]
+    warnings = []
+    assert prompt_tokens_total(events, warnings, {"prompt_tokens": manifest}) == 300
+    assert any("below another billing snapshot" in w for w in warnings)
+
+
+def test_billing_snapshot_cannot_erase_observed_spend():
+    warnings = []
+    events = [{"type": "message_end", "role": "assistant", "msg": 0,
+               "usage": {"prompt_tokens": 100}},
+              {"type": "agent_end", "usage": {"prompt_tokens": 90}}]
+    assert prompt_tokens_total(events, warnings, {"prompt_tokens": 80}) == 100
+    assert len(warnings) == 2 and all("below live message usage" in w for w in warnings)
+
+
+def test_missing_embedding_billing_snapshot_warns_about_undercount():
+    warnings = []
+    events = [{"type": "memory_role_bind", "payload": {"logical_role": "embedding"}}]
+    assert prompt_tokens_total(events, warnings) == 0
+    assert any("excludes embedding calls" in w for w in warnings)
+
+
+def test_negative_message_usage_cannot_cancel_observed_spend():
+    warnings = []
+    events = [{"type": "message_end", "role": "assistant", "msg": i,
+               "usage": {"prompt_tokens": tokens}} for i, tokens in enumerate((100, -50))]
+    assert prompt_tokens_total(events, warnings) == 100
+    assert any("negative prompt_tokens" in w for w in warnings)
 
 
 def test_cli_runs_share_the_container_without_clobbering(monkeypatch, tmp_path):
@@ -1992,6 +2079,23 @@ def test_aggregate_last_value_is_the_literal_latest_value():
     ]
     (roll,) = aggregate(ops, 2)["memory_usage"]
     assert roll["first_value"] == "v1" and roll["last_value"] is None
+
+
+@pytest.mark.parametrize("digest", [False, True])
+def test_usage_rollup_compares_local_ids_by_content(digest):
+    ops = []
+    for i, (key, value) in enumerate((("note-0", "same"), ("note-1", "same"),
+                                      ("note-0", "different"))):
+        memory = {"id": "m1", "key": key, "value": value, "namespace": "notes",
+                  "version_id": key, "identity_strength": "operation_local"}
+        if digest:
+            memory["content_sha256"] = value
+        ops.append(_op(f"T1:S{i}", "neutral", 0.9,
+                       {"m1": {"usage": "ignored", "evidence": ""}}, memories=[memory]))
+    rolls = aggregate(ops, 3)["memory_usage"]
+    assert len(rolls) == 2
+    assert [r["tallies"]["ignored"] for r in rolls] == [2, 1]
+    assert [r["first_value"] for r in rolls] == ["same", "different"]
 
 
 def test_summary_value_drift_needs_two_recorded_values():
@@ -2276,6 +2380,9 @@ def test_rubric_rollup_excludes_auto_neutral_placeholders(capsys):
     # statistic: the summary's span index omits it like the usage rollup does
     # (a label no tally could ever corroborate)
     assert "usage" not in build_summary(artifact)["details"]["trajectories"]["T1"]["spans"][0]
+    row = build_summary(artifact)["details"]["trajectories"]["T1"]["spans"][0]
+    assert row["verdict"] == "unassessable"
+    assert row["auto"] == "no_subsequent_turn"
     rub = artifact["aggregates"]["overall"]["rubric"]
     assert rub["deliveries"] == 0  # placeholder rubric is not a judged delivery
     assert all(v is None for v in rub["rates"].values())
@@ -2658,6 +2765,23 @@ def test_masking_skips_degenerate_short_keys():
     assert _mask_key("sk-secret guided", "sk-secret") == "*** guided"
 
 
+@pytest.mark.parametrize("key", ['sk-quote"slash\\secret', "sk-unicode-é-secret"])
+def test_masking_covers_nested_json_credential_echoes(tmp_path, key):
+    from injudge.agent import _mask_trajectory_file
+    from injudge.judge import _error_verdict
+
+    answer = json.dumps({"echo": key})
+    warnings = []
+    verdict = _error_verdict("invalid", answer, _FakeSpan(), warnings, key)
+    assert json.loads(verdict["judge_raw"]) == {"echo": "***"}
+    transcript = tmp_path / "trace.jsonl"
+    transcript.write_text(json.dumps({"answer": answer, "error": key}) + "\n")
+    _mask_trajectory_file(transcript, key)
+    record = json.loads(transcript.read_text())
+    assert record["error"] == "***"
+    assert json.loads(record["answer"]) == {"echo": "***"}
+
+
 def test_masking_covers_every_urlencoded_spelling():
     """A URL-logging gateway can percent-encode the key with any encoder —
     quote (leaves '/' literal), quote_plus, safe='' — encode every byte
@@ -2687,6 +2811,30 @@ def test_masking_covers_every_urlencoded_spelling():
                           key=len, reverse=True):
         text = "x" * (100 - 5) + encoded + " tail"
         assert encoded not in _masked_head(text, key, 100)
+
+
+@pytest.mark.parametrize("encoded", [
+    "sk-Ab%2fcD%2BeF%3dgH",
+    "sk%2dAb%2FcD%2beF%3DgH",
+    "%73%6b%2D%41%62%2f%63%44%2B%65%46%3d%67%48",
+])
+def test_masking_covers_mixed_hex_case_in_artifacts(tmp_path, encoded):
+    from injudge.agent import _mask_trajectory_file
+    from injudge.judge import _mask_key
+
+    key = "sk-Ab/cD+eF=gH"
+    answer = json.dumps({"echo": encoded})
+    verdict = _error_verdict("invalid", answer, _FakeSpan(), [], key)
+    assert json.loads(verdict["judge_raw"]) == {"echo": "***"}
+    transcript = tmp_path / "trace.jsonl"
+    transcript.write_text(json.dumps({"answer": answer, "error": encoded}) + "\n")
+    _mask_trajectory_file(transcript, key)
+    record = json.loads(transcript.read_text())
+    assert record["error"] == "***"
+    assert json.loads(record["answer"]) == {"echo": "***"}
+    # Only escape digits ignore case; unrelated text keeps its exact spelling.
+    unrelated = "sk-ab/cd+ef=gh and %2f%3A"
+    assert _mask_key(unrelated, key) == unrelated
 
 
 def test_masked_head_straddling_urlencoded_form_masks_whole():
@@ -2737,6 +2885,14 @@ def _agent_cfg(**kw):
     return AgentConfig(**base)
 
 
+@pytest.mark.parametrize("timeout", [float("inf"), float("-inf"), float("nan")])
+def test_cli_timeout_override_must_be_finite(monkeypatch, timeout):
+    monkeypatch.setattr("injudge.agent._check_runner", lambda: None)
+    with pytest.raises(SystemExit, match="timeout must be a positive finite"):
+        resolve_config({"BASE_URL": "https://judge.invalid", "API_KEY": "test-key-only",
+                        "MODEL": "test"}, timeout=timeout)
+
+
 def _result(answer, *, error=None, forced=False, llm_calls=3, tool_calls=4,
             messages=None, stop_reason="answer"):
     """One canned runner result."""
@@ -2780,6 +2936,25 @@ def test_runner_job_uses_the_phase_step_limit(monkeypatch, tmp_path, continued, 
                             warnings, repair=repair)
     assert result["answer"] == GOOD and warnings == []
     assert cfg.max_steps == configured  # the shared initial config is not mutated
+
+
+def test_deeply_nested_runner_result_is_a_reported_failure(monkeypatch, tmp_path):
+    import subprocess
+    from pathlib import Path
+    from injudge.agent import _invoke_runner
+
+    def run(args, **kwargs):
+        Path(args[args.index("--out") + 1]).write_text("[" * 2000 + "0" + "]" * 2000)
+        return subprocess.CompletedProcess(args, 0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr("injudge.agent.subprocess.run", run)
+    warnings = []
+    result = _invoke_runner(_agent_cfg(), tmp_path / "evidence", tmp_path / "trace.jsonl",
+                            1, "system", "message", None, warnings, repair=False)
+    assert result is None
+    # Recursive decoders reject the nesting; newer Python decoders can read
+    # it, then reject the result shape. Both must remain reported failures.
+    assert any("no readable result" in w or "unusable result" in w for w in warnings)
 
 
 def stub_runner(monkeypatch, results):
@@ -3166,7 +3341,7 @@ def test_agent_unknown_novelty_preserves_independent_signals(
     assert rub["counts"]["novelty"] == {"null": 1, "novel": 1}
     assert rub["rates"]["novelty"] == 1.0  # unknown does not dilute the rate
     summary = build_summary(saved)
-    assert summary["tool"]["schema"] == "injudge.summary/v8"
+    assert summary["tool"]["schema"] == "injudge.summary/v9"
     assert summary["details"]["overall"]["rubric"]["counts"]["novelty"] == rub["counts"]["novelty"]
     if usage == "ignored":
         assert rub["no_footprint_reasons"] == {"ignored_unknown_novelty": 1, "irrelevant": 1}
@@ -3291,3 +3466,81 @@ def test_unknown_novelty_does_not_relax_anchor_validation(
                         transcripts_root=tmp_path / "runs")
     assert result["verdict"] == "positive" and result["input"]["attempts"] == 2
     assert violation in calls[1]["message"]
+
+
+def test_config_reserves_the_forced_answer_message(monkeypatch):
+    from injudge.agent import _FORCED
+
+    monkeypatch.setattr("injudge.agent._check_runner", lambda: None)
+    env = {"BASE_URL": "https://judge.invalid", "API_KEY": "test-key-only", "MODEL": "test",
+           "MAX_OUTPUT_TOKENS": "1000", "CONTEXT_WINDOW": str(1000 + (len(_FORCED) + 3) // 4)}
+    with pytest.raises(SystemExit, match="forced message"):
+        resolve_config(env)
+
+
+def test_cli_missing_env_fails_before_parsing_or_creating_output(tmp_path, monkeypatch):
+    import injudge.__main__ as cli
+
+    monkeypatch.setattr(cli, "load_trajectories", lambda *_: pytest.fail("parsed trajectories"))
+    output = tmp_path / "output"
+    with pytest.raises(SystemExit, match="no .env file"):
+        cli.main([str(tmp_path), "--env", str(tmp_path / "missing.env"), "-o", str(output)])
+    assert not output.exists()
+
+
+def test_masking_excessive_json_wrapping_still_rewrites_transcript(tmp_path):
+    from injudge.agent import _mask_trajectory_file
+
+    key = 'sk-quoted"secret'
+    wrapped = key
+    for _ in range(18):
+        wrapped = json.dumps(wrapped)
+    transcript = tmp_path / "trace.jsonl"
+    transcript.write_text(json.dumps({"answer": wrapped, "error": key}) + "\n")
+    _mask_trajectory_file(transcript, key)
+    record = json.loads(transcript.read_text())
+    assert record["error"] == "***"
+    answer = record["answer"]
+    while answer.startswith('"'):
+        answer = json.loads(answer)
+    assert answer == "***"
+
+
+def test_failed_masked_write_does_not_keep_a_raw_transcript(tmp_path, monkeypatch):
+    from injudge.agent import _mask_trajectory_file
+
+    key = "sk-transcript-secret"
+    transcript = tmp_path / "trace.jsonl"
+    transcript.write_text(json.dumps({"error": key}) + "\n")
+    def fail_write(*_):
+        raise OSError("cannot replace transcript")
+    monkeypatch.setattr("injudge.agent.atomic_write", fail_write)
+    with pytest.raises(OSError, match="cannot replace transcript"):
+        _mask_trajectory_file(transcript, key)
+    assert not transcript.exists()
+
+
+def test_masking_a_truncated_utf8_transcript_preserves_no_secret(tmp_path):
+    from injudge.agent import _mask_trajectory_file
+
+    key = "sk-transcript-secret"
+    transcript = tmp_path / "trace.jsonl"
+    transcript.write_bytes((json.dumps({"error": key}) + "\n").encode() + b'"\xe2\x80')
+    _mask_trajectory_file(transcript, key)
+    assert key not in transcript.read_text()
+
+
+def test_transcript_masking_failure_keeps_an_error_input_record(monkeypatch, tmp_path):
+    calls = stub_runner(monkeypatch, [_result(GOOD)])
+    def fail_mask(*_):
+        raise OSError("cannot replace transcript")
+    monkeypatch.setattr("injudge.agent._mask_trajectory_file", fail_mask)
+    span, steps = _judge_input_fixture()
+    warnings = []
+    verdict = judge_span(span, steps, _agent_cfg(), warnings,
+                         evidence_root=tmp_path, transcripts_root=tmp_path / "runs")
+    assert len(calls) == 1
+    assert verdict["verdict"] == "error"
+    assert "cannot mask judge transcript" in verdict["error"]
+    assert verdict["input"] == {"path": "agent", "attempts": 1, "llm_calls": 3, "tool_calls": 4}
+    assert warnings

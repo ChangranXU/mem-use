@@ -64,7 +64,7 @@ from injudge.gold import (
     load_harness_report,
     load_sidecar,
 )
-from injudge.judge import GoldInput, _mask_keys, auto_verdict_no_subsequent_turn, blank_verdict
+from injudge.judge import GoldInput, _mask_key, auto_verdict_no_subsequent_turn, blank_verdict
 from injudge.model import InjectionSpan
 from injudge.report import (
     build_artifact,
@@ -426,6 +426,24 @@ def main(argv: list[str] | None = None) -> int:
     if args.limit is not None and args.limit < 1:
         raise SystemExit("error: --limit must be a positive integer")
 
+    cfg: AgentConfig | None = None
+    judge_parallel = 1
+    env_path = args.env or _DEFAULT_ENV
+    if not args.dry_run:
+        if not env_path.is_file():
+            raise SystemExit(f"error: no .env file at {env_path} (or use --dry-run)")
+        env = load_env(env_path)
+        cfg = resolve_config(
+            env,
+            args.judge_model,
+            timeout=args.timeout,
+            max_attempts=args.max_attempts,
+            max_tokens=args.judge_max_tokens,
+        )
+        judge_parallel = _int_config(env, "JUDGE_PARALLEL") or 1
+        if judge_parallel > MAX_PARALLEL:
+            raise SystemExit(f"error: JUDGE_PARALLEL must be at most {MAX_PARALLEL}")
+
     trajs, ops_by_traj, events_by_traj, load_warnings = load_trajectories(args.paths)
     # memgraph's linking pass doubles as the input-validation layer
     graph = build_graph(trajs, ops_by_traj, load_warnings)
@@ -466,8 +484,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.harness_report is not None:
         harness_report = load_harness_report(args.harness_report)
 
-    cfg: AgentConfig | None = None
-    judge_parallel = 1  # JUDGE_PARALLEL: spans of one trajectory judged in parallel
     # run isolation: every artifact of this run lands in its own folder
     # under the output container, so another run — earlier, later, or
     # concurrently in the same container — is never overwritten or mixed in
@@ -477,7 +493,6 @@ def main(argv: list[str] | None = None) -> int:
     html_path = run_dir / "memgraph-verdicts.html"
     evidence_root = run_dir / "evidence"
     transcripts_root = run_dir / "agent-runs"
-    env_path = args.env or _DEFAULT_ENV
     if not args.dry_run:
         # fail fast on an unwritable output folder, before any paid judge
         # call: flush() rewrites the report artifact after every trajectory,
@@ -494,19 +509,6 @@ def main(argv: list[str] | None = None) -> int:
         out_paths = [report_path, summary_path] + ([html_path] if args.html else [])
         for out_path in out_paths:
             check_writable(out_path)
-        if not env_path.is_file():
-            raise SystemExit(f"error: no .env file at {env_path} (or use --dry-run)")
-        env = load_env(env_path)
-        cfg = resolve_config(
-            env,
-            args.judge_model,
-            timeout=args.timeout,
-            max_attempts=args.max_attempts,
-            max_tokens=args.judge_max_tokens,
-        )
-        judge_parallel = _int_config(env, "JUDGE_PARALLEL") or 1
-        if judge_parallel > MAX_PARALLEL:
-            raise SystemExit(f"error: JUDGE_PARALLEL must be at most {MAX_PARALLEL}")
 
     trajectories: list[dict] = []
     operations: list[dict] = []
@@ -589,10 +591,10 @@ def main(argv: list[str] | None = None) -> int:
             )
 
         # delivery-policy metrics: density, restated ratio, and the injected
-        # share of the REAL prompt budget — every lane's billed usage records
-        # (the memory lane's extraction calls are real spend too)
+        # share of the REAL prompt budget — every lane's billed usage,
+        # including embedding calls that produce no conversation events.
         budget_warnings: list[str] = []
-        prompt_total = prompt_tokens_total(events, budget_warnings)
+        prompt_total = prompt_tokens_total(events, budget_warnings, t.run_usage)
         for w in budget_warnings:
             validation.append({"level": "warn", "msg": f"{run_id}: {w}"})
         extracts = [op for op in ops if op.kind == "extract"]
@@ -725,7 +727,7 @@ def main(argv: list[str] | None = None) -> int:
                 verdict = blank_verdict()
                 verdict["error"] = (
                     "judging failed unexpectedly: "
-                    + _mask_keys(f"{type(e).__name__}: {e}", (cfg.api_key,))[:2000]
+                    + _mask_key(f"{type(e).__name__}: {e}", cfg.api_key)[:2000]
                 )
                 error_note = f"{span.id}: {verdict['error']}"
             progress.advance_span()

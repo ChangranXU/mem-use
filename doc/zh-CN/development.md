@@ -9,7 +9,7 @@ icon: wrench
 
 ```bash
 uv sync                                # 首次，在 checkout 内执行
-cd agent && npm install                # 首次：pi 智能体包（需要 node >= 22.19）
+npm --prefix agent install                # 首次：pi 智能体包（需要 node >= 22.19）
 uv run pytest tests -q                 # 全部测试（同时驱动 TS 工具的 node --test）
 uv run pytest tests/test_injudge.py -q # 单个文件
 ```

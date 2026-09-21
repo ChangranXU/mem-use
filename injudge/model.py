@@ -132,8 +132,9 @@ class InjectionSpan:
     re-deliveries are skipped, not terminal, so the memory is unbounded
     only when no cleanly separated re-delivery exists. The strict > keeps
     the bound from ever cutting the span's own delivery steps. An entry
-    with no portable identity can never be re-delivery-matched and stays
-    unbounded. Empty when built directly, not via group_spans.
+    with no stable item identity matches by the canonical entry used for
+    span fingerprints, so fresh operation-local ids cannot reopen the same
+    content's window. Empty when built directly, not via group_spans.
     `memory_window_starts` holds the one exception to the default window
     start (the span's first step): when a LATER span starts at an earlier
     carrier's last delivery step (a same-step delivery collision), the

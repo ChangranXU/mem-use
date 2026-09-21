@@ -9,7 +9,7 @@ icon: plug
 The judge is an agent built on the [pi](https://github.com/earendil-works/pi) agent runtime (`@earendil-works/pi-agent-core` + `@earendil-works/pi-ai`), driven by a small TypeScript runner (`agent/runner.ts`) that Python spawns once per phase of a span's conversation (initial investigation, repairs, resumed investigations), each process continuing the same conversation through `job.history`. Python owns the verdict contract; the runner owns the conversation.
 {% endhint %}
 
-See [Configuration](configuration.md) for endpoint setup (`cd agent && npm install` once; node ≥ 22.19 on PATH).
+See [Configuration](configuration.md) for endpoint setup (`npm --prefix agent install` once; node ≥ 22.19 on PATH).
 
 ## The Conversation
 
@@ -26,12 +26,14 @@ Every conversation is recorded as a pi event-sourced trajectory: the runner subs
 
 The forced-answer message joins the conversation by context rewrite (no event fires for it), so the runner appends it to the trajectory explicitly. The runner records raw; Python rewrites the file masked after each attempt (the one masking implementation stays Python-side), so the kept artifact never carries the credential even when the endpoint echoed it. The operation's `input.transcript` names the file, relative to the output dir.
 
+When a forced answer also contains blocked tool calls, the runner records the retained assistant text after tombstoning the tool tail, so replay preserves the final answer.
+
 ## Budgets and Forced Answers
 
 Two budgets bound every conversation, and both end in a **forced final answer** instead of a failure (the pattern the collection harness uses):
 
 - **Step budget** (`MAX_STEPS`): when the LLM-call count reaches the cap, the conversation is cut to one final round: the forced-answer message is appended ("stop calling tools; answer from what you have gathered"), and any defiant tool call in the forced round is blocked.
-- **Context budget** (`CONTEXT_WINDOW`): when the estimated context (the last assistant message's server-reported usage plus the trailing messages) crosses the watermark — the context window minus the reserved `MAX_OUTPUT_TOKENS` — the overflowing round is rolled back and the same forced message is injected, so the next request fits.
+- **Context budget** (`CONTEXT_WINDOW`): the estimate uses the last applicable assistant usage plus trailing messages; without usable input usage (including output-only usage), it estimates that content from messages, the system prompt, and tool schemas. The watermark reserves `MAX_OUTPUT_TOKENS` and the forced message's estimated size. Crossing it rolls back the overflowing round and injects the forced message.
 
 A missing-evidence continuation gets **at most four model calls including its final answer**, or `MAX_STEPS` if that is lower. At the four-call limit this allows three evidence-gathering rounds and one forced final round; it does not regain the initial full investigation budget. The existing context watermark can force an answer earlier. This is a fixed policy, not another configuration knob.
 
@@ -58,3 +60,6 @@ There are no conformance tiers, no truncation classes, no input budget gates: an
 ## Credentials
 
 The API key travels from Python to the runner only through the `JUDGE_API_KEY` environment variable — never through the job file, the result file, or any artifact — and is sent only to the configured endpoint. Endpoint output that echoes the request (an auth/proxy fault page reflecting the credential, in an HTTP error or a 200 answer alike) is masked before any of its text reaches a verdict, `judge_raw`, or a validation note: the raw key and every percent-encoded spelling, in either hex case.
+
+Masking also follows JSON string escaping, including answer JSON embedded inside a transcript record, so escaped credentials cannot survive in saved output.
+Excessively nested string wrappers are masked as a whole. An interrupted UTF-8 write still gets masked; if saving the masked transcript fails, the raw file is removed and the span records an error with its input diagnostics.

@@ -10,6 +10,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from memgraph.annotations import item_ident
+
+
+def _linked_memory(entry: dict) -> dict:
+    """Graph references keep recorded identity and carry the registry join
+    separately, so the browser need not reconstruct content-derived ids."""
+    return {**entry, "grouping_id": item_ident(entry)[1]}
+
 
 @dataclass
 class Trajectory:
@@ -21,6 +29,8 @@ class Trajectory:
     model: str | None = None
     started_at: str | None = None
     status: str | None = None
+    # Internal billing snapshot: includes embedding calls with no chat events.
+    run_usage: dict[str, object] = field(default_factory=dict)
     n_steps: int = 0  # agent steps (non-memory-lane turns)
     # the single lane of the final memory-lanes set, after the shared-lane
     # guard; None when several lanes are bound or none survived it
@@ -137,8 +147,8 @@ class MemoryOp:
             counts = self.rejection_counts or {}
             d.update(
                 {
-                    "candidates": self.candidates,
-                    "deletions": self.deletions,
+                    "candidates": [_linked_memory(m) for m in self.candidates],
+                    "deletions": [{**d, "ref": _linked_memory(d["ref"])} for d in self.deletions],
                     "rejections": {
                         "count": sum(counts.values()),
                         "by_reason": dict(counts),
@@ -152,7 +162,7 @@ class MemoryOp:
             if self.declared_step is not None:
                 d["declared_step"] = self.declared_step
         else:
-            d.update({"memories": self.memories})
+            d.update({"memories": [_linked_memory(m) for m in self.memories]})
             if self.searches:
                 d["searches"] = self.searches
             if self.queries:
@@ -170,13 +180,14 @@ class MemoryOp:
 class MemoryUnit:
     """One memory, identified by its (namespace, item) pair — the store
     namespace plus the item-level identity (the recorded portable `item_id`,
-    else the display key) — linked across trajectories. `key` stays the
+    else a stable display key or content-derived id) — linked across
+    trajectories. `key` stays the
     human-readable display key; two same-keyed items in one store are two
     MemoryUnits."""
 
     key: str
     namespace: str | None = None  # store namespace scoping the item (None = none recorded)
-    item_id: str | None = None  # the identity half of the pair (item_id, else key)
+    item_id: str | None = None  # recorded item, stable key, or content-derived grouping id
     memory_type: str | None = None
     confidence: float | None = None
     value: str | None = None

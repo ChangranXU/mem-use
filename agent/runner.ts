@@ -9,7 +9,7 @@
  * no filesystem, no bash. Two budgets bound the conversation, both ending
  * in a FORCED final round instead of a crash (the pattern the collection
  * harness uses): the LLM-call cap (max_steps) and the context-window
- * watermark (context_window minus the reserved output budget). When a
+ * watermark (context_window minus output and forced-message reserves). When a
  * budget trips, the overflowing round is rolled back, the job's
  * forced_message is appended, and any defiant tool call in the forced
  * round is blocked. The conversation's final assistant text is the judge
@@ -21,7 +21,6 @@
 import * as fs from "node:fs";
 import {
 	Agent,
-	estimateContextTokens,
 	type AgentMessage,
 	type AgentTool,
 	type ThinkingLevel,
@@ -31,6 +30,7 @@ import {
 	createProvider,
 	type ApiKeyAuth,
 	type AssistantMessage,
+	type Message,
 	type Model,
 	type Models,
 	type ProviderAuth,
@@ -39,6 +39,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { anthropicMessagesApi } from "@earendil-works/pi-ai/api/anthropic-messages.lazy";
+import { estimateContextTokens, estimateTextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import type { AgentJob, AgentResult, AgentUsage } from "./protocol.ts";
 import { createEvidenceTools } from "./evidence-tools.ts";
 import { TrajectoryLog } from "./trajectory.ts";
@@ -180,7 +181,7 @@ async function main(): Promise<number> {
 		forced: null,
 		forcedInjected: false,
 	};
-	const watermark = Math.max(1, cfg.context_window - cfg.max_output_tokens);
+	const watermark = cfg.context_window - cfg.max_output_tokens - estimateTextTokens(job.forced_message);
 
 	const agent = new Agent({
 		initialState: {
@@ -214,6 +215,7 @@ async function main(): Promise<number> {
 						const idx = agent.state.messages.indexOf(r);
 						if (idx >= 0) agent.state.messages.splice(idx, 1);
 					}
+					trajectory.message(message);
 				}
 				return true;
 			}
@@ -224,7 +226,16 @@ async function main(): Promise<number> {
 			budget.llmCalls += 1;
 			// context.messages already carries this turn's assistant message
 			// and tool results — the exact request the next call would send
-			const estimate = estimateContextTokens(context.messages);
+			// pi accepts output-only usage as a measured prefix. Such a response
+			// says nothing about input size: let its normal content estimator run.
+			const messages = (context.messages as Message[]).map((m) => {
+				if (m.role !== "assistant") return m;
+				const input = m.usage.input + m.usage.cacheRead + m.usage.cacheWrite;
+				return Number.isFinite(input) && input > 0 ? m : {
+					...m, usage: { ...m.usage, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 },
+				};
+			});
+			const estimate = estimateContextTokens({ ...context, messages });
 			if (estimate.tokens > watermark) {
 				budget.forced = { reason: "context_budget_forced", rollbackTail: 1 + toolResults.length };
 				return false;

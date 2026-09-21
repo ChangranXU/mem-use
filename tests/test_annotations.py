@@ -37,6 +37,124 @@ from annotated_fixtures import (
 # ---------------------------------------------------------------- parsing
 
 
+@pytest.mark.parametrize("embedding_lane", ["EMBEDDING", None])
+@pytest.mark.parametrize("refs", [[], [{"call_id": "embedding-1", "call_sequence": 1,
+                                      "role_call_index": 1}]])
+def test_embedding_binding_is_valid_without_agent_turns(tmp_path, embedding_lane, refs):
+    b = AnnotatedBuilder()
+    b.annotation("memory_role_bind", {"trace_session_id": SID, "logical_role": "embedding"},
+                 lane=embedding_lane)
+    search = b.search(returned=[cure_ref("k1")])
+    b.events[-1].update(binding={"after_role_call_index": 0, "embedding_after_role_call_index": 0},
+                        embedding_call_refs=refs,
+                        embedding_binding_status="bound" if refs else "no_call")
+    b.agent_turn().delivery(search, memories=[cure_ref("k1")], bind=b.last_call, content="v")
+    traj, ops, warnings = parse(b, tmp_path)
+    assert warnings == []
+    assert build_annotation_index(b.events).binds[SID]["embedding"] == embedding_lane
+    assert traj.n_steps == 1 and traj.memory_lanes == {MEM}
+    assert ops[0].step == 1
+
+
+@pytest.mark.parametrize("lane", [MAIN, MEM])
+def test_embedding_binding_cannot_share_main_or_memory_lane(lane):
+    b = AnnotatedBuilder()
+    b.annotation("memory_role_bind", {"trace_session_id": SID, "logical_role": "embedding"},
+                 lane=lane)
+    assert any("embedding must bind a distinct lane" in p
+               for p in build_annotation_index(b.events).problems)
+
+
+@pytest.mark.parametrize("changes,problem", [
+    ({"binding": {"embedding_after_role_call_index": True}}, "invalid embedding cursor"),
+    ({"embedding_call_refs": {}}, "malformed embedding call refs"),
+    ({"embedding_call_refs": [{"call_id": [], "call_sequence": 1, "role_call_index": 1}]},
+     "malformed embedding call refs"),
+    ({"embedding_call_refs": [{"call_id": "e", "call_sequence": 1, "role_call_index": True}]},
+     "malformed embedding call refs"),
+    ({"embedding_binding_status": ["bound"]}, "inconsistent embedding binding status"),
+    ({"binding": {}}, "embedding refs without a cursor binding"),
+])
+def test_corrupt_embedding_binding_warns_without_crashing(changes, problem):
+    b = AnnotatedBuilder()
+    b.annotation("memory_role_bind", {"trace_session_id": SID, "logical_role": "embedding"},
+                 lane="EMBEDDING")
+    b.search()
+    b.events[-1].update(binding={"embedding_after_role_call_index": 0},
+                        embedding_call_refs=[], embedding_binding_status="no_call")
+    b.events[-1].update(changes)
+    assert any(problem in p for p in build_annotation_index(b.events).problems)
+
+
+def test_embedding_cursor_requires_a_bound_lane():
+    b = AnnotatedBuilder()
+    b.search()
+    b.events[-1].update(binding={"embedding_after_role_call_index": 0},
+                        embedding_call_refs=[], embedding_binding_status="no_call")
+    assert any("embedding binding has no lane" in p
+               for p in build_annotation_index(b.events).problems)
+
+
+def test_delivery_subsequence_checks_memory_lane_identity(tmp_path):
+    b = AnnotatedBuilder()
+    ref = cure_ref("k1")
+    search = b.search(returned=[ref])
+    b.agent_turn().delivery(search, memories=[{**ref, "lane_id": "other"}],
+                            bind=b.last_call, content="v")
+    _, ops, warnings = parse(b, tmp_path)
+    assert len(ops) == 1
+    assert any("not an ordered search subsequence" in w for w in warnings)
+
+
+def test_search_result_must_belong_to_its_read_lane():
+    b = AnnotatedBuilder()
+    b.search(returned=[{**cure_ref("k1"), "lane_id": "other"}])
+    assert any("returned memory lane_id disagrees with the searched lane" in p
+               for p in build_annotation_index(b.events).problems)
+
+
+@pytest.mark.parametrize("start_lane,ref_lane,mismatch", [
+    (None, "hits", False), ("hits", None, False), ([], "hits", False),
+    ("hits", [], False), ("hits", "hits", False), ("hits", "end-only", True),
+])
+def test_search_result_lane_uses_string_start_lane(start_lane, ref_lane, mismatch):
+    b = AnnotatedBuilder()
+    b.search(returned=[{**cure_ref("k1"), "lane_id": ref_lane}])
+    b.events[-2]["payload"]["lane_id"] = start_lane
+    b.events[-1]["payload"]["lane_id"] = "end-only"
+    problems = build_annotation_index(b.events).problems
+    assert any("returned memory lane_id disagrees" in p for p in problems) == mismatch
+
+
+def test_read_lane_alone_does_not_supply_memory_identity():
+    b = AnnotatedBuilder()
+    search = b.search(returned=[{"lane_id": LANE}])
+    b.agent_turn().delivery(search, memories=[{"lane_id": LANE}], bind=b.last_call)
+    problems = build_annotation_index(b.events).problems
+    assert any("returned entry has no usable identity fields" in p for p in problems)
+    assert any("memory entry has no usable identity fields" in p for p in problems)
+
+
+@pytest.mark.parametrize("text", [None, "visible content"])
+def test_negative_placement_size_never_reduces_cost(tmp_path, text):
+    b = AnnotatedBuilder().agent_turn()
+    search = b.search()
+    b.delivery(search, bind=b.last_call, content=text)
+    b.events[-1]["payload"]["placements"][0]["content"]["chars"] = -100
+    _, (op,), warnings = parse(b, tmp_path)
+    assert op.content_chars == (None if text is None else len(text))
+    assert any("invalid placement content.chars" in w for w in warnings)
+
+
+def test_negative_matched_count_uses_returned_count(tmp_path):
+    b = AnnotatedBuilder().agent_turn()
+    search = b.search(returned=[cure_ref("k1")], matched_count={"value": -1})
+    b.delivery(search, bind=b.last_call)
+    _, (op,), warnings = parse(b, tmp_path)
+    assert op.matched == 1
+    assert any("matched_count" in w for w in warnings)
+
+
 def test_annotated_run_parses_from_annotations_alone(tmp_path):
     """Lanes come from role bindings; no message ever carries an injection."""
     b = AnnotatedBuilder()
@@ -171,6 +289,46 @@ def test_duplicate_delivery_search_links_are_reported(tmp_path, same_operation):
         {"lane_id": LANE, "operation_id": search_id} for search_id in searches
     ]
     assert [memory["key"] for memory in recall["memories"]] == ["k2", "k1"]
+    assert recall["matched"] == (2 if same_operation else 4)
+    assert len(recall["queries"]) == (1 if same_operation else 2)
+
+
+def test_duplicate_search_links_skip_subsequence_check(monkeypatch):
+    b = AnnotatedBuilder()
+    search = b.search(returned=[cure_ref("k1"), cure_ref("k2")])
+    b.delivery([search, search], memories=[cure_ref("k2"), cure_ref("k1")])
+    checks = []
+    monkeypatch.setattr("memgraph.annotations._is_subsequence",
+                        lambda *args: checks.append(args) or True)
+    problems = build_annotation_index(b.events).problems
+    assert any("duplicate searches operation_id" in p for p in problems)
+    assert checks == []  # repeated results cannot prove a valid order
+
+
+@pytest.mark.parametrize("search_id", [None, 1, [], {}])
+def test_delivery_search_link_requires_a_string_operation_id(tmp_path, search_id):
+    b = AnnotatedBuilder().agent_turn()
+    b.delivery([{"operation_id": search_id}], main_step=1)
+    _, (op,), warnings = parse(b, tmp_path)
+    assert op.searches == []
+    assert any("searches entry has a missing or non-string operation_id" in w for w in warnings)
+
+
+@pytest.mark.parametrize("kind", ["search", "generation"])
+def test_cross_session_search_does_not_supply_recall_provenance(tmp_path, kind):
+    b = AnnotatedBuilder().agent_turn()
+    search = (b.search(query="foreign query", returned=[cure_ref("k1")])
+              if kind == "search" else b.generate(extraction_step="1"))
+    b.annotation("memory_session", {"trace_session_id": "other"}, lane=MAIN)
+    b.delivery(search, memories=[cure_ref("k1")], bind=b.last_call)
+    b.events[-1]["payload"]["trace_session_id"] = "other"
+    traj, ops, warnings = parse(b, tmp_path)
+    op = next(o for o in ops if o.kind == "recall")
+    problem = "outside its session" if kind == "search" else "names generation"
+    assert any(problem in w for w in warnings)
+    assert op.searches == [{"lane_id": LANE, "operation_id": search}]
+    assert op.matched is None and op.queries == []
+    assert group_spans([op], traj.id)[0].queries == []
 
 
 @pytest.mark.parametrize("corrupt_field", ["lane_id", "operation_id"])
@@ -786,6 +944,18 @@ def test_delivery_bound_to_a_truncated_turn_stays_unattributable(tmp_path):
     assert any("not a classified agent turn" in w for w in warnings)
 
 
+@pytest.mark.parametrize("declared", [None, 1])
+def test_delivery_bound_to_a_missing_call_stays_unattributable(tmp_path, declared):
+    b = AnnotatedBuilder().agent_turn()
+    search = b.search(returned=[cure_ref("k1")])
+    b.delivery(search, memories=[cure_ref("k1")], main_step=declared,
+               bind={"call_id": "missing", "call_sequence": 2, "role_call_index": 2})
+    _, (op,), warnings = parse(b, tmp_path)
+    assert op.step is None
+    assert any("known but unobserved" in w for w in warnings)
+    assert not any("observed-turn fallback" in w for w in warnings)
+
+
 def test_declared_extraction_step_unparseable_warns(tmp_path):
     """An adapter-declared extraction step that is neither a step number nor
     "final" cannot be cross-checked against the computed step — warn instead
@@ -1233,15 +1403,19 @@ def test_delivery_recent_turn_fallback_is_chronological_under_pipelining(tmp_pat
     b._emit("turn_start", turn=3, call_id="000003-x", proxy_source=MAIN)
     sid = b.search(returned=[cure_ref("k1")])
     b.delivery(sid, memories=[cure_ref("k1")])  # unbound, undeclared → the fallback
+    b.generate(extraction_step="2")
+    b.rewrite(replay_tool_ends=False)
     b._emit("message_end", proxy_source=MAIN, role="assistant", msg=2, turn=3,
             content="turn 3 classifies next")
     b._emit("turn_end", turn=3, status="completed", proxy_source=MAIN)
     b._emit("message_end", proxy_source=MAIN, role="assistant", msg=2, turn=1,
             content="turn 1's deferred response records last")
     b._emit("turn_end", turn=1, status="completed", proxy_source=MAIN)
-    _, ops, warnings = parse(b, tmp_path)
+    traj, ops, warnings = parse(b, tmp_path)
     (recall,) = [o for o in ops if o.kind == "recall"]
     assert recall.step == 2  # turn 2 — classified last before the delivery
+    assert next(o for o in ops if o.kind == "extract").step == 2
+    assert traj.rewrites[0]["step"] == 2
 
 
 def test_annotation_structural_problems_surface_as_warnings(tmp_path):
@@ -1910,7 +2084,7 @@ def test_corrupt_matched_count_shapes_are_problems():
     # exactly the corrupt ends (seqs 5/7/9/11) — the explicit null (13) and
     # the clean object (15) never fire
     assert sorted(int(p.split(":", 1)[0].split()[-1]) for p in flagged) == [5, 7, 9, 11]
-    assert all("is not an object with an integer value" in p for p in flagged)
+    assert all("is not an object with a non-negative integer value" in p for p in flagged)
 
 
 def test_delivery_non_list_memories_warns_and_degrades(tmp_path):
@@ -2448,6 +2622,44 @@ def test_span_fingerprint_operation_local_groups_by_content(tmp_path):
     spans = group_spans(recalls, traj.id)
     assert len(spans) == 2
     assert spans[0].n_injections == 2 and spans[1].n_injections == 1
+    # Reusing a local id for different content cannot close the first
+    # content's footprint: no stable item identity links the two versions.
+    assert spans[0].memory_windows == {"m1": None}
+    assert spans[1].memory_windows == {"m1": None}
+    graph = load_and_build([tmp_path])
+    assert len(graph["memories"]) == 2
+    assert [len(m["recalls"]) for m in graph["memories"]] == [2, 1]
+    assert len({e["memory"] for e in graph["edges"] if e["kind"] == "recalls"}) == 2
+    delivered = [op["memories"][0] for op in graph["ops"] if op["kind"] == "recall"]
+    assert [m["key"] for m in delivered] == ["note-0", "note-1", "note-0"]
+    assert delivered[0]["grouping_id"] == delivered[1]["grouping_id"]
+    assert delivered[0]["grouping_id"] != delivered[2]["grouping_id"]
+    assert {m["grouping_id"] for m in delivered} == {m["item_id"] for m in graph["memories"]}
+
+
+@pytest.mark.parametrize("digest", [False, True])
+@pytest.mark.parametrize("same_step", [False, True])
+def test_local_memory_treatment_split_bounds_windows(tmp_path, digest, same_step):
+    text = "Use the recorded evidence before deciding the answer."
+    b = AnnotatedBuilder().agent_turn()
+    for i, placement in enumerate((text[:20], text)):
+        if i and not same_step:
+            b.agent_turn()
+        ref = {"version_id": f"note-{i}", "namespace": "notes",
+               "identity_strength": "operation_local", "identity_scheme": "notes",
+               "content": {"availability": "inline", "text": text}}
+        if digest:
+            ref["content"]["sha256"] = hashlib.sha256(text.encode()).hexdigest()
+        search = b.search(returned=[ref])
+        b.delivery(search, memories=[ref], bind=b.last_call, content=placement)
+    traj, ops, _ = parse(b, tmp_path)
+    first, second = group_spans(ops, traj.id)
+    assert first.fingerprint == second.fingerprint
+    assert first.memory_windows == {"m1": 1}
+    assert second.memory_windows == {"m1": None}
+    assert second.memory_window_starts == ({"m1": 2} if same_step else {})
+    assert second.new_keys == second.removed_keys == []
+    assert second.previous_keys == second.previous_partial_keys == ["note-1"]
 
 
 def test_annotated_zero_operations_is_valid(tmp_path):

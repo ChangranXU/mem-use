@@ -167,7 +167,7 @@ function memColor(id){ return `hsl(${hue(id)},65%,42%)`; }
 // names no store (the same rule as the registry's namespace_of). Display text
 // stays the bare key everywhere; the namespace only disambiguates on demand
 // (detail panel, list tooltip).
-const memId=m=>JSON.stringify([typeof m.namespace==="string"?m.namespace:null, m.item_id||m.key]);
+const memId=m=>JSON.stringify([typeof m.namespace==="string"?m.namespace:null, m.grouping_id||m.item_id||m.key]);
 const keyOf=id=>JSON.parse(id)[1];
 const memById=Object.fromEntries(G.memories.map(m=>[memId(m),m]));
 // display text for a memory id: the registered memory's bare key (the item

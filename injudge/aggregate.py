@@ -18,7 +18,8 @@ The counting rules:
   same placeholder exclusion the rubric rollup applies.
 - per-memory usage tallies merge by (namespace, item) — the system's memory
   identity pair, so two stores' (or one store's two items') same-keyed
-  memories never conflate — over
+  memories never conflate. Local display ids use canonical content identity,
+  matching the graph and span comparisons. Tallies cover
   LLM-judged spans only (a rule-judged auto-neutral span carries a
   placeholder "unclear" per memory, the same exclusion the rubric rollup and
   confidence apply); first_value/last_value surface value drift across those

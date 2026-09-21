@@ -219,6 +219,14 @@ def apply_verdicts(graph: dict, report: dict, source: str = "") -> None:
         for t in graph.get("trajectories") or []
         if isinstance(t.get("run_id"), str) and t.get("run_id")
     )
+    for run_id in sorted(inj_by_run.keys() - graph_runs.keys()):
+        seqs = sorted(inj_by_run[run_id])
+        if seqs:
+            note(
+                "warn",
+                f"{run_id}: {len(seqs)} report injection(s) matched no loaded trajectory "
+                f"(seqs {seqs[:8]}{', …' if len(seqs) > 8 else ''})",
+            )
     ambiguous = {r for r, n in graph_runs.items() if n > 1}
     for r in sorted(ambiguous):
         note(

@@ -11,7 +11,7 @@ type RequestBody = {
 	messages: { role: string; content: unknown }[];
 	tools?: { function: { name: string } }[];
 };
-type Reply = { content?: string; tool_calls?: unknown[] };
+type Reply = { content?: string; tool_calls?: unknown[]; usage?: object };
 
 async function fixture(t: TestContext, replies: Reply[]) {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "judge-runner-"));
@@ -33,7 +33,8 @@ async function fixture(t: TestContext, replies: Reply[]) {
 			id: "test", object: "chat.completion.chunk", created: 0, model: "test-model",
 			choices: [{ index: 0, delta, finish_reason }],
 		});
-		res.write(`data: ${JSON.stringify(chunk({ role: "assistant", ...reply }, null))}\n\n`);
+		const { usage, ...delta } = reply;
+		res.write(`data: ${JSON.stringify({ ...chunk({ role: "assistant", ...delta }, null), usage })}\n\n`);
 		res.write(`data: ${JSON.stringify(chunk({}, reply.tool_calls ? "tool_calls" : "stop"))}\n\n`);
 		res.end("data: [DONE]\n\n");
 	});
@@ -117,7 +118,61 @@ test("a defiant repair tool call cannot read evidence or start another model tur
 	const result = await run();
 	assert.equal(requests.length, 1);
 	assert.equal(result.llm_calls, 1);
+	assert.equal(result.error, null);
+	assert.equal(result.answer, "invalid");
 	assert.ok(!JSON.stringify(result.messages).includes("new step-two evidence"));
+});
+
+test("first-round context rollback retains the opening and a replayable forced answer", async (t) => {
+	const { run, requests, root, config } = await fixture(t, [
+		{ tool_calls: [readStepTwo] },
+		{ content: '{"done":true}', tool_calls: [{ ...readStepTwo, id: "blocked" }] },
+	]);
+	fs.writeFileSync(path.join(root, "steps/step_000002.md"), "evidence ".repeat(1000));
+	const result = await run({ repair: false, opening: "judge the evidence",
+		config: { ...config, context_window: 2500 } });
+	assert.equal(result.error, null);
+	assert.equal(result.answer, '{"done":true}');
+	assert.equal(result.stop_reason, "context_budget_forced");
+	assert.equal(result.forced, true);
+	assert.equal(requests.length, 2);
+	const userMessages = requests[1].messages.filter((m) => m.role === "user");
+	assert.ok(JSON.stringify(userMessages).includes("judge the evidence"));
+	assert.deepEqual(userMessages.at(-1)!.content, [{ type: "text", text: "answer now" }]);
+	assert.ok(!JSON.stringify(requests[1]).includes("evidence evidence"));
+	const live = new Map<number, unknown>();
+	for (const line of fs.readFileSync(path.join(root, "trace.jsonl"), "utf8").trim().split("\n")) {
+		const event = JSON.parse(line);
+		if (event.type === "message") live.set(event.seq, event.message);
+		if (event.type === "tombstone") for (const seq of event.removedSeqs) live.delete(seq);
+	}
+	assert.deepEqual([...live.values()], result.messages);
+});
+
+test("context watermark includes the system and evidence tool schemas without usage", async (t) => {
+	const { run, requests, root, config } = await fixture(t, [
+		{ tool_calls: [readStepTwo] }, { content: '{"done":true}' },
+	]);
+	fs.writeFileSync(path.join(root, "steps/step_000002.md"), "evidence ".repeat(400));
+	const result = await run({ repair: false, system: "scoring instructions ".repeat(200),
+		config: { ...config, context_window: 3000 } });
+	assert.equal(result.error, null);
+	assert.equal(result.stop_reason, "context_budget_forced");
+	assert.equal(requests.length, 2);
+});
+
+test("output-only usage cannot replace the context prefix estimate", async (t) => {
+	const { run, requests, root, config } = await fixture(t, [
+		{ tool_calls: [readStepTwo], usage: { completion_tokens: 10, total_tokens: 10 } },
+		{ content: '{"done":true}' },
+	]);
+	fs.writeFileSync(path.join(root, "steps/step_000002.md"), "evidence ".repeat(400));
+	const result = await run({ repair: false, system: "scoring instructions ".repeat(200),
+		config: { ...config, context_window: 3000 } });
+	assert.equal(result.error, null);
+	assert.equal(result.stop_reason, "context_budget_forced");
+	assert.equal(requests.length, 2);
+	assert.ok(!JSON.stringify(requests[1]).includes("evidence evidence"));
 });
 
 for (const limit of [2, 4]) {

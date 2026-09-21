@@ -1379,6 +1379,36 @@ def test_created_status_preserved_across_updates(tmp_path):
     assert mem["created"]["status"] == "pending_review"  # creating status kept
 
 
+def test_empty_candidate_value_replaces_previous_content(tmp_path):
+    b = TrajBuilder().agent_turn()
+    for text in ("old content", "", ""):
+        b.generate(produced=[cure_ref("k", text)], extraction_step="1")
+    graph = load_and_build([b.write(tmp_path / "t")])
+    (memory,) = graph["memories"]
+    assert memory["value"] == ""
+    assert [update["duplicate"] for update in memory["updates"]] == [False, True]
+
+
+def test_inline_empty_candidate_resolves_an_earlier_locator(tmp_path):
+    inline = cure_ref("k", "")
+    locator = {**inline, "content": {**inline["content"], "availability": "artifact"}}
+    locator["content"].pop("text")
+    b = TrajBuilder().agent_turn()
+    b.generate(produced=[inline], changes=[("create", [], [locator])], extraction_step="1")
+    graph = load_and_build([b.write(tmp_path / "t")])
+    assert graph["ops"][0]["candidates"][0]["value"] == ""
+    assert graph["memories"][0]["value"] == ""
+
+
+def test_cli_invalid_verdicts_fails_before_loading_trajectories(tmp_path, monkeypatch):
+    import memgraph.__main__ as cli
+
+    monkeypatch.setattr(cli, "load_and_build", lambda *_: pytest.fail("parsed trajectories"))
+    with pytest.raises(SystemExit, match="verdict"):
+        cli.main([str(tmp_path), "--verdicts", str(tmp_path / "missing.json"),
+                  "-o", str(tmp_path / "graph.html")])
+
+
 def test_mixed_tz_timestamps_do_not_crash_chronology(tmp_path):
     b = TrajBuilder().agent_turn(with_task=True)
     b.memory_turn()
@@ -2005,6 +2035,8 @@ def test_apply_verdicts_run_without_report_coverage_notes_info(tmp_path):
     assert "verdict" not in graph["ops"][0]
     assert "verdicts" not in graph["tool"]
     assert any("no verdicts in the report for this trajectory" in v["msg"]
+               for v in graph["validation"])
+    assert any("some-other-run" in v["msg"] and "matched no loaded trajectory" in v["msg"]
                for v in graph["validation"])
 
 

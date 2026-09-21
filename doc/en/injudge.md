@@ -13,7 +13,7 @@ injudge classifies each recall injection as **positive**, **negative**, or **neu
 uv run -m injudge <paths>    # writes output/<run-stamp>/injudge-report.json + summary.json
 
 # The TS half of the judge (a pi agent) needs its packages once:
-cd agent && npm install && cd ..
+npm --prefix agent install
 
 # Preview mode: print each span's evidence document, file index, and opening
 # message with no network access, no node, no files written:
@@ -29,7 +29,7 @@ Each run writes its own `<run-stamp>/` folder (`YYYYMMDD-HHMMSS-<hex>`) under `-
 | File | Contents |
 |---|---|
 | `injudge-report.json` | The runtime judging record (`injudge.report/v11`), rewritten after every trajectory so a crash keeps completed work |
-| `summary.json` | The final statistics (`injudge.summary/v8`): counts, rates, per-memory usage |
+| `summary.json` | The final statistics (`injudge.summary/v9`): counts, rates, per-memory usage |
 | `memgraph-verdicts.html` | Only with `--html`: memgraph with recall nodes colored by verdict |
 | `evidence/` | One folder per span sent to the judge agent (error outcomes included): the files the agent searched (span document, manifest, per-step files, gold) |
 | `agent-runs/` | One trajectory JSONL per span sent to the judge agent: the pi event-sourced recording of how each verdict was reached |

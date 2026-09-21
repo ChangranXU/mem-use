@@ -3,8 +3,7 @@
 A span is a maximal run of recall ops (in agent-step order) delivering
 identical content under the SAME treatment: the same memory set in the same
 order under the recorder's portable identity (namespace, item, identity_scheme,
-version_id, content digest — what the gate's own `memory_identity` compares
-on, plus the recorded item identity, so two DISTINCT items that merely share
+version_id, content digest, so two DISTINCT recorded items that merely share
 a content digest never collapse into one span and lose a provenance), never
 adapter-native fields, so spanning works for any memory system recorded
 through the gate. One escape hatch: a memory no portable identity
@@ -62,29 +61,8 @@ import json
 from bisect import bisect_right
 
 from injudge.model import InjectionSpan, memory_id
-from memgraph.annotations import grouping_item_key, item_ident, version_identity
+from memgraph.annotations import canonical_entry, grouping_item_key, namespace_of
 from memgraph.model import MemoryOp
-
-_Ident = tuple[str | None, str]
-
-
-def _canon_entry(m: dict) -> str:
-    """One delivered entry's portable identity string — the per-entry half
-    of content_fingerprint's sorted comparison (the tuple semantics live on
-    its docstring). The treatment comparison (_same_treatment) keys on the
-    SAME identity the span grouping does, so the two can never disagree
-    about which entries are the same memory."""
-    ns, scheme, version_id, digest = version_identity(m, withhold_local=True)
-    # grouping_item_key withholds an operation-local version_id posing as
-    # the display key (it names nothing outside its own operation); two
-    # DISTINCT recorded items that merely share a content digest stay two
-    # memories
-    item = grouping_item_key(m)
-    if version_id is not None or digest is not None:
-        ident = [ns, item, scheme, version_id, digest]
-    else:
-        ident = [ns, item, m.get("value")]
-    return json.dumps(ident, ensure_ascii=False)
 
 
 def content_fingerprint(op: MemoryOp) -> str:
@@ -109,7 +87,7 @@ def content_fingerprint(op: MemoryOp) -> str:
     recorded), leaving distinct redacted contents under one recorded item
     identity indistinguishable and sharing one span.
     """
-    blob = json.dumps(sorted(_canon_entry(m) for m in op.memories), ensure_ascii=False)
+    blob = json.dumps(sorted(canonical_entry(m) for m in op.memories), ensure_ascii=False)
     # surrogatepass, like the gate's canonical digests: a lone surrogate (a
     # legal \ud800 JSON escape in a delivered value) stays digestible instead
     # of crashing the span pass on a valid recorded payload
@@ -131,7 +109,7 @@ def _same_treatment(span: InjectionSpan, op: MemoryOp) -> bool:
       (length mismatch) compares as "no contradiction": the op then merges
       and the span's recorded exposure stands (never widened).
     """
-    if [_canon_entry(m) for m in op.memories] != [_canon_entry(m) for m in span.memories]:
+    if [canonical_entry(m) for m in op.memories] != [canonical_entry(m) for m in span.memories]:
         return False
     if op.placements != span.placements:
         return False
@@ -237,13 +215,16 @@ def _merge_spans(
 
 def _stamp_novelty(
     spans: list[InjectionSpan], steps_seen: list[list[int]]
-) -> list[list[_Ident | None]]:
+) -> list[list[str]]:
     """Step bounds, membership diffs, and the cumulative novelty baseline.
 
     The diff compares (namespace, item) identities — a delivery switching
     stores or another item reusing the key IS a change — then speaks in
-    distinct bare keys. A key whose item identity changed lands in BOTH
-    lists.     `previous_keys` / `changed_keys` accumulate across ANY earlier
+    distinct bare keys. Without an item identity valid across operations,
+    the canonical entry used by fingerprints carries the comparison instead;
+    fresh local ids cannot leave the same content's windows overlapping.
+    A key whose item identity changed lands in BOTH
+    lists. `previous_keys` / `changed_keys` accumulate across ANY earlier
     span (a gap re-delivery is still content the agent already saw);
     `changed_keys` compares against the last RECORDED earlier value — a
     None side records no value, so it is unrecorded, never a change, and a
@@ -251,13 +232,13 @@ def _stamp_novelty(
     actually recorded. One verified full exposure (verbatim or
     presentation-normalized) makes the "already seen in full" cue sound
     for every later span carrying the identity (`previous_partial_keys`
-    qualifies the rest). Returns per-span per-entry identities (None =
-    none) for the window pass — one window per delivered entry, so
+    qualifies the rest). Returns per-span per-entry identities
+    for the window pass — one window per delivered entry, so
     identities sharing a display key keep their own bounds."""
-    prev: dict[_Ident, str] = {}
-    seen: dict[_Ident, object] = {}
-    seen_full: set[_Ident] = set()
-    entry_idents: list[list[_Ident | None]] = []
+    prev: dict[str, str] = {}
+    seen: dict[str, object] = {}
+    seen_full: set[str] = set()
+    entry_idents: list[list[str]] = []
     for span, steps in zip(spans, steps_seen):
         if steps:
             span.step_first = min(steps)
@@ -266,22 +247,24 @@ def _stamp_novelty(
             span.step_gaps = [
                 s for s in range(span.step_first, span.step_last + 1) if s not in delivered
             ]
-        cur: dict[_Ident, str] = {}
-        vals: dict[_Ident, object] = {}
-        idents: list[_Ident | None] = []
+        cur: dict[str, str] = {}
+        vals: dict[str, object] = {}
+        idents: list[str] = []
         for m in span.memories:
-            ns, item = item_ident(m)
-            if item:
-                ident = (ns, item)
-                cur.setdefault(ident, m.get("key") or item)
+            item = grouping_item_key(m)
+            # The two-field item key cannot collide with canonical_entry's
+            # three/five-field version key. Stable items still track revisions.
+            ident = (json.dumps([namespace_of(m), item], ensure_ascii=False)
+                     if item is not None else canonical_entry(m))
+            idents.append(ident)
+            label = m.get("key") or item
+            if label:
+                cur.setdefault(ident, label)
                 # last recorded value in this delivery speaks for the span
                 # (several versions of one item is a legal collapse)
                 v = m.get("value")
                 if ident not in vals or v is not None:
                     vals[ident] = v
-                idents.append(ident)
-            else:
-                idents.append(None)
         entry_idents.append(idents)
         span.new_keys = list(dict.fromkeys(cur[i] for i in cur if i not in prev))
         span.removed_keys = list(dict.fromkeys(prev[i] for i in prev if i not in cur))
@@ -303,7 +286,7 @@ def _stamp_novelty(
             if ident not in seen or v is not None:
                 seen[ident] = v
         for ident, (_m, exp) in zip(idents, span.iter_exposed()):
-            if ident is not None and exp is not None and (
+            if exp is not None and (
                 exp.get("state") in ("full", "full_normalized")
             ):
                 seen_full.add(ident)
@@ -313,7 +296,7 @@ def _stamp_novelty(
 
 def _stamp_windows(
     spans: list[InjectionSpan],
-    entry_idents: list[list[_Ident | None]],
+    entry_idents: list[list[str]],
     warnings: list[str] | None,
 ) -> None:
     """A re-delivery bounds only the entries it carries. Strictly later
@@ -324,13 +307,12 @@ def _stamp_windows(
     that end remain creditable to both spans. Unrelated entries keep their
     windows; intervening same-step carriers can have empty windows.
     """
-    carriers: dict[_Ident, list[int]] = {}
+    carriers: dict[str, list[int]] = {}
     for j, idents in enumerate(entry_idents):
         if spans[j].step_first is None:
             continue
         for ident in idents:
-            if ident is not None:
-                carriers.setdefault(ident, []).append(j)
+            carriers.setdefault(ident, []).append(j)
     starts: dict[int, list[int]] = {}
     for j, s in enumerate(spans):
         if s.step_first is not None:
@@ -341,7 +323,7 @@ def _stamp_windows(
         windows: dict[str, int | None] = {}
         for j, ident in enumerate(entry_idents[i]):
             end = None
-            if ident is not None and span.step_last is not None:
+            if span.step_last is not None:
                 js = carriers.get(ident)
                 if js:
                     for k in js[bisect_right(js, i) :]:
@@ -355,8 +337,6 @@ def _stamp_windows(
             corrected = False
             if collisions:
                 for j_pos, ident in enumerate(entry_idents[i]):
-                    if ident is None:
-                        continue
                     carriers_hit = [j for j in collisions if ident in entry_idents[j]]
                     if not carriers_hit:
                         continue

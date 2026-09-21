@@ -26,8 +26,6 @@ from __future__ import annotations
 # ignored_unknown_novelty, never ignored_novel.
 REPORT_SCHEMA = "injudge.report/v11"
 
-# injudge.summary/v8: results-first layout, grouped counts/verdicts/delivery/
-# judge statistics, compact trajectory rows, and an id-keyed details section.
-# Source report schema is retained; scoring and null-novelty semantics do not
-# change (null counts as unknown and stays out of novelty-rate denominators).
-SUMMARY_SCHEMA = "injudge.summary/v8"
+# injudge.summary/v9: span-index auto-neutral entries are unassessable and
+# retain their auto reason, matching every aggregate's population semantics.
+SUMMARY_SCHEMA = "injudge.summary/v9"

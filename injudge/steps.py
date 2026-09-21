@@ -38,9 +38,10 @@ Anomalies (end without start, unknown tool_call_id, start without end while
 the run continued) are reported via `warnings`, never dropped silently.
 
 The module also owns the run's billed prompt-token accounting
-(`prompt_tokens_total`) — the same event semantics, read off the same
-stream, over every lane (the memory lane's extraction calls are real spend
-of running the memory system): the recorder lets exactly one LIVE
+(`prompt_tokens_total`) — run.json totals include every lane's spend,
+including embeddings with no chat events. agent_end is the snapshot at seal
+time; live message usage is the lower bound when neither total is available.
+For that lower bound, the recorder lets exactly one LIVE
 message_end carry a call's billed usage (a message_retracted annuls the
 record it replaces, and only a recovery re-record carries usage turn-less),
 so summing only turn-bearing records would bill the retracted and miss the
@@ -391,11 +392,13 @@ def _token_share(part: int | float, whole: int | float) -> float | None:
     return share if math.isfinite(share) else None
 
 
-def prompt_tokens_total(events: list[dict], warnings: list[str]) -> int | float:
-    """The run's real billed prompt budget: every live usage record, every
-    lane. The memory lane's extraction calls are real spend of running the
-    memory system — excluding them would understate the budget and overstate
-    the injected-token share.
+def prompt_tokens_total(
+    events: list[dict], warnings: list[str], run_usage: dict[str, object] | None = None,
+) -> int | float:
+    """All-lane billed prompt budget: the largest valid run.json, agent_end,
+    or live-message total. Embeddings have no message events; snapshots can
+    lag each other. These totals replace the message sum, never add to it.
+    Invalid or smaller snapshots warn so corruption cannot erase known spend.
 
     The recorder lets exactly one LIVE message_end carry a call's billed
     usage: a message_retracted annuls the record it replaces (the billed
@@ -425,6 +428,7 @@ def prompt_tokens_total(events: list[dict], warnings: list[str]) -> int | float:
     unmatched_retractions = 0
     nonfinite = 0  # records whose prompt_tokens is a NaN/Infinity spelling or a 1e999 literal
     corrupt_tokens = 0  # records whose prompt_tokens is present but not a number
+    negative_tokens = 0
     for e in events:
         usage_record = e.get("type") == "message_end" and e.get("role") == "assistant"
         if not usage_record and e.get("type") != "message_retracted":
@@ -481,6 +485,9 @@ def prompt_tokens_total(events: list[dict], warnings: list[str]) -> int | float:
                 # record, and two finite floats overflowing the double range.
                 nonfinite += 1
                 tokens = 0
+            elif tokens < 0:
+                negative_tokens += 1
+                tokens = 0
             values.append(tokens)
     total, mixed_overflow = _mixed_sum(values)
     if dropped_records:
@@ -506,6 +513,11 @@ def prompt_tokens_total(events: list[dict], warnings: list[str]) -> int | float:
             "shape; excluded, so the record they annul stays billed and the "
             "prompt-token total may overcount"
         )
+    if negative_tokens:
+        warnings.append(
+            f"{negative_tokens} usage record(s) carry a negative prompt_tokens value; "
+            "counted 0 so corrupt usage cannot cancel observed spend"
+        )
     if unmatched_retractions:
         warnings.append(
             f"{unmatched_retractions} message_retracted event(s) matched no live "
@@ -517,5 +529,38 @@ def prompt_tokens_total(events: list[dict], warnings: list[str]) -> int | float:
             "an integer usage record past the float range cannot sum with float "
             "records; the float part counts 0, so the prompt-token total may "
             "undercount"
+        )
+    ended = next((e.get("usage") for e in reversed(events) if e.get("type") == "agent_end"), None)
+    snapshots: dict[str, int | float] = {}
+    for source, usage in (("run.json", run_usage), ("agent_end", ended)):
+        if usage is None or (isinstance(usage, dict) and "prompt_tokens" not in usage):
+            continue
+        tokens = usage.get("prompt_tokens") if isinstance(usage, dict) else None
+        if (
+            isinstance(tokens, bool) or not isinstance(tokens, (int, float))
+            or (isinstance(tokens, float) and not math.isfinite(tokens)) or tokens < 0
+        ):
+            warnings.append(f"{source}: invalid usage.prompt_tokens total; ignoring billing snapshot")
+        elif tokens < total:
+            warnings.append(f"{source}: prompt-token total is below live message usage; ignoring billing snapshot")
+        else:
+            snapshots[source] = tokens
+    if snapshots:
+        largest = max(snapshots.values())
+        for source, tokens in snapshots.items():
+            if tokens < largest:
+                warnings.append(
+                    f"{source}: prompt-token total is below another billing snapshot; "
+                    "using the larger total to avoid undercounting"
+                )
+        return largest
+    if any(
+        e.get("type") == "memory_role_bind" and isinstance(e.get("payload"), dict)
+        and e["payload"].get("logical_role") == "embedding"
+        for e in events
+    ):
+        warnings.append(
+            "no valid run-level prompt-token total; message usage excludes embedding calls "
+            "and may undercount the billed budget"
         )
     return total

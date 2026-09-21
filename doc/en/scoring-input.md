@@ -34,7 +34,7 @@ The step files carry the complete recorded stream — nothing is truncated or pr
 The agent's entire toolset is two read-only operations, scoped to that one folder:
 
 - `read_evidence` — one file with 1-based line numbers, whole or by line range. These line numbers locate passages; verdict anchors remain agent-step numbers.
-- `search_evidence` — a regular expression over `steps/` by default (or an explicit evidence file/subfolder), returning `path:line: match excerpt`. Excerpts surround the match even in long reasoning paragraphs. Default searches exclude the injected span and manifest, so the memory itself is not mistaken for downstream evidence.
+- `search_evidence` — a regular expression over `steps/` by default (or an explicit evidence file/subfolder), returning `path:line: match excerpt`. Excerpts surround the match even in long reasoning paragraphs. Each line is searched through its first 10,000 characters; the result reports any clipped lines so the judge can inspect the rest with `read_evidence`. Default searches exclude the injected span and manifest, so the memory itself is not mistaken for downstream evidence.
 
 Absolute paths, `..` segments, and symlinks pointing outside the folder are refused. There is no filesystem tool, no bash, no network — the model's only world is the evidence.
 

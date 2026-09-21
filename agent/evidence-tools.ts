@@ -137,6 +137,7 @@ export function createEvidenceTools(root: string): AgentTool<any>[] {
 			}
 			const hits: string[] = [];
 			let truncated = false;
+			let clippedLines = 0;
 			for (const f of files) {
 				if (hits.length >= SEARCH_MATCH_CAP) {
 					truncated = true;
@@ -145,6 +146,7 @@ export function createEvidenceTools(root: string): AgentTool<any>[] {
 				const text = fs.readFileSync(path.join(rootReal, f), "utf8");
 				const lines = text.split("\n");
 				for (let i = 0; i < lines.length; i++) {
+					if (lines[i].length > SEARCH_LINE_CAP) clippedLines++;
 					const match = regex.exec(lines[i].slice(0, SEARCH_LINE_CAP));
 					if (match) {
 						// Long reasoning paragraphs put the actual match well past
@@ -164,6 +166,9 @@ export function createEvidenceTools(root: string): AgentTool<any>[] {
 			let textOut = hits.join("\n") || "(no matches)";
 			if (truncated) {
 				textOut += `\n(... cut at ${SEARCH_MATCH_CAP} matched lines; narrow the pattern or scope to see more)`;
+			}
+			if (clippedLines) {
+				textOut += `\n(search examined only the first ${SEARCH_LINE_CAP} chars of ${clippedLines} long line(s); use read_evidence to inspect their remaining text)`;
 			}
 			return { content: [{ type: "text", text: textOut }], details: { pattern: params.pattern, path: params.path } };
 		},

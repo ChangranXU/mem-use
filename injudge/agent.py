@@ -280,9 +280,9 @@ def resolve_config(
         cfg.max_output_tokens = max_tokens
     # CLI-flag overrides bypass the .env parsers, so validate them here;
     # the inverted comparisons reject NaN as well as out-of-range values
-    if not cfg.timeout > 0:
+    if not math.isfinite(cfg.timeout) or cfg.timeout <= 0:
         raise SystemExit(
-            f"error: timeout must be a positive number of seconds (got {cfg.timeout})"
+            f"error: timeout must be a positive finite number of seconds (got {cfg.timeout})"
         )
     if not cfg.max_attempts >= 1:
         raise SystemExit(
@@ -297,11 +297,14 @@ def resolve_config(
             f"error: max_steps must be at least 2 (one tool round plus the "
             f"forced final round; got {cfg.max_steps})"
         )
-    if cfg.max_output_tokens >= cfg.context_window:
+    # Match pi's chars/4 estimate for the fixed forced-answer prompt.
+    forced_tokens = math.ceil(len(_FORCED) / 4)
+    if cfg.max_output_tokens + forced_tokens >= cfg.context_window:
         raise SystemExit(
             f"error: MAX_OUTPUT_TOKENS ({cfg.max_output_tokens}) must leave room "
             f"inside CONTEXT_WINDOW ({cfg.context_window}) — the reserved output "
-            "budget is what the forced-answer watermark protects"
+            f"budget and forced message ({forced_tokens} estimated tokens) "
+            "must leave room for input"
         )
     _check_runner()
     return cfg
@@ -395,7 +398,7 @@ def _invoke_runner(
             return None
         try:
             raw = json.loads(out_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as e:
+        except (OSError, ValueError, RecursionError) as e:
             warnings.append(f"the agent runner wrote no readable result: {e}")
             return None
         result = _result_or_none(raw)
@@ -437,18 +440,21 @@ def _mask_trajectory_file(path: Path, api_key: str) -> None:
     each attempt returns. The file's on-disk window between the runner's
     append and this rewrite lives in the run's own output folder, the same
     trust domain as the runner's result file; the KEPT artifact is always
-    masked. A missing/unreadable file is a no-op: the trajectory is audit
-    support, never a gate the judging depends on."""
+    masked. A missing file is harmless; a failed masking write removes the
+    raw transcript and surfaces an error rather than silently keeping secrets.
+    """
     try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
+        # A killed runner can leave its final UTF-8 write incomplete.
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
         return
     masked = _mask_key(text, api_key)
     if masked != text:
         try:
             atomic_write(path, masked)
         except OSError:
-            pass
+            path.unlink(missing_ok=True)
+            raise
 
 
 def judge_span(
@@ -501,6 +507,7 @@ def judge_span(
     message = opening
     while attempt < cfg.max_attempts:
         attempt += 1
+        mask_error = None
         try:
             result = _invoke_runner(
                 cfg, dest, trajectory_path, attempt, system, message, history, warnings,
@@ -509,7 +516,16 @@ def judge_span(
         finally:
             # A timeout/nonzero exit can leave a partial transcript containing
             # endpoint echoes even though no result file ever became readable.
-            _mask_trajectory_file(trajectory_path, cfg.api_key)
+            try:
+                _mask_trajectory_file(trajectory_path, cfg.api_key)
+            except OSError as e:
+                mask_error = _mask_key(str(e), cfg.api_key)
+        if mask_error is not None:
+            verdict = blank_verdict()
+            verdict["error"] = f"cannot mask judge transcript: {mask_error}"
+            warnings.append(f"{span.id}: {verdict['error']}")
+            verdict["input"] = _input_record(gold, attempt, result, None)
+            return verdict
         if result is None:
             # setup/transport fault: an identical retry re-pays it. The
             # runner-level detail (stderr, timeout) is already in warnings

@@ -1,5 +1,5 @@
 """Report assembly: the `injudge.report/v11` JSON artifact, the statistics-only
-`injudge.summary/v8` distillation, and the stdout summary.
+`injudge.summary/v9` distillation, and the stdout summary.
 
 The runtime artifact's output contract: per operation
 {operation_id, kind, seq, payload_summary, verdict, confidence, evidence[]}
@@ -57,8 +57,8 @@ def payload_summary(span: InjectionSpan) -> str:
     noun = "memory" if n == 1 else "memories"
     if span.step_first is None:
         return (
-            f"{span.n_injections} injection(s) with no agent turn classified in "
-            f"the run, delivering {n} {noun}: {mems}"
+            f"{span.n_injections} injection(s) with no attributed agent step, "
+            f"delivering {n} {noun}: {mems}"
         )
     steps = step_range(span.step_first, span.step_last)
     return (
@@ -74,7 +74,7 @@ def operation_record(span: InjectionSpan, verdict: dict, delivery_cost: dict) ->
         "kind": "recall_injection_span",
         "traj": span.traj,
         "seq": span.seq_first,
-        # omitted when no agent turn ever classified in the run (a
+        # omitted when no delivery has an attributed agent step (a
         # rule-judged auto-neutral span): [None, None] is not a step range
         **({"steps": [span.step_first, span.step_last]}
            if span.step_first is not None else {}),
@@ -92,8 +92,8 @@ def operation_record(span: InjectionSpan, verdict: dict, delivery_cost: dict) ->
         # the per-entry footprint window ends the action anchors were
         # validated against (null = never re-delivered, so bounded by the
         # step stream's end) — recorded so the enforced bounds stay
-        # auditable from the artifact; omitted like `steps` when no agent
-        # turn ever classified (no window bounds anything there).
+        # auditable from the artifact; omitted like `steps` when no delivery
+        # has an attributed agent step (no window bounds anything there).
         # `memory_window_starts` carries the same-step collision exception:
         # the entries whose window opens only AFTER the shared step the
         # earlier carrier owns (empty unless a collision bumped one)
@@ -532,6 +532,9 @@ def _summary_span_index(op: dict) -> dict:
     same placeholder (no judge ran), so projecting it here would emit a label
     no tally can ever corroborate."""
     out = {"operation_id": op["operation_id"], "verdict": op["verdict"]}
+    if op.get("auto"):
+        out["verdict"] = "unassessable"
+        out["auto"] = op["auto"]
     if op.get("confidence") is not None:
         out["confidence"] = op["confidence"]
     if op.get("steps") is not None:

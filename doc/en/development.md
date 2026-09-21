@@ -9,7 +9,7 @@ icon: wrench
 
 ```bash
 uv sync                                # once, inside the checkout
-cd agent && npm install                # once: the pi agent packages (node >= 22.19)
+npm --prefix agent install                # once: the pi agent packages (node >= 22.19)
 uv run pytest tests -q                 # full suite (also drives node --test for the TS tools)
 uv run pytest tests/test_injudge.py -q # single file
 ```

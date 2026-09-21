@@ -29,7 +29,7 @@ icon: book-open
 ```bash
 # 安装依赖（首次，在 checkout 内执行）
 uv sync
-cd agent && npm install && cd ..   # TS 评审智能体的依赖包（node ≥ 22.19）
+npm --prefix agent install   # TS 评审智能体的依赖包（node ≥ 22.19）
 
 # 1 —— 可视化全部记忆操作
 uv run -m memgraph runs/ -o memgraph.html --json memgraph.json

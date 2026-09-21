@@ -6,8 +6,8 @@ actions as first-class `memory_*` events in the same `trajectory.jsonl`
 
 - `memory_session` — trace-session identity, adapter, optional exact task
   and instance_id;
-- `memory_role_bind` — binds logical `main`/`memory` to a proxy-stamped lane
-  (`proxy_source`), replacing any label convention;
+- `memory_role_bind` — binds logical `main`/`memory`/optional `embedding`
+  to a proxy-stamped lane (`proxy_source`), replacing any label convention;
 - `memory_generate_start` / `memory_change` / `memory_generate_end` — one
   extraction (generation) operation: inputs, native state effects (create /
   update / delete / noop with before/after MemoryRefs), status, produced and
@@ -49,8 +49,7 @@ returned sets).
 
 Stdlib only, like the rest of the tools. Every entry carries the recorder's
 portable memory identity (namespace / item_id / identity_scheme /
-identity_strength / version_id + content sha256 — the same fields the gate's
-own `memory_identity` compares on, never adapter-native vocabulary) so span
+identity_strength / version_id + content sha256, never adapter-native vocabulary) so span
 fingerprinting and item-level grouping work for any adapter; display fields
 (key/value/memory_type/confidence/review_status/needs_verification) prefer
 the `extensions.cure` projection and fall back to the portable identity
@@ -242,8 +241,8 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
             if not isinstance(role, str):
                 index.problems.append(f"seq {seq}: memory_role_bind has a non-string logical_role")
                 continue
-            if role not in ("main", "memory"):
-                # the protocol binds exactly these two roles (the gate rejects
+            if role not in ("main", "memory", "embedding"):
+                # the protocol binds exactly these roles (the gate rejects
                 # any other at ingest): an unknown one only reaches the log
                 # through corruption — report it and skip the bind, the same
                 # refusal the recorder's retrieval index makes
@@ -373,10 +372,11 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
                 matched = event["payload"].get("matched_count")
                 if matched is not None and not (
                     isinstance(matched, dict) and is_int(matched.get("value"))
+                    and matched["value"] >= 0
                 ):
                     index.problems.append(
                         f"seq {seq}: memory_search_end payload.matched_count "
-                        "is not an object with an integer value"
+                        "is not an object with a non-negative integer value"
                     )
                 # Same never-silent rule for the returned entries the
                 # subsequence check iterates: ingest requires each to be an
@@ -392,13 +392,23 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
                         field is None
                         for field in _ref_identity(
                             item.get("memory") if isinstance(item, dict) else None
-                        )
+                        )[1:]  # the read lane alone identifies no memory
                     )
                     for item in returned
                 ):
                     index.problems.append(
                         f"seq {seq}: memory_search_end payload.returned entry "
                         "has no usable identity fields"
+                    )
+                searched_lane = operation.start["payload"].get("lane_id")
+                if isinstance(searched_lane, str) and isinstance(returned, list) and any(
+                    isinstance(item, dict) and isinstance(item.get("memory"), dict)
+                    and isinstance(item["memory"].get("lane_id"), str)
+                    and item["memory"]["lane_id"] != searched_lane
+                    for item in returned
+                ):
+                    index.problems.append(
+                        f"seq {seq}: returned memory lane_id disagrees with the searched lane"
                     )
 
     # Bridge revisions are not portable MemoryRef ids. A successful provider
@@ -448,6 +458,13 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
         binds = index.binds.get(sid, {})
         if "main" not in binds or "memory" not in binds:
             index.problems.append(f"session {sid}: needs exactly one main and one memory binding")
+        if "embedding" in binds and any(
+            role in binds and binds["embedding"] == binds[role] for role in ("main", "memory")
+        ):
+            index.problems.append(f"session {sid}: embedding must bind a distinct lane")
+        for op in ops_by_session.get(sid, []):
+            if op.end is not None:
+                _check_embedding_binding(op.end, binds, op.operation_id, index.problems)
         if "main" in binds and index.sessions[sid].get("proxy_source") != binds["main"]:
             index.problems.append(f"session {sid}: memory_session was not recorded on the main lane")
         # Lane placement (the same checks the recorder's retrieval index
@@ -488,8 +505,8 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
         entries = payload.get("searches")
         entries = entries if isinstance(entries, list) else []
         resolved: list[AnnotatedOperation] = []
-        # Repeated links widen the subsequence haystack; the gate requires
-        # both operation_id and lane_id to be unique within a delivery.
+        # The gate requires unique operation_id and lane_id links. Skip
+        # duplicates and the incomplete delivery's subsequence check below.
         seen_links: dict[str, set[str]] = {"operation_id": set(), "lane_id": set()}
         for entry in entries:
             if not isinstance(entry, dict):
@@ -500,16 +517,25 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
                     f"delivery {delivery_id}: searches entry is not an object"
                 )
                 continue
+            duplicate = False
             for key, seen in seen_links.items():
                 value = entry.get(key)
                 if isinstance(value, str):
                     if value in seen:
+                        duplicate = True
                         index.problems.append(
                             f"delivery {delivery_id}: duplicate searches {key} {value!r}"
                         )
                     seen.add(value)
             search_id = entry.get("operation_id")
-            search = index.operations.get(search_id) if isinstance(search_id, str) else None
+            if not isinstance(search_id, str):
+                index.problems.append(
+                    f"delivery {delivery_id}: searches entry has a missing or non-string operation_id"
+                )
+                continue
+            if duplicate:
+                continue
+            search = index.operations.get(search_id)
             if search is None or search.kind != "search":
                 continue  # op assembly warns about the missing/unknown link
             if search.start["payload"].get("trace_session_id") != payload.get("trace_session_id"):
@@ -560,7 +586,7 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
             if isinstance(memories, list)
             else []
         )
-        if any(all(field is None for field in ident) for ident in delivered):
+        if any(all(field is None for field in ident[1:]) for ident in delivered):
             index.problems.append(
                 f"delivery {delivery_id}: memory entry has no usable identity fields"
             )
@@ -587,6 +613,37 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
                 f"delivery {delivery_id}: memories are not an ordered search subsequence"
             )
     return index
+
+
+def _check_embedding_binding(
+    end: dict[str, Any], binds: dict[str, str | None], operation_id: str, problems: list[str],
+) -> None:
+    """Embedding calls have their own cursor; they never replace the memory
+    call refs used to attribute operations to conversation turns."""
+    binding = end.get("binding", {})
+    if not isinstance(binding, dict):
+        problems.append(f"operation {operation_id}: binding is not an object")
+        binding = {}
+    refs = end.get("embedding_call_refs", [])
+    if "embedding_after_role_call_index" not in binding:
+        if refs or "embedding_binding_status" in end:
+            problems.append(f"operation {operation_id}: embedding refs without a cursor binding")
+        return
+    cursor = binding["embedding_after_role_call_index"]
+    if not is_int(cursor) or cursor < 0:
+        problems.append(f"operation {operation_id}: invalid embedding cursor")
+    if "embedding" not in binds:
+        problems.append(f"operation {operation_id}: embedding binding has no lane")
+    if "embedding_call_refs" not in end or not isinstance(refs, list) or any(
+        not isinstance(ref, dict)
+        or not isinstance(ref.get("call_id"), str)
+        or not is_int(ref.get("call_sequence"))
+        or not is_int(ref.get("role_call_index"))
+        for ref in refs
+    ):
+        problems.append(f"operation {operation_id}: malformed embedding call refs")
+    elif end.get("embedding_binding_status") != ("bound" if refs else "no_call"):
+        problems.append(f"operation {operation_id}: inconsistent embedding binding status")
 
 
 # --- ContentRef / MemoryRef mapping -------------------------------------------
@@ -754,7 +811,7 @@ def content_chars(ref: Any) -> int | None:
     if not isinstance(ref, dict):
         return None
     chars = ref.get("chars")
-    if is_int(chars):
+    if is_int(chars) and chars >= 0:
         return chars
     text = content_text(ref)
     return len(text) if text is not None else None
@@ -855,17 +912,18 @@ def _cure_ext(holder: Any) -> dict[str, Any]:
     return cure if isinstance(cure, dict) else {}
 
 
-def _ref_identity(ref: Any) -> tuple[Any, Any, Any, Any]:
-    """The gate's portable identity of one raw MemoryRef — (namespace,
+def _ref_identity(ref: Any) -> tuple[Any, Any, Any, Any, Any]:
+    """The gate's lane-scoped identity of one raw MemoryRef — (lane_id, namespace,
     identity_scheme, version_id, content sha256): the tuple the recorder's
-    `memory_identity` compares on for the delivery subsequence check (the
-    raw-read twin of version_identity, which reads mapped entries). A
+    `memory_identity` compares on for the delivery subsequence check. Item
+    grouping and version comparison remain independent of read lanes. A
     corrupt entry degrades to nulls, never raises."""
     if not isinstance(ref, dict):
-        return (None, None, None, None)
+        return (None, None, None, None, None)
     content = ref.get("content")
     sha = content.get("sha256") if isinstance(content, dict) else None
-    return (ref.get("namespace"), ref.get("identity_scheme"), ref.get("version_id"), sha)
+    return (ref.get("lane_id"), ref.get("namespace"), ref.get("identity_scheme"),
+            ref.get("version_id"), sha)
 
 
 def _is_subsequence(needle: list[Any], haystack: list[Any]) -> bool:
@@ -893,8 +951,8 @@ def item_key(memory: Any) -> str | None:
     store hold several items under it (nothing in schema v9 makes a display
     key item-unique), so grouping on the display key alone would merge
     distinct memories; grouping on the version tuple would split one memory
-    per version. The one rule the graph registry, the span set-diff, and
-    injudge's usage rollups share — never adapter vocabulary alone."""
+    per version. Within-operation candidate dedupe keeps local ids; every
+    cross-operation consumer uses grouping_item_key instead."""
     if not isinstance(memory, dict):
         return None
     item = memory.get("item_id")
@@ -905,14 +963,22 @@ def item_key(memory: Any) -> str | None:
 
 
 def item_ident(memory: Any) -> tuple[str | None, str | None]:
-    """The (namespace, item) grouping pair — the one construction the graph
-    registry, span set-diffs, and injudge usage rollups share, so the three
-    can never disagree about which recorded entry is which memory."""
-    return (namespace_of(memory), item_key(memory))
+    """Cross-operation grouping for the graph and usage rollups.
+
+    A local id used as the display key cannot name an item across operations.
+    Use a content-derived grouping id, leaving the recorded ref untouched.
+    Truly keyless entries retain the caller's anonymous-entry handling.
+    """
+    item = grouping_item_key(memory)
+    if item is None and item_key(memory) is not None:
+        canonical = canonical_entry(memory).encode("utf-8", "surrogatepass")
+        item = "content:" + hashlib.sha256(canonical).hexdigest()
+    return (namespace_of(memory), item)
 
 
 def grouping_item_key(memory: Any) -> str | None:
-    """Item identity for comparison ACROSS operations (span fingerprints).
+    """Item identity for comparison ACROSS operations (graph, usage rollups,
+    span fingerprints, novelty baselines, and footprint windows).
 
     Same as item_key except when the display key IS an operation-local
     version_id (no item_id, no real key recorded): that id names nothing
@@ -932,14 +998,25 @@ def grouping_item_key(memory: Any) -> str | None:
     return item
 
 
+def canonical_entry(memory: dict) -> str:
+    """Version/content identity for cross-operation comparisons. Local ids
+    carry no identity here; recorded item ids still separate identical text
+    belonging to different items. Undigested content compares by value."""
+    ns, scheme, version_id, digest = version_identity(memory, withhold_local=True)
+    item = grouping_item_key(memory)
+    ident = ([ns, item, scheme, version_id, digest]
+             if version_id is not None or digest is not None
+             else [ns, item, memory.get("value")])
+    return json.dumps(ident, ensure_ascii=False)
+
+
 def version_identity(memory: Any, *, withhold_local: bool = False) -> tuple:
-    """The gate's version-level identity of one MAPPED memory entry
+    """The version-level identity of one MAPPED memory entry
     (ref_to_memory output): (namespace, identity_scheme, version_id,
-    content sha256) — the tuple the gate's own `memory_identity` compares
-    on, naming one landed state of an item. The one construction the span
-    fingerprint and the candidate dedupe share, so the two can never drift
-    apart; `_ref_identity` is the raw-MemoryRef twin for the delivery
-    subsequence check. Every part is string-guarded: a hand-edited
+    content sha256), naming one landed state of an item. The one construction
+    the span fingerprint and the candidate dedupe share, so the two can never drift
+    apart; `_ref_identity` additionally checks read-lane provenance for the
+    delivery subsequence. Every part is string-guarded: a hand-edited
     non-string names nothing and reads as absent, so an unhashable value
     never reaches a set/dict keyed on the tuple. An `operation_local`
     version_id names nothing outside its own operation (the gate's
@@ -986,7 +1063,7 @@ def ref_to_memory(ref: Any) -> dict:
     plus the recorder's portable identity `{namespace, item_id,
     identity_scheme, identity_strength, version_id, content_sha256}` — the
     adapter-agnostic fields span fingerprinting and item-level grouping work
-    on (the gate's `memory_identity`, never adapter-native fields). Display
+    on, never adapter-native fields. Display
     values come from the adapter's `extensions.cure` projection when present,
     else from the portable identity/content fields; unavailable content
     degrades to None values instead of parse failure.

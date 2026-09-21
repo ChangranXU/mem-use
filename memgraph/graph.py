@@ -2,7 +2,8 @@
 
 Memory identity is the (store `namespace`, item) pair — the namespace plus
 the item-level identity (the recorder's portable `item_id` when recorded,
-else the display key) — registry-scoped across ALL loaded trajectories: a
+else a stable display key, or content when only a local id is known) —
+registry-scoped across ALL loaded trajectories: a
 memory created in one trajectory and recalled in another yields a
 cross-trajectory `recalls` edge, while the same display key minted by two
 DIFFERENT stores (namespaces) — or carried by two different items in ONE
@@ -208,7 +209,7 @@ def build_graph(
                         # unchanged (or unreported) status is
                         duplicate = (
                             not recreated
-                            and bool(cand.get("value"))
+                            and cand.get("value") is not None
                             and cand.get("value") == mem.value
                             and (
                                 not cand.get("review_status")
@@ -235,7 +236,7 @@ def build_graph(
                     # at first proposal, approved by a later extraction).
                     if cand.get("review_status"):
                         mem.status = cand["review_status"]
-                    if cand.get("value"):
+                    if cand.get("value") is not None:
                         mem.value = cand["value"]
                     if cand.get("confidence") is not None:
                         mem.confidence = cand["confidence"]
@@ -298,9 +299,8 @@ def build_graph(
                 continue
             ident = item_ident(delivered)
             if ident in seen:
-                # one recall link per (op, memory) — judged once per item too;
-                # the collapse is noted, never silent (injudge warns for the
-                # same collapse at verdict assembly)
+                # One graph link per (op, memory), while injudge still
+                # judges every delivered entry independently.
                 note(
                     "info",
                     f"{op.id}: delivery carries several versions of memory {key!r}; "

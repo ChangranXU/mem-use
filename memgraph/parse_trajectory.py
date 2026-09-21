@@ -33,8 +33,10 @@ attributed to step N —
 so one observed before the first agent turn completes gets step 0 (N=0; the
 HTML draws it at the axis origin). A delivery is attributed to its bound
 call's turn (cross-checked against the adapter-declared `main_step` when both
-exist), falling back to the declared step and then to the most recent
-classified agent turn — the bridge commits a delivery only after the
+exist). A claimed call_id whose turn is missing or unclassified stays
+unattributable. Only without a claimed call_id do we fall back to the
+declared step and then to the most recent classified agent turn — the
+bridge commits a delivery only after the
 carrying call's response recorded, so the consuming turn has already
 classified (when none has, e.g. a deferred first response, the next agent
 turn is the consumer) — its step is therefore always >= 1 or None.
@@ -270,11 +272,6 @@ class _TurnTable:
     def n_agent_turns(self) -> int:
         return len(self.agent_turns)
 
-    def agent_steps_before(self, seq: int) -> int:
-        """Agent turns whose classifying response precedes `seq` (an exchange
-        observed after agent turn N is attributed to step N)."""
-        return sum(1 for t in self.agent_turns if self._classif_seq[t] < seq)
-
     def step_after(self, seq: int) -> int | None:
         """Step of the first agent turn classified at/after `seq`, else None
         for a truncated tail. "First" is chronological: pipelined deferred
@@ -315,28 +312,29 @@ def _delivery_step(
 ) -> int | None:
     """Agent step consuming one delivery, from explicit bindings first.
 
-    Order: the bound terminal call's turn (the call that provably carried the
-    placement), then the adapter-declared `main_step`, then the most recent
-    classified agent turn — a delivery is committed after the carrying call's
-    response recorded, so the consuming turn has already classified (the
-    next-agent-turn rule covers the no-classified-turn-yet case). Bound and
-    declared values are cross-checked when both exist.
-    A KNOWN but unobserved consumer — the bound call's turn classified as a
-    memory/side-lane turn, or never classified at all (a truncated agent
-    turn) — is never reassigned to a declared or most-recent step: that
-    would make a pre-exposure action eligible as downstream evidence. The
-    delivery stays unattributable (step None) instead.
+    A claimed call_id must resolve to a classified agent turn. A missing
+    turn_start, memory/side-lane turn, or truncated turn leaves the delivery
+    unattributable (step None): falling back could make a pre-exposure action
+    eligible as downstream evidence. A resolved binding wins over a
+    conflicting adapter-declared `main_step`, with a warning.
+
+    Only without a claimed call_id do we use a valid declared `main_step`,
+    then the most recently classified agent turn: delivery commits after the
+    carrying call's response. If no agent turn has classified yet, the
+    observed-turn fallback uses the first later classified turn.
     """
     payload = event["payload"]
     declared = payload.get("main_step")
     declared = declared if is_int(declared) else None
-    bound_turn = _bound_turn(table, event.get("terminal_call_ref"))
+    ref = event.get("terminal_call_ref")
+    claimed_call = isinstance(ref, dict) and isinstance(ref.get("call_id"), str)
+    bound_turn = _bound_turn(table, ref)
     bound_step = table.step_of_turn.get(bound_turn) if bound_turn is not None else None
-    if bound_turn is not None and bound_step is None:
+    if claimed_call and bound_step is None:
         warnings.append(
             f"{run_id}: delivery {payload.get('delivery_id')}: the bound call's "
             f"turn {bound_turn} is not a classified agent turn (memory/side-lane "
-            "or truncated); the consumer is known but unobserved, so the "
+            "or missing/truncated); the consumer is known but unobserved, so the "
             "delivery stays unattributable (no fallback to an earlier step)"
         )
         return None
@@ -366,8 +364,8 @@ def _delivery_step(
     # delivery after the carrying call's response): name it so a reader can
     # see how much of a run depends on it
     warnings.append(
-        f"{run_id}: delivery {payload.get('delivery_id')}: no call binding or "
-        f"declared main_step recorded; attributed to "
+        f"{run_id}: delivery {payload.get('delivery_id')}: no usable call binding or "
+        f"declared main_step; attributed to "
         f"{'step ' + str(step) if step is not None else 'no classified step'} "
         "by the observed-turn fallback"
     )
@@ -447,7 +445,7 @@ def _extract_op_from_generation(
         id=op_id,
         kind="extract",
         traj=traj_id,
-        step=table.agent_steps_before(seq),
+        step=table.step_most_recent(seq) or 0,
         seq=seq,
         at=anchor.get("at"),
         turn=_bound_turn(table, end.get("terminal_call_ref")) if end else None,
@@ -538,7 +536,7 @@ def _extract_op_from_generation(
             if ident not in seen:  # each record speaks in first-landing order
                 seen.append(ident)
             if ident in slot_of:
-                if entry.get("value") and not candidates[slot_of[ident]].get("value"):
+                if entry.get("value") is not None and candidates[slot_of[ident]].get("value") is None:
                     candidates[slot_of[ident]] = entry
                 continue
             slot_of[ident] = len(candidates)
@@ -563,6 +561,11 @@ def _placements_chars(
 ) -> int | None:
     """Keep known cost without disguising unsized slots as a complete total.
     An explicitly empty placement list records zero rendered content."""
+    for placement in placements:
+        content = placement.get("content") if isinstance(placement, dict) else None
+        chars = content.get("chars") if isinstance(content, dict) else None
+        if chars is not None and (not is_int(chars) or chars < 0):
+            warnings.append(f"{label}: invalid placement content.chars; using inline text size when available")
     sizes = [content_chars(p.get("content")) if isinstance(p, dict) else None for p in placements]
     known = [n for n in sizes if n is not None]
     if known and len(known) < len(sizes):
@@ -659,6 +662,7 @@ def _recall_op_from_delivery(
     # single-search shape had, aggregated over the linked searches.
     entries = list_field(payload, "searches")
     matched: int | None = None
+    seen_searches: set[str] = set()
     for entry in entries:
         if not isinstance(entry, dict):
             continue  # the annotation index reported the corrupt entry
@@ -672,8 +676,15 @@ def _recall_op_from_delivery(
                 "operation_id": search_id,
             }
         )
+        # Preserve recorded links for audit, but a repeated operation cannot
+        # contribute its query or matched count twice.
+        if search_id in seen_searches:
+            continue
+        seen_searches.add(search_id)
         search = index.operations.get(search_id)
         if search is not None and search.kind == "search":
+            if search.start["payload"].get("trace_session_id") != payload.get("trace_session_id"):
+                continue  # the index reports the foreign link; it supplies no provenance
             # the same resolution rule as the session task: inline text, or a
             # trajectory_message locator against this event stream — the
             # other locator kinds carry no text resolvable here
@@ -691,7 +702,7 @@ def _recall_op_from_delivery(
                 # summed across the linked lanes.
                 matched_ref = end_payload.get("matched_count")
                 value = matched_ref.get("value") if isinstance(matched_ref, dict) else None
-                if is_int(value):
+                if is_int(value) and value >= 0:
                     matched = (matched or 0) + value
                 else:
                     returned = end_payload.get("returned")
@@ -742,6 +753,7 @@ def parse_trajectory(
     # falls back to the path text (the join assumes a non-empty run_id).
     run_id = traj_dir.resolve().name or str(traj_dir)
     model = started_at = status = None
+    run_usage = {}
     run_json = traj_dir / "run.json"
     if run_json.is_file():
         meta = None
@@ -781,9 +793,14 @@ def parse_trajectory(
             model = meta.get("model_name")
             started_at = meta.get("started_at")
             status = meta.get("status")
+            usage = meta.get("usage")
+            if isinstance(usage, dict):
+                run_usage = usage
+            elif usage is not None:
+                warnings.append(f"{run_json}: usage is not an object; ignoring run billing snapshot")
 
     traj = Trajectory(id=traj_id, run_id=run_id, path=str(traj_dir),
-                      model=model, started_at=started_at, status=status)
+                      model=model, started_at=started_at, status=status, run_usage=run_usage)
 
     index = build_annotation_index(events)
     # one slot index for every locator resolution below (session task, each
@@ -933,7 +950,7 @@ def parse_trajectory(
             traj.rewrites.append(
                 {
                     "seq": e["seq"],
-                    "step": table.agent_steps_before(e["seq"]),
+                    "step": table.step_most_recent(e["seq"]) or 0,
                     "kept": e.get("kept"),
                     "dropped": e.get("dropped"),
                     "proxy_source": e.get("proxy_source"),

@@ -99,3 +99,24 @@ test("search_evidence resolves equivalent directory scopes before matching files
 		fs.rmSync(root, { recursive: true, force: true });
 	}
 });
+
+test("search_evidence discloses unsearched tails of long lines", async () => {
+	const root = makeRoot();
+	try {
+		const file = "steps/step_000001.md";
+		fs.writeFileSync(path.join(root, file), "x".repeat(10_001) + " hidden evidence");
+		const tools = createEvidenceTools(root);
+		const search = tools.find((t) => t.name === "search_evidence")!;
+		for (const pattern of ["hidden evidence", "xxx"]) {
+			const result = await search.execute("t", { pattern, path: file });
+			const text = result.content[0].type === "text" ? result.content[0].text : "";
+			assert.match(text, /only the first 10000 chars of 1 long line/);
+			assert.match(text, /read_evidence/);
+		}
+		const read = tools.find((t) => t.name === "read_evidence")!;
+		const result = await read.execute("t", { path: file });
+		assert.match(result.content[0].type === "text" ? result.content[0].text : "", /hidden evidence/);
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});

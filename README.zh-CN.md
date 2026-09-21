@@ -20,7 +20,7 @@ injudge 另需 `tqdm`）。评审本身是 `agent/` 下的 TypeScript 智能体�
 
 ```bash
 uv sync                     # 首次——创建 .venv
-cd agent && npm install     # 首次——pi 智能体包（需要 node >= 22.19）
+npm --prefix agent install     # 首次——pi 智能体包（需要 node >= 22.19）
 
 # 1. 可视化记忆操作——离线，不调用评审
 uv run -m memgraph <paths> -o memgraph.html --json memgraph.json

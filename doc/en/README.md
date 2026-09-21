@@ -29,7 +29,7 @@ One principle runs through both: a recall injection is judged by its **subsequen
 ```bash
 # Install dependencies (once, inside the checkout)
 uv sync
-cd agent && npm install && cd ..   # the TS judge agent's packages (node ≥ 22.19)
+npm --prefix agent install   # the TS judge agent's packages (node ≥ 22.19)
 
 # 1 — Visualize every memory operation
 uv run -m memgraph runs/ -o memgraph.html --json memgraph.json

@@ -23,7 +23,7 @@ packages and installed with npm.
 
 ```bash
 uv sync                     # once — creates .venv
-cd agent && npm install     # once — pi agent packages (node >= 22.19)
+npm --prefix agent install     # once — pi agent packages (node >= 22.19)
 
 # 1. Visualize memory operations — offline, no judge calls
 uv run -m memgraph <paths> -o memgraph.html --json memgraph.json

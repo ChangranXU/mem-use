@@ -22,8 +22,8 @@
    Accuracy never decides this signal: a memory carrying a false claim can
    still have set off the diagnostic that found the fix — judge the effect
    by the downstream events, whatever the accuracy call. When
-   influence is acted_on but the work's outcome neither improved nor
-   degraded on the evidence available, say null — an unresolved causal
+   influence is acted_on but the effect's direction cannot be determined
+   on the evidence available, say null — an unresolved causal
    question is uncertainty, never a confident no_effect, and never silently
    improved either.
    null when influence is none or referenced.

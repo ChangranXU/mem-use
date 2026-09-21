@@ -55,9 +55,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.json_out:
         check_writable(args.json_out)
 
+    verdicts = load_verdict_report(args.verdicts) if args.verdicts else None
     graph = load_and_build(args.paths)
-    if args.verdicts:
-        apply_verdicts(graph, load_verdict_report(args.verdicts), str(args.verdicts))
+    if verdicts is not None:
+        apply_verdicts(graph, verdicts, str(args.verdicts))
 
     atomic_write(args.output, render_html(graph))
     if args.json_out:
