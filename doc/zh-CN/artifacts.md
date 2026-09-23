@@ -17,6 +17,24 @@ injudge 把一次运行的全部产物写入输出容器（`-o DIR`，默认 `ou
 | `evidence/<span-dir>/` | — | 每个送入评审智能体的区间一个文件夹（含 error 结局）：向智能体提供的原始文件。 |
 | `agent-runs/<span-dir>.jsonl` | — | 每个送入评审智能体的区间一条轨迹：评判对话的 pi 事件流记录（见[评审智能体](judge-client.md#轨迹记录)）。 |
 
+离线准备运行会在自己的运行目录下写出另一套产物：
+
+| 文件 | Schema | 作用 |
+|---|---|---|
+| `episode-inputs.json` | `injudge.episode-inputs/v1` | episode 索引、执行/基准身份、边界来源、准备状态、附件状态、计数、审计投影与未归属诊断；不包含 verdict。 |
+| `episodes/<safe-episode-id>/episode.md` | — | 紧凑身份与固定文件导航。 |
+| `episodes/<safe-episode-id>/task.md` | — | 带来源的实际用户任务与后续更新。 |
+| `episodes/<safe-episode-id>/context.json` | — | 每个回合可见的消息出现与重放缺口。 |
+| `episodes/<safe-episode-id>/deliveries.md` | — | 按时间排列的 delivery、搜索、槽位与曝光证据，也包含空 delivery。 |
+| `episodes/<safe-episode-id>/steps/` | — | 原始全局 step 与工具结果可用时间。 |
+
+episode 文件夹是未来评审器的 evidence root。规范记忆记录和未解析审计数据
+留在 `episode-inputs.json`；裁剪或无法核实的值不会出现在评审可读文件中。
+
+审计记录使用 `gold_join` 与 `outcome_join` 分别保存黄金答案和评测结果的来源。
+仅按基准实例索引的 harness report 不能跨重复执行或不同实验组关联。结果冲突
+或缺失会明确保留，不会被轨迹目录中的 sidecar 覆盖。
+
 `<span-dir>` 是文件系统安全的区间 id——非 `[A-Za-z0-9._-]` 字符替换为 `_`、截到 80 字符，再加 8 字符摘要后缀（`span_dir_name`）——任意区间 id 都不会冲突。report 的 `input.transcript` 指向同一个派生名称。
 
 memgraph 的 `--json` 产物是 `{tool, trajectories, ops, memories, edges, validation}`——与 HTML 内嵌的同一个 dict。见 [memgraph](memgraph.md#图模型)。

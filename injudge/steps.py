@@ -294,6 +294,7 @@ def build_step_stream(
                 # order, and consumers prefer the completed close
                 continue
             ex.seq_end = e2["seq"]
+            ex.source_event_index = e2.get("_event_index")
             result = e2.get("result")
             # a structured tool output records a JSON value, not text: spell
             # it back as JSON (the same spelling _cmd_of gives non-string

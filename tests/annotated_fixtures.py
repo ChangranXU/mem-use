@@ -117,6 +117,55 @@ class AnnotatedBuilder:
         self.events.append(ev(self.seq, type, **kw))
         return self
 
+    def episode_open(self, episode_id="episode-1", session_id=SID,
+                     sequence_id="seq-0", treatment_arm_id="test-arm"):
+        """Add bridge episode scope metadata without creating memory ops."""
+        return self._emit(
+            "bridge_episode_open",
+            proxy_source=self.main,
+            payload={
+                "episode_id": episode_id,
+                "trace_session_id": session_id,
+                "sequence_id": sequence_id,
+                "event_id": f"open-{self.seq}",
+                "treatment_arm_id": treatment_arm_id,
+            },
+        )
+
+    def episode_close(self, episode_id="episode-1", session_id=SID,
+                      sequence_id="seq-0", treatment_arm_id="test-arm"):
+        """Close bridge episode scope for preparation fixtures."""
+        return self._emit(
+            "bridge_episode_close",
+            proxy_source=self.main,
+            payload={
+                "episode_id": episode_id,
+                "trace_session_id": session_id,
+                "sequence_id": sequence_id,
+                "event_id": f"close-{self.seq}",
+                "treatment_arm_id": treatment_arm_id,
+            },
+        )
+
+    def user_message(self, content, msg=1, lane=None):
+        """Record an additional main-lane user occurrence."""
+        return self._emit(
+            "message_end",
+            proxy_source=self.main if lane is None else lane,
+            role="user",
+            msg=msg,
+            content=content,
+        )
+
+    def history_rewrite(self, kept=1, dropped=1, lane=None):
+        """Record a history prefix rewrite used by context replay tests."""
+        return self._emit(
+            "history_rewritten",
+            proxy_source=self.main if lane is None else lane,
+            kept=kept,
+            dropped=dropped,
+        )
+
     def annotation(self, type, payload, lane=None, binding_status="not_requested",
                    call_refs=None, terminal_call_ref=None):
         self.seq += 1

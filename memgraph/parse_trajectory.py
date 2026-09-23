@@ -134,6 +134,7 @@ def load_events(path: Path, warnings: list[str]) -> list[dict]:
                 warnings.append(f"{path.name}:{lineno}: skipped non-object JSONL line")
                 continue
             seq = event.get("seq")
+            event["_original_seq"] = seq if is_int(seq) else None
             if not is_int(seq):
                 high = (high if high is not None else 0) + 1
                 synthetics.add(high)
@@ -449,6 +450,7 @@ def _extract_op_from_generation(
         seq=seq,
         at=anchor.get("at"),
         turn=_bound_turn(table, end.get("terminal_call_ref")) if end else None,
+        source_event_index=anchor.get("_event_index"),
     )
     op.trigger = operation.start["payload"].get("trigger")
     # Change events are recorded state effects — they survive a missing end
@@ -607,6 +609,7 @@ def _recall_op_from_delivery(
         turn=_bound_turn(table, event.get("terminal_call_ref")),
         status=payload.get("status"),
         binding_status=event.get("binding_status"),
+        source_event_index=event.get("_event_index"),
         content_chars=(
             _placements_chars(
                 raw_placements, warnings, f"{run_id}: delivery {payload.get('delivery_id')}",
@@ -745,6 +748,11 @@ def parse_trajectory(
     if not jsonl.is_file():
         raise FileNotFoundError(f"no trajectory.jsonl in {traj_dir}")
     events = load_events(jsonl, warnings)
+    # Parsed-stream position is the stable provenance key for preparation.
+    # It is intentionally separate from seq, which corrupt recordings may
+    # duplicate or regress, and remains internal to the graph parser.
+    for event_index, event in enumerate(events):
+        event["_event_index"] = event_index
 
     # The RESOLVED directory name: the verdict join keys on run_id, so one
     # directory must name one run under every spelling — "." (empty .name)

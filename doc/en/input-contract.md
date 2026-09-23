@@ -9,6 +9,12 @@ icon: file-lines
 Both tools read **schema-v9 gate trajectories**. Memory actions come exclusively from the recorder's `memory_*` annotation events — prompt text, role names, and label conventions are never parsed. The recorder's `bridge_*` lifecycle events do not create memory operations. A successful bridge delete without its same-operation `memory_*` retirement record produces a warning, since bridge-native revision IDs cannot substitute for portable MemoryRefs. Other bridge events are skipped; a non-v9 run produces a version warning, with no compatibility parser.
 {% endhint %}
 
+`injudge --prepare-only` is the offline episode preparation path. It consumes
+`bridge_episode_open` / `bridge_episode_close` only to establish episode scope
+and provenance; memory operations and MemoryRefs remain annotation-only. The
+preparation artifact records unresolved boundaries and assignment gaps instead
+of guessing from directory names, task text, or history resets.
+
 A trajectory without annotations is valid input: the run yields zero memory operations plus a validation note, not an error.
 
 ## Annotation Events
@@ -76,6 +82,25 @@ Each CLI path may be:
 - a root directory scanned recursively for `trajectory.jsonl` files.
 
 The same directory under two spellings is loaded once. A path that matches nothing is a usage error, named explicitly — never a silent skip.
+
+## Episode preparation
+
+Preparation keeps the global agent-step ordinals from the parsed stream. It
+replays lane-specific message occurrences at each main-lane `turn_start`,
+including tool-result message slots, history prefixes, and retractions. A
+message occurrence is identified by its parsed event position as well as its
+recorded `msg` value, so rewrites that reuse a slot cannot overwrite an older
+message. A bound delivery follows its consumer call even when the annotation
+was written after the episode close; an unbound delivery retains its observed
+scope but has no manufactured consumer step.
+
+Placement proofs resolve only within the bound consumer's input, never against
+a later reuse of the same message slot. A placement can occupy part of a
+message: the recorder's `input_prefix` and `system_suffix` placements retain
+the surrounding task/system text and link only the memory portion to its
+delivery. Unresolved proofs and missing task context require review. History
+rewrites use recorded message indexes; episode resets and proven wrapper
+removals retain separate source events.
 
 ## Corrupt Input
 

@@ -41,6 +41,7 @@ uv run -m memgraph <paths> -o memgraph.html --json memgraph.json
 uv run -m injudge <paths> -o output/    # one run folder: report + summary; judged-span evidence/transcripts
 uv run -m injudge <paths> --html        # also memgraph-verdicts.html
 uv run -m injudge <paths> --dry-run     # preview spans that use the agent; no calls or files
+uv run -m injudge <paths> --prepare-only -o output/  # offline episode evidence; no .env/Node/judge
 ```
 
 `<paths>` are trajectory dirs (containing `trajectory.jsonl`),
@@ -54,6 +55,13 @@ share a folder); it exits 2 if any span errored.
 memgraph
 render. injudge also accepts `--golden`, `--correctness`, `--gold-metadata`,
 `--harness-report`, `--limit`, and `--env` (see `doc/en/configuration.md`).
+
+`--prepare-only` is a staged offline path. It uses bridge episode lifecycle
+events only for scope/provenance, keeps memory operations annotation-only, and
+writes `injudge.episode-inputs/v1` (`episode-inputs.json` plus one inspectable
+folder per episode). It loads no `.env`, Node runtime, network client, or
+judge runner. Scope/assignment ambiguity is preserved in diagnostics; the
+package is written before the command returns status 2 for review.
 
 Judge credentials live in the checkout `.env` (copy `.env.example`; never
 commit `.env`). Every key the tools consume is validated; the API key

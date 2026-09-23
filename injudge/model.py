@@ -58,6 +58,7 @@ class ToolExec:
     status: str | None = None  # completed | no_result | interrupted | None (missing end)
     seq_start: int | None = None  # seq of tool_execution_start (None if never observed)
     seq_end: int | None = None  # seq of tool_execution_end (None if never observed)
+    source_event_index: int | None = field(default=None, repr=False)
 
 
 @dataclass
@@ -75,6 +76,169 @@ class AgentStep:
     reasoning: str = ""  # assistant reasoning_content (or joined thinking_blocks)
     content: str = ""  # assistant content (content-parts lists joined to their text)
     tools: list[ToolExec] = field(default_factory=list)  # executions bearing this turn
+
+
+@dataclass
+class SourceRef:
+    """A stable pointer into the parsed event stream.
+
+    The event index is deliberately separate from ``seq``.  Recorder output
+    is append-only and can contain duplicate or fabricated sequence numbers;
+    the parsed position is the only unambiguous provenance for preparation
+    artifacts.  The remaining identifiers are optional because a source may
+    be a message, a tool result, a turn, or an annotation.
+    """
+
+    event_index: int
+    seq: int | None = None
+    original_seq: object = None
+    lane: str | None = None
+    event_type: str | None = None
+    turn: int | None = None
+    msg: int | None = None
+    call_id: str | None = None
+    tool_call_id: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "event_index": self.event_index,
+            "seq": self.seq,
+            "original_seq": self.original_seq,
+            "lane": self.lane,
+            "event_type": self.event_type,
+            "turn": self.turn,
+            "msg": self.msg,
+            "call_id": self.call_id,
+            "tool_call_id": self.tool_call_id,
+        }
+
+@dataclass
+class ContextView:
+    """The input history established at one consuming turn.
+
+    ``messages`` contains occurrence references, not copied canonical memory
+    records. Each referenced occurrence has its own source position, so a
+    reused recorder ``msg`` slot remains distinguishable after rewrites.
+    """
+
+    turn: int | None
+    step: int | None
+    source_refs: list[SourceRef] = field(default_factory=list)
+    messages: list[dict[str, Any]] = field(default_factory=list)
+    gaps: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "turn": self.turn,
+            "step": self.step,
+            "source_refs": [ref.to_dict() for ref in self.source_refs],
+            "messages": self.messages,
+            "gaps": list(self.gaps),
+        }
+
+
+@dataclass
+class EpisodeInput:
+    """One execution-ready episode assembled without a judge call.
+
+    The identity dictionaries keep execution identity, recorded bridge
+    identity, and benchmark join identity separate.  ``deliveries`` and
+    ``searches`` are audit projections of the portable parsed operations;
+    judge-readable rendering applies exposure filtering later.
+    """
+
+    execution_identity: dict[str, Any]
+    recorded_episode_identity: dict[str, Any]
+    benchmark_identity: str | None = None
+    boundary_provenance: dict[str, Any] = field(default_factory=dict)
+    steps: list[AgentStep] = field(default_factory=list)
+    task: list[dict[str, Any]] = field(default_factory=list)
+    context: list[ContextView] = field(default_factory=list)
+    message_occurrences: list[dict[str, Any]] = field(default_factory=list)
+    searches: list[dict[str, Any]] = field(default_factory=list)
+    deliveries: list[dict[str, Any]] = field(default_factory=list)
+    attachments: dict[str, Any] = field(default_factory=dict)
+    preparation_status: str = "prepared"
+    diagnostics: list[str] = field(default_factory=list)
+    source_refs: list[SourceRef] = field(default_factory=list)
+    # Internal references used by the renderer; never emitted as a second
+    # public input contract or mixed into the judge's evidence root.
+    _events: list[dict[str, Any]] = field(default_factory=list, repr=False)
+    _step_sources: dict[int, SourceRef] = field(default_factory=dict, repr=False)
+
+    @property
+    def episode_id(self) -> str | None:
+        value = self.recorded_episode_identity.get("episode_id")
+        return value if isinstance(value, str) else None
+
+    @property
+    def execution_id(self) -> str | None:
+        value = self.execution_identity.get("execution_id")
+        return value if isinstance(value, str) else None
+
+    @property
+    def session_id(self) -> str | None:
+        value = self.recorded_episode_identity.get("trace_session_id")
+        return value if isinstance(value, str) else None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "execution_identity": dict(self.execution_identity),
+            "recorded_episode_identity": dict(self.recorded_episode_identity),
+            "benchmark_identity": self.benchmark_identity,
+            "boundary_provenance": self.boundary_provenance,
+            "steps": [_step_to_dict(step) for step in self.steps],
+            "task": self.task,
+            "context": [view.to_dict() for view in self.context],
+            "message_occurrences": self.message_occurrences,
+            "searches": self.searches,
+            "deliveries": self.deliveries,
+            "attachments": self.attachments,
+            "preparation_status": self.preparation_status,
+            "diagnostics": list(self.diagnostics),
+            "source_refs": [ref.to_dict() for ref in self.source_refs],
+        }
+
+
+@dataclass
+class PreparationResult:
+    """Result of deterministic episode preparation for one recording."""
+
+    episodes: list[EpisodeInput] = field(default_factory=list)
+    unassigned: list[dict[str, Any]] = field(default_factory=list)
+    diagnostics: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "episodes": [episode.to_dict() for episode in self.episodes],
+            "unassigned": self.unassigned,
+            "diagnostics": list(self.diagnostics),
+        }
+
+
+def _step_to_dict(step: AgentStep) -> dict[str, Any]:
+    """Compact serialisation shared by episode indexes and manifests."""
+    return {
+        "step": step.step,
+        "turn": step.turn,
+        "seq_start": step.seq_start,
+        "seq_end": step.seq_end,
+        "reasoning": step.reasoning,
+        "content": step.content,
+        "tools": [
+            {
+                "tool_call_id": tool.tool_call_id,
+                "name": tool.name,
+                "args": tool.args,
+                "result": tool.result,
+                "status": tool.status,
+                "seq_start": tool.seq_start,
+                "seq_end": tool.seq_end,
+                "source_event_index": tool.source_event_index,
+            }
+            for tool in step.tools
+        ],
+    }
 
 
 @dataclass

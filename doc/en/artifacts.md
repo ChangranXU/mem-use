@@ -17,6 +17,26 @@ injudge writes all artifacts of a run to that run's own `<run-stamp>/` folder un
 | `evidence/<span-dir>/` | — | One folder per span sent to the judge agent (error outcomes included): the exact files available to it. |
 | `agent-runs/<span-dir>.jsonl` | — | One trajectory per span sent to the judge agent: the pi event-sourced recording of the judging conversation (see [Judge agent](judge-client.md#trajectory-recording)). |
 
+An offline preparation run writes a different package under its own run folder:
+
+| File | Schema | Role |
+|---|---|---|
+| `episode-inputs.json` | `injudge.episode-inputs/v1` | Episode index, execution and benchmark identities, boundary provenance, readiness, attachment status, counts, audit projections, and unassigned diagnostics. It contains no verdicts. |
+| `episodes/<safe-episode-id>/episode.md` | — | Compact episode header and fixed file navigation. |
+| `episodes/<safe-episode-id>/task.md` | — | Recorded user task messages and updates with source provenance. |
+| `episodes/<safe-episode-id>/context.json` | — | Per-turn visible message occurrences and explicit replay gaps. |
+| `episodes/<safe-episode-id>/deliveries.md` | — | Chronological delivery, search, placement, and exposure evidence, including empty deliveries. |
+| `episodes/<safe-episode-id>/steps/` | — | Original global steps and tool-result availability. |
+
+The episode folder is the future judge's evidence root. Canonical memory
+records and unresolved audit data stay in `episode-inputs.json`; clipped or
+unverified values are withheld from judge-readable files.
+
+The audit records gold and outcome attachment provenance separately as
+`gold_join` and `outcome_join`. A benchmark-keyed harness report cannot be
+joined across repeated executions or treatment arms. Conflicting or missing
+harness results remain explicit; a trajectory sidecar cannot override them.
+
 `<span-dir>` is the span id made filesystem-safe — non-`[A-Za-z0-9._-]` characters replaced by `_`, capped at 80 characters, plus an 8-char digest suffix (`span_dir_name`) — so arbitrary span ids cannot collide. The report's `input.transcript` points at the same derived name.
 
 memgraph's `--json` artifact is `{tool, trajectories, ops, memories, edges, validation}` — the same dict embedded in the HTML. See [memgraph](memgraph.md#graph-model).

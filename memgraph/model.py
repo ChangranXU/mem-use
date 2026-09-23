@@ -110,6 +110,10 @@ class MemoryOp:
     trigger: str | None = None  # generation trigger
     declared_step: str | None = None  # adapter-declared step, for cross-checking
     flagged: str | None = None
+    # Parsed-stream provenance used by injudge episode preparation. This is
+    # intentionally internal: graph JSON remains keyed by (run_id, seq) and
+    # never exposes recorder event indexes as a second public contract.
+    source_event_index: int | None = field(default=None, repr=False)
     # recall payload
     memories: list[dict] = field(default_factory=list)
     # the delivery's per-lane read links as recorded ({lane_id,

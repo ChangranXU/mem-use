@@ -66,6 +66,19 @@ npm --prefix agent install    # TS 侧执行一次（需要 PATH 上有 node >= 
 | `-o DIR` | `output/` | 产物容器——每次运行写入自己的 `<run-stamp>/` 子目录；送入智能体的区间会增加 `evidence/` 与 `agent-runs/` 条目 |
 | `--html` | 关 | 同时写出 `memgraph-verdicts.html` |
 
+### 离线准备
+
+使用 `--prepare-only` 可在不加载 `.env`、Node 或网络的情况下按 bridge
+episode 分区并写出 `injudge.episode-inputs/v1`：
+
+```bash
+uv run -m injudge <paths> --prepare-only -o output/
+```
+
+该模式支持 `--limit`（限制物化的 episode 数量）以及带键的 gold/harness
+附件。`--dry-run`、`--html` 和付费评审参数会被拒绝。若边界或归属需要复核，
+仍先写出带诊断的包，再以非零状态退出。
+
 {% hint style="warning" %}
 评审 API key 仅通过 `JUDGE_API_KEY` 环境变量传给智能体运行器——绝不经过作业文件或产物——且只发往评审端点。它不得出现在产物、报告、日志或错误信息中。回显了请求的端点输出会在任何文本被保留前先打码。
 {% endhint %}

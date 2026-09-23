@@ -9,6 +9,11 @@ icon: file-lines
 两个工具都读取 **schema-v9 gate 轨迹**。记忆动作完全来自录制器的 `memory_*` 注解事件——绝不解析提示词、角色名或标签约定。录制器的 `bridge_*` 生命周期事件不产生记忆操作。成功的 bridge 删除若缺少同一操作的 `memory_*` 退役记录，会给出警告；bridge 原生版本 ID 不能替代可移植 MemoryRef。其余 bridge 事件被跳过；非 v9 的 run 会收到版本警告，不提供兼容解析器。
 {% endhint %}
 
+`injudge --prepare-only` 是离线 episode 准备路径。它只使用
+`bridge_episode_open` / `bridge_episode_close` 建立 episode 范围与来源；记忆
+操作和 MemoryRef 仍然只能来自 `memory_*` 注释。边界或归属不明确时会保留
+诊断，不会从目录名、任务文字或历史重置中猜测。
+
 没有注解的轨迹是合法输入：运行得到零个记忆操作，外加一条 validation 说明，而不是报错。
 
 ## 注解事件
@@ -76,6 +81,20 @@ Generation 的 `retired` 引用补充 delete-change 记录，同一版本只计�
 - 递归扫描 `trajectory.jsonl` 的根目录。
 
 同一目录的两种写法只加载一次。匹配不到任何内容的路径会明确报用法错误，绝不静默跳过。
+
+## Episode 准备
+
+准备阶段保留解析流中的全局 agent step 序号，在每个主泳道
+`turn_start` 重放泳道消息、工具结果消息槽、历史前缀和撤回。消息身份包含
+解析事件位置，因此重写后复用的 `msg` 槽不会覆盖旧消息。绑定的 delivery
+跟随其 consumer call，即使注释在 episode 关闭后才写入；未绑定 delivery
+保留可观察的 episode 范围，但不会伪造 consumer step。
+
+Placement proof 只在绑定 consumer 的输入中解析，不会匹配后续复用同一消息槽
+的内容。`input_prefix` 和 `system_suffix` 可以只占据消息的一部分；准备阶段
+保留其余任务或系统文本，仅将记忆部分关联到 delivery。无法解析的 proof 和
+缺失的任务上下文会标记为待复核。历史重写按实际消息索引处理，episode reset
+与已证实的 wrapper 移除分别保留来源事件。
 
 ## 损坏输入
 

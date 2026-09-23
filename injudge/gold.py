@@ -43,7 +43,7 @@ from injudge.judge import GoldInput
 # the resolved bit, the failure lists mark harness failures (an errored or
 # incomplete instance is no outcome). Defined once — the format recognizer
 # and the join below must never drift apart on a hand-edited copy.
-_HARNESS_FAILURE_FIELDS = ("error_ids", "incomplete_ids")
+_HARNESS_FAILURE_FIELDS = ("error_ids", "incomplete_ids", "empty_patch_ids")
 _HARNESS_LIST_FIELDS = ("resolved_ids", "unresolved_ids", *_HARNESS_FAILURE_FIELDS)
 
 

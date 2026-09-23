@@ -66,6 +66,21 @@ A verdict cut mid-answer is not a failure class: the answer simply fails the con
 | `-o DIR` | `output/` | Artifact container — each run gets a `<run-stamp>/` subfolder; spans sent to the agent add `evidence/` and `agent-runs/` entries |
 | `--html` | off | Also write `memgraph-verdicts.html` |
 
+### Offline preparation
+
+Use `--prepare-only` to partition recordings into bridge-delimited episodes and
+write inspectable `injudge.episode-inputs/v1` evidence without loading `.env`,
+Node, or contacting a judge:
+
+```bash
+uv run -m injudge <paths> --prepare-only -o output/
+```
+
+The mode accepts `--limit` (counting materialized episodes) and the keyed gold
+and harness attachment options. `--dry-run`, `--html`, and paid judge options
+are rejected. A package is written before a nonzero exit when a boundary or
+assignment needs review, so the diagnostics remain inspectable.
+
 {% hint style="warning" %}
 The judge API key travels to the agent runner only through the `JUDGE_API_KEY` environment variable — never through a job file or an artifact — and is sent only to the judge endpoint. It must not appear in artifacts, reports, logs, or error messages. Endpoint output that echoes the request is masked before any of its text is kept.
 {% endhint %}

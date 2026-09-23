@@ -50,6 +50,7 @@ except ImportError as e:
     ) from e
 
 from util import atomic_write, check_writable, print_safe, print_validation
+from injudge import EPISODE_INPUT_SCHEMA
 from injudge.agent import (
     MAX_PARALLEL,
     AgentConfig,
@@ -59,6 +60,8 @@ from injudge.agent import (
     load_env,
     resolve_config,
 )
+from injudge.episodes import prepare_trajectory
+from injudge.evidence import build_episode_evidence, episode_dir_name, write_evidence
 from injudge.gold import (
     join_gold_patch,
     join_harness_report,
@@ -67,7 +70,7 @@ from injudge.gold import (
     load_sidecar,
 )
 from injudge.judge import GoldInput, _mask_key, auto_verdict_no_subsequent_turn, blank_verdict
-from injudge.model import InjectionSpan
+from injudge.model import EpisodeInput, InjectionSpan
 from injudge.report import (
     build_artifact,
     build_summary,
@@ -258,6 +261,281 @@ def _exposure_notes(run_id: str, spans: list[InjectionSpan]) -> list[dict]:
     return notes
 
 
+def _prepare_attachment_scope(
+    episodes: list[EpisodeInput],
+    trajectories: list[Trajectory],
+    args: argparse.Namespace,
+    validation: list[dict],
+) -> None:
+    """Join evaluator-only attachments after episode partitioning.
+
+    Global bodies are safe only for one materialized episode. Keyed metadata
+    joins use the exact recorded benchmark identity; trajectory sidecars are
+    unkeyed and therefore only attach when that trajectory contains one
+    episode.
+    """
+    if args.golden is not None:
+        try:
+            golden = args.golden.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise SystemExit(f"error: cannot read the golden answer file {args.golden}: {exc}") from exc
+        if not golden.strip():
+            raise SystemExit(f"error: golden answer file {args.golden} is empty")
+        if len(episodes) != 1:
+            raise SystemExit("error: --golden with --prepare-only requires exactly one episode before --limit")
+        episodes[0].attachments.update({"golden": golden, "gold_join": "global"})
+
+    if args.correctness is not None:
+        if len(episodes) != 1:
+            raise SystemExit("error: --correctness with --prepare-only requires exactly one episode before --limit")
+        episodes[0].attachments.update({
+            "correctness": {"resolved": args.correctness == "resolved"},
+            "outcome_status": args.correctness,
+            "outcome_join": "global",
+        })
+
+    patches: dict[str, str] = {}
+    if args.gold_metadata is not None:
+        patches, notes = load_gold_patches(args.gold_metadata)
+        validation.extend({"level": "warn", "msg": note} for note in notes)
+    harness = load_harness_report(args.harness_report) if args.harness_report is not None else None
+
+    if harness is not None:
+        for name in ("resolved_ids", "unresolved_ids", "error_ids", "incomplete_ids", "empty_patch_ids"):
+            if name in harness and not isinstance(harness[name], list):
+                validation.append({"level": "error", "msg": f"harness report has a corrupt non-list {name}"})
+        # A conventional harness report is keyed only by benchmark instance.
+        # It cannot distinguish repeated executions or arms, and correctness
+        # belongs to one execution. Reject that ambiguity before --limit can
+        # make the selected view look single-instance.
+        arms = {
+            episode.execution_identity.get("treatment_arm_id")
+            for episode in episodes
+            if episode.execution_identity.get("treatment_arm_id") is not None
+        }
+        by_benchmark: dict[str, list[EpisodeInput]] = {}
+        for episode in episodes:
+            if episode.benchmark_identity is not None:
+                by_benchmark.setdefault(episode.benchmark_identity, []).append(episode)
+        repeated = [key for key, values in by_benchmark.items() if len(values) > 1]
+        if len(arms) > 1 or repeated:
+            detail = "multiple treatment arms" if len(arms) > 1 else "repeated benchmark executions"
+            raise SystemExit(
+                "error: --harness-report has no execution provenance and cannot join "
+                f"the selected batch with {detail}"
+            )
+
+    episodes_by_trajectory: dict[str, list[EpisodeInput]] = {}
+    for episode in episodes:
+        trajectory_id = episode.execution_identity.get("trajectory_id")
+        episodes_by_trajectory.setdefault(trajectory_id, []).append(episode)
+    trajectory_map = {trajectory.id: trajectory for trajectory in trajectories}
+
+    for episode in episodes:
+        benchmark = episode.benchmark_identity
+        trajectory_id = episode.execution_identity.get("trajectory_id")
+        trajectory = trajectory_map.get(trajectory_id)
+        warn_prefix = episode.execution_identity.get("execution_id") or benchmark or "episode"
+
+        if patches and "golden" not in episode.attachments:
+            if benchmark is None:
+                validation.append({"level": "warn", "msg": f"{warn_prefix}: gold metadata has no benchmark identity"})
+            elif benchmark in patches:
+                episode.attachments.update({"golden": patches[benchmark], "gold_join": "gold_metadata"})
+            else:
+                validation.append({"level": "warn", "msg": f"{warn_prefix}: gold metadata has no patch for {benchmark}"})
+
+        if harness is not None and args.correctness is None:
+            # The harness lists are exact benchmark keys. Preserve distinct
+            # error/missing/conflicting states instead of collapsing them into
+            # an unresolved boolean.
+            lists = {
+                name: value if isinstance(value, list) else []
+                for name, value in (
+                    ("resolved", harness.get("resolved_ids")),
+                    ("unresolved", harness.get("unresolved_ids")),
+                    ("error", harness.get("error_ids")),
+                    ("incomplete", harness.get("incomplete_ids")),
+                    ("empty_patch", harness.get("empty_patch_ids")),
+                )
+            }
+            hits = [name for name, values in lists.items() if benchmark is not None and benchmark in values]
+            if len(hits) > 1:
+                outcome_status = "conflicting_result"
+                validation.append({"level": "warn", "msg": f"{warn_prefix}: harness report lists {benchmark} in {'/'.join(hits)}"})
+            elif hits == ["resolved"]:
+                outcome_status = "resolved"
+                episode.attachments["correctness"] = {"resolved": True}
+            elif hits == ["unresolved"]:
+                outcome_status = "unresolved"
+                episode.attachments["correctness"] = {"resolved": False}
+            elif hits:
+                outcome_status = "harness_error" if hits[0] == "error" else "incomplete_evaluation"
+                if hits[0] == "empty_patch":
+                    outcome_status = "empty_patch_submission"
+                validation.append({"level": "warn", "msg": f"{warn_prefix}: harness reports {benchmark} as {hits[0]}"})
+            else:
+                outcome_status = "missing_result"
+                validation.append({"level": "warn", "msg": f"{warn_prefix}: harness has no result for {benchmark or '(unknown)'}"})
+            episode.attachments.update({"outcome_status": outcome_status, "outcome_join": "harness_report"})
+
+        # A trajectory sidecar has no execution key. It is valid only when
+        # the trajectory itself represents one episode.
+        if trajectory is not None and len(episodes_by_trajectory.get(trajectory.id, [])) == 1:
+            def _warn(note: str) -> None:
+                validation.append({"level": "warn", "msg": f"{warn_prefix}: {note}"})
+            sidecar = load_sidecar(Path(trajectory.path), benchmark, _warn)
+            if "golden" not in episode.attachments and sidecar.golden is not None:
+                episode.attachments.update({"golden": sidecar.golden, "gold_join": "trajectory_sidecar"})
+            if harness is None and "correctness" not in episode.attachments and sidecar.correctness is not None:
+                resolved = bool(sidecar.correctness.get("resolved"))
+                episode.attachments.update({
+                    "correctness": sidecar.correctness,
+                    "outcome_status": "resolved" if resolved else "unresolved",
+                    "outcome_join": "trajectory_sidecar",
+                })
+        elif trajectory is not None:
+            # Do not even read an unkeyed sidecar for a multi-episode stream:
+            # doing so would make --limit appear to disambiguate it.
+            sidecar_paths = [Path(trajectory.path) / name for name in ("golden.txt", "golden.md", "correctness.json")]
+            if any(path.is_file() for path in sidecar_paths):
+                validation.append({
+                    "level": "warn",
+                    "msg": f"{warn_prefix}: trajectory sidecar attachment ignored because the trajectory contains "
+                            f"{len(episodes_by_trajectory.get(trajectory.id, []))} episodes; use keyed metadata",
+                })
+
+
+def _prepare_only_main(args: argparse.Namespace) -> int:
+    """Run the complete no-credentials preparation path and materialize it."""
+    trajectories, ops_by_traj, events_by_traj, load_warnings = load_trajectories(args.paths)
+    validation: list[dict] = [{"level": "warn", "msg": warning} for warning in load_warnings]
+    all_episodes: list[EpisodeInput] = []
+    all_unassigned: list[dict] = []
+    for trajectory in trajectories:
+        prepared = prepare_trajectory(
+            trajectory,
+            events_by_traj[trajectory.id],
+            ops_by_traj[trajectory.id],
+        )
+        all_episodes.extend(prepared.episodes)
+        all_unassigned.extend(prepared.unassigned)
+        validation.extend({
+            "level": "warn" if any(
+                marker in diagnostic
+                for marker in ("ambiguous", "conflict", "unresolved", "without a close", "overlap", "no episode scope")
+            ) else "info",
+            "msg": diagnostic,
+        } for diagnostic in prepared.diagnostics)
+        reset_count = sum(
+            1 for episode in prepared.episodes
+            if episode.boundary_provenance.get("episode_reset")
+        )
+        rewrite_count = sum(
+            1 for episode in prepared.episodes
+            if episode.boundary_provenance.get("wrapper_removal_rewrite") is not None
+        )
+        if reset_count or rewrite_count:
+            validation.append({
+                "level": "info",
+                "msg": f"{trajectory.run_id}: episode resets={reset_count}; "
+                       f"main-lane wrapper-removal rewrites={rewrite_count}",
+            })
+        for item in prepared.unassigned:
+            validation.append({"level": "error", "msg": f"{trajectory.run_id}: unassigned {item}"})
+
+    # Attachment scope is validated before --limit, as a limited view must not
+    # hide a multi-episode ambiguity.
+    _prepare_attachment_scope(all_episodes, trajectories, args, validation)
+    materialized = all_episodes if args.limit is None else all_episodes[: args.limit]
+
+    run_dir = args.output / _run_stamp()
+    index_path = run_dir / "episode-inputs.json"
+    try:
+        run_dir.mkdir(parents=True, exist_ok=False)
+    except OSError as exc:
+        raise SystemExit(f"error: cannot create output folder {run_dir}: {exc}") from exc
+    check_writable(index_path)
+
+    evidence_root = run_dir / "episodes"
+    index_episodes: list[dict] = []
+    for episode in materialized:
+        files = build_episode_evidence(episode)
+        directory = evidence_root / episode_dir_name(
+            str(episode.execution_identity.get("execution_id") or "unresolved")
+        )
+        write_evidence(directory, files)
+        index_episodes.append({
+            "directory": directory.relative_to(run_dir).as_posix(),
+            "execution_id": episode.execution_identity.get("execution_id"),
+            "episode_id": episode.benchmark_identity,
+            "episode_index": episode.recorded_episode_identity.get("episode_index"),
+            "execution_identity": dict(episode.execution_identity),
+            "recorded_episode_identity": dict(episode.recorded_episode_identity),
+            "boundary_provenance": episode.boundary_provenance,
+            "status": episode.preparation_status,
+            "attachments": {
+                "gold": bool(episode.attachments.get("golden")),
+                "outcome": episode.attachments.get("outcome_status"),
+            },
+            "counts": {
+                "steps": len(episode.steps),
+                "searches": len(episode.searches),
+                "deliveries": len(episode.deliveries),
+                "task_messages": len(episode.task),
+            },
+            "diagnostics": list(episode.diagnostics),
+            # The full episode model is audit-only and remains outside the
+            # future judge evidence root's readable files.
+            "audit": episode.to_dict(),
+        })
+
+    package = {
+        "schema": EPISODE_INPUT_SCHEMA,
+        "tool": {"name": "injudge", "schema": EPISODE_INPUT_SCHEMA, "mode": "prepare-only"},
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "episodes": index_episodes,
+        "unassigned": all_unassigned,
+        "diagnostics": validation,
+        "counts": {
+            "recordings": len(trajectories),
+            "episodes_discovered": len(all_episodes),
+            "episodes_materialized": len(materialized),
+            "steps": sum(len(episode.steps) for episode in materialized),
+            "searches": sum(len(episode.searches) for episode in materialized),
+            "deliveries": sum(len(episode.deliveries) for episode in materialized),
+            "needs_review": sum(1 for episode in all_episodes if episode.preparation_status in ("needs_review", "incomplete")),
+            "episode_resets": sum(
+                1 for episode in all_episodes if episode.boundary_provenance.get("episode_reset")
+            ),
+            "wrapper_removal_rewrites": sum(
+                1 for episode in all_episodes
+                if episode.boundary_provenance.get("wrapper_removal_rewrite") is not None
+            ),
+        },
+    }
+    atomic_write(index_path, json.dumps(package, ensure_ascii=False, indent=2) + "\n")
+    print_validation(validation)
+    print_safe(
+        f"injudge --prepare-only: {len(trajectories)} recordings, "
+        f"{len(all_episodes)} episodes discovered, {len(materialized)} materialized, "
+        f"{sum(len(episode.deliveries) for episode in materialized)} deliveries, "
+        "0 judge calls"
+    )
+    print_safe(f"wrote {index_path}")
+    review = any(
+        item.get("level") == "error"
+        or "ambiguous" in str(item.get("msg", "")).lower()
+        or "unmatched" in str(item.get("msg", "")).lower()
+        or "conflict" in str(item.get("msg", "")).lower()
+        or "without a close" in str(item.get("msg", "")).lower()
+        or "overlap" in str(item.get("msg", "")).lower()
+        or "no episode scope" in str(item.get("msg", "")).lower()
+        for item in validation
+    ) or any(episode.preparation_status in ("needs_review", "incomplete") for episode in all_episodes)
+    return 2 if review else 0
+
+
 class _Progress:
     """Running evaluation progress on stderr, rendered with tqdm: a
     trajectories bar plus a per-trajectory spans bar on a TTY, and one
@@ -366,6 +644,12 @@ def main(argv: list[str] | None = None) -> int:
         "message; no judge calls, no files written",
     )
     ap.add_argument(
+        "--prepare-only",
+        action="store_true",
+        help="prepare bridge-delimited episode evidence offline; no .env, Node, "
+             "network, judge calls, verdicts, or summary are produced",
+    )
+    ap.add_argument(
         "--golden",
         type=Path,
         default=None,
@@ -430,6 +714,26 @@ def main(argv: list[str] | None = None) -> int:
     # (the free inspection workflow is --dry-run)
     if args.limit is not None and args.limit < 1:
         raise SystemExit("error: --limit must be a positive integer")
+
+    if args.prepare_only:
+        if args.dry_run:
+            raise SystemExit("error: --prepare-only cannot be combined with --dry-run")
+        if args.html:
+            raise SystemExit("error: --prepare-only cannot be combined with --html")
+        paid_options = {
+            "--judge-model": args.judge_model,
+            "--env": args.env,
+            "--timeout": args.timeout,
+            "--max-attempts": args.max_attempts,
+            "--judge-max-tokens": args.judge_max_tokens,
+        }
+        selected = [name for name, value in paid_options.items() if value is not None]
+        if selected:
+            raise SystemExit(
+                "error: paid judge option(s) " + ", ".join(selected) +
+                " cannot be combined with --prepare-only"
+            )
+        return _prepare_only_main(args)
 
     cfg: AgentConfig | None = None
     judge_parallel = 1

@@ -30,3 +30,7 @@ REPORT_SCHEMA = "injudge.report/v11"
 # injudge.summary/v9: span-index auto-neutral entries are unassessable and
 # retain their auto reason, matching every aggregate's population semantics.
 SUMMARY_SCHEMA = "injudge.summary/v9"
+
+# Offline episode preparation artifact. This staged contract intentionally has
+# no verdict fields; the paid episode judge will define its own report schema.
+EPISODE_INPUT_SCHEMA = "injudge.episode-inputs/v1"
