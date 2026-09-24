@@ -12,7 +12,8 @@ import json
 
 import pytest
 
-from injudge.evidence import build_evidence, write_evidence
+from injudge.evidence import build_span_evidence, write_evidence
+from injudge.model import EpisodeInput
 from injudge.spans import content_fingerprint, group_spans
 from injudge.steps import build_step_stream
 from memgraph.annotations import (
@@ -32,6 +33,14 @@ from annotated_fixtures import (
     cure_ref,
     parse,
 )
+
+
+def _span_files(span):
+    episode = EpisodeInput(
+        execution_identity={"execution_id": "test-execution"},
+        recorded_episode_identity={"episode_id": "test"},
+    )
+    return build_span_evidence(span, episode)[0]
 
 
 # ---------------------------------------------------------------- parsing
@@ -516,7 +525,7 @@ def test_distinct_slot_presentations_never_merge(tmp_path, change):
     assert [span.n_injections for span in spans] == [1, 2]
     for i, span in enumerate(spans):
         dest = tmp_path / f"evidence-{i}"
-        write_evidence(dest, build_evidence(span, [], TASK, None))
+        write_evidence(dest, _span_files(span))
     before = (tmp_path / "evidence-0" / "span.md").read_text()
     after = (tmp_path / "evidence-1" / "span.md").read_text()
     assert "slot 'tail' (prompt_message)" in before
@@ -541,7 +550,7 @@ def test_corrupt_placement_labels_do_not_leak_unrecorded_content(tmp_path):
     _, ops, _ = parse(b, tmp_path)
     (span,) = group_spans(ops, "T1")
     dest = tmp_path / "evidence"
-    write_evidence(dest, build_evidence(span, [], TASK, None))
+    write_evidence(dest, _span_files(span))
     text = (dest / "span.md").read_text()
     assert "unexpected secret" not in text and "canonical secret" not in text
 
@@ -557,7 +566,7 @@ def test_concurrent_slot_evidence_reports_an_empty_action_window(tmp_path):
     _, ops, _ = parse(b, tmp_path)
     spans = group_spans(ops, "T1")
     dest = tmp_path / "evidence"
-    write_evidence(dest, build_evidence(spans[1], [], TASK, None))
+    write_evidence(dest, _span_files(spans[1]))
     text = (dest / "span.md").read_text()
     assert "no eligible action steps" in text
     assert "steps 2–1" not in text

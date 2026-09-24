@@ -16,9 +16,9 @@ import json
 import pytest
 
 from injudge import __main__ as injudge_main
-from injudge.agent import AgentConfig, judge_span, resolve_config
+from injudge.agent import AgentConfig, judge_span as _episode_judge_span, resolve_config
 from injudge.aggregate import WASTE_SHARE_CAVEAT, aggregate, policy_rollup
-from injudge.evidence import build_evidence, span_dir_name, write_evidence
+from injudge.evidence import build_span_evidence, span_dir_name, write_evidence
 from injudge.judge import (
     GOLD_SYSTEM_PROMPT,
     SYSTEM_PROMPT,
@@ -28,7 +28,7 @@ from injudge.judge import (
     _verdict_semantics,
     auto_verdict_no_subsequent_turn,
 )
-from injudge.model import AgentStep, InjectionSpan, ToolExec, memory_id
+from injudge.model import AgentStep, EpisodeInput, InjectionSpan, ToolExec, memory_id
 from injudge import SUMMARY_SCHEMA
 from injudge.report import (
     _policy_line,
@@ -382,8 +382,7 @@ def test_step_stream_normalizes_non_openai_message_shapes():
     assert steps[0].reasoning == "ponder"
     assert steps[0].content == "first\nsecond"
     span, _steps = _judge_input_fixture()
-    from injudge.evidence import build_evidence
-    files = build_evidence(span, steps, None, None)
+    files, _ = build_span_evidence(span, _test_episode(span, steps))
     step_text = files["steps/step_000001.md"]
     assert "reasoning: ponder" in step_text and "content: first\nsecond" in step_text
     assert "command: bash — ls --color" in step_text  # raw args, not "\"ls --color\""
@@ -1755,15 +1754,15 @@ def test_summary_keeps_comparisons_ahead_of_drilldown(tmp_path):
     assert list(summary) == ["overall", "trajectories", "details", "generated_at", "tool"]
     assert list(summary["overall"])[0] == "headline"
     assert summary["tool"] == {
-        "name": "injudge", "schema": "injudge.summary/v9",
-        "source_report_schema": "injudge.report/v11",
+        "name": "injudge", "schema": "injudge.summary/v11",
+        "source_report_schema": "injudge.report/v13",
         "judge_model": "judge", "config": {"max_steps": 4},
     }
     assert summary["generated_at"] == artifact["generated_at"]
     assert json.dumps(artifact) == before
     ov = summary["overall"]
     agg = artifact["aggregates"]["overall"]
-    assert ov["counts"] == {"n_trajectories": 2, "n_injections": 1,
+    assert ov["counts"] == {"n_trajectories": 2, "n_episodes": 0, "n_injections": 1,
                             "n_spans": 1, "restated_injections": 0}
     assert ov["verdicts"]["rates"] == agg["rates"]
     assert ov["delivery"] == {"cost": agg["cost"], "policy": agg["policy"]}
@@ -1779,10 +1778,10 @@ def test_summary_keeps_comparisons_ahead_of_drilldown(tmp_path):
         detail = summary["details"]["trajectories"][row["id"]]
         ta = artifact["aggregates"]["per_trajectory"][row["id"]]
         assert row["counts"] == {k: ta[k] for k in (
-            "n_injections", "n_spans", "restated_injections",
+            "n_episodes", "n_injections", "n_spans", "restated_injections",
         )}
         assert row["verdicts"]["counts"] == {k: ta[k] for k in (
-            "positive", "negative", "neutral", "error", "unjudged", "unassessable",
+            "positive", "negative", "neutral", "error", "unjudged", "unassessable", "empty",
         )}
         if row["id"] == "T1":
             assert row["verdicts"]["rates"] == ta["rates"]
@@ -1813,7 +1812,7 @@ def test_cli_writes_results_first_summary(monkeypatch, tmp_path):
     summary = json.loads(text)
     report = json.loads((run_dir / "injudge-report.json").read_text())
     assert text.startswith('{\n  "overall": {\n') and text.endswith("\n")
-    assert summary["tool"]["schema"] == "injudge.summary/v9"
+    assert summary["tool"]["schema"] == "injudge.summary/v11"
     assert summary["tool"]["source_report_schema"] == report["tool"]["schema"]
     assert "test-key-only" not in text
     (row,) = summary["trajectories"]
@@ -1933,7 +1932,7 @@ def test_cli_runs_share_the_container_without_clobbering(monkeypatch, tmp_path):
     assert len(run_dirs) == 2  # distinct stamps even for same-second runs
     for run_dir in run_dirs:
         report = json.loads((run_dir / "injudge-report.json").read_text())
-        assert report["tool"]["schema"] == "injudge.report/v11"
+        assert report["tool"]["schema"] == "injudge.report/v13"
         assert (run_dir / "summary.json").is_file()
         (span_evidence,) = (run_dir / "evidence").iterdir()
         assert (span_evidence / "manifest.json").is_file()
@@ -2467,6 +2466,23 @@ def test_aggregate_unassessable_spans_leave_every_directional_denominator():
     assert slim["headline"]["unassessable_tokens"] == 25
 
 
+def test_empty_delivery_has_separate_cost_and_summary_population():
+    empty = {**_op("T1:S1", "neutral", cost={"content_chars_total": 40, "approx_tokens_total": 10}),
+             "auto": "empty_delivery"}
+    judged = _op("T1:S2", "positive", 0.9,
+                 cost={"content_chars_total": 400, "approx_tokens_total": 100})
+    report = build_artifact({}, [{"id": "T1"}], [empty, judged], [], {"T1": 2}, [])
+    summary = build_summary(report)
+    overall = summary["overall"]
+    assert overall["verdicts"]["counts"]["empty"] == 1
+    assert overall["verdicts"]["counts"]["unassessable"] == 0
+    assert overall["verdicts"]["rates"]["positive"] == 1
+    assert overall["headline"]["judged_tokens"] == 100
+    assert overall["headline"]["wasted_token_share"] == 0
+    assert overall["delivery"]["cost"]["approx_tokens_by_verdict"]["empty"] == 10
+    assert summary["details"]["trajectories"]["T1"]["spans"][0]["verdict"] == "empty"
+
+
 def test_headline_wasted_share_is_over_judged_cost_only():
     """Error/unjudged spans' delivery cost is a count, never a denominator:
     judge failures must not dilute the wasted-token share toward zero."""
@@ -2637,7 +2653,7 @@ def test_aggregate_cost_by_verdict():
     assert cost["approx_tokens_total"] == 310
     assert cost["approx_tokens_by_verdict"] == {
         "positive": 200, "negative": 0, "neutral": 100, "error": 10, "unjudged": 0,
-        "unassessable": 0}
+        "unassessable": 0, "empty": 0}
 
 
 def _judge_input_fixture():
@@ -2750,8 +2766,8 @@ def test_render_steps_reports_the_recorded_close_status():
         ToolExec(tool_call_id="c2", name="bash", args={"command": "ls"},
                  seq_start=5),  # truncated: no close at all
     ]
-    from injudge.judge import _render_step
-    text = "\n".join(_render_step(s) for s in [step])
+    from injudge.evidence import _episode_step_text
+    text = _episode_step_text(_test_episode(InjectionSpan(id="T1:S1", traj="T1"), [step]), step)
     assert "result (interrupted): (none recorded)" in text
     assert "result: (never observed)" in text  # the truly unclosed one
 
@@ -2885,6 +2901,25 @@ def _agent_cfg(**kw):
     return AgentConfig(**base)
 
 
+def _test_episode(span, steps, task=None, gold=None):
+    attachments = {}
+    if gold is not None:
+        attachments = {"golden": gold.golden, "correctness": gold.correctness}
+    return EpisodeInput(
+        execution_identity={"execution_id": f"{span.traj}:test"},
+        recorded_episode_identity={"episode_id": "test"},
+        steps=steps,
+        task=[{"content": task, "source_kind": "recorded_user_message",
+               "source": {"event_index": 0}}] if task else [],
+        attachments=attachments,
+    )
+
+
+def judge_span(span, steps, cfg, warnings, task=None, *, gold=None, **kwargs):
+    return _episode_judge_span(span, _test_episode(span, steps, task, gold), cfg,
+                               warnings, gold=gold, **kwargs)
+
+
 @pytest.mark.parametrize("timeout", [float("inf"), float("-inf"), float("nan")])
 def test_cli_timeout_override_must_be_finite(monkeypatch, timeout):
     monkeypatch.setattr("injudge.agent._check_runner", lambda: None)
@@ -2902,6 +2937,7 @@ def _result(answer, *, error=None, forced=False, llm_calls=3, tool_calls=4,
         "forced": forced,
         "llm_calls": llm_calls,
         "tool_calls": tool_calls,
+        "retained_evidence": 1,
         "messages": messages if messages is not None else [{"role": "user"},
                                                            {"role": "assistant"}],
         "stop_reason": stop_reason,
@@ -3012,9 +3048,9 @@ def test_agent_span_end_to_end(monkeypatch, tmp_path):
     verdict = judge_span(span, steps, _agent_cfg(), warnings, "the task",
                          gold=None, evidence_root=tmp_path, transcripts_root=tmp_path / "runs")
     assert verdict["verdict"] == "positive"
-    assert verdict["input"] == {"path": "agent", "attempts": 1, "llm_calls": 3,
-                                "tool_calls": 4,
-                                "transcript": verdict["input"]["transcript"]}
+    assert {key: verdict["input"][key] for key in ("path", "attempts", "llm_calls", "tool_calls")} == {
+        "path": "agent", "attempts": 1, "llm_calls": 3, "tool_calls": 4,
+    }
     from injudge.evidence import span_dir_name
     trajectory = tmp_path / "runs" / f"{span_dir_name(span.id)}.jsonl"
     records = [json.loads(line) for line in trajectory.read_text().splitlines()]
@@ -3033,17 +3069,16 @@ def test_agent_span_end_to_end(monkeypatch, tmp_path):
     assert files == ["step_000001.md", "step_000002.md"]
     assert (dest / "manifest.json").is_file() and (dest / "span.md").is_file()
     manifest = json.loads((dest / "manifest.json").read_text())
-    assert manifest["span_id"] == span.id and manifest["n_steps"] == 2
+    assert manifest["span_id"] == span.id and manifest["counts"]["steps"] == 2
     assert manifest["footprint_from_step"] == 1
-    # the evidence document carries the recorded task verbatim
-    assert "the task" in (dest / "span.md").read_text()
-    # Setup evidence is already in context, not another discovery round.
+    assert "the task" in (dest / "task.md").read_text()
+    # The target is in context; the detailed index remains tool-readable.
     assert (dest / "span.md").read_text() in calls[0]["message"]
-    assert (dest / "manifest.json").read_text() in calls[0]["message"]
+    assert "manifest.json" in calls[0]["message"]
+    assert (dest / "manifest.json").read_text() not in calls[0]["message"]
     for entry in manifest["files"]:
         if entry["kind"] == "step":
             body = (dest / entry["path"]).read_text()
-            assert entry["lines"] == len(body.split("\n"))
             assert entry["chars"] == len(body)
 
 
@@ -3057,8 +3092,9 @@ def test_agent_gold_attachments_ride_gold_md(monkeypatch, tmp_path):
                gold=GoldInput(golden="the golden patch",
                               correctness={"resolved": True}),
                evidence_root=tmp_path, transcripts_root=tmp_path / "runs")
-    gold_md = (tmp_path / span_dir_name(span.id) / "gold.md").read_text()
-    assert "the golden patch" in gold_md and "resolved" in gold_md
+    evidence = tmp_path / span_dir_name(span.id)
+    assert "the golden patch" in (evidence / "gold.md").read_text()
+    assert "resolved" in (evidence / "outcome.json").read_text()
     # the gold regime selects the gold system prompt for the conversation
     assert calls[0]["system"] is GOLD_SYSTEM_PROMPT
 
@@ -3166,6 +3202,38 @@ def test_agent_forced_answer_lands_in_the_input_record(monkeypatch, tmp_path):
     assert _slim_aggregate(agg)["judge"]["forced_answers"] == 1
 
 
+def test_context_rollback_repair_cannot_erase_missing_investigation(monkeypatch, tmp_path):
+    first = {**_result(GOOD, forced=True), "context_rollbacks": 1,
+             "retained_evidence": 0, "executed_llm_calls": 2,
+             "executed_tool_calls": 1,
+             "reported_usage": {"input": 100, "output": 20, "cache_read": 0, "cache_write": 0}}
+    repair = {**_result(GOOD), "retained_evidence": 0,
+              "executed_llm_calls": 1, "executed_tool_calls": 0,
+              "reported_usage": {"input": 50, "output": 10, "cache_read": 0, "cache_write": 0}}
+    calls = stub_runner(monkeypatch, [first, repair])
+    span, steps = _judge_input_fixture()
+    verdict = judge_span(span, steps, _agent_cfg(), [], evidence_root=tmp_path,
+                         transcripts_root=tmp_path / "runs")
+    assert verdict["verdict"] == "error" and len(calls) == 2
+    assert verdict["input"]["executed_llm_calls"] == 3
+    assert verdict["input"]["executed_tool_calls"] == 1
+    assert verdict["input"]["reported_usage"]["input"] == 150
+    assert verdict["input"]["context_rollbacks"] == 1
+    assert verdict["input"]["any_phase_forced"] is True
+    assert "forced" not in verdict["input"]
+
+
+def test_forced_answer_with_retained_investigation_can_be_valid(monkeypatch, tmp_path):
+    result = {**_result(GOOD, forced=True), "context_rollbacks": 1,
+              "retained_evidence": 1}
+    stub_runner(monkeypatch, [result])
+    span, steps = _judge_input_fixture()
+    verdict = judge_span(span, steps, _agent_cfg(), [], evidence_root=tmp_path,
+                         transcripts_root=tmp_path / "runs")
+    assert verdict["verdict"] == "positive"
+    assert verdict["input"]["forced"] is True
+
+
 def test_agent_trajectory_masks_an_echoed_credential(monkeypatch, tmp_path):
     """The runner records its trajectory raw (it holds the credential and
     cannot fork the masking implementation); Python rewrites the file
@@ -3252,7 +3320,7 @@ def test_evidence_exposure_grounding_lands_in_the_span_document(tmp_path):
         {"state": "clipped", "exposed_chars": 1, "value_chars": 1},
         {"state": "unknown"},
     ]
-    write_evidence(tmp_path, build_evidence(span, steps, None, None))
+    write_evidence(tmp_path, build_span_evidence(span, _test_episode(span, steps))[0])
     doc = (tmp_path / "span.md").read_text()
     assert "EXPOSED CLIP" in doc and "only the first 1 of 1 chars" in doc
     assert "EXPOSURE UNVERIFIED" in doc
@@ -3264,12 +3332,13 @@ def test_evidence_replaces_a_prior_run(tmp_path):
     """A re-judged span must never read stale files: the folder is replaced
     wholesale."""
     span, steps = _judge_input_fixture()
-    write_evidence(tmp_path, build_evidence(span, steps, "old task", None))
-    write_evidence(tmp_path, build_evidence(span, steps, "new task", None))
-    assert "new task" in (tmp_path / "span.md").read_text()
-    assert "old task" not in (tmp_path / "span.md").read_text()
+    write_evidence(tmp_path, build_span_evidence(span, _test_episode(span, steps, "old task"))[0])
+    write_evidence(tmp_path, build_span_evidence(span, _test_episode(span, steps, "new task"))[0])
+    assert "new task" in (tmp_path / "task.md").read_text()
+    assert "old task" not in (tmp_path / "task.md").read_text()
     assert sorted(p.name for p in tmp_path.iterdir()) == [
-        "manifest.json", "span.md", "steps"]
+        "context.json", "deliveries.md", "episode.md", "manifest.json",
+        "searches.json", "span.md", "steps", "task.md"]
 
 
 def test_span_dir_name_is_filesystem_safe_and_collision_free():
@@ -3334,14 +3403,14 @@ def test_agent_unknown_novelty_preserves_independent_signals(
     path = tmp_path / "report.json"
     path.write_text(json.dumps(artifact))
     saved = json.loads(path.read_text())
-    assert saved["tool"]["schema"] == "injudge.report/v11"
+    assert saved["tool"]["schema"] == "injudge.report/v13"
     assert saved["operations"][0]["rubric"]["m1"]["novelty"]["value"] is None
     rub = saved["aggregates"]["overall"]["rubric"]
     assert rub["deliveries"] == 2
     assert rub["counts"]["novelty"] == {"null": 1, "novel": 1}
     assert rub["rates"]["novelty"] == 1.0  # unknown does not dilute the rate
     summary = build_summary(saved)
-    assert summary["tool"]["schema"] == "injudge.summary/v9"
+    assert summary["tool"]["schema"] == "injudge.summary/v11"
     assert summary["details"]["overall"]["rubric"]["counts"]["novelty"] == rub["counts"]["novelty"]
     if usage == "ignored":
         assert rub["no_footprint_reasons"] == {"ignored_unknown_novelty": 1, "irrelevant": 1}
@@ -3440,7 +3509,7 @@ def test_unattributed_redelivery_never_backfills_an_earlier_hidden_placement(tmp
     ops[1].step = None
     spans = group_spans(ops, "T1")
     assert len(spans) == 1 and spans[0].n_injections == 2
-    files = build_evidence(spans[0], [], None, None)
+    files, _ = build_span_evidence(spans[0], _test_episode(spans[0], []))
     assert REF_A["content"]["text"] not in files["span.md"]
     assert spans[0].placements == []
     assert spans[0].memory_exposure == [{"state": "unknown"}]
@@ -3542,5 +3611,7 @@ def test_transcript_masking_failure_keeps_an_error_input_record(monkeypatch, tmp
     assert len(calls) == 1
     assert verdict["verdict"] == "error"
     assert "cannot mask judge transcript" in verdict["error"]
-    assert verdict["input"] == {"path": "agent", "attempts": 1, "llm_calls": 3, "tool_calls": 4}
+    assert {key: verdict["input"][key] for key in ("path", "attempts", "llm_calls", "tool_calls")} == {
+        "path": "agent", "attempts": 1, "llm_calls": 3, "tool_calls": 4,
+    }
     assert warnings

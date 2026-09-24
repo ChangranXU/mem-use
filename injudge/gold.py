@@ -235,33 +235,3 @@ def load_harness_report(path: Path) -> dict:
             f"shape (no {'/'.join(_HARNESS_LIST_FIELDS)} field)"
         )
     return obj
-
-
-def join_gold_patch(
-    patches: dict[str, str], instance_id: str | None, warn: Callable[[str], None]
-) -> str | None:
-    """One trajectory's golden patch out of the loaded metadata; a miss is
-    absent plus a note (the run continues on the plain rubric)."""
-    if not instance_id:
-        warn("gold metadata given but the run recorded no instance_id; "
-             "no patch joined from it")
-        return None
-    patch = patches.get(instance_id)
-    if patch is None:
-        warn(f"gold metadata carries no patch for {instance_id}; "
-             "no patch joined from it")
-    return patch
-
-
-def join_harness_report(
-    report: dict, instance_id: str | None, warn: Callable[[str], None]
-) -> dict | None:
-    """One trajectory's correctness out of the loaded harness report —
-    the sidecar recognizer's join, notes routed to the run's validation.
-    The recognizer's notes end with 'no correctness attached' (the sidecar
-    context, where nothing follows); here a sidecar may still attach one
-    after the miss, so the note states the report's miss alone."""
-    correctness, note = _harness_correctness(report, instance_id)
-    if note:
-        warn(f"harness report {note.removesuffix('; no correctness attached')}")
-    return correctness

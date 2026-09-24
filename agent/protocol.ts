@@ -17,7 +17,7 @@ export interface AgentJobConfig {
 	base_url: string;
 	/** Total LLM-call cap for this phase, forced final round included. */
 	max_steps: number;
-	/** Per-call output-token cap (maxTokens on every stream call). */
+	/** Per-call output cap; continuations may use less to fit retained evidence. */
 	max_output_tokens: number;
 	/** The model's context window in tokens; the budget forces an answer before it overflows. */
 	context_window: number;
@@ -67,6 +67,12 @@ export interface AgentResult {
 	llm_calls: number;
 	tool_calls: number;
 	usage: AgentUsage;
+	executed_llm_calls: number;
+	executed_tool_calls: number;
+	reported_usage: AgentUsage;
+	/** Successfully read step files still present in the conversation. */
+	retained_evidence: number;
+	context_rollbacks: number;
 	/** The full conversation, for the caller's corrective continuation. */
 	messages: unknown[];
 	/** Runner/endpoint failure text; null on a completed conversation. */

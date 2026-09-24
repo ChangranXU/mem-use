@@ -20,7 +20,7 @@ Two read-only tools share one parsing core:
 | Tool | Purpose |
 |---|---|
 | **memgraph** | Renders every memory operation and its relationships as a self-contained HTML graph, with an optional JSON artifact. |
-| **injudge** | Scores each recall injection against a five-signal rubric and writes the `injudge.report/v11` artifact, which overlays onto the graph with `--verdicts`. |
+| **injudge** | Scores episode-scoped recall spans against a five-signal rubric and writes the `injudge.report/v13` artifact, which overlays onto the graph with `--verdicts`. |
 
 One principle runs through both: a recall injection is judged by its **subsequent influence** on the agent. The final task result may corroborate a judgment; it never decides one.
 

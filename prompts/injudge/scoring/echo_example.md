@@ -1,13 +1,7 @@
-Worked example (the same-episode echo): the task statement names the
-failing module, and at step 4 the agent reasons "the bug is the dtype cast
-in copy(); I will preserve dtype on copy". A mid-episode extraction at
-step 5 stores "copy() must preserve dtype" — a paraphrase of the agent's own
-step-4 reasoning — and it is injected at step 6; the agent applies its plan
-at step 7 without referring to the memory. Judge: novelty=redundant (the
-substance was established at step 4 and in the task statement, not new), influence=none (the fix continues the
-agent's own pre-injection direction; the memory arrived after that direction
-existed). Crediting the memory with the step-7 fix would be reversed
-causality. If the agent instead says "the memory confirms my plan" while
-executing that same plan, novelty is still redundant but influence is
-referenced, not none; positive_effect remains null. Neither case earns
-action-change credit.
+Example (echo): at step 4 the agent writes "the bug is the dtype cast in
+copy(); I will preserve dtype". A memory saying "copy() must preserve dtype"
+is consumed at step 6, and the agent applies its fix at step 7 without
+mentioning it: novelty=redundant (step 4), influence=none, since crediting
+the memory would reverse causality. If the agent says "the memory confirms
+my plan", influence is referenced. Had that reasoning first appeared at step
+6 or later, it would be post-exposure and could not show a prior plan.

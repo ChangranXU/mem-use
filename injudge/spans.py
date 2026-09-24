@@ -119,7 +119,9 @@ def _same_treatment(span: InjectionSpan, op: MemoryOp) -> bool:
 
 
 def group_spans(
-    recall_ops: list[MemoryOp], traj_id: str, warnings: list[str] | None = None
+    recall_ops: list[MemoryOp], traj_id: str, warnings: list[str] | None = None,
+    *, episode_execution_id: str | None = None, id_offset: int = 0,
+    last_step: int | None = None,
 ) -> list[InjectionSpan]:
     """Maximal runs of same-treatment recall ops, in (step, seq) order.
 
@@ -129,14 +131,22 @@ def group_spans(
     span also carries is then bounded at that step, and the colliding span's
     window for that memory opens only after it — the shared step is credited
     exactly once, and the bound is named."""
-    spans, steps_seen = _merge_spans(recall_ops, traj_id)
+    spans, steps_seen = _merge_spans(recall_ops, traj_id, id_offset)
     entry_idents = _stamp_novelty(spans, steps_seen)
     _stamp_windows(spans, entry_idents, warnings)
+    for span in spans:
+        span.episode_execution_id = episode_execution_id
+        span.episode_last_step = last_step
+        if last_step is not None:
+            span.memory_windows = {
+                mid: min(end, last_step) if end is not None else last_step
+                for mid, end in span.memory_windows.items()
+            }
     return spans
 
 
 def _merge_spans(
-    recall_ops: list[MemoryOp], traj_id: str
+    recall_ops: list[MemoryOp], traj_id: str, id_offset: int
 ) -> tuple[list[InjectionSpan], list[list[int]]]:
     """Collapse consecutive same-treatment deliveries; return the spans and
     the attributed steps of each (parallel lists).
@@ -191,7 +201,7 @@ def _merge_spans(
         latest[fp] = len(spans)
         spans.append(
             InjectionSpan(
-                id=f"{traj_id}:S{len(spans) + 1}",
+                id=f"{traj_id}:S{id_offset + len(spans) + 1}",
                 traj=traj_id,
                 op_ids=[op.id],
                 step_first=None,

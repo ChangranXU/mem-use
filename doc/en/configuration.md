@@ -57,12 +57,12 @@ A verdict cut mid-answer is not a failure class: the answer simply fails the con
 | `--timeout` | `300` | Per-LLM-call timeout seconds |
 | `--max-attempts` | `MAX_ATTEMPTS` | Total judge/repair phases per span |
 | `--judge-max-tokens` | `MAX_OUTPUT_TOKENS` | Per-call output cap |
-| `--limit N` | unset | Judge at most *N* spans with the agent (the rest are `unjudged`). Must be positive. Rule-judged auto-neutral spans still verdict; they cost no agent run. |
-| `--dry-run` | off | Print the evidence document, file index, and opening message for each span that would use the agent; no calls, no files |
-| `--golden PATH` | sidecar | Golden-answer body for every agent-judged span's evidence |
-| `--correctness resolved\|unresolved` | sidecar | Recorded task outcome for every agent-judged span, corroboration only |
-| `--gold-metadata PATH` | unset | verified-metadata.json: per-instance gold patches joined by each trajectory's recorded `instance_id` (sits between `--golden` and the sidecar) |
-| `--harness-report PATH` | unset | One SWE-bench-style harness report for the run, joined per trajectory by `instance_id` (sits between `--correctness` and the sidecar) |
+| `--limit N` | unset | Judge at most *N* episode-scoped, nonempty spans with the agent; validate all episode and attachment scopes first. `--prepare-only` instead limits materialized episodes. |
+| `--dry-run` | off | Preview the target document and bounded navigation for each paid span job; no calls or files |
+| `--golden PATH` | unset | Golden answer for exactly one episode; use keyed metadata otherwise |
+| `--correctness resolved\|unresolved` | unset | Recorded outcome for exactly one episode, corroboration only |
+| `--gold-metadata PATH` | unset | verified-metadata.json patches joined by recorded episode benchmark identity |
+| `--harness-report PATH` | unset | Harness results joined by episode identity; repeated executions or treatment arms are rejected without execution-specific provenance |
 | `-o DIR` | `output/` | Artifact container — each run gets a `<run-stamp>/` subfolder; spans sent to the agent add `evidence/` and `agent-runs/` entries |
 | `--html` | off | Also write `memgraph-verdicts.html` |
 

@@ -28,10 +28,10 @@ Each run writes its own `<run-stamp>/` folder (`YYYYMMDD-HHMMSS-<hex>`) under `-
 
 | File | Contents |
 |---|---|
-| `injudge-report.json` | The runtime judging record (`injudge.report/v11`), rewritten after every trajectory so a crash keeps completed work |
-| `summary.json` | The final statistics (`injudge.summary/v9`): counts, rates, per-memory usage |
+| `injudge-report.json` | The runtime judging record (`injudge.report/v13`), rewritten after every trajectory so a crash keeps completed work |
+| `summary.json` | The final statistics (`injudge.summary/v11`): counts, rates, per-memory usage |
 | `memgraph-verdicts.html` | Only with `--html`: memgraph with recall nodes colored by verdict |
-| `evidence/` | One folder per span sent to the judge agent (error outcomes included): the files available to it (span document, manifest, per-step files, gold) |
+| `evidence/` | One folder per judged span (error outcomes included): target `span.md` plus only its parent's prepared episode files and optional attachments |
 | `agent-runs/` | One trajectory JSONL per span sent to the judge agent: the pi event-sourced recording of how each verdict was reached |
 
 Delivery cost and delivery-policy metrics are computed deterministically from the recordings, not judged — see [Artifacts](artifacts.md#delivery-cost-and-policy). The full field reference lives there too.
@@ -42,8 +42,10 @@ The process exits `2` if any span ended in `error`.
 
 The same content is often re-injected, so the judged unit is the **injection span**: a maximal run of recall ops using the same treatment — identical entries in the same order, the same placement presentation, and the same per-entry exposure.
 
+Episodes are partitioned before span grouping. Identical treatments across episodes never merge; each episode retains global step numbers, its own task/context, and its own gold/outcome joins. Empty deliveries and unattributable spans are mechanically counted without paid calls.
+
 - Step gaps do not break a span; they are recorded in `step_gaps` and shown to the judge.
-- A content or treatment change does break a span — a re-ranked bundle, a re-framed block, or a changed per-entry exposure starts a new span even when the delivered content is identical. Each delivered entry's judged footprint window runs from the span's first step to that entry's next re-delivery (a re-delivery supersedes — a memory delivered in two spans is never credited in both); an entry never re-delivered keeps the rest of the stream, an unrelated span in between bounds nothing, and one entry's window ending never caps a co-delivered entry's window. Windows are per delivered ENTRY (the span-local id the rubric keys on): identities sharing one display key keep their own bounds, and every entry — keyed or not — is judged.
+- A content or treatment change does break a span — a re-ranked bundle, a re-framed block, or a changed per-entry exposure starts a new span even when the delivered content is identical. Each delivered entry's judged footprint window runs from the span's first step to that entry's next re-delivery **within the episode**; an entry never re-delivered remains eligible through that episode's last step. An unrelated span in between bounds nothing, and one entry's window ending never caps a co-delivered entry's window. Windows are per delivered ENTRY (the span-local id the rubric keys on): identities sharing one display key keep their own bounds, and every entry — keyed or not — is judged.
 - Re-deliveries roll up as `restated`: they count toward delivery cost and `n_injections`, but never appear in verdict rates.
 - A span with no attributed agent step (`step_first` is `None`) has no downstream footprint. It is rule-judged **neutral** with `auto: no_subsequent_turn`, and no judge call is made. Aggregates tally it as `unassessable`, out of every directional rate.
 
@@ -55,7 +57,7 @@ Span construction, including the fingerprint fallback for undigested content, is
 
 Each span goes through three stages, each documented on its own page:
 
-1. **Materialize the evidence.** The recorded task statement (when present), the span document, any gold attachments, and one file per recorded agent step, written into a folder the agent reads with its two read-only tools. → [Judge evidence](scoring-input.md)
+1. **Materialize the evidence.** The target span and its parent episode's recorded task, visible context, other deliveries, original global steps, and optional attachments go into one tool-scoped folder. → [Judge evidence](scoring-input.md)
 2. **Score the rubric.** One agent conversation searches the evidence and answers with five signals per delivered memory — `relevance`, `accuracy`, `novelty`, `influence`, `positive_effect` — and never a verdict. → [Rubric and verdict derivation](verdict-derivation.md)
 3. **Derive the verdict in code.** Usage labels first, then the span verdict: any misused memory makes the span negative; otherwise any used memory makes it positive; otherwise it is neutral. → [Rubric and verdict derivation](verdict-derivation.md)
 
@@ -63,13 +65,13 @@ Budgets, forced answers, and the conversation's retry/failure behavior are in [J
 
 ## Golden Answer and Correctness
 
-The scoring call accepts two optional attachments. Each comes from a sidecar next to `trajectory.jsonl`, a per-instance linkage file, or the CLI; precedence is CLI value → linkage join → sidecar. One CLI gold over several loaded trajectories warns.
+The scoring call accepts two optional attachments, joined to episodes **before** `--limit` selects paid spans. `--golden` and `--correctness` require exactly one discovered episode. Benchmark-keyed metadata can attach to several episodes; an unkeyed trajectory sidecar applies only when that trajectory has exactly one episode. Precedence is CLI value → keyed join → eligible sidecar.
 
 | Attachment | Source | Effect |
 |---|---|---|
-| Golden-answer body | `golden.txt` (wins over `golden.md` when both are usable), `--gold-metadata PATH` (verified-metadata.json: the instance's gold `patch`, joined by the recorded `instance_id`), or `--golden PATH` | Switches that call to the **gold rubric** (`GOLD_SYSTEM_PROMPT`). Same five signals, same schema, same derive chain. `relevance` and the direction of `positive_effect` are judged against the gold text; gold does not speak to `accuracy`, `novelty`, or `influence`. |
-| Recorded correctness | `correctness.json`, `--harness-report PATH` (one SWE-bench-style harness report for the whole run, joined by the recorded `instance_id`), or `--correctness resolved\|unresolved` | Attaches as a `TASK CORRECTNESS` block under whichever prompt the call uses. Corroboration only: it cannot decide a signal, and it does not select the gold rubric. |
+| Golden-answer body | `golden.txt` (wins over `golden.md` when both are usable), `--gold-metadata PATH` (verified-metadata.json: a `patch` joined by recorded episode benchmark identity), or `--golden PATH` | Switches that episode's span calls to the **gold rubric** (`GOLD_SYSTEM_PROMPT`) and supplies `gold.md`. Same five signals, schema, and derivation; the reference is not the verdict. |
+| Recorded correctness | `correctness.json`, `--harness-report PATH` (SWE-bench-style results joined by episode benchmark identity), or `--correctness resolved\|unresolved` | Supplies `outcome.json` as corroboration only. It cannot decide a signal or select the gold rubric. |
 
-`correctness.json` accepts a plain `{"resolved": true|false, "score": …}` record or a SWE-bench-style harness report (`resolved_ids` / `unresolved_ids`). A harness report is joined by the trajectory's recorded `instance_id`; errored or incomplete instances are harness failures, not outcomes, so no correctness attaches. The `--gold-metadata` / `--harness-report` links are the multi-trajectory form: each trajectory gets its own instance's patch and resolved bit, and a trajectory that fails to join (no recorded `instance_id`, or the instance absent from the file) degrades to the next source with a validation note. An unusable linkage file (unreadable, unparseable, wrong shape) fails fast before any paid judge call.
+`correctness.json` accepts a plain `{"resolved": true|false, "score": …}` record or a SWE-bench-style harness report (`resolved_ids` / `unresolved_ids`). Error, incomplete, missing, and conflicting harness results remain explicit statuses rather than being guessed as resolved/unresolved; a sidecar does not override a harness join. Because a benchmark-only harness report cannot identify repeated executions or treatment arms, those joins fail before judging; use execution-scoped results instead. Unusable linkage files fail before a paid call.
 
 With neither attachment, scoring uses the plain rubric. The gold regime is recorded on the operation's `input` (`"gold": true`) and counted in `aggregates.overall.gold_scored`.

@@ -1,30 +1,20 @@
-3. novelty (@novelty@) — what did the agent already
-   have when the injection arrived? The baseline is EVERYTHING already in
-   the conversation: the task statement counts as already-in-conversation
-   just like the agent's own pre-injection steps — a memory paraphrasing
-   the issue text or the agent's own earlier reasoning is NOT new. Judge
-   the memory's substance against
-   that baseline, by how it had been articulated:
-   - confirming: the agent had articulated the substance as OPEN — a
-     suspicion, hypothesis, hesitation, or an unverified assumption — and
-     the memory settles it. Expressed doubt wins over ambient evidence:
-     still-unsure means confirming even if the answer was technically
-     observable earlier;
-   - redundant: the substance was already ESTABLISHED with no open doubt —
-     the task statement said it, the agent stated it as fact, had decided or
-     applied it, or tool results had already shown it. The delivery was
-     redundant/late;
-   - novel: the available baseline supports that the substance was new to
-     the agent. Mere absence from an incomplete transcript or evidence
-     summary is not enough;
-   - null: the recorded baseline cannot establish which tier applies. Name
-     the specific missing context in the note; this is unassessed novelty,
-     not a fourth tier and not evidence for or against influence.
-   For an assessed tier, the note must cite what it rests on: the task statement (it has no
-   step number — naming it as the task statement is the correct citation) or
-   the specific pre-injection step. When the header says a memory was
-   delivered in an earlier span, or carries the same key with a changed
-   value, that history is part of the baseline: a re-delivery of what an
-   earlier span already delivered is not novel on content the agent had
-   already seen, while a changed value may be. Judge from the recorded task
-   statement, the span history, and the agent's steps only.
+3. novelty (@novelty@) — was the substance already available before the
+   delivery? The baseline is the task and updates available by then,
+   context.json target_baseline, and earlier steps; never the target
+   placement or later input. Novelty is relative to this recorded baseline,
+   not the agent's unobserved knowledge; even common practice can be novel.
+   - confirming: the agent had voiced it as open (a suspicion, hypothesis, or
+     unverified assumption) and the memory settles it. Expressed uncertainty
+     wins even when supporting facts were already visible;
+   - redundant: already established — stated in the task, stated or applied
+     by the agent, or shown by a tool result;
+   - novel: the baseline supports that it was new; absence from an incomplete
+     record is not enough;
+   - null: the baseline cannot decide; name the missing context.
+   Judge substance, not wording. For a memory with several claims, it is
+   redundant only if every material claim was established; otherwise take
+   the tier of the rest (confirming if all were open, else novel) and name
+   which claims were known and which were new. Do not drop a claim from
+   novelty because it is irrelevant to this task. Cite the task text or step
+   the tier rests on. An earlier delivery is a cue to check visibility,
+   not proof.

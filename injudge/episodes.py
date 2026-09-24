@@ -1,7 +1,7 @@
 """Deterministic offline episode preparation.
 
-The paid evaluator works on trajectory-wide recall spans.  Preparation is a
-separate, read-only normalization layer: bridge lifecycle events provide only
+The paid evaluator groups recall spans inside prepared episodes. Preparation is a
+read-only normalization layer: bridge lifecycle events provide only
 episode scope, while memory operations still come from the schema-v9
 ``memory_*`` annotations parsed by memgraph.  All joins use parsed event
 positions first and recorded identifiers only as corroborating metadata, so a
@@ -121,7 +121,13 @@ def _discover_boundaries(events: list[dict[str, Any]], diagnostics: list[str]) -
         # the recorded identity; exact repeats must not create another run.
         if ident[1] is not None and ident in seen_identity:
             if _payload(event) != seen_identity[ident]:
-                diagnostics.append(f"event {index}: conflicting payload for repeated episode event identity")
+                note = f"event {index}: conflicting payload for repeated episode event identity"
+                diagnostics.append(note)
+                for boundary in boundaries:
+                    if any(source is not None and _identity(source, typ) == ident
+                           for source in (boundary.open_event, boundary.close_event)):
+                        boundary.status = "needs_review"
+                        boundary.diagnostics.append(note)
             continue
         if ident[1] is not None:
             seen_identity[ident] = _payload(event)
@@ -450,13 +456,19 @@ def project_occurrence(item: dict[str, Any], deliveries: list[dict[str, Any]]) -
     text = item.get("content")
     refs: list[str] = []
     unresolved = False
+    removed: set[str] = set()
     for delivery in deliveries:
         for placement in delivery["placements"]:
             proof = placement["source_resolution"]
             if proof.get("occurrence_id") == item["occurrence_id"]:
                 shown = placement.get("text")
-                if isinstance(text, str) and isinstance(shown, str) and shown and text.count(shown) == 1:
+                if isinstance(shown, str) and shown in removed:
+                    # Re-deliveries can prove the same resident placement.
+                    # Its host is projected once, while every delivery keeps its link.
+                    pass
+                elif isinstance(text, str) and isinstance(shown, str) and shown and text.count(shown) == 1:
                     text = text.replace(shown, "", 1)
+                    removed.add(shown)
                 else:
                     unresolved = True
                 refs.append(delivery["entry_prefix"])
@@ -695,6 +707,11 @@ def prepare_episodes(
                 "turn": step.turn,
                 "reason": "ambiguous_or_missing_episode_membership",
             })
+            for candidate in boundaries:
+                if candidate.contains(turn_index.get(step.turn, -1)):
+                    episode = episode_data[candidate.ordinal]
+                    episode.boundary_provenance["status"] = "needs_review"
+                    episode.diagnostics.append(f"step {step.step} has ambiguous episode membership")
             continue
         episode = episode_data[boundary.ordinal]
         episode.steps.append(step)
@@ -736,7 +753,7 @@ def prepare_episodes(
         if isinstance(call_id, str) and call_id in call_map:
             turn, _step = call_map[call_id]
             boundary = _episode_for_index(boundaries, turn_index.get(turn, source_index))
-        if boundary is None:
+        else:
             boundary = _episode_for_index(boundaries, source_index, event)
         if boundary is None:
             diagnostics.append(f"{trajectory.run_id}: delivery {op.id} has ambiguous episode membership")
@@ -746,6 +763,12 @@ def prepare_episodes(
                 "seq": op.seq,
                 "reason": "ambiguous_or_missing_episode_membership",
             })
+            consumer_index = turn_index.get(call_map.get(call_id, (None, None))[0]) if isinstance(call_id, str) else None
+            for candidate in boundaries:
+                if candidate.contains(consumer_index if consumer_index is not None else source_index):
+                    episode = episode_data[candidate.ordinal]
+                    episode.boundary_provenance["status"] = "needs_review"
+                    episode.diagnostics.append(f"delivery {op.id} has ambiguous episode membership")
             continue
         projection = _delivery_projection(
             op,

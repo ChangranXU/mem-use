@@ -37,7 +37,7 @@ from urllib.parse import urlsplit
 from urllib.request import Request
 
 from util import atomic_write, print_safe
-from injudge.evidence import build_evidence, span_dir_name, write_evidence
+from injudge.evidence import build_span_evidence, span_dir_name, write_evidence
 from injudge.judge import (
     GoldInput,
     _assemble_verdict,
@@ -47,12 +47,13 @@ from injudge.judge import (
     _mask_key,
     _masked_head,
     _scoring_system,
+    _source_claim_warnings,
     _substitute_enums,
     _strict_parse,
     _verdict_semantics,
     blank_verdict,
 )
-from injudge.model import AgentStep, InjectionSpan
+from injudge.model import EpisodeInput, InjectionSpan
 from injudge.prompts import load_prompt
 
 # The checkout's TS half: the pi agent runner the judge spawns per span.
@@ -76,10 +77,16 @@ _RESUME = load_prompt("injudge/agent/resume")
 
 
 def _opening_message(span_id: str, files: dict[str, str]) -> str:
-    """Seed the judge with the exact indexed evidence, not discovery calls."""
+    """Keep the target verbatim; leave the detailed episode index to tools."""
+    index = json.loads(files["manifest.json"])
+    navigation = [f"{entry['path']} ({entry['chars']} chars)" for entry in index["files"]
+                  if entry.get("kind") != "step"]
+    step_numbers = [entry["step"] for entry in index["files"] if entry.get("kind") == "step"]
+    navigation.append(f"steps/: {len(step_numbers)} files, global steps "
+                      f"{step_numbers[0] if step_numbers else '?'}–{step_numbers[-1] if step_numbers else '?'}")
     return (
         f"## span.md\n{files['span.md']}"
-        + f"\n\n## manifest.json\n{files['manifest.json']}"
+        + "\n\n## Evidence navigation\n" + "\n".join(navigation)
         + "\n\n## Judging request\n" + _OPENING.replace("@span_id@", span_id)
     )
 
@@ -408,7 +415,8 @@ def _invoke_runner(
 
 
 def _input_record(
-    gold: GoldInput, attempts: int, result: dict | None, transcript: str | None
+    gold: GoldInput, attempts: int, result: dict | None, transcript: str | None,
+    health: dict | None = None,
 ) -> dict:
     """The agent-run record on a judged span's verdict: which regime it ran
     under, what the conversation cost (attempts, LLM/tool calls, the
@@ -420,6 +428,8 @@ def _input_record(
         record["tool_calls"] = result.get("tool_calls") if isinstance(result.get("tool_calls"), int) else 0
         if result.get("forced"):
             record["forced"] = True
+    if health:
+        record.update(health)
     if transcript is not None:
         record["transcript"] = transcript
     if gold.golden:
@@ -459,10 +469,9 @@ def _mask_trajectory_file(path: Path, api_key: str) -> None:
 
 def judge_span(
     span: InjectionSpan,
-    steps: list[AgentStep],
+    episode: EpisodeInput,
     cfg: AgentConfig,
     warnings: list[str],
-    task: str | None = None,
     *,
     gold: GoldInput | None = None,
     evidence_root: Path,
@@ -481,11 +490,12 @@ def judge_span(
     (setup fault, endpoint auth) is that span's error verdict; the run
     continues.
     """
+    steps = episode.steps
     gold = gold or GoldInput()
     system = _scoring_system(gold)
     span_dir = span_dir_name(span.id)
     dest = evidence_root / span_dir
-    files = build_evidence(span, steps, task, gold)
+    files, baseline = build_span_evidence(span, episode)
     write_evidence(dest, files)
     # one trajectory per judging run: a re-judged span never mixes its old
     # conversation into the new audit trail
@@ -499,6 +509,10 @@ def judge_span(
     opening = _opening_message(span.id, files)
     last_step = steps[-1].step if steps else None
     history: list | None = None
+    health: dict = {"executed_llm_calls": 0, "executed_tool_calls": 0,
+                    "reported_usage": {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0},
+                    "context_rollbacks": 0, "any_phase_forced": False}
+    investigation_failed = False
     last_text = ""
     last_error = "no answer"
     result: dict | None = None
@@ -524,7 +538,7 @@ def judge_span(
             verdict = blank_verdict()
             verdict["error"] = f"cannot mask judge transcript: {mask_error}"
             warnings.append(f"{span.id}: {verdict['error']}")
-            verdict["input"] = _input_record(gold, attempt, result, None)
+            verdict["input"] = _input_record(gold, attempt, result, None, health)
             return verdict
         if result is None:
             # setup/transport fault: an identical retry re-pays it. The
@@ -533,14 +547,29 @@ def judge_span(
             warnings.append(f"{span.id}: judge agent failed to run")
             verdict = blank_verdict()
             verdict["error"] = "judge agent failed to run (see validation notes)"
-            verdict["input"] = _input_record(gold, attempt, None, transcript)
+            verdict["input"] = _input_record(gold, attempt, None, transcript, health)
             return verdict
+        for key in ("executed_llm_calls", "executed_tool_calls", "context_rollbacks"):
+            value = result.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                health[key] += value
+        usage = result.get("reported_usage")
+        if isinstance(usage, dict):
+            for key in health["reported_usage"]:
+                value = usage.get(key)
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    health["reported_usage"][key] += value
+        health["any_phase_forced"] = health["any_phase_forced"] or bool(result.get("forced"))
+        health["retained_llm_calls"] = result.get("llm_calls", 0)
+        health["retained_tool_calls"] = result.get("tool_calls", 0)
+        health["retained_evidence"] = result.get("retained_evidence", 0)
+        investigation_failed = not bool(result.get("retained_evidence"))
         if result.get("error"):
             masked = _mask_key(str(result["error"]), cfg.api_key)
             warnings.append(f"{span.id}: the judge agent run failed: {masked}")
             verdict = blank_verdict()
             verdict["error"] = f"agent run failed: {masked}"
-            verdict["input"] = _input_record(gold, attempt, result, transcript)
+            verdict["input"] = _input_record(gold, attempt, result, transcript, health)
             return verdict
         text = result["answer"]
         if repair:
@@ -573,13 +602,16 @@ def judge_span(
         else:
             obj, error = _strict_parse(text)
             if obj is not None:
-                error = _verdict_semantics(obj, span, last_step)
+                error = _verdict_semantics(obj, span, last_step, {step.step for step in steps})
+                if error is None and investigation_failed:
+                    error = "required investigation evidence was not retained; inspect the episode again"
                 if error is not None:
                     obj = None  # a semantic violation is as out-of-contract as a parse one
         if obj is not None:
             verdict = _assemble_verdict(obj, text, span, warnings, cfg.api_key)
-            verdict["input"] = _input_record(gold, attempt, result, transcript)
-            _echo_overlap_warnings(verdict, span, steps, task, warnings)
+            verdict["input"] = _input_record(gold, attempt, result, transcript, health)
+            _echo_overlap_warnings(verdict, span, baseline, warnings)
+            _source_claim_warnings(verdict, span, files["task.md"], warnings)
             return verdict
         last_text, last_error = text, error
         if repair:
@@ -593,17 +625,15 @@ def judge_span(
         f"agent output {last_error} after {attempt} attempts", last_text, span,
         warnings, cfg.api_key,
     )
-    verdict["input"] = _input_record(gold, attempt, result, transcript)
+    verdict["input"] = _input_record(gold, attempt, result, transcript, health)
     return verdict
 
 
 def dry_run_print(
     span: InjectionSpan,
-    steps: list[AgentStep],
-    task: str | None,
-    gold: GoldInput | None,
+    episode: EpisodeInput,
 ) -> None:
     """Print the exact opening of a real run, without calls or files."""
-    files = build_evidence(span, steps, task, gold)
+    files, _baseline = build_span_evidence(span, episode)
     print_safe(f"EVIDENCE FOLDER for {span.id}: {len(files)} files")
     print_safe(f"\nOPENING MESSAGE:\n{_opening_message(span.id, files)}")

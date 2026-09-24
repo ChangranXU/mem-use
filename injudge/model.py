@@ -260,15 +260,15 @@ class InjectionSpan:
     recording).
     `step_gaps` lists steps inside [step_first, step_last] where the memory
     was NOT delivered. `new_keys`/`removed_keys` diff against the previous
-    span in the same trajectory (first span: all keys are new). The diff
+    span in the same episode (first span: all keys are new). The diff
     compares (namespace, item) identities — memory identity is the pair, so
     a delivery switching stores or items is a change — but speaks in
     distinct bare keys (labels): a key whose item identity changed appears
     in BOTH lists (its old identity left, its new one arrived).
     `previous_keys` labels the identities delivered in an earlier span —
-    ANY earlier span, not only the immediately previous one: a gap
-    re-delivery is still content the agent already saw (the novelty
-    baseline beyond the task statement) — and `changed_keys` labels
+    ANY earlier span in the episode, not only the immediately previous one;
+    recorded delivery is a cue to check current visibility, not proof of it.
+    `changed_keys` labels
     identities whose RECORDED VALUE drifted against their last recorded
     earlier delivery — membership alone would hide a same-identity value
     change. `memory_exposure` carries, per delivered entry, what the
@@ -285,7 +285,7 @@ class InjectionSpan:
     span's injections (in delivery order); `placements` keeps each rendered
     slot's kind and full resolved text in recorded order, with the digest
     retained when text is unavailable. `position`/`total` locate the span
-    among the trajectory's spans (0/0 when built directly, not via
+    among its episode's spans (0/0 when built directly, not via
     group_spans). `memory_windows` bounds each delivered memory's judged
     footprint window individually, keyed by the entry's span-local id
     (memory_id; every delivered entry carries one) → the window's last
@@ -293,8 +293,9 @@ class InjectionSpan:
     identity starting strictly after this span's last delivery step, minus
     one (a re-delivery supersedes — from then on the memory's influence is
     the newer span's to claim), or None when none qualifies: overlapping
-    re-deliveries are skipped, not terminal, so the memory is unbounded
-    only when no cleanly separated re-delivery exists. The strict > keeps
+    re-deliveries are skipped, not terminal. When no cleanly separated
+    re-delivery exists, the prepared episode's last step caps the window.
+    The strict > keeps
     the bound from ever cutting the span's own delivery steps. An entry
     with no stable item identity matches by the canonical entry used for
     span fingerprints, so fresh operation-local ids cannot reopen the same
@@ -317,7 +318,7 @@ class InjectionSpan:
     named in the run's validation notes.
     `previous_partial_keys` qualifies `previous_keys`: the identities whose
     every EARLIER delivery was clipped or exposure-unverifiable, so the
-    "delivered in an earlier span (not new)" cue cannot mean the agent saw
+    "delivered in an earlier span" cue cannot mean the agent saw
     the whole substance — this delivery may be the first to expose the
     suffix.
     """
@@ -346,6 +347,8 @@ class InjectionSpan:
     memory_windows: dict[str, int | None] = field(default_factory=dict)
     memory_window_starts: dict[str, int] = field(default_factory=dict)
     same_step_bound: int | None = None
+    episode_execution_id: str | None = None
+    episode_last_step: int | None = None
 
     def iter_exposed(self) -> Iterator[tuple[dict, dict | None]]:
         """(memory, exposure) pairs for delivered entries; a shorter or

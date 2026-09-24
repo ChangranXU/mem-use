@@ -2123,15 +2123,15 @@ def test_render_html_without_verdicts_has_no_verdict_payload(tmp_path):
     assert '<div class="group" id="legend-verdicts" style="display:none">' in html
 
 
-def test_render_html_verdict_stats_count_auto_as_unassessable():
-    """The overlay header counts auto-neutral spans as unassessable (v8),
-    not ○neutral (v7). Guarded in JS — no engine in the stdlib suite."""
+def test_render_html_verdict_stats_separate_mechanical_skips():
+    """Keep empty deliveries and unobserved consumers out of judged rates."""
     from memgraph.html import render_html
 
     html = render_html({"trajectories": [], "ops": [], "memories": [],
                         "edges": [], "validation": []})
-    assert '(o.verdict_detail||{}).auto?"unassessable"' in html
+    assert 'auto==="empty_delivery"?"empty":auto?"unassessable"' in html
     assert "⊘${vc.unassessable}" in html
+    assert "∅${vc.empty} empty" in html
 
 
 def test_render_html_title_literal_in_graph_data_survives(tmp_path):

@@ -13,7 +13,7 @@ See [Configuration](configuration.md) for endpoint setup (`npm --prefix agent in
 
 ## The Conversation
 
-One span, one conversation. Python materializes the span's [evidence folder](scoring-input.md), assembles the system prompt from the five-signal rubric, and writes a secret-free job file; the runner builds the pi agent with exactly the two evidence tools, seeds it with the opening message containing the exact span document and file index, and lets it run until the model produces a final message with no tool calls. That final text is the judge answer. The result file returns call counts, token usage, and stop diagnostics to Python. The operation's `input` records attempts, LLM/tool calls, the forced marker when applicable, and a transcript path; per-call token usage and stop diagnostics stay in that transcript.
+One span, one conversation, scoped to its parent episode. Python materializes the span's [evidence folder](scoring-input.md), assembles the system prompt from the five-signal rubric, and writes a secret-free job file; the runner builds the pi agent with exactly two evidence tools. The opening includes the exact target span and compact file navigation; the detailed manifest and episode files remain tool-readable. The result file returns retained and executed call counts, reported usage (including rolled-back rounds), context rollbacks, successful retained step-file reads (`retained_evidence`), and stop diagnostics. The operation's `input` preserves these across repair phases alongside the final `forced` and any-phase `any_phase_forced` markers.
 
 ## Trajectory Recording
 
@@ -22,7 +22,7 @@ Every conversation is recorded as a pi event-sourced trajectory: the runner subs
 - `attempt` — opens each runner process's lines, with `phase: "judge"` or `"repair"`. Phases append to the same file; seeded history fires no events, so no duplication.
 - `message` — one full message (user opening, assistant turns with their tool calls and per-call usage, tool results), including turns a budget later rolled back.
 - `tombstone` — `{removedSeqs, reason}` for what the context-budget rollback (`context_budget_rollback`) or a forced round's stripped tool tail (`forced_tool_tail`) removed from the live conversation.
-- `attempt_end` — answer, stop reason, forced flag, error, and cumulative call counts/token usage over the retained conversation. Do not sum these cumulative totals across phases.
+- `attempt_end` — answer, stop reason, forced flag, error, retained-conversation counts/usage, and this phase's executed calls/usage and rollbacks. Only the latter are summed across phases.
 
 The forced-answer message joins the conversation by context rewrite (no event fires for it), so the runner appends it to the trajectory explicitly. The runner records raw; Python rewrites the file masked after each attempt (the one masking implementation stays Python-side), so the kept artifact never carries the credential even when the endpoint echoed it. The operation's `input.transcript` names the file, relative to the output dir.
 
@@ -37,7 +37,12 @@ Two budgets bound every conversation, and both end in a **forced final answer** 
 
 A missing-evidence continuation gets **at most four model calls including its final answer**, or `MAX_STEPS` if that is lower. At the four-call limit this allows three evidence-gathering rounds and one forced final round; it does not regain the initial full investigation budget. The existing context watermark can force an answer earlier. This is a fixed policy, not another configuration knob.
 
-A forced answer is still a verdict like any other; the operation's `input` record carries `"forced": true` and the aggregates tally `forced_answers`, because a budget-exhausted judgment is its own judge-quality regime.
+Before a repair or resumed investigation, the runner caps output at the remaining
+context room when the prior answer has consumed part of the reservation. It
+keeps the evidence history intact and never exceeds `MAX_OUTPUT_TOKENS`.
+Out-of-range or empty step-file reads do not count as retained evidence.
+
+A forced answer can be a valid verdict after retained investigation. Without a successful step-file read still in the conversation, even syntactically valid JSON goes to repair rather than becoming an ordinary neutral verdict; reading only navigation files is insufficient. The operation's `input` carries `"forced": true` only when the final answer was forced, while `any_phase_forced` preserves earlier forced phases across repair.
 
 ## Corrective Retries
 

@@ -80,7 +80,7 @@ const searchSchema = Type.Object({
 });
 
 export function createEvidenceTools(root: string): AgentTool<any>[] {
-	const readEvidence: AgentTool<typeof readSchema, { path: string }> = {
+	const readEvidence: AgentTool<typeof readSchema, { path: string; lines_read: number }> = {
 		label: "Read evidence",
 		name: "read_evidence",
 		description:
@@ -88,13 +88,14 @@ export function createEvidenceTools(root: string): AgentTool<any>[] {
 		parameters: readSchema,
 		execute: async (_id, params) => {
 			const target = resolveInside(root, params.path);
+			const relative = path.relative(fs.realpathSync(root), target).split(path.sep).join("/");
 			const text = fs.readFileSync(target, "utf8");
 			const lines = text.split("\n");
 			const from = (params.offset ?? 1) - 1;
 			if (from > 0 && from >= lines.length) {
 				return {
 					content: [{ type: "text", text: `(the file has ${lines.length} lines; offset ${params.offset} is past its end)` }],
-					details: { path: params.path },
+					details: { path: relative, lines_read: 0 },
 				};
 			}
 			const selected = params.limit ? lines.slice(from, from + params.limit) : lines.slice(from);
@@ -106,7 +107,7 @@ export function createEvidenceTools(root: string): AgentTool<any>[] {
 			}
 			return {
 				content: [{ type: "text", text: body + note }],
-				details: { path: params.path },
+				details: { path: relative, lines_read: selected.filter((line) => line.trim()).length },
 			};
 		},
 	};

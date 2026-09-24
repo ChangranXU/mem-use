@@ -1,1 +1,1 @@
-only from the task statement and the step stream
+only from the recorded episode task, visible context, and step files

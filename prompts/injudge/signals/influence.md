@@ -1,69 +1,37 @@
-4. influence (@influence@) — the memory's
-   footprint in the agent's SUBSEQUENT behavior: the steps from the span's
-   first step onward, bounded where THIS memory is next re-delivered (a
-   re-delivery supersedes — later steps are the re-delivery span's window,
-   so one memory's influence is never credited to two spans). A memory never
-   re-delivered is judged to the end of the stream; another memory's
-   re-delivery bounds only its own window, never this one's:
-   - referenced: the agent explicitly mentioned or quoted the memory, but
-     its actions did not change because of it. This includes confirmation
-     of an existing plan or a redundant echo;
-   - acted_on: a post-injection command, edit, or test USES content the
-     memory carries and the agent could not have derived from what it had
-     already seen — content that appears in neither the task statement,
-     the pre-injection steps, nor any tool output before that step (a
-     path, identifier, flag, ordering, or a claim the agent could not have
-     known otherwise) — or the agent explicitly cites the memory when
-     choosing the action. A SKIPPED step also qualifies, but only with an
-     observable anchor: the agent had announced the intent before the
-     injection and then dropped it, or it explicitly credited the memory
-     with making the step unnecessary;
-   - decisive: the memory changed the direction of the agent's plan — a
-     demonstrable course change (a new approach, a reversed decision), not
-     merely a step executing the established course. Explicit credit is
-     evidence for the change, never a substitute for the change itself;
-   - none: no observable reference to the memory and no action shaped by it.
-     A skip merely inferred from an action's absence is none — absence alone
-     is never evidence.
-   An explicit memory mention establishes referenced, NOT acted_on or
-   decisive. Knowing the fact already can make novelty redundant; it does
-   not erase a recorded reference. Judge action change separately.
-   Context is not memory content. The recorded task, pre-injection steps,
-   and tool outputs already available before an action are alternative
-   sources. A later result cannot explain an earlier choice; a later action
-   may follow an intervening discovery rather than the memory. Search
-   queries may originate in a memory or side lane: a query alone never
-   establishes what the main agent knew. Keys are item labels, not extra
-   delivered claims. Golden answers are evaluator-only verification.
-   Credit only content actually shown in the delivered placement or the
-   entry's exposure-grounded value, not metadata or an unseen suffix.
-   Changed action, not continuation: acted_on/decisive require a step that
-   DIFFERS from the course already established before the injection. A
-   patch already applied, a test already passing, an analysis or plan
-   already written at pre-injection steps, or merely continued/executed
-   afterward, is continuation — referenced if the memory was mentioned,
-   otherwise none, whatever the memory's topic. Redundancy alone does not
-   decide this: an already-established substance can still be acted on when the delivery
-   itself changed the action — a reminder that restores a dropped
-   direction, or execution detail the established plan lacked — so judge
-   the footprint on its own evidence, whatever the novelty call. The `anchors`
-   you give must be the post-injection steps
-   where that changed action or decision happened, inside this memory's
-   window. An in-window decision may anchor credit when later execution
-   substantiates it; a plan that never materializes is not acted_on merely
-   because it was announced. Later outcomes may confirm or refute that
-   action's consequence, but cannot supply a new out-of-window anchor. Steps
-   before the span's first step may support a novelty or accuracy judgment,
-   never an influence claim.
-   Echo rule: a direction the agent had already announced, reasoned out, or
-   applied at pre-span steps cannot be credited to a memory delivered
-   afterward — even when the resulting action lands inside the footprint
-   window. Re-delivering the agent's own earlier reasoning or the task
-   statement back to it is not acted-on influence; that is reversed causality.
-   The echo rule does not erase explicit mentions: those remain referenced.
-   When another delivered memory (a co-delivered entry, or an earlier
-   span's delivery named in the header) carries the same substance, the
-   footprint may be genuinely SHARED: credit the entry the agent's
-   behavior most directly follows — or the one it names — and say in the
-   note that the support is shared. Never drop an observed footprint only
-   because a second memory carried the same substance.
+4. influence (@influence@) — the entry's footprint inside its window (span.md):
+   from the first consuming step until this entry's next re-delivery or the
+   episode's end.
+   - none: no observable reference or attributable action established;
+   - referenced: mentioned or quoted, but actions unchanged (including
+     confirmation of an existing plan);
+   - acted_on: an in-window action uses DISTINCTIVE memory content (a specific
+     path, value, mechanism, or nonroutine procedure) unavailable from earlier
+     evidence, or explicitly credits the memory for choosing that action.
+     Minimal edits and focused-before-full testing are routine, not
+     distinctive content: their absence from the task does not establish
+     use. Uncited matching of routine practice is none; a demonstrated
+     memory-shaped reversal of a prior direction can instead be decisive.
+     A skipped step counts only if the intent was announced before delivery
+     and then dropped, or the agent credits the memory;
+   - decisive: a demonstrable course change (new approach, reversed
+     decision); explicit credit supports but never replaces the change.
+   Sources and timing:
+   - A prior direction needs a pre-delivery source: the task, pre-delivery
+     input, or a step before the first consuming step. A plan first stated in
+     the window, even "I was already going to", cannot show it predated the
+     memory. An intervening discovery counts from the step that observed it;
+     a later result never explains an earlier choice.
+   - Continuing a direction established before delivery is not acted_on
+     (referenced if mentioned). A reminder that restores a dropped direction
+     or supplies missing detail can be.
+   - Wording overlap alone proves neither use nor independence. When the
+     memory and another source both support an action, say attribution is
+     ambiguous and name both; credit acted_on only for memory-specific
+     content or an explicit citation.
+   - When another delivered entry carries the same substance, credit the one
+     the behavior follows or names, and note that support is shared.
+   - Credit only exposed content, never keys, queries, or gold.
+   Each note names the first consuming step and the source behind each
+   action it discusses. Anchors are in-window steps where the shaped action
+   happened; later results may confirm its effect but never add an
+   out-of-window anchor. Pre-window steps inform novelty and accuracy only.

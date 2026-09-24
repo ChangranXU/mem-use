@@ -67,7 +67,17 @@ _BUCKETS = ("[0,0.5)", "[0.5,0.8)", "[0.8,1.0]")
 # the verdict classes every count/cost rollup tallies (error, unjudged, and
 # unassessable — the rule-judged no-subsequent-turn spans — are counts,
 # never rate denominators)
-_COUNTED = (*_VERDICTS, "error", "unjudged", "unassessable")
+_COUNTED = (*_VERDICTS, "error", "unjudged", "unassessable", "empty")
+
+
+def counted_verdict(op: dict) -> str:
+    """Mechanical skips have their own populations, outside judged rates."""
+    if op.get("auto") == "empty_delivery":
+        return "empty"
+    if op.get("auto"):
+        return "unassessable"
+    verdict = op.get("verdict")
+    return verdict if verdict in _COUNTED else "error"
 
 # The wasted-token share is a SPAN-LEVEL non-beneficial-delivery proxy, and
 # it must never read as measured harm — the caveat rides the headline
@@ -75,8 +85,10 @@ _COUNTED = (*_VERDICTS, "error", "unjudged", "unassessable")
 # the proxy per-memory truth, and its coarse bundle charging is just as
 # present then).
 WASTE_SHARE_CAVEAT = (
-    "wasted_token_share is a span-level non-beneficial-delivery proxy: a "
-    "neutral span's referenced memories count as wasted, a positive span's "
+    "wasted_token_share is an estimated span-level non-beneficial-delivery "
+    "proxy: a neutral span means no attributable benefit was observed, not a "
+    "measured absence of effect; a neutral span's referenced memories count "
+    "as wasted, a positive span's "
     "ignored memories count as productive, and a mixed bundle is charged "
     "wholly to its verdict — a high share reads as 'most injected budget "
     "not shown beneficial', never as measured harm; and the verdict rule is "
@@ -247,8 +259,7 @@ def _cost_rollup(operations: list[dict]) -> dict:
         dcost = op.get("delivery_cost") or {}
         tok = dcost.get("approx_tokens_total") or 0
         chars += dcost.get("content_chars_total") or 0
-        v = "unassessable" if op.get("auto") else op.get("verdict")
-        by_verdict[v if v in by_verdict else "error"] += tok
+        by_verdict[counted_verdict(op)] += tok
     return {
         "content_chars_total": chars,
         "approx_tokens_total": sum(by_verdict.values()),
@@ -294,7 +305,7 @@ def aggregate(operations: list[dict], n_injections: int, n_trajectories: int | N
         # a rule-judged auto-neutral span tallies as UNASSESSABLE, never as
         # the neutral its placeholder verdict spells: its "no footprint" is
         # observation missingness, not a measured null effect
-        counts["unassessable" if op.get("auto") else (v if v in counts else "error")] += 1
+        counts[counted_verdict(op)] += 1
         conf = op.get("confidence")
         if v in _VERDICTS and isinstance(conf, (int, float)) and not isinstance(conf, bool):
             conf_sums[v].append(conf)
@@ -355,6 +366,7 @@ def aggregate(operations: list[dict], n_injections: int, n_trajectories: int | N
     out["error"] = counts["error"]
     out["unjudged"] = counts["unjudged"]
     out["unassessable"] = counts["unassessable"]
+    out["empty"] = counts["empty"]
     denom = sum(counts[v] for v in _VERDICTS)
     out["rates"] = {v: (round(counts[v] / denom, 4) if denom else None) for v in _VERDICTS}
     out["memory_usage"] = [

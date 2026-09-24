@@ -10,6 +10,8 @@ import type { AgentJob, AgentResult } from "./protocol.ts";
 type RequestBody = {
 	messages: { role: string; content: unknown }[];
 	tools?: { function: { name: string } }[];
+	max_tokens?: number;
+	max_completion_tokens?: number;
 };
 type Reply = { content?: string; tool_calls?: unknown[]; usage?: object };
 
@@ -90,6 +92,7 @@ test("repair is one call without tools; resumed prompt keeps prior evidence exac
 		{ content: missing }, { tool_calls: [readStepTwo] }, { content: '{"done":true}' },
 	]);
 	const judged = await run({ repair: false, opening: "judge the evidence" });
+	assert.equal(judged.retained_evidence, 1);
 	const repaired = await run({ attempt: 2, history: judged.messages });
 	assert.equal(repaired.answer, missing);
 	assert.equal(repaired.llm_calls - judged.llm_calls, 1);
@@ -135,6 +138,10 @@ test("first-round context rollback retains the opening and a replayable forced a
 	assert.equal(result.answer, '{"done":true}');
 	assert.equal(result.stop_reason, "context_budget_forced");
 	assert.equal(result.forced, true);
+	assert.equal(result.context_rollbacks, 1);
+	assert.equal(result.executed_llm_calls, 2);
+	assert.equal(result.llm_calls, 1);
+	assert.equal(result.retained_evidence, 0);
 	assert.equal(requests.length, 2);
 	const userMessages = requests[1].messages.filter((m) => m.role === "user");
 	assert.ok(JSON.stringify(userMessages).includes("judge the evidence"));
@@ -147,6 +154,58 @@ test("first-round context rollback retains the opening and a replayable forced a
 		if (event.type === "tombstone") for (const seq of event.removedSeqs) live.delete(seq);
 	}
 	assert.deepEqual([...live.values()], result.messages);
+});
+
+test("oversized opening is rejected before a paid request", async (t) => {
+	const { run, requests, config } = await fixture(t, []);
+	const result = await run({ repair: false, opening: "target evidence ".repeat(4000),
+		config: { ...config, context_window: 2300 } });
+	assert.match(result.error ?? "", /opening context .* exceeds the input budget/);
+	assert.equal(result.executed_llm_calls, 0);
+	assert.equal(requests.length, 0);
+});
+
+test("repair keeps evidence when the prior answer consumed reserved output room", async (t) => {
+	const { run, requests, config } = await fixture(t, [
+		{ tool_calls: [readStepTwo] }, { content: "invalid answer ".repeat(700) },
+		{ content: '{"done":true}' },
+	]);
+	const judged = await run({ repair: false });
+	const result = await run({ attempt: 2, history: judged.messages,
+		config: { ...config, context_window: 3700 } });
+	assert.equal(result.error, null);
+	assert.equal(result.answer, '{"done":true}');
+	assert.equal(result.retained_evidence, 1);
+	assert.equal(requests.length, 3);
+	const outputLimit = requests[2].max_completion_tokens!;
+	assert.ok(outputLimit > 0 && outputLimit < config.max_output_tokens);
+});
+
+for (const [file, offset, retained] of [
+	["steps/step_000002.md", 1000, 0], ["./steps/step_000002.md", 1, 1],
+] as const) {
+	test(`evidence coverage counts actual step contents (${file}, offset ${offset})`, async (t) => {
+		const { run } = await fixture(t, [
+			{ tool_calls: [{ ...readStepTwo, function: { name: "read_evidence",
+				arguments: JSON.stringify({ path: file, offset }) } }] },
+			{ content: '{"done":true}' },
+		]);
+		const result = await run({ repair: false });
+		assert.equal(result.retained_evidence, retained);
+	});
+}
+
+test("reading navigation alone is not retained investigation evidence", async (t) => {
+	const { run, root } = await fixture(t, [
+		{ tool_calls: [{ ...readStepTwo, function: {
+			name: "read_evidence", arguments: '{"path":"manifest.json"}',
+		} }] },
+		{ content: '{"done":true}' },
+	]);
+	fs.writeFileSync(path.join(root, "manifest.json"), '{"files":[]}');
+	const result = await run({ repair: false, opening: "judge the evidence" });
+	assert.equal(result.answer, '{"done":true}');
+	assert.equal(result.retained_evidence, 0);
 });
 
 test("context watermark includes the system and evidence tool schemas without usage", async (t) => {
@@ -173,6 +232,18 @@ test("output-only usage cannot replace the context prefix estimate", async (t) =
 	assert.equal(result.stop_reason, "context_budget_forced");
 	assert.equal(requests.length, 2);
 	assert.ok(!JSON.stringify(requests[1]).includes("evidence evidence"));
+});
+
+test("output-only history cannot bypass continuation preflight", async (t) => {
+	const { run, requests, config } = await fixture(t, [
+		{ content: "large invalid answer ".repeat(2000), usage: { completion_tokens: 10, total_tokens: 10 } },
+	]);
+	const prior = await run();
+	const result = await run({ attempt: 2, history: prior.messages,
+		config: { ...config, context_window: 3000 } });
+	assert.match(result.error ?? "", /before any judge call/);
+	assert.equal(result.executed_llm_calls, 0);
+	assert.equal(requests.length, 1);
 });
 
 for (const limit of [2, 4]) {

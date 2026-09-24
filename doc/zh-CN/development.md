@@ -27,8 +27,28 @@ uv run pytest tests/test_injudge.py -q # 单个文件
 | `injudge/` | 步骤流、注入区间、判定契约与评审提示词（`judge.py`）、证据文件夹（`evidence.py`）、智能体运行器客户端与纠正循环（`agent.py`）、gold 边车（`gold.py`）、聚合、报告、CLI（`python3 -m injudge`） |
 | `agent/` | TypeScript 评审智能体：带预算与强制作答的 pi 运行器（`runner.ts`）、只读证据工具（`evidence-tools.ts`）、事件流记录（`trajectory.ts`）、作业/结果协议（`protocol.ts`） |
 | `prompts/` | 所有 LLM 提示词文件，按工具与用途分目录（经 `injudge/prompts.py` 加载） |
+| `calibration/` | 受控的评审校准用例与报告打分（`python3 -m calibration`） |
 | `tests/` | pytest 测试套件与共享的 schema-v9 合成轨迹构造器 |
 | `doc/` | 本书（GitBook 布局：`LANGS.md` + `en/` + `zh-CN/`） |
+
+## 评审校准
+
+预制答案测试的是契约，而非判断质量。`calibration/` 包含受控的开发回归用例，覆盖显式
+与未引用的使用、通用做法、来源与新颖性的区别、未决疑点、计划执行与逆转、有害建议，
+以及仅措辞不同的基线。每个用例只固定其构造能够确立的标签。
+
+```bash
+uv run -m calibration build calibration-cases/
+uv run -m injudge calibration-cases/ -o output/calibration   # 付费；重复运行以测稳定性
+uv run -m calibration score output/calibration/*/injudge-report.json
+```
+
+`score` 报告每处分歧、重复运行的逐标签稳定性，以及匹配用例的新颖性一致性。相同设置
+衡量可重复性，改变设置衡量敏感性。除标签外还须审阅来源断言：neutral 判定仍可能错误
+描述证据。`AGENTS.md` 要求付费校准取得用户授权。
+
+所有现有用例都属于回归集。留出集必须重新编写，并在首次付费运行前冻结用例、预期标签
+和评审提示词。一旦其结果被用于调优，它就成为回归数据；留出验证需要另一套新用例。
 
 ## 贡献约定
 

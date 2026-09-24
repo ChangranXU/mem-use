@@ -1,5 +1,5 @@
 ---
-description: "injudge.report/v11、injudge.summary/v9、全部字段，以及每项比率如何计数。"
+description: "injudge.report/v13、injudge.summary/v11、全部字段，以及每项比率如何计数。"
 icon: box-archive
 ---
 
@@ -11,8 +11,8 @@ injudge 把一次运行的全部产物写入输出容器（`-o DIR`，默认 `ou
 
 | 文件 | Schema | 作用 |
 |---|---|---|
-| `injudge-report.json` | `injudge.report/v11` | 运行时评审记录。每条轨迹完成后重写，崩溃也保留已完成部分。用 `--verdicts` 喂给 memgraph。 |
-| `summary.json` | `injudge.summary/v9` | 最终统计集合：计数、比率，以及无叙述的区间索引。 |
+| `injudge-report.json` | `injudge.report/v13` | 运行时评审记录。每条轨迹完成后重写，崩溃也保留已完成部分。用 `--verdicts` 喂给 memgraph。 |
+| `summary.json` | `injudge.summary/v11` | 最终统计集合：计数、比率，以及无叙述的区间索引。 |
 | `memgraph-verdicts.html` | — | 仅在 `--html` 时产出（默认关闭）：召回节点按区间判定着色的 memgraph。 |
 | `evidence/<span-dir>/` | — | 每个送入评审智能体的区间一个文件夹（含 error 结局）：向智能体提供的原始文件。 |
 | `agent-runs/<span-dir>.jsonl` | — | 每个送入评审智能体的区间一条轨迹：评判对话的 pi 事件流记录（见[评审智能体](judge-client.md#轨迹记录)）。 |
@@ -28,8 +28,9 @@ injudge 把一次运行的全部产物写入输出容器（`-o DIR`，默认 `ou
 | `episodes/<safe-episode-id>/deliveries.md` | — | 按时间排列的 delivery、搜索、槽位与曝光证据，也包含空 delivery。 |
 | `episodes/<safe-episode-id>/steps/` | — | 原始全局 step 与工具结果可用时间。 |
 
-episode 文件夹是未来评审器的 evidence root。规范记忆记录和未解析审计数据
-留在 `episode-inputs.json`；裁剪或无法核实的值不会出现在评审可读文件中。
+正常评审为每个区间建立独立 evidence root，复用其所属 episode 的准备文件，
+另加目标 `span.md`。规范记忆记录与审计数据不进入评审可读文件；裁剪或无法核实
+的值仍被隐藏。report 记录 episode 执行身份、附件来源、证据边界和评审过程计数。
 
 审计记录使用 `gold_join` 与 `outcome_join` 分别保存黄金答案和评测结果的来源。
 仅按基准实例索引的 harness report 不能跨重复执行或不同实验组关联。结果冲突
@@ -45,6 +46,10 @@ memgraph 的 `--json` 产物是 `{tool, trajectories, ops, memories, edges, vali
 
 **summary** 是供阅读和比较记忆系统的数字。评判叙述只留在 report 中。
 
+计数包含 episode 数量，各轨迹详情包含 episode 到区间的简洁索引。CLI 汇总诊断数量，
+完整诊断保留在 report 和图中。Report v13 与 summary v11 将空投递和消费者未观测分开计数；
+不接受旧版产物。
+
 当多个身份共用同一显示键时，summary 的 `key` 字段（排查清单与 `memory_usage`）会带上 `key#<item 或 namespace>` 后缀——取 8 字符前缀，前缀冲突时取完整 base——两条记忆绝不会被并成一条。report 始终保留完整身份。
 
 ## 数字如何推导
@@ -56,6 +61,7 @@ memgraph 的 `--json` 产物是 `{tool, trajectories, ops, memories, edges, vali
 | 总体 | 成员 |
 |---|---|
 | 已评判区间 | `positive` + `negative` + `neutral`。判定率的分母。 |
+| `empty` | 未投递任何条目（`auto: empty_delivery`）。不调用评审；单独计数和记录投递成本，不进入方向性比率或浪费 token 份额。 |
 | `unassessable` | 规则判定的 auto-neutral 区间（所有投递都无法归属到 agent 步骤——无法确定下游足迹）。只计数，其投递成本计入独立的 token 桶：观察缺失不等于测得的零效应，因此不进入任何方向性分母，也不计入浪费 token 份额。有已评判总体、因而存在 `headline` 时，由其中的 `unassessable_spans` / `unassessable_tokens` 标出。 |
 | LLM 已评判区间 | 无 `auto` 标记的已评判区间。评分比率、使用汇总与置信度的总体。 |
 | `error` / `unjudged` | 只计数。永远不是比率分母。 |
@@ -71,7 +77,7 @@ $$
 \mathrm{rates}[v] = \frac{\mathrm{count}[v]}{\mathrm{positive} + \mathrm{negative} + \mathrm{neutral}}
 $$
 
-`headline.judged_spans` 就是该分母。`headline.wasted_token_share` 是 neutral 与 negative 区间的注入 token 成本占已评判区间成本的份额——一个**区间级"无收益投递"代理**：neutral 区间被引用的记忆计入浪费，positive 区间被无视的记忆计入产出，混合捆绑整体按其判定计费；因此份额的分子与分母（`wasted_tokens` / `judged_tokens`）随行命名，被排除的 error/unjudged token 在非零时以 `error_unjudged_tokens` 呈现（unassessable token 同理以 `unassessable_tokens` 呈现）；`headline.caveat` 随行于每一个报告的份额，重申两种已知的粗糙性（区间级代理，以及判定的不对称：被无视的垃圾是 neutral；只有 acted-on 且无效或有害才是 negative）——不会因为份额偏低或存在少量 negative 区间而消失。
+`headline.judged_spans` 就是该分母。`headline.wasted_token_share` 是 neutral 与 negative 区间的注入 token 成本占已评判区间成本的份额——一个**估算的区间级"无收益投递"代理**（neutral 区间表示未观察到可归因的收益，而非测得的无作用）：neutral 区间被引用的记忆计入浪费，positive 区间被无视的记忆计入产出，混合捆绑整体按其判定计费；因此份额的分子与分母（`wasted_tokens` / `judged_tokens`）随行命名，被排除的 error/unjudged token 在非零时以 `error_unjudged_tokens` 呈现（unassessable token 同理以 `unassessable_tokens` 呈现）；`headline.caveat` 随行于每一个报告的份额，重申两种已知的粗糙性（区间级代理，以及判定的不对称：被无视的垃圾是 neutral；只有 acted-on 且无效或有害才是 negative）——不会因为份额偏低或存在少量 negative 区间而消失。
 
 ### 评分比率
 
@@ -111,7 +117,7 @@ $$
 
 ### 输入路径计数
 
-仅 overall：带 `input` 记录的区间——每个送入智能体运行的区间，含 error 结局——计入 `input_paths.agent`、`gold_scored` 与 `forced_answers`（`forced` 标记：对话的最终答案出自预算耗尽的强制作答轮）。只有规则判定的 auto-neutral 与 unjudged 区间没有 `input`，因此只有它们不出现在这些计数中。
+仅 overall：带 `input` 记录的区间——每个送入智能体运行的区间，含 error 结局——计入 `input_paths.agent`、`gold_scored` 与 `forced_answers`（`forced` 表示最终答案出自预算耗尽的强制作答轮）。按规则计数的空投递或不可归属区间，以及 unjudged 区间没有 `input`。
 
 ## summary.json 字段
 
@@ -184,6 +190,7 @@ $$
 | 字段 | 含义 |
 |---|---|
 | `operation_id` | 区间 id；据此在 `injudge-report.json` 查找完整记录 |
+| `episode_execution_id` | 所属 episode 的执行身份；边界不明确时省略 |
 | `verdict` / `confidence` | 区间结果与评审置信度；confidence 为 null 时省略。auto-neutral 使用 `unassessable`，与汇总计数一致。 |
 | `auto` | 不可评估区间的规则原因，如 `no_subsequent_turn`；已评审区间省略 |
 | `steps` | 区间投递所在的 `[first, last]` agent 步；未归属到 step 时省略 |
@@ -192,6 +199,6 @@ $$
 
 ## 仅 Report 中的字段
 
-`injudge-report.json` 每个操作还带有：`memories`（完整已录制引用，每条标注其区间本地 `id`）、`memory_exposure`（逐条目：placement 对该值是 `full`、`full_normalized`——整体载入但仅在空白符折叠 / markdown 转义剥离后匹配——、`clipped` 到 N 字符前缀，还是 `unknown`——无法核实，故评审输入中隐去规范值；含引号、反斜杠或换行结构的值只做逐字比对）、`memory_windows`（逐条目 id：该条目动作 `anchors` 校验所依据的足迹窗口结束步——从未被重投递时为 `null`，即其上界是步骤流末尾；同一步投递冲突会把窗口截断在该区间自己的末次投递步，即使此前已有更晚的有限上界；所有投递都无法归属到 agent 步骤时省略）、`memory_window_starts`（仅在同一步投递冲突抬高某条目窗口时出现：该条目窗口自共享步骤之后才开始，共享步骤归先 carrier）、评分 note 与各条目的动作 `anchors`、`analysis`、`evidence`、`step_gaps`、`new_keys` / `removed_keys` / `previous_keys` / `changed_keys`、`auto`、`error`、`judge_raw`、`pe_pairing_corrections`（若有），以及送入智能体运行的区间（含 error 结局）上的 `input`（`path` 为 `agent`，外加 `attempts`、`llm_calls`、`tool_calls`、`transcript`——指向 `agent-runs/` 下该对话的轨迹 JSONL，相对输出目录——适用时还有 `"gold"` / `"forced"`——`forced` 标记步数或上下文预算以强制作答轮结束的对话）。`tool.config` 记录已解析、无密钥的评审智能体配置（净化为 `scheme://host[:port][/path]`），便于从产物本身复现运行。
+`injudge-report.json` 的每个操作还带有 `episode_execution_id`、`episode_last_step`、完整的 `memories` 引用与区间本地 id、`memory_exposure`（`full`、`full_normalized`、`clipped` 或 `unknown`；未核实的规范值不会进入评审证据），以及逐条目的 `memory_windows`（全局步骤上界，至迟止于该 episode 的最后可用步骤；同 episode 的后续投递也可提前截断）。`memory_window_starts` 记录同一步投递冲突。评分 note、动作 `anchors`、`analysis`、`evidence`、`step_gaps`、`new_keys` / `removed_keys` / `previous_keys` / `changed_keys`、`auto`、`error`、`judge_raw` 和适用时的 `pe_pairing_corrections` 仍保留。送入智能体的区间（含 error）另有 `input`：尝试次数、保留的模型/工具调用及成功读取且仍保留的步骤文件数（`retained_evidence`）、实际执行调用数、包括回滚调用的用量、上下文回滚、`any_phase_forced` 和相对输出目录的 transcript 路径；适用时还有 `gold` 与仅代表最终答案的 `forced`。轨迹中的 episode 行记录边界、任务、附件与证据来源，但不产生 episode verdict。`tool.config` 记录已解析且无密钥的评审配置。
 
 `injections` 数组列出每一次原始投递及其所属区间、`role`（`first` 或 `restated`）、`verdict`、`content_chars`，以及 `op_id` / `seq` / `step`。

@@ -711,7 +711,7 @@ function showOp(opId){
         // counts are pipeline-typed ints
         const inp=d.input||{};
         const inpTxt=inp.path?`<span class="meta">input: ${esc(inp.path)}${inp.gold?" · gold":""}${inp.forced?" · forced":""}${typeof inp.attempts==="number"?` · ${esc(inp.attempts)} attempt${inp.attempts===1?"":"s"}`:""}</span>`:"";
-        h+=`<div class="mrow"><div><span class="chip" style="color:${VD_COLOR[v]||"var(--muted)"}">${esc(v)}</span>${d.confidence!=null?`<span class="meta">conf ${esc(d.confidence)}</span>`:""}<span class="meta">${esc(x.verdict_span)}</span>${d.auto?`<span class="meta">auto: ${esc(d.auto)}</span>`:""}${dcTxt}${inpTxt}</div>`;
+        h+=`<div class="mrow"><div><span class="chip" style="color:${VD_COLOR[v]||"var(--muted)"}">${esc(v)}</span>${d.confidence!=null?`<span class="meta">conf ${esc(d.confidence)}</span>`:""}<span class="meta">${esc(x.verdict_span)}</span>${d.episode_execution_id?`<span class="meta">episode: ${esc(d.episode_execution_id)}</span>`:""}${d.auto?`<span class="meta">auto: ${esc(d.auto)}</span>`:""}${dcTxt}${inpTxt}</div>`;
         if(d.error) h+=`<div class="flagbox">judge error: ${esc(d.error)}</div>`;
         if(d.analysis) h+=`<div class="vline" style="white-space:normal">${esc(d.analysis)}</div>`;
         // the rubric/usage key on span-local entry ids (m1, m2, …): render
@@ -791,13 +791,13 @@ function mount(keepScroll){
     for(const o of G.ops){
       if(o.kind!=="recall"||!o.verdict_span||seenS.has(o.verdict_span)) continue;
       seenS.add(o.verdict_span);
-      // auto-neutral is unassessable in the overlay count, matching the
-      // report aggregate — not ○neutral
-      const v=(o.verdict_detail||{}).auto?"unassessable":(o.span_verdict||"unjudged");
+      const auto=(o.verdict_detail||{}).auto;
+      const v=auto==="empty_delivery"?"empty":auto?"unassessable":(o.span_verdict||"unjudged");
       vc[v]=(vc[v]||0)+1;
     }
     vdStats=` · verdicts +${vc.positive||0}/−${vc.negative||0}/○${vc.neutral||0}`
       +(vc.unassessable?` ⊘${vc.unassessable}`:"")
+      +(vc.empty?` ∅${vc.empty} empty`:"")
       +(vc.error?` !${vc.error}`:"")+(vc.unjudged?` ?${vc.unjudged}`:"");
   }
   document.getElementById("stats").textContent=

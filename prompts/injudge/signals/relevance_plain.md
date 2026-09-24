@@ -1,7 +1,9 @@
-1. relevance (true|false) — is the memory topically related to the task
-   (the recorded statement above; when absent, reconstruct the task from
-   the pre-injection steps) and to the agent's current subgoal at the
-   injection point? Use the steps before the span's first step.
-   relevance=false says the memory was off-topic — it never by itself
-   decides influence or positive_effect (an off-topic memory can still be
-   acted on, and a topical one can be ignored).
+1. relevance (true|false) — does the exposed content apply to the task
+   (task.md) or to the agent's subgoal at delivery? Judge its main substance,
+   not names or a lesson you could abstract from it: a technique, failure
+   pattern, or verification or submission step that applies here is relevant
+   even from another library or bug, but facts about a different bug's
+   mechanism, results, or artifacts are not relevant merely because they
+   share a generic principle. Relevance is separate from accuracy, novelty,
+   and use: a wrong proposed remedy can still be relevant. Say why in terms
+   of the content.

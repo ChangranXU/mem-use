@@ -44,12 +44,10 @@ from __future__ import annotations
 import json
 import math
 import re
-import threading
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from injudge.model import AgentStep, InjectionSpan, memory_id, step_range
+from injudge.model import InjectionSpan, memory_id, step_range
 from injudge.prompts import load_prompt
 from memgraph.annotations import is_int
 
@@ -136,12 +134,6 @@ GOLD_SYSTEM_PROMPT = _substitute_enums(_scoring_prompt("gold"))
 # never drift apart.
 MEMORIES_NOTE = load_prompt("injudge/scoring/memories_note")
 
-# The gold attachments' frames (the @golden@ / @correctness@ slots take the
-# recorded bodies) — instruction prose lives in the prompt files like every
-# other LLM-facing string.
-_GOLDEN_BLOCK = load_prompt("injudge/scoring/golden_block")
-_CORRECTNESS_BLOCK = load_prompt("injudge/scoring/correctness_block")
-
 # The corrective retry note's frame (the @error@ slot takes the contract
 # violation) — one module-level load like every other prompt file here,
 # never a re-read per corrective retry.
@@ -162,9 +154,8 @@ class GoldInput:
     `golden` is a golden-answer body (the reference solution): attaching one
     switches that span's judging to GOLD_SYSTEM_PROMPT. `correctness` is the
     recorded outcome — {"resolved": bool} plus an optional 0–1 "score" —
-    corroboration only: it attaches as the TASK CORRECTNESS block under
-    whichever system prompt the span uses and never selects the prompt by
-    itself.
+    corroboration only: it is available in outcome.json and never selects
+    the scoring prompt by itself.
     """
 
     golden: str | None = None
@@ -235,77 +226,6 @@ def _cmd_of(args: dict | str) -> str:
     return json.dumps(args or {}, ensure_ascii=False)
 
 
-def _render_step(st: AgentStep) -> str:
-    """One step's rendered block — the unit the evidence folder writes one
-    file of."""
-    seq_end = st.seq_end if st.seq_end is not None else "?"  # truncated mid-turn
-    lines = [f"[step {st.step}, turn {st.turn}, seqs {st.seq_start}–{seq_end}]"]
-    if st.reasoning:
-        lines.append(f"reasoning: {st.reasoning}")
-    if st.content:
-        lines.append(f"content: {st.content}")
-    for t in st.tools:
-        lines.append(f"command: {t.name} — {_cmd_of(t.args)}")
-        # a late close (the recorder's turn-less late-result path) joins its
-        # initiating step by tool_call_id: name the actual availability seq,
-        # or the rendered order would present the result as known at this
-        # turn's range while later turns were really its first readers
-        late = (
-            t.seq_end is not None
-            and st.seq_end is not None
-            and t.seq_end > st.seq_end
-        )
-        avail = f", available from seq {t.seq_end} — after this turn's end" if late else ""
-        if t.result is not None:
-            lines.append(f"result ({t.status or '?'}{avail}): {t.result}")
-        elif t.status is not None:
-            # the execution closed without a result (no_result/interrupted)
-            # — the recorded close says why; "never observed" would claim
-            # the run lost the outcome, which it did not
-            lines.append(f"result ({t.status}{avail}): (none recorded)")
-        else:
-            lines.append("result: (never observed)")
-    return "\n".join(lines)
-
-
-def _step_text(s: AgentStep) -> str:
-    """One step's searchable text: reasoning, content, tool name/args/result —
-    the surfaces the echo-overlap guard matches against."""
-    parts = [s.reasoning, s.content]
-    for t in s.tools:
-        parts += [t.name or "", _cmd_of(t.args), t.result or ""]
-    return "\n".join(p for p in parts if p)
-
-
-class _StepsMemo:
-    """A one-entry memo over a steps list, keyed by the list's identity.
-
-    One entry is enough: a trajectory's spans are judged together (the
-    JUDGE_PARALLEL pool shares the steps list) before the next trajectory's
-    stream is built. The list itself rides the entry tuple and identity is
-    compared, so an id() recycled after garbage collection can never alias a
-    stale entry. The first miss computes under the lock (double-checked):
-    without it every pool worker misses the empty memo on the opening batch
-    and independently re-derives the identical value."""
-
-    def __init__(self, compute: Callable[[list[AgentStep]], Any]) -> None:
-        self._compute = compute
-        self._entry: tuple[list[AgentStep], Any] | None = None
-        self._lock = threading.Lock()
-
-    def __call__(self, steps: list[AgentStep]) -> Any:
-        entry = self._entry
-        if entry is not None and entry[0] is steps:
-            return entry[1]
-        with self._lock:
-            entry = self._entry
-            if entry is not None and entry[0] is steps:
-                return entry[1]
-            value = self._compute(steps)
-            self._entry = (steps, value)
-            return value
-
-
 # ------------------------------------------------- the same-episode echo guard
 
 # Content words the overlap check counts (4+ chars — shorter tokens are
@@ -315,20 +235,10 @@ _ECHO_WORD = re.compile(r"[A-Za-z0-9_]{4,}")
 _ECHO_MIN_WORDS = 6  # a shorter value is too coarse to call an echo
 _ECHO_MIN_OVERLAP = 0.8  # share of the value's words already seen pre-injection
 
-# per-step content-word sets, memoized per steps list: a trajectory's spans
-# share the one list, so the words are split once
-_step_words = _StepsMemo(
-    lambda steps: tuple(
-        {w.lower() for w in _ECHO_WORD.findall(_step_text(st))} for st in steps
-    )
-)
-
-
 def _echo_overlap_warnings(
     verdict: dict,
     span: InjectionSpan,
-    steps: list[AgentStep],
-    task: str | None,
+    baseline: str,
     warnings: list[str],
 ) -> None:
     """Display-level guard against the same-episode echo trap: a memory whose
@@ -339,11 +249,7 @@ def _echo_overlap_warnings(
     rubric = verdict.get("rubric") or {}
     if not rubric or span.step_first is None:
         return
-    pre: set[str] = set()
-    if task:
-        pre.update(w.lower() for w in _ECHO_WORD.findall(task))
-    for words in _step_words(steps)[: span.step_first - 1]:
-        pre |= words
+    pre = {w.lower() for w in _ECHO_WORD.findall(baseline)}
     if not pre:
         return
     for i, m in enumerate(span.memories):
@@ -362,14 +268,129 @@ def _echo_overlap_warnings(
         if overlap >= _ECHO_MIN_OVERLAP:
             warnings.append(
                 f"{span.id}: {mid} ({key or 'unkeyed'}).novelty judged 'novel' but "
-                f"{overlap:.0%} of the value's words already appear in the task "
-                "statement or the pre-injection steps — a possible same-episode "
+                f"{overlap:.0%} of the value's words already appear in the independent "
+                "pre-delivery context or prior steps — a possible same-episode "
                 "echo (the judged novelty stands; review the span)"
             )
 
 
-def _render_span_header(span: InjectionSpan, task: str | None, memories_note: str) -> str:
-    """The task + span + delivered-memories header of the span document the
+# A task mention alone does not attribute every later quote to it: novelty
+# notes also quote content ABSENT from the task. Recognize direct citation
+# prefixes conservatively; leave other attribution styles to manual review.
+_QUOTED_TEXT = re.compile(
+    r'"([^"\n]+)"|“([^”\n]+)”|'
+    r"(?<!\w)'([^'\n]+)'(?!\w)|‘([^’\n]+)’|`([^`\n]+)`"
+)
+_TASK_CITATION = re.compile(
+    r"\b(?:task(?:\.md)?(?:['’]s)?|submission instructions?)\s*"
+    r"(?:(?:own|explicit|text|submission|workflow|instructions?|requirements?|rules|"
+    r"says?|states?|requires?|specifies?|mandates?|prescribes?|already|recommended|"
+    r"asks?|for|calls|that|to)\s+)*"
+    r"[:(]?\s*$",
+    re.IGNORECASE,
+)
+_INDEPENDENCE = re.compile(
+    r"\b(?:independent(?:ly)?|unassisted|unaided|"
+    r"from\s+(?:the\s+)?(?:code|source(?:\s+code)?)\s+alone)\b", re.IGNORECASE,
+)
+_TASK_SOURCE = r"\btask(?:\.md)?(?:['’]s)?"
+_TASK_ATTRIBUTION = re.compile(
+    _TASK_SOURCE + r"\s+(?:(?:own|explicit|instructions?|workflow|submission|"
+    r"steps?|\d+|recommended|already)\s+){0,6}"
+    r"(?:requires?|mandates?|prescribes?|specifies?|implies?|states?|says?)\b|"
+    r"\b(?:required|mandated|prescribed)\s+by\s+(?:the\s+)?" + _TASK_SOURCE + r"|"
+    r"\b(?:follows?|followed|mirrors?|restates?)\s+(?:the\s+)?" + _TASK_SOURCE + r"|"
+    r"\btask[- ]mandated\b",
+    re.IGNORECASE,
+)
+
+
+def _task_quote_matches(quote: str, task: str) -> tuple[bool, int]:
+    """Match in order; count one fragment so omissions cannot pool words."""
+    fragments = [part.strip() for part in quote.replace("…", "...").split("...")
+                 if part.strip()]
+    longest_fragment_words = max(
+        (len(part.split()) for part in fragments), default=0)
+    offset = 0
+    for fragment in fragments:
+        offset = task.find(fragment, offset)
+        if offset < 0:
+            return False, longest_fragment_words
+        offset += len(fragment)
+    return bool(fragments), longest_fragment_words
+
+
+def _source_claim_warnings(
+    verdict: dict, span: InjectionSpan, task_text: str, warnings: list[str],
+) -> None:
+    """Flag suspect prose after masking, without retries or label changes.
+
+    Analysis is span-wide, so independence there can only be flagged for
+    review when any entry has influence=none; it cannot be assigned to one
+    entry by a lexical check. Even negated independence can trigger a warning.
+    Warning bodies name fields, never copy endpoint text or task contents.
+    """
+    fields: list[tuple[str, str, bool]] = []
+    none_ids = []
+    for mid, signals in verdict["rubric"].items():
+        no_influence = signals["influence"]["value"] == "none"
+        if no_influence:
+            none_ids.append(mid)
+        fields.extend((f"{mid}.{signal}.note", signals[signal]["note"], no_influence)
+                      for signal in _SIGNALS)
+    analysis = verdict["analysis"]
+    fields.append(("analysis", analysis, bool(none_ids)))
+    # This is a presence hint, not a syntax check: Markdown code delimiters
+    # and capitalization in quoted prose should not fabricate a missing source.
+    task = " ".join(task_text.replace("`", "").split()).casefold()
+    for field, text, no_influence in fields:
+        if no_influence and _INDEPENDENCE.search(text):
+            warnings.append(
+                f"{span.id}: {field} uses independence language with influence='none' "
+                "in the rubric; attribution may be overstated (review only; verdict unchanged)"
+            )
+        if field != "analysis" and not field.endswith((".influence.note", ".novelty.note")):
+            continue
+        task_quote = False
+        verified_quote = False
+        missing_quote = False
+        previous_end = 0
+        for match in _QUOTED_TEXT.finditer(text):
+            prefix = text[previous_end:match.start()]
+            task_quote = bool(_TASK_CITATION.search(prefix)) or (
+                task_quote and bool(re.fullmatch(r"[\s,;]*(?:and\s+|\.\.\.\s*)?", prefix))
+            )
+            previous_end = match.end()
+            quote = next(part for part in match.groups() if part is not None)
+            normalized_quote = " ".join(quote.replace("`", "").split()).casefold()
+            matches_task, longest_fragment_words = _task_quote_matches(
+                normalized_quote, task)
+            if task_quote and not matches_task:
+                warnings.append(
+                    f"{span.id}: {field} has a task-attributed quote absent from task.md "
+                    "after whitespace/backtick/case normalization (review only; verdict unchanged)"
+                )
+                missing_quote = True
+                break
+            # Identifiers and short labels are not requirement quotations.
+            verified_quote |= matches_task and longest_fragment_words >= 3
+        if (not verified_quote and not missing_quote
+                and _TASK_ATTRIBUTION.search(_QUOTED_TEXT.sub("", text))):
+            warnings.append(
+                f"{span.id}: {field} attributes requirements to the task without a "
+                "matching task quote with a fragment of at least three words "
+                "(review only; verdict unchanged)"
+            )
+    words = len(analysis.split())
+    if words > 60:
+        warnings.append(
+            f"{span.id}: analysis has {words} words, above the 60-word target "
+            "(review only; verdict unchanged)"
+        )
+
+
+def _render_span_header(span: InjectionSpan, memories_note: str) -> str:
+    """The target and delivered-memories header of the span document the
     judge agent reads first."""
     # a step-less span (no attributed consumer — the CLI rule-judges
     # it auto-neutral) names no step range
@@ -379,18 +400,16 @@ def _render_span_header(span: InjectionSpan, task: str | None, memories_note: st
         else "no attributed agent step (consumer missing or unclassified)"
     )
     parts = []
-    if task:
-        parts.append(f"TASK STATEMENT (the exact task the run recorded):\n{task}\n")
     parts.append(
         f"SPAN TO EVALUATE {span.id} — {span.n_injections} identical injection(s), "
         f"consumed at {consumed} (seqs {span.seq_first}–{span.seq_last})."
     )
     if span.total:
-        # the span's position in the run (set by group_spans; 0/0 when the
+        # the span's position in its episode (set by group_spans; 0/0 when the
         # span was built directly) — k > 1 means earlier spans delivered
         # memories before this one
         parts.append(
-            f"This is span {span.position} of {span.total} in the trajectory"
+            f"This is span {span.position} of {span.total} in the episode"
             + ("; earlier spans already delivered memories before it."
                if span.position > 1 else ".")
         )
@@ -415,9 +434,11 @@ def _render_span_header(span: InjectionSpan, task: str | None, memories_note: st
     if span.new_keys:
         parts.append(f"New memories vs the previous span: {span.new_keys}.")
     if span.previous_keys:
-        # the novelty baseline beyond the task statement: these keys were
-        # already delivered in an earlier span of this trajectory
-        line = f"Delivered in an earlier span (not new): {span.previous_keys}."
+        # history cue, not a visibility claim: these keys were recorded
+        # in an earlier span of this episode
+        line = (f"Recorded in an earlier span of this episode: {span.previous_keys}. "
+                "Check the visible context at this delivery before claiming prior knowledge; "
+                "earlier delivery alone does not prove current visibility.")
         if span.previous_partial_keys:
             # those earlier deliveries were only ever clipped or
             # exposure-unverifiable: the "not new" cue cannot mean the agent
@@ -454,9 +475,11 @@ def _render_span_header(span: InjectionSpan, task: str | None, memories_note: st
                     "delivery of this same memory owns that shared step)"
                 )
             if end is not None and start > end:
+                reason = (f"episode ends at step {end}" if end == span.episode_last_step
+                          else f"re-delivered from step {end + 1}")
                 frags.append(
                     f"{mid} ({label}) — no eligible action steps{bump} "
-                    f"(re-delivered from step {end + 1})"
+                    f"({reason})"
                 )
             elif end is not None:
                 if span.same_step_bound == end and not bump:
@@ -471,9 +494,11 @@ def _render_span_header(span: InjectionSpan, task: str | None, memories_note: st
                         "steps beyond it are that span's to claim)"
                     )
                 else:
+                    reason = ("episode's last eligible step" if end == span.episode_last_step
+                              else f"re-delivered from step {end + 1}; later steps belong to that span")
                     frags.append(
                         f"{mid} ({label}) — {step_range(start, end)}{bump} "
-                        f"(re-delivered from step {end + 1}; later steps belong to that span)"
+                        f"({reason})"
                     )
             else:
                 frags.append(
@@ -486,32 +511,6 @@ def _render_span_header(span: InjectionSpan, task: str | None, memories_note: st
         for i, (m, exp) in enumerate(span.iter_exposed())
     )
     return "\n".join(parts)
-
-
-def _gold_blocks(gold: GoldInput | None) -> str:
-    """The GOLDEN ANSWER / TASK CORRECTNESS attachments; "" when neither is
-    present."""
-    if gold is None:
-        return ""
-    parts = []
-    if gold.golden:
-        parts.append(_GOLDEN_BLOCK.replace("@golden@", gold.golden))
-    if gold.correctness:
-        block = _CORRECTNESS_BLOCK.replace(
-            "@correctness@",
-            "resolved" if gold.correctness.get("resolved") else "unresolved",
-        )
-        score = gold.correctness.get("score")
-        if isinstance(score, (int, float)) and not isinstance(score, bool):
-            try:
-                block += f"\nscore: {score:g}"
-            except OverflowError:
-                # an int past the float range overflows the :g conversion
-                # (the sidecar's range check keeps one out; only a hand-built
-                # record reaches this) — show the plain digits, never crash
-                block += f"\nscore: {score}"
-        parts.append(block)
-    return "\n\n".join(parts)
 
 
 # ---------------------------------------------------------------- parsing
@@ -603,7 +602,8 @@ def _strict_parse(text: str) -> tuple[dict | None, str | None]:
 
 
 def _verdict_semantics(
-    obj: dict, span: InjectionSpan, last_step: int | None
+    obj: dict, span: InjectionSpan, last_step: int | None,
+    eligible_steps: set[int] | None = None,
 ) -> str | None:
     """The span-relative contract checks a JSON schema cannot express:
     coverage (the answer carries EXACTLY one entry per delivered memory's
@@ -658,6 +658,7 @@ def _verdict_semantics(
             if a < start
             or (end is not None and a > end)
             or (last_step is not None and a > last_step)
+            or (eligible_steps is not None and a not in eligible_steps)
         ]
         if out_of_window:
             bound = (
@@ -1031,4 +1032,12 @@ def auto_verdict_no_subsequent_turn(span: InjectionSpan) -> dict:
         for i in range(len(span.memories))
     }
     verdict["auto"] = "no_subsequent_turn"
+    return verdict
+
+
+def auto_verdict_empty(span: InjectionSpan) -> dict:
+    verdict = blank_verdict()
+    verdict["verdict"] = "neutral"
+    verdict["analysis"] = "no memory entries were delivered; no influence can be attributed"
+    verdict["auto"] = "empty_delivery"
     return verdict

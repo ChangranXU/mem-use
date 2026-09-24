@@ -45,7 +45,7 @@ uv run -m memgraph <paths> --verdicts output/<run-stamp>/injudge-report.json -o 
 
 injudge 把处理方式相同的重复注入归并为**区间（span）**：条目顺序、
 placement 呈现和逐条目曝光都必须一致。它为每个送入评审的区间建立证据
-文件夹（任务、区间文档、gold 附件、每个已录制 agent 步骤一个文件）。
+文件夹（目标区间及其所属 episode 的任务、上下文、其他投递、全局步骤和可选附件）。
 一个工具只读且限定在该文件夹内的 pi 智能体，对投递的记忆条目打五个信号
 （relevance、accuracy、novelty、influence、positive effect），按稳定的
 区间本地 id 逐条评分。再由代码推导区间判定：任一记忆被误用 →

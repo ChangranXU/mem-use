@@ -45,10 +45,11 @@ Each `<path>` is a trajectory dir (containing `trajectory.jsonl`), a
 
 ## How it works
 
-injudge groups same-treatment re-injections into **spans**: the ordered
-entries, placement presentation, and per-entry exposure must match. For each
-span sent to the judge, it writes the evidence (task, span document, gold
-attachments, and one file per recorded agent step) into a folder. A pi agent
+injudge prepares episodes, then groups same-treatment re-injections into
+**spans** within each episode: the ordered entries, placement presentation,
+and per-entry exposure must match. For each span sent to the judge, it writes
+the target document and its parent episode's task, context, deliveries, global
+steps, and optional attachments into an isolated folder. A pi agent
 with read-only tools scoped to that folder scores every delivered memory on
 five signals — relevance, accuracy, novelty, influence, positive effect —
 under a stable span-local id. Python then derives the span verdict: any

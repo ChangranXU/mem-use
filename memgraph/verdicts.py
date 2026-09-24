@@ -308,6 +308,8 @@ def apply_verdicts(graph: dict, report: dict, source: str = "") -> None:
             # render every restated op of the span as a bare verdict chip
             op["verdict_detail"] = {
                 "verdict": span.get("verdict"),
+                "episode_execution_id": span.get("episode_execution_id"),
+                "episode_last_step": span.get("episode_last_step"),
                 "confidence": span.get("confidence"),
                 "analysis": span.get("analysis"),
                 "evidence": span.get("evidence") or [],

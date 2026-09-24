@@ -9,26 +9,25 @@ Use exactly this shape:
       "accuracy":        {"value": @accuracy@,
                           "note": "<one sentence>"},
       "novelty":         {"value": @novelty@,
-                          "note": "<one sentence citing the baseline, or the specific gap for null>"},
+                          "note": "<baseline citation, or specific gap for null>"},
       "influence":       {"value": @influence@,
-                          "note": "<one sentence>"},
+                          "note": "<consuming step; action; source; attribution>"},
       "positive_effect": {"value": @positive_effect@,
                           "note": "<one sentence>"},
       "anchors":         [<int>...]
     }
   ],
-  "analysis": "<2-4 sentences synthesizing the span's footprint>",
+  "analysis": "<At most 60 words: observed actions and memory attribution>",
   "evidence": [{"claim": "<what happened>", "steps": [<int>...],
                 "seqs": [<int>...]}...],
   "confidence": <number 0.0-1.0>
 }
-memories must contain exactly one entry per delivered memory id, no more and
-no less. `anchors` lists the agent-step numbers where this memory's
-footprint appears, inside its footprint window: REQUIRED and non-empty
-whenever influence is acted_on or decisive (the steps where the shaped
-action happened — the span's delivery step counts when the shaped action
-happened in that very response; a step is not an anchor merely because the
-memory was delivered or mentioned there, and the plan behind an action
-executed later is not one either); optional for referenced;
-empty for none. Anchors outside the memory's window are rejected: the
-window states where this memory's influence may be claimed.
+Keep causal-source arguments in entry notes. An influence note's source is
+an exact task quote, a tool/earlier step, memory, or common practice.
+memories has exactly one entry per delivered id. anchors lists in-window
+steps where the shaped action or decision happened, including the consuming
+step when applicable. A decision can anchor credit if later execution
+substantiates it; an unexecuted plan earns no action credit. Delivery or
+mention alone is not an action anchor. Anchors are required for acted_on or
+decisive, optional for referenced, empty for none; out-of-window anchors
+are rejected.

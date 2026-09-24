@@ -28,8 +28,8 @@ uv run -m injudge <paths> --dry-run --limit 3
 
 | 文件 | 内容 |
 |---|---|
-| `injudge-report.json` | 运行时评审记录（`injudge.report/v11`），每条轨迹后重写，崩溃也保留已完成部分 |
-| `summary.json` | 最终统计（`injudge.summary/v9`）：计数、比率、逐记忆使用 |
+| `injudge-report.json` | 运行时评审记录（`injudge.report/v13`），每条轨迹后重写，崩溃也保留已完成部分 |
+| `summary.json` | 最终统计（`injudge.summary/v11`）：计数、比率、逐记忆使用 |
 | `memgraph-verdicts.html` | 仅在 `--html` 时产出：召回节点按判定着色的 memgraph |
 | `evidence/` | 每个送入评审智能体的区间一个文件夹（含 error 结局）：向智能体提供的文件（区间文档、manifest、逐步骤文件、gold） |
 | `agent-runs/` | 每个送入评审智能体的区间一条轨迹 JSONL：判定如何得出的 pi 事件流记录 |
@@ -41,6 +41,8 @@ uv run -m injudge <paths> --dry-run --limit 3
 ## 注入区间
 
 相同内容常常被重复注入，因此评审单元是**注入区间（span）**：采用同一处理方式的召回操作最大段——相同条目按相同顺序、相同 placement 呈现、且每条目的曝光相同。
+
+先划分 episode，再在各 episode 内归并区间；跨 episode 的相同投递不会合并。步骤保留录制时的全局编号，窗口至迟在所属 episode 的最后一个可用步骤结束。
 
 - 步骤间隔不切段；记入 `step_gaps` 并展示给评审。
 - 内容或处理方式的变化都会切段——重新排序的包、重新框定的块、或单条目曝光的变化都会开启新区间，即使投递内容完全相同。每个投递条目的足迹评判窗口各自从区间首步到该条目下一次被重投递处（重投递即取代——同一条记忆在两个区间投递，不会被重复归功）；从未被重投递的条目窗口直到步骤流末尾，中间内容无关的区间不构成上界，同区间其他条目的窗口结束也不收窄本条目的窗口。窗口按投递条目（rubric 键用的区间本地 id）计算：共用一个显示键的多个身份各自保有自己的边界，每个条目——无论有无键——都参与评分。
@@ -63,13 +65,13 @@ uv run -m injudge <paths> --dry-run --limit 3
 
 ## Golden Answer 与 Correctness
 
-评分调用可携带两类可选附件。各自来自 `trajectory.jsonl` 旁的边车文件、按实例连接的 linkage 文件或命令行；优先级为：命令行值 → linkage 连接 → 边车文件。对多条已加载轨迹共用一个 CLI gold 会给出警告。
+评分调用可携带两类可选附件。在 `--limit` 生效前按 episode 连接；`--golden` 和 `--correctness` 只允许恰好一个已发现的 episode。按 benchmark 身份连接的元数据可用于多个 episode；未带执行身份的轨迹边车文件仅在该轨迹只有一个 episode 时适用。优先级为：命令行值 → 元数据连接 → 可用的边车文件。
 
 | 附件 | 来源 | 作用 |
 |---|---|---|
-| Golden answer 正文 | `golden.txt`（与可用的 `golden.md` 同时存在时优先）、`--gold-metadata PATH`（verified-metadata.json：按记录的 `instance_id` 连接该实例的 gold `patch`），或 `--golden PATH` | 把该次调用切换到 **gold 评分规则**（`GOLD_SYSTEM_PROMPT`）。同样的五个信号、同样的 schema、同样的推导链。`relevance` 与 `positive_effect` 的方向相对 gold 文本评判；gold 不评判 `accuracy`、`novelty`、`influence`。 |
-| 已记录的 correctness | `correctness.json`、`--harness-report PATH`（整个运行共用一份 SWE-bench 风格评测报告，按记录的 `instance_id` 连接），或 `--correctness resolved\|unresolved` | 以 `TASK CORRECTNESS` 块附加在该次调用所用提示词之下。仅作佐证：不能决定任何信号，也不会选用 gold 规则。 |
+| Golden answer 正文 | `golden.txt`（与可用的 `golden.md` 同时存在时优先）、`--gold-metadata PATH`（verified-metadata.json：按 episode 记录的 benchmark 身份连接 gold `patch`），或 `--golden PATH` | 将该 episode 的区间调用切换到 **gold 评分规则**（`GOLD_SYSTEM_PROMPT`），并提供 `gold.md`；gold 本身不是判定。 |
+| 已记录的 correctness | `correctness.json`、`--harness-report PATH`（按 episode 的 benchmark 身份连接 SWE-bench 风格结果），或 `--correctness resolved\|unresolved` | 通过 `outcome.json` 提供佐证；不能单独决定信号，也不会选用 gold 规则。 |
 
-`correctness.json` 接受简单的 `{"resolved": true|false, "score": …}` 记录，或 SWE-bench 风格的评测报告（`resolved_ids` / `unresolved_ids`）。评测报告按轨迹记录的 `instance_id` 连接；error / incomplete 实例属于 harness 故障而非结果，不附加 correctness。`--gold-metadata` / `--harness-report` 是多轨迹形态：每条轨迹获得自己实例的 patch 与 resolved 位；连接失败（未记录 `instance_id`，或文件中缺该实例）时降级到下一来源并附 validation 注记。不可用的 linkage 文件（不可读、不可解析、形状不符）在任何付费 judge 调用之前快速失败。
+`correctness.json` 接受简单的 `{"resolved": true|false, "score": …}` 记录，或 SWE-bench 风格的评测报告（`resolved_ids` / `unresolved_ids`）。harness 中的错误、未完成、缺失与冲突结果保留为不同状态，边车文件不能覆盖 harness 连接。仅按 benchmark 标识的 harness 报告无法区分重复执行或不同实验组；这种连接会在付费调用前拒绝。不可用的 linkage 文件也会提前失败。
 
 两者都没有时，评分使用朴素规则。gold 体系记录在该操作的 `input` 上（`"gold": true`），并计入 `aggregates.overall.gold_scored`。

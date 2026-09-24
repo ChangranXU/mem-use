@@ -1,10 +1,11 @@
 """CLI: python3 -m injudge <path>... [options]
 
-Judge recall injections in gate trajectories: group same-treatment
-re-injections into spans, then score every delivered memory on a five-signal
+Judge recall injections in gate trajectories: prepare episode scopes, group
+same-treatment re-injections into spans within each episode, then score each
+target span's delivered memories on a five-signal
 rubric (relevance / accuracy / novelty / influence / positive_effect). The judge
-is an AGENT, not one prompt: each agent-judged span's evidence (task, span
-header, gold attachments, one file per recorded agent step) is materialized
+is an AGENT, not one prompt: each agent-judged span's target and parent-episode
+evidence (task, context, deliveries, optional gold, original global steps) is materialized
 into a folder under <output>/<run-stamp>/evidence/, and a pi agent with
 read-only tools scoped to that folder searches it and answers with the
 rubric JSON. Two simple budgets bound every conversation — a max-steps LLM-call cap and
@@ -60,16 +61,14 @@ from injudge.agent import (
     load_env,
     resolve_config,
 )
-from injudge.episodes import prepare_trajectory
 from injudge.evidence import build_episode_evidence, episode_dir_name, write_evidence
+from injudge.episodes import prepare_trajectory
 from injudge.gold import (
-    join_gold_patch,
-    join_harness_report,
     load_gold_patches,
     load_harness_report,
     load_sidecar,
 )
-from injudge.judge import GoldInput, _mask_key, auto_verdict_no_subsequent_turn, blank_verdict
+from injudge.judge import GoldInput, _mask_key, auto_verdict_empty, auto_verdict_no_subsequent_turn, blank_verdict
 from injudge.model import EpisodeInput, InjectionSpan
 from injudge.report import (
     build_artifact,
@@ -79,7 +78,7 @@ from injudge.report import (
     print_summary,
 )
 from injudge.spans import group_spans
-from injudge.steps import _token_share, build_step_stream, prompt_tokens_total
+from injudge.steps import _token_share, prompt_tokens_total
 from memgraph.graph import build_graph, load_trajectories
 from memgraph.html import render_html
 from memgraph.model import MemoryOp, Trajectory
@@ -282,12 +281,12 @@ def _prepare_attachment_scope(
         if not golden.strip():
             raise SystemExit(f"error: golden answer file {args.golden} is empty")
         if len(episodes) != 1:
-            raise SystemExit("error: --golden with --prepare-only requires exactly one episode before --limit")
+            raise SystemExit("error: --golden requires exactly one episode before --limit")
         episodes[0].attachments.update({"golden": golden, "gold_join": "global"})
 
     if args.correctness is not None:
         if len(episodes) != 1:
-            raise SystemExit("error: --correctness with --prepare-only requires exactly one episode before --limit")
+            raise SystemExit("error: --correctness requires exactly one episode before --limit")
         episodes[0].attachments.update({
             "correctness": {"resolved": args.correctness == "resolved"},
             "outcome_status": args.correctness,
@@ -653,41 +652,34 @@ def main(argv: list[str] | None = None) -> int:
         "--golden",
         type=Path,
         default=None,
-        help="golden answer file (reference solution): its body is attached to "
-        "every agent-judged span's evidence and switches it to the gold rubric; "
-        "overrides a "
-        "trajectory's golden.txt/golden.md sidecar",
+        help="golden answer file for a single episode; switches its spans to "
+        "the gold rubric (use keyed metadata for multi-episode runs)",
     )
     ap.add_argument(
         "--correctness",
         choices=("resolved", "unresolved"),
         default=None,
-        help="recorded task outcome attached to every agent-judged span's evidence "
-        "(corroboration only — it never selects the gold rubric); overrides a "
-        "trajectory's correctness.json sidecar",
+        help="recorded outcome for a single episode (corroboration only; "
+        "use keyed metadata for multi-episode runs)",
     )
     ap.add_argument(
         "--gold-metadata",
         type=Path,
         default=None,
-        help="verified-metadata.json with per-instance gold patches: each "
-        "trajectory's patch is joined by its recorded instance_id and "
-        "switches that span to the gold rubric; sits between --golden and "
-        "the trajectory's golden.txt/golden.md sidecar in precedence",
+        help="verified-metadata.json with gold patches joined by each "
+        "episode's recorded benchmark identity",
     )
     ap.add_argument(
         "--harness-report",
         type=Path,
         default=None,
-        help="one SWE-bench-style harness report (resolved_ids/unresolved_ids/"
-        "...) shared by the whole run: each trajectory's correctness is "
-        "joined by its recorded instance_id; sits between --correctness and "
-        "the trajectory's correctness.json sidecar in precedence",
+        help="SWE-bench-style harness report joined by episode benchmark "
+        "identity; repeated executions or treatment arms are rejected",
     )
     ap.add_argument("--limit", type=int, default=None,
-                    help="judge at most N spans with the agent (rest: unjudged); "
+                    help="judge at most N episode-scoped spans with the agent (rest: unjudged); "
                     "also caps --dry-run to printing the first N spans' evidence "
-                    "(rule-judged auto-neutral spans always verdict — "
+                    "(empty and no-attributable-turn spans are mechanically counted — "
                     "they cost no agent run)")
     ap.add_argument(
         "-o",
@@ -757,41 +749,18 @@ def main(argv: list[str] | None = None) -> int:
     # memgraph's linking pass doubles as the input-validation layer
     graph = build_graph(trajs, ops_by_traj, load_warnings)
     validation: list[dict] = list(graph["validation"])
-
-    # CLI-given gold/correctness apply to every loaded trajectory; a
-    # trajectory's sidecar files fill whichever the CLI did not give
-    cli_golden: str | None = None
-    if args.golden is not None:
-        try:
-            cli_golden = args.golden.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as e:
-            raise SystemExit(
-                f"error: cannot read the golden answer file {args.golden}: {e}"
-            ) from e
-        if not cli_golden.strip():
-            raise SystemExit(f"error: golden answer file {args.golden} is empty")
-    cli_correctness = {"resolved": args.correctness == "resolved"} if args.correctness else None
-    if (cli_golden is not None or cli_correctness is not None) and len(trajs) > 1:
-        # one instance's gold silently stamped on another's spans is the
-        # footgun this warning exists for — the run continues
-        validation.append(
-            {
-                "level": "warn",
-                "msg": f"--golden/--correctness given with {len(trajs)} trajectories "
-                "loaded: the same gold/correctness applies to every trajectory",
-            }
-        )
-    # per-instance gold linkage (the multi-trajectory form --golden/
-    # --correctness cannot serve): loaded once, joined per trajectory by its
-    # recorded instance_id inside the loop
-    gold_patches: dict[str, str] = {}
-    if args.gold_metadata is not None:
-        gold_patches, md_notes = load_gold_patches(args.gold_metadata)
-        for n in md_notes:
-            validation.append({"level": "warn", "msg": n})
-    harness_report: dict | None = None
-    if args.harness_report is not None:
-        harness_report = load_harness_report(args.harness_report)
+    episodes_by_traj: dict[str, list[EpisodeInput]] = {}
+    for trajectory in trajs:
+        prepared = prepare_trajectory(trajectory, events_by_traj[trajectory.id], ops_by_traj[trajectory.id])
+        episodes_by_traj[trajectory.id] = prepared.episodes
+        validation.extend({"level": "warn", "msg": note} for note in prepared.diagnostics)
+        validation.extend({"level": "error", "msg": f"{trajectory.run_id}: unassigned {item}"}
+                          for item in prepared.unassigned)
+        for episode in prepared.episodes:
+            validation.extend({"level": "warn", "msg": f"{episode.execution_id}: {note}"}
+                              for note in episode.diagnostics)
+    all_episodes = [episode for trajectory in trajs for episode in episodes_by_traj[trajectory.id]]
+    _prepare_attachment_scope(all_episodes, trajs, args, validation)
 
     # run isolation: every artifact of this run lands in its own folder
     # under the output container, so another run — earlier, later, or
@@ -853,17 +822,43 @@ def main(argv: list[str] | None = None) -> int:
     progress = _Progress(len(trajs), enabled=not args.dry_run)
     for t in trajs:
         run_id = t.run_id
-        lanes = t.memory_lanes
         ops = ops_by_traj[t.id]
         events = events_by_traj[t.id]
-        step_warnings: list[str] = []
-        steps = build_step_stream(events, lanes, step_warnings, side_lanes=t.side_lanes)
-        for w in step_warnings:
-            validation.append({"level": "warn", "msg": f"{run_id}: {w}"})
         recall_ops = [op for op in ops if op.kind == "recall"]
         ops_by_id = {op.id: op for op in recall_ops}
         span_warnings: list[str] = []
-        spans = group_spans(recall_ops, t.id, span_warnings)
+        spans: list[InjectionSpan] = []
+        episode_by_span: dict[str, EpisodeInput] = {}
+        assigned: set[str] = set()
+        episode_rows: list[dict] = []
+        for episode in episodes_by_traj[t.id]:
+            episode_ops = [ops_by_id[item["op_id"]] for item in episode.deliveries
+                           if item["op_id"] in ops_by_id and item["op_id"] not in assigned]
+            assigned.update(op.id for op in episode_ops)
+            scoped = group_spans(episode_ops, t.id, span_warnings,
+                                 episode_execution_id=episode.execution_id,
+                                 id_offset=len(spans),
+                                 last_step=episode.steps[-1].step if episode.steps else None)
+            spans.extend(scoped)
+            episode_by_span.update({span.id: episode for span in scoped})
+            episode_rows.append({
+                "execution_identity": episode.execution_identity,
+                "recorded_episode_identity": episode.recorded_episode_identity,
+                "boundary_provenance": episode.boundary_provenance,
+                "task_provenance": [{"source": task.get("source"), "source_kind": task.get("source_kind")}
+                                    for task in episode.task],
+                "attachments": {key: episode.attachments.get(key) for key in
+                                ("gold_join", "outcome_join", "outcome_status")},
+                "evidence_bounds": {"steps": [step.step for step in episode.steps],
+                                    "open_event_index": episode.recorded_episode_identity.get("open_event_index"),
+                                    "close_event_index": episode.recorded_episode_identity.get("close_event_index")},
+                "span_ids": [span.id for span in scoped],
+                "preparation_status": episode.preparation_status,
+                "diagnostics": list(episode.diagnostics),
+            })
+        for op in recall_ops:
+            if op.id not in assigned:
+                spans.extend(group_spans([op], t.id, span_warnings, id_offset=len(spans)))
         # the span pass's notes (same-step delivery collisions bounding
         # footprint windows) surface like every other structural finding
         for w in span_warnings:
@@ -967,28 +962,10 @@ def main(argv: list[str] | None = None) -> int:
                 "n_steps": t.n_steps,
                 "n_injections": len(recall_ops),
                 "n_spans": len(spans),
+                "episodes": episode_rows,
                 "policy": policy,
             }
         )
-
-        # golden-answer / correctness attachments (the span's evidence only):
-        # the CLI values win, then the per-instance linkage files (joined by
-        # the recorded instance_id), then the trajectory's own sidecar files
-        def _gold_warn(msg: str) -> None:
-            validation.append({"level": "warn", "msg": f"{run_id}: {msg}"})
-
-        sidecar = load_sidecar(Path(t.path), t.instance_id, _gold_warn)
-        golden = cli_golden
-        if golden is None and gold_patches:
-            golden = join_gold_patch(gold_patches, t.instance_id, _gold_warn)
-        if golden is None:
-            golden = sidecar.golden
-        correctness = cli_correctness
-        if correctness is None and harness_report is not None:
-            correctness = join_harness_report(harness_report, t.instance_id, _gold_warn)
-        if correctness is None:
-            correctness = sidecar.correctness
-        gold = GoldInput(golden=golden, correctness=correctness)
 
         verdict_by_span: dict[str, dict] = {}
         # per-span routing is decided serially — rule-judged auto-neutral,
@@ -998,7 +975,21 @@ def main(argv: list[str] | None = None) -> int:
         judged: list[tuple[int, InjectionSpan]] = []
         verdicts: dict[int, dict] = {}
         for i, span in enumerate(spans):
-            if span.step_first is None:
+            episode = episode_by_span.get(span.id)
+            problem = None
+            if episode is None or episode.boundary_provenance.get("status") != "prepared":
+                problem = "ambiguous or missing episode boundary/assignment"
+            elif span.memories and span.step_first is not None and not episode.task:
+                problem = "parent episode has no recorded task"
+            if problem:
+                verdicts[i] = blank_verdict()
+                verdicts[i]["error"] = f"unsafe episode evidence: {problem}"
+                validation.append({"level": "error", "msg": f"{span.id}: {verdicts[i]['error']}"})
+                progress.advance_span()
+            elif not span.memories:
+                verdicts[i] = auto_verdict_empty(span)
+                progress.advance_span()
+            elif span.step_first is None:
                 verdicts[i] = auto_verdict_no_subsequent_turn(span)
                 progress.advance_span()
             elif args.limit is not None and taken >= args.limit:
@@ -1009,7 +1000,7 @@ def main(argv: list[str] | None = None) -> int:
                 # the evidence embeds recorded memory values: print it
                 # surrogate-safe like the artifacts (a \ud800 value in a
                 # delivered memory must not abort the dry run)
-                dry_run_print(span, steps, t.task, gold)
+                dry_run_print(span, episode)
                 verdicts[i] = _unjudged("dry run")
                 progress.advance_span()
             else:
@@ -1020,11 +1011,14 @@ def main(argv: list[str] | None = None) -> int:
             """One span's judging on a pool worker: its own evidence folder
             and agent conversation, sharing nothing mutable with siblings."""
             i, span = item
+            episode = episode_by_span[span.id]
+            gold = GoldInput(golden=episode.attachments.get("golden"),
+                             correctness=episode.attachments.get("correctness"))
             span_warnings: list[str] = []
             error_note = None
             try:
                 verdict = judge_span(
-                    span, steps, cfg, span_warnings, t.task, gold=gold,
+                    span, episode, cfg, span_warnings, gold=gold,
                     evidence_root=evidence_root, transcripts_root=transcripts_root,
                 )
             except Exception as e:
@@ -1080,7 +1074,8 @@ def main(argv: list[str] | None = None) -> int:
             f"{sum(n_injections_by_traj.values())} injections, "
             f"{len(operations)} spans{printed} (no judge calls made)"
         )
-        return 0
+        print_validation([item for item in validation if item.get("level") == "error"])
+        return 2 if any(item.get("level") == "error" for item in validation) else 0
 
     # the final statistics set, projected from the final report in one pass
     # (per-trajectory rewrites would re-walk every operation per trajectory)
@@ -1095,20 +1090,21 @@ def main(argv: list[str] | None = None) -> int:
         n_before = len(graph["validation"])
         apply_verdicts(graph, artifact, str(report_path))
         merge_notes = graph["validation"][n_before:]
-        print_validation(merge_notes)
         # the run's diagnostics (step attribution, per-span masking notes,
         # agent-run failures) accumulated in `validation` — the graph's own
         # list only ever held the load-time prefix it was copied from; the
         # HTML embeds graph["validation"], so hand it the full log or the
         # render cannot explain its own error verdicts
         graph["validation"] = validation + merge_notes
+        validation.extend(merge_notes)
+        atomic_write(report_path, json.dumps(artifact, indent=1, ensure_ascii=False) + "\n")
         atomic_write(html_path, render_html(graph))
     n_error = print_summary(artifact)
     print_safe(f"wrote {report_path}")
     print_safe(f"wrote {summary_path}")
     if args.html:
         print_safe(f"wrote {html_path}")
-    return 2 if n_error else 0
+    return 2 if n_error or any(item.get("level") == "error" for item in validation) else 0
 
 
 if __name__ == "__main__":

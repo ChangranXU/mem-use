@@ -1,18 +1,14 @@
 """Materialize one span's judge evidence as a folder of read-only files.
 
-Python writes everything the judge may see into one folder — the span header (task,
-placement, delivered memories with their exposure grounding, footprint
-windows), any gold attachments, and one file per recorded agent step —
-plus a manifest.json indexing it all (step/turn/seq ranges, sizes, and a
-one-line preview per step so the agent can triage without reading every
-file). The runner scopes the agent's two tools to that folder, so the
-judged evidence can never exceed what was materialized here.
+Python writes the target span and its parent's prepared episode evidence to
+one folder: task, visible context, deliveries, searches, optional attachments,
+and one file per recorded global agent step. A manifest indexes files and
+source bounds. The runner scopes its two tools to that folder.
 
-The opening includes span.md and the manifest verbatim; step bodies and
-gold remain available through tools. The file texts reuse judge's renderers,
-so the exposure contract — a clipped value shows only its exposed prefix,
-an unverifiable one withholds
-the canonical value — carries over unchanged.
+The opening includes span.md and compact navigation; the detailed episode
+manifest, step bodies, and gold remain available through tools. The span text
+reuses judge's exposure renderer: a clipped value shows only its exposed prefix,
+and an unverifiable one withholds the canonical value.
 """
 
 from __future__ import annotations
@@ -24,96 +20,13 @@ import shutil
 from pathlib import Path
 
 from util import atomic_write
-from injudge.judge import (
-    MEMORIES_NOTE,
-    GoldInput,
-    _gold_blocks,
-    _render_span_header,
-    _render_step,
-    _step_text,
-    _cmd_of,
-)
+from injudge.judge import MEMORIES_NOTE, _render_span_header, _cmd_of
 from injudge import EPISODE_INPUT_SCHEMA
 from injudge.episodes import project_occurrence
 from injudge.model import AgentStep, EpisodeInput, InjectionSpan
+from injudge.prompts import load_prompt
 
-_PREVIEW_CHARS = 160
-
-
-def _preview(text: str) -> str:
-    """A step's one-line preview for the manifest: the head of its
-    searchable text, whitespace-run-collapsed so a single rendered block
-    never eats the whole line budget."""
-    line = re.sub(r"\s+", " ", text).strip()
-    return line[:_PREVIEW_CHARS]
-
-
-def _step_entry(name: str, st: AgentStep, text: str) -> dict:
-    return {
-        "path": name,
-        "kind": "step",
-        "step": st.step,
-        "turn": st.turn,
-        "seqs": [st.seq_start, st.seq_end],
-        "chars": len(text),
-        "lines": len(text.split("\n")),
-        "preview": _preview(_step_text(st)),
-    }
-
-
-def build_evidence(
-    span: InjectionSpan,
-    steps: list[AgentStep],
-    task: str | None,
-    gold: GoldInput | None,
-) -> dict[str, str]:
-    """The span's evidence as a {relative path: file text} map, including
-    manifest.json. Pure — writing to disk is write_evidence's half, so a
-    dry run can print the very files a real run would mount."""
-    files: dict[str, str] = {}
-    span_text = _render_span_header(span, task, MEMORIES_NOTE)
-    files["span.md"] = span_text
-    entries: list[dict] = [
-        {
-            "path": "span.md",
-            "kind": "span",
-            "chars": len(span_text),
-            "desc": (
-                "the span to evaluate: task statement, placement, delivered "
-                "memories ([mN] ids with exposure markers), footprint windows"
-            ),
-        }
-    ]
-    gold_text = _gold_blocks(gold)
-    if gold_text:
-        files["gold.md"] = gold_text
-        entries.append(
-            {
-                "path": "gold.md",
-                "kind": "gold",
-                "chars": len(gold_text),
-                "desc": "golden answer / recorded correctness attachments",
-            }
-        )
-    for st in steps:
-        name = f"steps/step_{st.step:06d}.md"
-        files[name] = _render_step(st)
-        entries.append(_step_entry(name, st, files[name]))
-    manifest = {
-        "span_id": span.id,
-        "n_steps": len(steps),
-        # steps at or beyond this number are where the span's footprint may
-        # appear; earlier steps are pre-injection context (span.md details)
-        "footprint_from_step": span.step_first,
-    }
-    # One entry per line keeps the index compact in the opening and still
-    # lets read_evidence address individual entries by line.
-    header = json.dumps(manifest, ensure_ascii=False)
-    files["manifest.json"] = header[:-1] + ', "files": [\n' + ",\n".join(
-        json.dumps(entry, ensure_ascii=False) for entry in entries
-    ) + "\n]}"
-    return files
-
+_SPAN_CONTEXT = load_prompt("injudge/scoring/span_context")
 
 def span_dir_name(span_id: str) -> str:
     """The evidence folder name for one span id: filesystem-safe, collision-
@@ -166,7 +79,7 @@ def _episode_memory_line(entry: dict) -> str:
     return f"{label}: {shown}"
 
 
-def _episode_step_text(episode: EpisodeInput, step: AgentStep) -> str:
+def _episode_step_text(episode: EpisodeInput, step: AgentStep, before_index: int | None = None) -> str:
     """Keep tool-result ownership and availability tied to the shared parser."""
     seq_end = step.seq_end if step.seq_end is not None else "?"
     lines = [f"[step {step.step}, turn {step.turn}, seqs {step.seq_start}–{seq_end}]"]
@@ -177,6 +90,8 @@ def _episode_step_text(episode: EpisodeInput, step: AgentStep) -> str:
     occurrences = {item["source"]["event_index"]: item for item in episode.message_occurrences}
     close_index = episode.recorded_episode_identity.get("close_event_index")
     for tool in step.tools:
+        if before_index is not None and (tool.source_event_index is None or tool.source_event_index >= before_index):
+            continue
         lines.append(f"command: {tool.name} — {_cmd_of(tool.args)}")
         index = tool.source_event_index
         late = tool.seq_end is not None and step.seq_end is not None and tool.seq_end > step.seq_end
@@ -185,6 +100,9 @@ def _episode_step_text(episode: EpisodeInput, step: AgentStep) -> str:
             lines.append(f"result ({tool.status or '?'}): [recorded after episode close; unavailable in this episode input]")
             continue
         occurrence = occurrences.get(index)
+        if occurrence is None and index is not None:
+            occurrence = {"occurrence_id": f"event:{index}", "kind": "tool_result",
+                          "content": tool.result, "source": {"event_index": index}}
         projected = project_occurrence(occurrence, episode.deliveries) if occurrence else {}
         refs = projected.get("memory_delivery_refs", [])
         if refs:
@@ -193,11 +111,56 @@ def _episode_step_text(episode: EpisodeInput, step: AgentStep) -> str:
                 lines.append(projected["content"])
         elif tool.result is not None:
             lines.append(f"result ({tool.status or '?'}{avail}): {tool.result}")
+        elif tool.status is not None:
+            lines.append(f"result ({tool.status}): (none recorded)")
         else:
-            lines.append(f"result ({tool.status or '?'}): (none recorded)")
+            lines.append("result: (never observed)")
     source = episode._step_sources.get(step.turn)
     prefix = f"source event: {source.event_index}, seq {source.seq}\n" if source is not None else ""
     return prefix + "\n".join(lines)
+
+
+def span_baseline(episode: EpisodeInput, span: InjectionSpan) -> tuple[dict, str]:
+    delivery = next((item for item in episode.deliveries if item["op_id"] in span.op_ids), None)
+    source_index = (delivery or {}).get("source", {}).get("event_index")
+    consumer = (delivery or {}).get("consumer") or {}
+    view = next((item for item in episode.context if item.turn == consumer.get("turn")), None)
+    occurrences = {item["occurrence_id"]: item for item in episode.message_occurrences}
+    visible = [project_occurrence(occurrences[ref["occurrence_id"]], episode.deliveries)
+               for ref in view.messages if ref.get("occurrence_id") in occurrences] if view else []
+    independent = [item for item in visible if item.get("content")]
+    prior_steps = [step for step in episode.steps if span.step_first is not None
+                   and step.step < span.step_first
+                   and isinstance(source_index, int)
+                   and episode._step_sources.get(step.turn) is not None
+                   and episode._step_sources[step.turn].event_index < source_index]
+    baseline = "\n".join([*(str(item["content"]) for item in independent),
+                           *(_episode_step_text(episode, step, source_index) for step in prior_steps)])
+    return ({"target_delivery_source": (delivery or {}).get("source"),
+             "consumer": consumer, "visible_occurrences": visible,
+             "independent_occurrence_ids": [item["occurrence_id"] for item in independent],
+             "prior_step_numbers": [step.step for step in prior_steps],
+             "visibility_gaps": view.gaps if view else ["consumer input view unavailable"]}, baseline)
+
+
+def build_span_evidence(span: InjectionSpan, episode: EpisodeInput) -> tuple[dict[str, str], str]:
+    files = build_episode_evidence(episode)
+    baseline, baseline_text = span_baseline(episode, span)
+    context = json.loads(files["context.json"])
+    context["target_baseline"] = baseline
+    files["context.json"] = json.dumps(context, ensure_ascii=False, indent=2) + "\n"
+    header = _render_span_header(span, MEMORIES_NOTE)
+    delivery_refs = [item for item in episode.deliveries if item["op_id"] in span.op_ids]
+    files["span.md"] = (f"# Target span in parent episode {episode.execution_id}\n\n"
+                        f"Delivery provenance: {json.dumps([{'op_id': item['op_id'], 'source': item['source'], 'consumer': item['consumer']} for item in delivery_refs], ensure_ascii=False)}\n\n"
+                        + header + "\n\n" + _SPAN_CONTEXT + "\n")
+    manifest = json.loads(files["manifest.json"])
+    manifest["span_id"] = span.id
+    manifest["footprint_from_step"] = span.step_first
+    manifest["files"].insert(0, {"path": "span.md", "kind": "target", "chars": len(files["span.md"])})
+    manifest["files"] = [{**entry, "chars": len(files[entry["path"]])} for entry in manifest["files"]]
+    files["manifest.json"] = json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
+    return files, baseline_text
 
 
 def build_episode_evidence(episode: EpisodeInput) -> dict[str, str]:

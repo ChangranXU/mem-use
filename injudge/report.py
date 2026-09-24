@@ -1,5 +1,5 @@
-"""Report assembly: the `injudge.report/v11` JSON artifact, the statistics-only
-`injudge.summary/v9` distillation, and the stdout summary.
+"""Report assembly: the `injudge.report/v13` JSON artifact, the statistics-only
+`injudge.summary/v11` distillation, and the stdout summary.
 
 The runtime artifact's output contract: per operation
 {operation_id, kind, seq, payload_summary, verdict, confidence, evidence[]}
@@ -43,7 +43,7 @@ from datetime import datetime, timezone
 from util import print_safe, print_validation
 
 from injudge import REPORT_SCHEMA, SUMMARY_SCHEMA
-from injudge.aggregate import aggregate, policy_rollup
+from injudge.aggregate import aggregate, counted_verdict, policy_rollup
 from injudge.judge import _ACCURACY, _NOVELTY
 from injudge.model import InjectionSpan, memory_id, step_range
 
@@ -73,6 +73,8 @@ def operation_record(span: InjectionSpan, verdict: dict, delivery_cost: dict) ->
         "operation_id": span.id,
         "kind": "recall_injection_span",
         "traj": span.traj,
+        **({"episode_execution_id": span.episode_execution_id} if span.episode_execution_id else {}),
+        **({"episode_last_step": span.episode_last_step} if span.episode_execution_id else {}),
         "seq": span.seq_first,
         # omitted when no delivery has an attributed agent step (a
         # rule-judged auto-neutral span): [None, None] is not a step range
@@ -90,8 +92,8 @@ def operation_record(span: InjectionSpan, verdict: dict, delivery_cost: dict) ->
         # what the delivery REFERENCES, these are what the agent could see
         **({"memory_exposure": span.memory_exposure} if span.memory_exposure else {}),
         # the per-entry footprint window ends the action anchors were
-        # validated against (null = never re-delivered, so bounded by the
-        # step stream's end) — recorded so the enforced bounds stay
+        # validated against (the episode's last eligible step when not
+        # superseded by an in-episode re-delivery) — recorded so the bounds stay
         # auditable from the artifact; omitted like `steps` when no delivery
         # has an attributed agent step (no window bounds anything there).
         # `memory_window_starts` carries the same-step collision exception:
@@ -146,6 +148,7 @@ def injection_rollup(
                 {
                     "op_id": op_id,
                     "span_id": span.id,
+                    **({"episode_execution_id": span.episode_execution_id} if span.episode_execution_id else {}),
                     "seq": op.seq,
                     "step": op.step,
                     "role": "first" if first else "restated",
@@ -171,7 +174,9 @@ def build_artifact(
     for t in trajectories:
         ops = [o for o in operations if o["traj"] == t["id"]]
         per_traj[t["id"]] = aggregate(ops, n_injections_by_traj.get(t["id"], 0))
+        per_traj[t["id"]]["n_episodes"] = len(t.get("episodes", []))
     overall = aggregate(operations, sum(n_injections_by_traj.values()), len(trajectories))
+    overall["n_episodes"] = sum(stats["n_episodes"] for stats in per_traj.values())
     overall["policy"] = policy_rollup(trajectories, validation)
     return {
         "tool": {"name": "injudge", "schema": REPORT_SCHEMA, **tool_cfg},
@@ -236,14 +241,17 @@ def _rubric_line(rub: dict) -> str | None:
     return txt
 
 
-def _headline_line(headline: dict) -> str | None:
+def _headline_line(headline: dict, rates: dict) -> str | None:
     """The one-line headline summary for the stdout summary; None when no
-    spans were judged."""
+    spans were judged. The judged-span count leads: every rate is over it.
+    Neutral is spelled out because it means no attributable benefit was
+    observed, not a measured absence of effect."""
     if headline.get("negative_span_rate") is None:
         return None
     txt = (
-        f"headline: negative-span rate {headline['negative_span_rate']:.0%}"
-        f" (n={headline['judged_spans']} judged spans)"
+        f"headline: {headline['judged_spans']} judged spans — "
+        f"positive {rates['positive']:.0%}, negative {rates['negative']:.0%}, "
+        f"neutral (no attributable benefit observed) {rates['neutral']:.0%}"
     )
     if headline.get("unassessable_spans"):
         # assessability is a headline property: these spans held no
@@ -254,7 +262,7 @@ def _headline_line(headline: dict) -> str | None:
         # all-class total printed above — label both sides so the share
         # never reads as per-memory truth
         txt += (
-            f", wasted-token share {headline['wasted_token_share']:.0%} "
+            f", estimated span-level wasted-token proxy {headline['wasted_token_share']:.0%} "
             f"(neutral+negative ≈{headline.get('wasted_tokens', 0):,} of "
             f"≈{headline.get('judged_tokens', 0):,} judged-class injected tokens)"
         )
@@ -273,7 +281,9 @@ def _verdict_tally(a: dict) -> str:
     the error and unassessable counts marked when any."""
     return f"+{a['positive']} −{a['negative']} ○{a['neutral']}" + (
         f" !{a['error']}" if a["error"] else ""
-    ) + (f" ⊘{a['unassessable']}" if a.get("unassessable") else "")
+    ) + (f" ⊘{a['unassessable']}" if a.get("unassessable") else "") + (
+        f" ∅{a['empty']} empty" if a.get("empty") else ""
+    )
 
 
 def _policy_line(pol: dict) -> str | None:
@@ -443,10 +453,10 @@ def _slim_aggregate(a: dict) -> dict:
     `low_confidence` already followed."""
     out = {
         "counts": {k: a[k] for k in (
-            "n_trajectories", "n_injections", "n_spans", "restated_injections",
+            "n_trajectories", "n_episodes", "n_injections", "n_spans", "restated_injections",
         ) if k in a},
         "verdicts": {"counts": {k: a[k] for k in (
-            "positive", "negative", "neutral", "error", "unjudged", "unassessable",
+            "positive", "negative", "neutral", "error", "unjudged", "unassessable", "empty",
         )}},
     }
     rates = a.get("rates") or {}
@@ -533,7 +543,7 @@ def _summary_span_index(op: dict) -> dict:
     no tally can ever corroborate."""
     out = {"operation_id": op["operation_id"], "verdict": op["verdict"]}
     if op.get("auto"):
-        out["verdict"] = "unassessable"
+        out["verdict"] = counted_verdict(op)
         out["auto"] = op["auto"]
     if op.get("confidence") is not None:
         out["confidence"] = op["confidence"]
@@ -541,6 +551,8 @@ def _summary_span_index(op: dict) -> dict:
         out["steps"] = op["steps"]
     if op.get("n_injections") is not None:
         out["n_injections"] = op["n_injections"]
+    if op.get("episode_execution_id"):
+        out["episode_execution_id"] = op["episode_execution_id"]
     usage = {} if op.get("auto") else {
         k: v.get("usage") for k, v in (op.get("memory_usage") or {}).items()
         if v.get("usage")
@@ -577,6 +589,13 @@ def build_summary(artifact: dict) -> dict:
         trajectory_details[t["id"]] = {
             **stats, "spans": spans_by_traj.get(t["id"], []),
         }
+        if t.get("episodes"):
+            trajectory_details[t["id"]]["episodes"] = [{
+                "execution_id": episode["execution_identity"]["execution_id"],
+                "episode_id": episode["recorded_episode_identity"].get("episode_id"),
+                "span_ids": episode["span_ids"],
+                "preparation_status": episode["preparation_status"],
+            } for episode in t["episodes"]]
     tool = dict(artifact.get("tool") or {})
     return {
         "overall": overall,
@@ -594,19 +613,15 @@ def print_summary(artifact: dict) -> int:
     """memgraph-style stdout summary; returns the number of error verdicts."""
     agg = artifact["aggregates"]["overall"]
     rates = agg.get("rates") or {}
-    rate_txt = (
-        f" (rates: +{rates['positive']:.0%} −{rates['negative']:.0%} ○{rates['neutral']:.0%})"
-        if rates.get("positive") is not None
-        else ""
-    )
     print_safe(
-        f"injudge: {agg.get('n_trajectories', 0)} trajectories, {agg['n_injections']} injections "
+        f"injudge: {agg.get('n_trajectories', 0)} trajectories, "
+        f"{agg.get('n_episodes', 0)} episodes, {agg['n_injections']} injections "
         f"({agg['restated_injections']} restated), {agg['n_spans']} spans: "
         f"+{agg['positive']} −{agg['negative']} ○{agg['neutral']}"
         + (f" !{agg['error']} error" if agg["error"] else "")
         + (f" ?{agg['unjudged']} unjudged" if agg["unjudged"] else "")
         + (f" ⊘{agg.get('unassessable', 0)} unassessable" if agg.get("unassessable") else "")
-        + rate_txt
+        + (f" ∅{agg['empty']} empty" if agg.get("empty") else "")
     )
     cost = agg.get("cost") or {}
     if cost.get("approx_tokens_total"):
@@ -622,6 +637,8 @@ def print_summary(artifact: dict) -> int:
             extra.append(f"?{byv['unjudged']:,} unjudged")
         if byv.get("unassessable"):
             extra.append(f"⊘{byv['unassessable']:,} unassessable")
+        if byv.get("empty"):
+            extra.append(f"∅{byv['empty']:,} empty")
         line = (
             f"  delivery cost: ≈{cost['approx_tokens_total']:,} injected tokens "
             f"({judged} judged-class"
@@ -632,7 +649,7 @@ def print_summary(artifact: dict) -> int:
             # read as though every token were judged
             line += f"; {' '.join(extra)} in no rate or share"
         print_safe(line + ")")
-    if (txt := _headline_line(agg.get("headline") or {})) is not None:
+    if (txt := _headline_line(agg.get("headline") or {}, rates)) is not None:
         print_safe(f"  {txt}")
         # the wasted-token share never reads alone: every reported share
         # carries its proxy caveat stated outright
@@ -656,5 +673,18 @@ def print_summary(artifact: dict) -> int:
             f"  {t['id']} {name}: {search_txt}{ta['n_injections']} inj, {ta['n_spans']} spans — "
             f"{_verdict_tally(ta)}"
         )
-    print_validation(artifact.get("validation") or [])
+    inputs = [op["input"] for op in artifact["operations"] if op.get("input")]
+    if inputs:
+        print_safe(
+            f"  judge: {len(inputs)} spans, {sum(i.get('executed_llm_calls', 0) for i in inputs)} model calls, "
+            f"{sum(i.get('executed_tool_calls', 0) for i in inputs)} tool calls; "
+            f"{sum(bool(i.get('any_phase_forced')) for i in inputs)} forced, "
+            f"{sum(i.get('context_rollbacks', 0) for i in inputs)} context rollbacks"
+        )
+    notes = artifact.get("validation") or []
+    if notes:
+        levels = Counter(note.get("level") for note in notes)
+        print_safe(f"  diagnostics: {levels['error']} errors, {levels['warn']} warnings, "
+                   f"{levels['info']} notes (details in injudge-report.json)")
+        print_validation([note for note in notes if note.get("level") == "error"])
     return agg["error"]

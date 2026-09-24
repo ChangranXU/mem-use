@@ -30,10 +30,10 @@ Each delivered ENTRY is scored independently under its span-local id (`m1`, `m2`
 
 | Signal | Type | Question |
 |---|---|---|
-| `relevance` | bool | Is the memory topically related to the task and to the agent's current subgoal at the injection point? Judged from the steps before the span's first step. |
+| `relevance` | bool | Is the memory topically related to the recorded task and current subgoal? Use input available before the target delivery and earlier eligible episode steps. Relevance is independent of accuracy, novelty, and use: a wrong proposed remedy, redundant memory, or unused memory can be relevant, and a transferable technique or useful subgoal counts even when it names another library or bug. |
 | `accuracy` | enum | `corroborated` (observable evidence it is right) / `uncontradicted` (no evidence either way) / `contradicted` (observable evidence it is wrong). |
-| `novelty` | enum or null | `novel` (the recorded baseline supports that the substance was new) / `confirming` (settles an open doubt the agent had articulated) / `redundant` (already established, no open doubt) / `null` (the recorded baseline cannot distinguish these tiers). The task statement counts as already-in-conversation, exactly like the agent's own pre-injection turns; absence from an incomplete record does not prove novelty. |
-| `influence` | enum | `none` / `referenced` (mentioned only) / `acted_on` (a post-injection command, edit, or test uses content the memory carries and the agent could not have derived from what it had already seen, or the agent explicitly cites the memory) / `decisive` (the memory changed the direction of the agent's plan — a demonstrable course change). Footprint is subsequent behavior: from the span's first step onward, bounded where that memory is next re-delivered (a re-delivery supersedes; never re-delivered = unbounded; another memory's re-delivery bounds only its own window). The echo rule: a direction the agent had already announced, reasoned out, or applied before the span cannot be credited to a memory delivered afterward — even when the resulting action lands inside the window. Two further bindings: context is not memory content, where a source's time and role decide — the task statement and the pre-injection steps are what the agent already had, the search query is retrieval metadata the main agent may never have seen (it can originate in a memory or side lane, so a query alone establishes nothing), while the golden answer is evaluator-only verification it never saw and the post-injection steps are exactly where the footprint is judged — and `acted_on`/`decisive` require a CHANGED action, not continuation of an already-established plan. A `redundant` memory CAN still be acted on when the delivery itself changed the action (a reminder restoring a dropped direction, or execution detail the plan lacked): novelty and influence are orthogonal. An acted-on or decisive claim must carry **anchors** — the agent-step numbers where the footprint appears, inside that entry's window; the span's delivery step counts when the shaped action happened in that very response. |
+| `novelty` | enum or null | `novel` (the pre-delivery baseline supports new substance) / `confirming` (settles an open doubt) / `redundant` (already established) / `null` (visibility cannot be established). The baseline includes recorded task/user input and earlier available steps but excludes the target placement and later updates. An earlier delivery alone does not prove continued visibility after a rewrite. Substance, not wording, decides: a mixed memory is `redundant` only when every material claim was already established, and the note names the known and the new claims. |
+| `influence` | enum | `none` / `referenced` (mentioned only) / `acted_on` (an eligible action uses the exposed memory rather than an already available source) / `decisive` (it demonstrably changes the plan). The footprint starts at the target span's first step and ends at that entry's next same-episode delivery or the episode's last eligible global step. Task/system text, earlier reasoning, and unrelated tool results are independent sources; a search query is retrieval metadata, and gold is evaluator-only. Echoing a direction already established before delivery is not changed action, although a redundant reminder can still change an action. A prior direction needs a pre-delivery source: a plan first stated at or after the span's first step cannot show it predated exposure. Notes name the delivery step and the source behind each action; overlap with both memory and task is reported as ambiguous attribution, and unsupported use is "influence not established", never a claim of no effect. A source is credited only with elements it actually contains, and an uncited action matching only common practice (focused tests, minimal fixes) is ambiguous attribution, not memory use. `acted_on`/`decisive` require original global step **anchors** inside both the episode and entry window. |
 | `positive_effect` | enum or null | `improved` / `no_effect` / `harmed`, judged by observable downstream events inside the memory's window (`improved`: a downstream event ties the benefit to the memory-shaped action; `no_effect`: the action produced no observable downstream change; `harmed`: a wrong location, false lead, reverted correct work). Non-null only when influence is `acted_on` or `decisive`. Accuracy never decides this signal: a memory carrying a false claim can still have set off the diagnostic that found the fix. |
 
 {% hint style="warning" %}
@@ -41,6 +41,15 @@ Each delivered ENTRY is scored independently under its span-local id (`m1`, `m2`
 {% endhint %}
 
 The verdict rule is deliberately asymmetric: ignored garbage is **neutral** (no footprint), and only acted-on influence with no effect — or harm — is **negative**. A zero negative rate therefore never reads as "harmless" on its own: reporting always binds it to the wasted-token share, itself a span-level proxy (a neutral span's referenced memories count as wasted; a positive span's ignored memories count as productive), and states the caveat on every reported share (see [Artifacts](artifacts.md#verdict-rates)). Spans whose deliveries cannot be attributed to an agent step (no classified agent turn, or a missing/unclassified consumer) are rule-judged without an LLM call and reported as **unassessable** — observation missingness, not a measured null — outside every directional denominator.
+
+Novelty rates describe new substance relative to the recorded pre-delivery
+baseline, not knowledge new to the agent. Common advice can therefore be
+`novel` while its uncited use remains unattributable (`influence=none`). A
+missing or incomplete baseline still calls for `null`, not automatic novelty.
+Novelty includes all material claims, even task-irrelevant ones; relevance
+cannot turn previously unavailable substance into redundancy.
+If the evidence instead establishes a memory-shaped reversal of an earlier
+habit or plan, common advice can be `decisive` without an explicit citation.
 
 The final task result, when discernible, may raise or lower confidence. It cannot decide a signal by itself.
 
@@ -62,8 +71,15 @@ Two layers of semantic checking apply, both in code:
 **Inside the attempt loop** (`_verdict_semantics`, called by `judge_span` on every final answer after `_strict_parse`) — these checks are span-relative (the judge cannot know this span's ids or windows a priori), so a violation takes the bounded corrective retry; exhaustion is an `error` verdict, never a silently partial one:
 
 1. **Exact id coverage.** The answer carries exactly one entry per delivered entry's span-local id — a missing entry is an unanswered judgment, an unknown one is noise, and neither stands.
-2. **Action anchors.** An `acted_on`/`decisive` claim cites at least one anchor step, and every cited anchor lies inside that entry's footprint window (from the span's first step to its next re-delivery − 1, or to the step stream's final step when it is never re-delivered — a step past the stream's end is a hallucination, not evidence). An anchor before the span's first step is rejected like any other out-of-window anchor, on every entry: pre-injection evidence may back a novelty or accuracy **note**, but never an anchor — anchors are influence evidence. `anchors` stay empty when influence is `none` (no footprint, so nothing to cite); a same-step delivery collision (a later span delivering the same memory at this span's last delivery step) opens the later span's window for that entry only after the shared step, which the earlier span keeps — the recording carries no causal order within one step, so the step is credited exactly once under a first-carrier rule.
+2. **Action anchors.** An `acted_on`/`decisive` claim cites at least one original global step in the parent episode, inside that entry's footprint window (from the span's first step to its next same-episode re-delivery − 1, or the episode's last eligible step). An anchor outside the episode or before the span is rejected: earlier evidence may support a novelty or accuracy **note**, never an influence anchor. `anchors` stay empty when influence is `none`. A same-step delivery collision credits the shared step only to the earlier carrier; the later span's entry window opens after it.
 3. **Orthogonal signals.** Novelty, accuracy, influence, and effect are judged independently: no cross-signal combination is a contract violation. A reminder (`redundant` + `acted_on`), a partially false memory that triggered the fix (`contradicted` + `improved`), and a genuinely shared footprint (two entries carrying the same substance, credited with a "shared" note) are all reportable states the rubric must not suppress.
+
+The judge may anchor an in-window decision when later execution substantiates
+it; an unexecuted plan earns no action credit. Source claims must distinguish
+quoted task requirements from common practice and discoveries after exposure.
+Expressed uncertainty takes priority for `confirming` even when supporting facts
+were already visible. These judgments remain the agent's responsibility; the
+validator checks anchor membership and shape, not the truth of the notes.
 
 **At assembly** (`_assemble_verdict`), on the validated object:
 
@@ -73,6 +89,31 @@ Two layers of semantic checking apply, both in code:
 A span that delivers no memories at all is not an error: it derives neutral with a warning, since there is nothing to score.
 
 Display-only fields (`analysis`, evidence claims) are copied and credential-masked. A malformed evidence list is dropped with a warning; it does not fail the span.
+
+After assembly, advisory prose checks add validation warnings without changing
+labels, rewriting text, or triggering retries. They flag `independent`,
+`independently`, `unassisted`, `unaided`, or exclusive-source wording such as
+`from code alone` in a `none` entry's notes (or in the span analysis when any
+entry is `none`), and analysis longer than 60 whitespace-delimited words.
+Task-source checks apply only to influence notes, novelty notes, and analysis:
+they flag locally task-attributed quotations absent from `task.md` after
+whitespace, backtick, and case normalization, and recognizable task-requirement
+claims without a matching quotation containing at least one fragment of three
+or more words. Neither separate short quotes nor ellipsis-separated fragments
+can pool words to satisfy that minimum. Ellipsis quotes (`...` or `…`) match
+only when every nonempty fragment occurs in task order. A qualifying quote
+prevents the unquoted warning even if its citation prefix is unrecognized.
+Relevance notes may describe the task
+without attributing an action to it and are excluded from these checks.
+These are lexical review cues: negated independence can also trigger,
+and a span-wide claim cannot be assigned to one entry mechanically. The quote
+check recognizes preceding task/source labels and common quote delimiters;
+it cannot catch every attribution style or a real quotation
+used to justify a requirement it does not imply. It checks presence in the
+file, not the quote's availability before delivery. An unrelated longer quote
+can still suppress a warning, and quoted adjectives can still cause false
+alarms. Replaying known reports is not a measure of coverage on new notes.
+Human review is still needed.
 
 ## Usage Labels
 

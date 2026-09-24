@@ -27,8 +27,34 @@ The suite does not use the network. Python tests stub paid judge calls with cann
 | `injudge/` | Step stream, injection spans, verdict contract and judge prompts (`judge.py`), evidence folders (`evidence.py`), the agent-runner client and corrective loop (`agent.py`), gold sidecars (`gold.py`), aggregates, report writer, CLI (`python3 -m injudge`) |
 | `agent/` | TypeScript judge agent: pi runner with budgets and forced answers (`runner.ts`), read-only evidence tools (`evidence-tools.ts`), event-sourced recording (`trajectory.ts`), job/result protocol (`protocol.ts`) |
 | `prompts/` | Every LLM prompt as a file, grouped by tool and purpose (loaded via `injudge/prompts.py`) |
+| `calibration/` | Controlled judge-calibration cases and report scoring (`python3 -m calibration`) |
 | `tests/` | pytest suite and shared schema-v9 fixture builder |
 | `doc/` | This book (GitBook layout: `LANGS.md` + `en/` + `zh-CN/`) |
+
+## Judge Calibration
+
+Canned answers test the contract, not judgment quality. `calibration/` contains
+controlled development regressions for explicit and uncited use, routine
+practice, source and novelty distinctions, uncertainty, plan execution and
+reversal, harmful advice, and paraphrased baselines. Each case pins only the
+labels its construction establishes.
+
+```bash
+uv run -m calibration build calibration-cases/
+uv run -m injudge calibration-cases/ -o output/calibration   # paid; repeat for stability
+uv run -m calibration score output/calibration/*/injudge-report.json
+```
+
+`score` reports every disagreement, per-label stability across repeats, and
+matched-pair novelty consistency. Use identical settings to measure repeatability;
+changed settings measure sensitivity. Inspect source claims as well as labels:
+a neutral verdict can still misdescribe its evidence. Paid calibration requires
+the user's go-ahead under `AGENTS.md`.
+
+All included cases are regressions. A held-out set must be newly written, with
+its cases, expected labels, and judge prompt frozen before its first paid run.
+Once its results inform tuning, it becomes regression data and a fresh set is
+needed for held-out validation.
 
 ## Contributing
 

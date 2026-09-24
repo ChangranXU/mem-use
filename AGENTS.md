@@ -5,9 +5,9 @@ mem-eval scores memory-system quality from schema-v9 gate trajectories
 
 - **memgraph** renders every memory operation and its relationships as a
   self-contained HTML/JSON graph.
-- **injudge** scores each recall injection's subsequent influence with an
-  agentic LLM rubric (a pi agent searching one evidence folder per span)
-  and writes `injudge.report/v11`, which memgraph can overlay with
+- **injudge** scores each episode-scoped recall span's subsequent influence
+  with an agentic LLM rubric (a pi agent searching one evidence folder per
+  span) and writes `injudge.report/v13`, which memgraph can overlay with
   `--verdicts`.
 
 An injection is judged by its influence on later agent turns. The final
@@ -42,6 +42,8 @@ uv run -m injudge <paths> -o output/    # one run folder: report + summary; judg
 uv run -m injudge <paths> --html        # also memgraph-verdicts.html
 uv run -m injudge <paths> --dry-run     # preview spans that use the agent; no calls or files
 uv run -m injudge <paths> --prepare-only -o output/  # offline episode evidence; no .env/Node/judge
+uv run -m calibration build <dir>       # controlled judge-calibration episodes
+uv run -m calibration score <report.json>...  # agreement, stability, matched-pair novelty
 ```
 
 `<paths>` are trajectory dirs (containing `trajectory.jsonl`),
@@ -84,24 +86,26 @@ memgraph/model.py          # Trajectory / MemoryOp / MemoryUnit / Edge
 memgraph/parse_trajectory.py  # trajectory.jsonl → ops; shared step rule
 memgraph/graph.py          # path discovery, cross-trajectory linking, validation
 memgraph/html.py           # self-contained HTML (template + embedded graph JSON)
-memgraph/verdicts.py       # merge injudge.report/v11 onto recall ops
+memgraph/verdicts.py       # merge injudge.report/v13 onto recall ops
 memgraph/__main__.py       # python3 -m memgraph
 injudge/__init__.py        # REPORT_SCHEMA / SUMMARY_SCHEMA (writer + memgraph reader)
 injudge/model.py           # AgentStep / ToolExec / InjectionSpan
 injudge/steps.py           # agent-lane step stream + all-lane billed prompt tokens
-injudge/spans.py           # recall ops → injection spans
+injudge/episodes.py        # offline episode scope and source assignments
+injudge/spans.py           # episode recall ops → injection spans
 injudge/judge.py           # the verdict contract, judge prompts, evidence renderers
 injudge/evidence.py        # one span's judge evidence as a folder of files + manifest
 injudge/agent.py           # .env → AgentConfig, runner subprocess, corrective-retry loop
 injudge/gold.py            # golden-answer / correctness sidecars and CLI joins
 injudge/prompts.py         # loads prompts/ (never inline prompts in code)
 injudge/aggregate.py       # verdict counts/rates, per-memory usage roll-ups
-injudge/report.py          # injudge.report/v11 + injudge.summary/v9 + stdout
+injudge/report.py          # injudge.report/v13 + injudge.summary/v11 + stdout
 injudge/__main__.py        # python3 -m injudge
 agent/                     # TS judge agent: runner.ts (pi Agent + budgets),
                            # evidence-tools.ts (scoped read-only tools),
                            # trajectory.ts (pi event-sourced recording), protocol.ts
 prompts/                   # every LLM prompt, grouped by tool/purpose
+calibration/               # controlled judge cases (real judge) + report scoring
 doc/                       # GitBook: LANGS.md + en/ + zh-CN/, each with SUMMARY.md
 tests/conftest.py          # checkout root on sys.path
 tests/annotated_fixtures.py  # schema-v9 synthetic-trajectory builder
@@ -180,12 +184,11 @@ adapter vocabulary.
     fingerprint is the delivered `(namespace, item, value)`. Redacted
     content records no value, so redacted bodies indistinguishable
     under one `(namespace, item)` share a span.
-  - A re-delivery merges into a span only as the SAME treatment:
-    identical entries in the same order, the same placement
-    presentation, and the same per-entry exposure. A changed exposure,
-    a re-ranked bundle, or a re-framed block starts a new span — a
-    wider later exposure never merges backward onto anchors that
-    predate it.
+  - A re-delivery merges into a span only inside the same prepared episode
+    and as the SAME treatment: identical entries in the same order, the same
+    placement presentation, and the same per-entry exposure. A changed
+    exposure, a re-ranked bundle, or a re-framed block starts a new span — a
+    wider later exposure never merges backward onto anchors that predate it.
 - **`extensions.cure`** is a display projection only (key, memory_type,
   confidence, review status, needs_verification, rejection counts, declared
   extraction step — falling back to the protocol `main_step` when
@@ -267,11 +270,13 @@ LLM. `used` is acted-on influence that improved the work; `misused` is
 acted-on influence with `positive_effect` `no_effect` or `harmed`. Mere
 reference is never misuse.
 
-The judge is an AGENT, not one prompt. Python materializes each span's
-evidence into a folder under `<output>/<run-stamp>/evidence/` (`injudge/evidence.py`:
-manifest.json + span.md + gold.md + one file per recorded agent step) and
-spawns `agent/runner.ts` — a pi agent whose opening contains span.md and
-the compact manifest verbatim, and whose only tools are read/search scoped
+The judge is an AGENT, not one prompt. Python prepares episodes before
+grouping spans, then materializes each span's target and parent episode evidence
+under `<output>/<run-stamp>/evidence/` (`injudge/evidence.py`: `span.md`,
+`episode.md`, `task.md`, `context.json`, `deliveries.md`, `searches.json`,
+`manifest.json`, `steps/`, and optional `gold.md` / `outcome.json`). The pi
+agent in `agent/runner.ts` receives `span.md` and compact file navigation in
+its opening; detailed episode evidence is read through tools scoped
 to that folder (absolute paths, `..`, and out-of-root symlinks refused).
 Two budgets bound the conversation, both ending in a FORCED final answer
 (the harness pattern), never a mid-run failure: MAX_STEPS caps LLM calls,
@@ -289,8 +294,8 @@ Easy to get wrong:
 - Python owns the contract: the runner reports the final assistant text,
   and `_strict_parse` + `_verdict_semantics` (injudge/judge.py) decide
   whether it is a verdict — exact id coverage, action anchors (acted-on/
-  decisive claims cite step numbers inside that entry's footprint window,
-  never past the step stream's end), and the anchor/influence shape
+  decisive claims cite global step numbers in the parent episode and inside
+  that entry's footprint window), and the anchor/influence shape
   (`anchors` stay empty when influence is `none`). A violation takes the
   single-call repair with no evidence tools, continuing job.history. Only
   an explicit `needs_evidence` repair reply reopens investigation, with a
@@ -358,6 +363,11 @@ evidence tools' path-scoping is security-bearing and tested under
 `tests/test_agent_tools.py` (skipped when node or the packages are
 missing).
 
+Canned answers test the contract, never judgment quality. After a prompt
+change, run the calibration cases through the real judge (`calibration/`,
+see `doc/en/development.md`) and report their disagreements and stability;
+that paid run needs the user's go-ahead.
+
 Name tests `test_<behavior>`. When a test is warranted, hit a real failure
 point (corrupt input, step attribution, verdict joins, retry routing),
 not a status code. Payload-based HTML tests (poison in, exact escaped
@@ -419,7 +429,7 @@ The HTML colors rewrite markers by each marker's own `on_memory_lane` flag,
 computed at parse time against the final lane set. Do not prune a field
 from one consumer only.
 
-**injudge** writes `injudge.report/v11` (`{tool, generated_at, trajectories,
+**injudge** writes `injudge.report/v13` (`{tool, generated_at, trajectories,
 operations, injections, aggregates, validation}`), rewritten after every
 trajectory so a crash keeps completed work. All of a run's artifacts land
 in that run's own `<output>/<run-stamp>/` folder — no run overwrites or
@@ -435,19 +445,27 @@ to its run.
   and digests are
   never overwritten. Span set-diffs also carry `new_keys` / `removed_keys`
   / `previous_keys` / `changed_keys`.
+- Trajectory episode rows carry execution/boundary identity, task and attachment
+  provenance, global step bounds, and their span ids. Operations carry parent
+  `episode_execution_id` and `episode_last_step`; memgraph keeps these links.
 - `tool.config` is the resolved, secret-free judge-agent configuration
   (URLs sanitized to `scheme://host[:port][/path]`).
 - Each operation the agent ran for carries an `input` record (error
   outcomes included):
   `{"path": "agent", "attempts", "llm_calls", "tool_calls", "transcript"}`
-  plus `"gold"` and `"forced"` when they apply (`forced`: the
+  plus executed/retained call counts and evidence, reported usage including
+  rolled-back calls, context rollbacks, and any-phase forced status. `"gold"`
+  and `"forced"` appear when they apply (`forced`: the
   conversation's final answer came from a budget-exhausted forced round).
-  Only rule-judged auto-neutral spans and unjudged spans omit it.
+  Only mechanically counted empty/unattributable spans and unjudged spans
+  omit it.
+  `retained_evidence` counts successful step-file reads still in the
+  conversation; reading only navigation files cannot validate a neutral answer.
 - `aggregates.overall` counts the regimes: `input_paths`, `gold_scored`,
   `forced_answers`.
 - The run also writes `<output>/<run-stamp>/evidence/<span-dir>/` — the
-  exact folders the agents read (audit/replay value; they embed recorded
-  memory values like the report does) — and
+  exact folders the agents read (audit/replay value; only exposed memory
+  content is included) — and
   `<output>/<run-stamp>/agent-runs/<span-dir>.jsonl` — the
   pi event-sourced trajectory of each judging conversation (message lines
   as they happen, `tombstone` lines for budget rollbacks, the injected
@@ -459,7 +477,7 @@ to its run.
   (non-`[A-Za-z0-9._-]` replaced by `_`, capped at 80 chars) plus an
   8-char digest suffix — `evidence.span_dir_name`.
 
-The companion `summary.json` (`injudge.summary/v9`) is the run's final
+The companion `summary.json` (`injudge.summary/v11`) is the run's final
 statistics: counts/rates, rubric distributions, cost, confidence, judge
 compliance (the positive_effect↔influence correction rate), per-trajectory
 extraction reliability (`n_extractions` / `extraction_failures`), and slim
@@ -469,8 +487,10 @@ rows, then `details`. Rows carry `instance_id` / `model` / `adapter` when
 recorded, plus `counts` and `verdicts`. `details.overall` holds rubric and
 memory usage; `details.trajectories` is keyed by trajectory id and holds
 headline, delivery, judge, rubric, usage, and a narrative-free `spans` index
-(verdict / confidence / usage labels). Auto-neutral index rows use
-`verdict: "unassessable"` and retain the `auto` reason, matching the counts.
+(verdict / confidence / usage labels). Mechanical-skip index rows retain `auto`: empty deliveries use
+`verdict: "empty"`; unobserved consumers use `verdict: "unassessable"`. Both
+are outside directional denominators and the wasted-token share. Counts include
+`n_episodes`, and each trajectory detail includes a compact episode-to-span index.
 `generated_at` and `tool` follow the
 results; `tool.source_report_schema` records the source report's version.
 Empty rate / headline / rubric / confidence shells are omitted with no
@@ -514,6 +534,7 @@ Components for `fix` / `feat` / `enh` / `ref`:
 - `injudge` — `injudge/`: step stream, spans, judge client, aggregates,
   report
 - `util` — `util.py`, the fixture builder
+- `calibration` — `calibration/`: controlled judge cases and report scoring
 
 ## Rules
 

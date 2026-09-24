@@ -30,6 +30,7 @@ import {
 	createProvider,
 	type ApiKeyAuth,
 	type AssistantMessage,
+	type Context,
 	type Message,
 	type Model,
 	type Models,
@@ -162,6 +163,19 @@ function lastAssistantText(messages: readonly AgentMessage[]): string {
 	return "";
 }
 
+function estimateInput(context: Context): number {
+	// Output-only usage says nothing about the input prefix, including when
+	// a conversation is restored for repair. Use pi's content estimate then.
+	const messages = context.messages.map((m) => {
+		if (m.role !== "assistant") return m;
+		const input = m.usage.input + m.usage.cacheRead + m.usage.cacheWrite;
+		return Number.isFinite(input) && input > 0 ? m : {
+			...m, usage: { ...m.usage, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 },
+		};
+	});
+	return estimateContextTokens({ ...context, messages }).tokens;
+}
+
 async function main(): Promise<number> {
 	const { job: jobPath, out: outPath } = parseArgs(process.argv);
 	const job: AgentJob = JSON.parse(fs.readFileSync(jobPath, "utf8"));
@@ -181,7 +195,13 @@ async function main(): Promise<number> {
 		forced: null,
 		forcedInjected: false,
 	};
-	const watermark = cfg.context_window - cfg.max_output_tokens - estimateTextTokens(job.forced_message);
+	let executedLlmCalls = 0;
+	let executedToolCalls = 0;
+	let contextRollbacks = 0;
+	const reportedUsage: AgentUsage = { input: 0, output: 0, cache_read: 0, cache_write: 0 };
+	const forcedReserve = estimateTextTokens(job.forced_message);
+	let maxOutputTokens = cfg.max_output_tokens;
+	let watermark = cfg.context_window - maxOutputTokens - forcedReserve;
 
 	const agent = new Agent({
 		initialState: {
@@ -192,13 +212,15 @@ async function main(): Promise<number> {
 			tools,
 			messages: (job.history ?? []) as AgentMessage[],
 		},
-		streamFn: (m, context, options) =>
-			models.streamSimple(m, context, {
+		streamFn: (m, context, options) => {
+			executedLlmCalls += 1;
+			return models.streamSimple(m, context, {
 				...options,
-				maxTokens: cfg.max_output_tokens,
+				maxTokens: maxOutputTokens,
 				temperature: cfg.temperature,
 				timeoutMs: cfg.timeout_ms,
-			}),
+			});
+		},
 		shouldStopAfterTurn: ({ message, toolResults, context }) => {
 			if (job.repair) {
 				budget.stopReason = "answer";
@@ -226,17 +248,7 @@ async function main(): Promise<number> {
 			budget.llmCalls += 1;
 			// context.messages already carries this turn's assistant message
 			// and tool results — the exact request the next call would send
-			// pi accepts output-only usage as a measured prefix. Such a response
-			// says nothing about input size: let its normal content estimator run.
-			const messages = (context.messages as Message[]).map((m) => {
-				if (m.role !== "assistant") return m;
-				const input = m.usage.input + m.usage.cacheRead + m.usage.cacheWrite;
-				return Number.isFinite(input) && input > 0 ? m : {
-					...m, usage: { ...m.usage, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 },
-				};
-			});
-			const estimate = estimateContextTokens({ ...context, messages });
-			if (estimate.tokens > watermark) {
+			if (estimateInput(context) > watermark) {
 				budget.forced = { reason: "context_budget_forced", rollbackTail: 1 + toolResults.length };
 				return false;
 			}
@@ -256,6 +268,7 @@ async function main(): Promise<number> {
 			};
 			const tail = budget.forced.rollbackTail;
 			if (tail > 0) {
+				contextRollbacks += 1;
 				trajectory.tombstoneTail(tail, "context_budget_rollback");
 			}
 			const keptContext = context.messages.slice(0, Math.max(0, context.messages.length - tail));
@@ -266,7 +279,10 @@ async function main(): Promise<number> {
 			return { context: { ...context, messages: [...keptContext, forcedMessage] } };
 		},
 		beforeToolCall: async () => {
-			if (!job.repair && !budget.forcedInjected) return undefined;
+			if (!job.repair && !budget.forcedInjected) {
+				executedToolCalls += 1;
+				return undefined;
+			}
 			return {
 				block: true,
 				terminate: true,
@@ -283,11 +299,36 @@ async function main(): Promise<number> {
 	agent.subscribe((e) => {
 		if (e.type === "message_end") {
 			trajectory.message(e.message);
+			if (e.message.role === "assistant") {
+				const usage = e.message.usage;
+				reportedUsage.input += usage.input ?? 0;
+				reportedUsage.output += usage.output ?? 0;
+				reportedUsage.cache_read += usage.cacheRead ?? 0;
+				reportedUsage.cache_write += usage.cacheWrite ?? 0;
+			}
 		}
 	});
 
 	let error: string | null = null;
 	try {
+		const opening: UserMessage = {
+			role: "user", content: [{ type: "text", text: job.opening }], timestamp: Date.now(),
+		};
+		const inputTokens = estimateInput({
+			systemPrompt: agent.state.systemPrompt,
+			tools: agent.state.tools,
+			messages: [...agent.state.messages, opening] as Message[],
+		});
+		// A final answer can consume some of the reserved output room before
+		// needing repair. Keep its evidence and cap the continuation's output
+		// to the remaining room instead of rejecting a recoverable verdict.
+		if (job.history?.length) {
+			maxOutputTokens = Math.min(maxOutputTokens, cfg.context_window - inputTokens - forcedReserve);
+			watermark = cfg.context_window - maxOutputTokens - forcedReserve;
+		}
+		if (maxOutputTokens <= 0 || inputTokens > watermark) {
+			throw new Error(`opening context (${inputTokens} estimated tokens) exceeds the input budget (${Math.min(watermark, cfg.context_window - forcedReserve)}) before any judge call`);
+		}
 		// A saved final/repair answer has an assistant tail: bare continue()
 		// rejects it. prompt() appends the follow-up without resetting history.
 		await agent.prompt(job.opening);
@@ -317,6 +358,14 @@ async function main(): Promise<number> {
 		llm_calls: assistantTurns,
 		tool_calls: toolCalls,
 		usage: sumUsage(messages),
+		executed_llm_calls: executedLlmCalls,
+		executed_tool_calls: executedToolCalls,
+		reported_usage: reportedUsage,
+		retained_evidence: messages.filter((message) => message.role === "toolResult"
+			&& message.toolName === "read_evidence" && !message.isError
+			&& (message.details as { path?: string } | undefined)?.path?.startsWith("steps/")
+			&& ((message.details as { lines_read?: number } | undefined)?.lines_read ?? 0) > 0).length,
+		context_rollbacks: contextRollbacks,
 		messages: messages as unknown[],
 		error,
 	};
@@ -327,6 +376,11 @@ async function main(): Promise<number> {
 		llm_calls: result.llm_calls,
 		tool_calls: result.tool_calls,
 		usage: result.usage,
+		executed_llm_calls: result.executed_llm_calls,
+		executed_tool_calls: result.executed_tool_calls,
+		reported_usage: result.reported_usage,
+		retained_evidence: result.retained_evidence,
+		context_rollbacks: result.context_rollbacks,
 		error,
 	});
 	fs.writeFileSync(outPath, JSON.stringify(result));

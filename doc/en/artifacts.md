@@ -1,5 +1,5 @@
 ---
-description: "injudge.report/v11, injudge.summary/v9, every field, and how every rate is counted."
+description: "injudge.report/v13, injudge.summary/v11, every field, and how every rate is counted."
 icon: box-archive
 ---
 
@@ -11,8 +11,8 @@ injudge writes all artifacts of a run to that run's own `<run-stamp>/` folder un
 
 | File | Schema | Role |
 |---|---|---|
-| `injudge-report.json` | `injudge.report/v11` | Runtime judging record. Rewritten after every trajectory so a crash keeps completed work. Feed it to memgraph with `--verdicts`. |
-| `summary.json` | `injudge.summary/v9` | Final statistics set: counts, rates, and a narrative-free span index. |
+| `injudge-report.json` | `injudge.report/v13` | Runtime judging record. Rewritten after every trajectory so a crash keeps completed work. Feed it to memgraph with `--verdicts`. |
+| `summary.json` | `injudge.summary/v11` | Final statistics set: counts, rates, and a narrative-free span index. |
 | `memgraph-verdicts.html` | — | Only with `--html` (off by default): memgraph with recall nodes colored by span verdict. |
 | `evidence/<span-dir>/` | — | One folder per span sent to the judge agent (error outcomes included): the exact files available to it. |
 | `agent-runs/<span-dir>.jsonl` | — | One trajectory per span sent to the judge agent: the pi event-sourced recording of the judging conversation (see [Judge agent](judge-client.md#trajectory-recording)). |
@@ -28,9 +28,11 @@ An offline preparation run writes a different package under its own run folder:
 | `episodes/<safe-episode-id>/deliveries.md` | — | Chronological delivery, search, placement, and exposure evidence, including empty deliveries. |
 | `episodes/<safe-episode-id>/steps/` | — | Original global steps and tool-result availability. |
 
-The episode folder is the future judge's evidence root. Canonical memory
-records and unresolved audit data stay in `episode-inputs.json`; clipped or
-unverified values are withheld from judge-readable files.
+The paid path reuses these prepared episode files inside each span's own evidence
+root, alongside target `span.md`; no judge can read another episode or the
+audit-only canonical memory index. The report records episode execution identity,
+task/attachment provenance, evidence bounds, and per-phase judge health. Clipped
+or unverified canonical values are withheld from judge-readable files.
 
 The audit records gold and outcome attachment provenance separately as
 `gold_join` and `outcome_join`. A benchmark-keyed harness report cannot be
@@ -47,6 +49,11 @@ The **report** is the judging record. Each operation carries the rubric with not
 
 The **summary** is the numbers for reading and comparing memory systems. Judging narrative stays in the report.
 
+Episode counts appear alongside trajectory/span counts. Each trajectory's detail
+includes a compact episode-to-span index. The CLI summarizes recording diagnostics;
+their complete messages remain in the report and graph. Report v13 and summary v11
+separate empty deliveries from unobserved consumers; obsolete versions are rejected.
+
 When several identities share one display key, summary `key` fields (triage lists and `memory_usage`) carry a `key#<item-or-namespace>` suffix — an 8-character prefix, or the full base when prefixes collide — so two memories never conflate. The report always keeps the full identity.
 
 ## How the Numbers Are Derived
@@ -58,6 +65,7 @@ The mapping from rubric signals to usage labels and span verdicts is in [Rubric 
 | Population | Members |
 |---|---|
 | Judged spans | `positive` + `negative` + `neutral`. Denominator for verdict rates. |
+| `empty` | No entries were delivered (`auto: empty_delivery`). No judge call; counts and delivery cost stay outside directional rates and the wasted-token share. |
 | `unassessable` | Rule-judged auto-neutral spans (no delivery has an attributed agent step — no downstream footprint can be grounded). Count only, with their delivery cost in their own token bucket: observation missingness is not a measured null, so they sit in no directional denominator and outside the wasted-token share. When a judged population makes `headline` available, `unassessable_spans` / `unassessable_tokens` name them there. |
 | LLM-judged spans | Judged spans with no `auto` marker. Population for rubric rates, usage tallies, and confidence. |
 | `error` / `unjudged` | Counts only. Never a rate denominator. |
@@ -73,7 +81,7 @@ $$
 \mathrm{rates}[v] = \frac{\mathrm{count}[v]}{\mathrm{positive} + \mathrm{negative} + \mathrm{neutral}}
 $$
 
-`headline.judged_spans` is that denominator. `headline.wasted_token_share` is the injected-token cost of neutral and negative spans as a share of judged spans' cost — a **span-level non-beneficial-delivery proxy**: a neutral span's referenced memories count as wasted, a positive span's ignored memories count as productive, and a mixed bundle is charged wholly to its verdict, so the share's numerator and denominator (`wasted_tokens` / `judged_tokens`) ride along named, the excluded error/unjudged tokens surface as `error_unjudged_tokens` when non-zero (unassessable tokens likewise as `unassessable_tokens`), and `headline.caveat` always rides a reported share, restating both coarsenesses — the proxy and the verdict asymmetry (ignored garbage is neutral; only acted-on influence with no effect or harm is negative). The caveat never disappears just because the share is low or a few negative spans exist.
+`headline.judged_spans` is that denominator. `headline.wasted_token_share` is the injected-token cost of neutral and negative spans as a share of judged spans' cost — an **estimated span-level non-beneficial-delivery proxy** (a neutral span means no attributable benefit was observed, not a measured absence of effect): a neutral span's referenced memories count as wasted, a positive span's ignored memories count as productive, and a mixed bundle is charged wholly to its verdict, so the share's numerator and denominator (`wasted_tokens` / `judged_tokens`) ride along named, the excluded error/unjudged tokens surface as `error_unjudged_tokens` when non-zero (unassessable tokens likewise as `unassessable_tokens`), and `headline.caveat` always rides a reported share, restating both coarsenesses — the proxy and the verdict asymmetry (ignored garbage is neutral; only acted-on influence with no effect or harm is negative). The caveat never disappears just because the share is low or a few negative spans exist.
 
 ### Rubric Rates
 
@@ -113,7 +121,7 @@ Means and buckets (`[0,0.5)`, `[0.5,0.8)`, `[0.8,1.0]`) cover LLM-judged spans o
 
 ### Input Regimes
 
-Overall only: spans carrying an `input` record — every span the agent ran for, error outcomes included — are counted in `input_paths.agent`, `gold_scored`, and `forced_answers` (the `forced` marker: the conversation's final answer came from a budget-exhausted forced round). Only rule-judged auto-neutral and unjudged spans omit `input`, so they alone stay out of those tallies.
+Overall only: spans carrying an `input` record — every span the agent ran for, error outcomes included — are counted in `input_paths.agent`, `gold_scored`, and `forced_answers` (the `forced` marker means the *final* answer came from a budget-exhausted round). Mechanically counted empty or unattributable spans and unjudged spans omit `input`.
 
 ## summary.json Fields
 
@@ -187,6 +195,7 @@ These blocks live under `details.overall` and `details.trajectories.<id>`:
 | Field | Meaning |
 |---|---|
 | `operation_id` | Span id — look it up in `injudge-report.json` for the full record |
+| `episode_execution_id` | Parent episode execution; omitted when its boundary was ambiguous |
 | `verdict` / `confidence` | Span outcome and judge confidence (`confidence` omitted when null). Auto-neutral spans use `unassessable`, matching the aggregate counts. |
 | `auto` | Rule reason on unassessable spans, e.g. `no_subsequent_turn`; omitted on judged spans |
 | `steps` | `[first, last]` agent step the span's deliveries landed on (omitted when the span has no attributed step) |
@@ -195,7 +204,7 @@ These blocks live under `details.overall` and `details.trajectories.<id>`:
 
 ## Report-Only Fields
 
-`injudge-report.json` additionally carries, per operation: `memories` (full recorded refs, each stamped with its span-local `id`), `memory_exposure` (per entry: whether the placement showed the value `full`, `full_normalized` — whole, but only up to whitespace-run or markdown-escape normalization —, `clipped` to a prefix of N chars, or `unknown` — unverifiable, so the canonical value is withheld from the judge input; prose-unsafe values (quotes, backslashes, line structure) compare verbatim only), `memory_windows` (per entry id: the footprint-window end step the entry's action `anchors` were validated against — `null` when the entry was never re-delivered, so its bound was the step stream's end; a same-step delivery collision caps the window at the span's own last delivery step, including a previously finite window; omitted when no delivery has an attributed agent step), `memory_window_starts` (only when a same-step collision bumped an entry: its window opens after the shared step the earlier carrier owns), rubric notes and each entry's action `anchors`, `analysis`, `evidence`, `step_gaps`, `new_keys` / `removed_keys` / `previous_keys` / `changed_keys`, `auto`, `error`, `judge_raw`, `pe_pairing_corrections` (when any), and `input` on spans the agent ran for, error outcomes included (`path`: `agent`, plus `attempts`, `llm_calls`, `tool_calls`, `transcript` — the conversation's trajectory JSONL under `agent-runs/`, relative to the output dir — and `"gold"` / `"forced"` when they apply — `forced` marks a conversation the step or context budget ended with a forced final answer).
+`injudge-report.json` additionally carries, per operation: `episode_execution_id` and `episode_last_step`; `memories` (full recorded refs stamped with span-local ids); `memory_exposure` (`full`, `full_normalized`, `clipped`, or `unknown`, with unverified canonical values withheld from judge evidence); and `memory_windows` (per-entry global end steps, capped at the episode's last eligible step or the next same-episode delivery). `memory_window_starts` records same-step collision exceptions. The operation also retains rubric notes and action `anchors`, `analysis`, `evidence`, `step_gaps`, `new_keys` / `removed_keys` / `previous_keys` / `changed_keys`, `auto`, `error`, `judge_raw`, and `pe_pairing_corrections` when present. Judged spans, including errors, carry `input`: `path: agent`, attempts, retained `llm_calls` / `tool_calls` and successful step-file reads (`retained_evidence`), executed call counts, reported usage including rolled-back calls, context rollbacks, `any_phase_forced`, and the transcript path relative to the output directory. `gold` and final-answer `forced` appear when applicable. Trajectory episode rows record boundary, task, attachment, and evidence provenance without an episode verdict.
 
 The report's `tool.config` is the resolved, secret-free judge-agent configuration (URLs sanitized to `scheme://host[:port][/path]`).
 

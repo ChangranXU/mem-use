@@ -6,28 +6,33 @@ icon: align-left
 # Judge Evidence
 
 {% hint style="info" %}
-One folder and one agent conversation per LLM-judged span. The opening supplies the exact span document and file index; two read-only tools scoped to the folder let the judge investigate the step evidence. The judged evidence can never exceed what was materialized into the folder.
+One folder and one agent conversation per eligible span, bounded to its parent episode. The opening supplies the exact target span and compact file navigation; two read-only tools scoped to the folder let the judge inspect the detailed manifest and episode evidence.
 {% endhint %}
 
-The span document (`span.md`) tells the judge the span's position among the trajectory's spans, all recorded search queries that produced the injection, and how the injection was presented when recorded (each ordered slot's name, kind, and full resolved text; unavailable or redacted content is explicitly marked unrecorded). Each delivered ENTRY is labelled with a stable span-local id (`[m1]`, `[m2]`, …) — the answer keys its rubric entries by those ids, so two entries sharing a display key are scored independently (annotation-only `memory_type` and confidence fields are withheld; text actually shown in the placement is preserved) — and, where the recording allows it, an exposure marker: the placement is compared against the canonical value adapter-free; a value the placement carried only in part is shown to the judge as the exposed prefix only (`EXPOSED CLIP`), a value carried whole but only up to whitespace-run or markdown-escape normalization is marked `EXPOSURE NORMALIZED` (treated as fully shown), and a value that cannot be matched at all is marked `EXPOSURE UNVERIFIED` with the canonical value withheld from the folder (a warning alone is no information boundary — hidden content could still prime the explanation). The normalized compare is prose-safe only: a value carrying quotes, backslashes, or line structure compares verbatim only, since collapsing whitespace or stripping escapes inside strings, regexes, or indentation-sensitive content changes semantics rather than presentation. The document also names the keys delivered in any earlier span and the keys whose value changed since their last earlier delivery — the novelty baseline beyond the task statement (a gap re-delivery, absent from the immediately previous span, is still not new content).
+The span document (`span.md`) identifies one target and its parent execution, ordered delivered entries with span-local `[m1]`, `[m2]`, … IDs, exposure, consumer/delivery provenance, and per-entry windows. It names earlier deliveries **within that episode**, but a prior delivery is not proof the content remained visible: inspect the recorded input view. `task.md` carries the recorded user task and updates with source positions; `context.json` includes the target's pre-delivery view with independent host text separated from placement-owned text. The episode's other deliveries provide competing-source context, not extra rubric targets. Clipped values show only the exposed prefix and unverifiable canonical values are withheld.
 
-Each delivered entry's judged footprint window runs from the span's first step to that entry's next re-delivery — a re-delivery supersedes, so a memory delivered in two spans is never credited in both; the document lists each entry's window separately, and an entry never re-delivered is unbounded. The one exception is named rather than implied: a later span delivering one of these entries at the span's own last delivery step (a same-step collision — two memory blocks placed in one call, or a declared step collision) caps that entry's window at that step inclusive, even if already finitely bounded, AND opens the colliding span's window for the same entry only after it (the recording carries no causal order within one step, so the shared step is credited exactly once under a first-carrier rule); the collision is noted in the run's validation log. Windows are per entry (span-local id), never per display key: identities sharing one key keep their own bounds.
+Windows end at the next same-episode re-delivery of that entry or at the episode's last eligible global step. Same-step collisions credit the shared step only to the earlier carrier. Anchors must name steps in the episode and inside that entry's window; later same-episode consequences may support an already eligible earlier action.
 
 ## The Folder
 
 ```
 <output>/<run-stamp>/evidence/<span-dir>/
-  manifest.json        # the index: every file, its size, and per step
-                       # the step and turn, its seq range, a one-line preview
-  span.md              # task statement + the span document above
-  gold.md              # golden answer / correctness attachments, when any
+  span.md              # only the target span and its provenance
+  episode.md           # parent execution and navigation
+  task.md              # task and user updates with source positions
+  context.json         # visible input views and target baseline
+  deliveries.md        # other same-episode deliveries as context
+  searches.json        # search provenance
+  manifest.json        # detailed file index
+  gold.md              # optional golden answer
+  outcome.json         # optional recorded outcome
   steps/
-    step_000001.md     # one recorded agent step per file: reasoning,
-    step_000002.md     # content, and every tool run with name/args/result
+    step_000257.md     # original global step number, reasoning, tools,
+    step_000258.md     # results and availability, no renumbering
     ...
 ```
 
-The step files carry the complete recorded stream — nothing is truncated or pre-summarized. `manifest.json` exists so the agent can triage without reading everything: each step entry lists its step and turn, its seq range, character and line counts, and a one-line preview. The JSON uses one file entry per line; there is no duplicate approximate-token field. The opening includes the exact `span.md` and `manifest.json`, so no discovery calls are needed. Previews guide navigation, not verdicts. Gold attachments ride `gold.md` (they are part of the evidence the agent reads; a golden-answer body selects the gold rubric for that span, while a correctness-only attachment leaves the plain rubric in place — see [injudge](injudge.md#golden-answer-and-correctness)).
+Step bodies are not truncated or renumbered. The opening includes `span.md` and compact navigation, not the detailed manifest or step bodies; the runner checks its full estimated context against the input watermark **before** any paid call. Gold selects the gold rubric for that episode's spans, while outcome is corroboration only.
 
 ## The Tools
 

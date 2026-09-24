@@ -21,16 +21,11 @@ from __future__ import annotations
 # (injudge.report.py) and the reader (memgraph/verdicts.py) so a bump can
 # never land on one side only and surface at read time. Tests pin the
 # literal deliberately — a bump must update them (see AGENTS.md).
-# injudge.report/v11: novelty can be null when its recorded baseline cannot
-# establish a tier. Other signals and the influence/effect verdict rule stay
-# unchanged. Ignored relevant entries with null novelty carry the reason
-# ignored_unknown_novelty, never ignored_novel.
-REPORT_SCHEMA = "injudge.report/v11"
+# injudge.report/v13: empty deliveries have a separate count/cost bucket;
+# episode diagnostics and counts remain explicit alongside span verdicts.
+REPORT_SCHEMA = "injudge.report/v13"
 
-# injudge.summary/v9: span-index auto-neutral entries are unassessable and
-# retain their auto reason, matching every aggregate's population semantics.
-SUMMARY_SCHEMA = "injudge.summary/v9"
+# injudge.summary/v11: empty-span accounting and compact episode indexes.
+SUMMARY_SCHEMA = "injudge.summary/v11"
 
-# Offline episode preparation artifact. This staged contract intentionally has
-# no verdict fields; the paid episode judge will define its own report schema.
 EPISODE_INPUT_SCHEMA = "injudge.episode-inputs/v1"
