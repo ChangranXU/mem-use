@@ -420,23 +420,14 @@ class _CallUsage:
 
     The recorder stamps every bound operation end with its memory-lane
     `call_refs` and, when an embedding lane is bound, `embedding_call_refs` —
-    portable evidence of what the operation itself spent. A chat call bills on
-    its turn's assistant message_end; an embedding call folds no turn, so its
-    usage is read from the call's recorded response."""
+    portable evidence of what the operation itself spent. Each call's billing
+    is the recorder's normalized `call.json` `response.usage` (null when the
+    provider reported none): one source for chat and embedding calls alike,
+    including responses that never folded into an assistant message."""
 
-    def __init__(self, events: list[dict], traj_dir: Path) -> None:
+    def __init__(self, traj_dir: Path) -> None:
         self._dir = traj_dir
-        turns = {
-            e["turn"]: e["call_id"] for e in events
-            if e.get("type") == "turn_start" and is_int(e.get("turn")) and isinstance(e.get("call_id"), str)
-        }
-        self._chat: dict[str, dict] = {}
-        for e in events:
-            if e.get("type") == "message_end" and e.get("role") == "assistant" and isinstance(e.get("usage"), dict):
-                call = turns.get(e["turn"]) if is_int(e.get("turn")) else None
-                if call is not None:
-                    self._chat.setdefault(call, e["usage"])
-        self._embedding: dict[str, int | None] = {}
+        self._recorded: dict[str, dict | None] = {}
 
     def cost(self, end: dict[str, Any] | None) -> dict[str, int | None] | None:
         if not isinstance(end, dict):
@@ -444,34 +435,36 @@ class _CallUsage:
         out: dict[str, int | None] = {}
         calls = self._call_ids(end.get("call_refs"))
         if calls:
-            usages = [self._chat.get(call) for call in calls]
+            usages = [self._usage(call) for call in calls]
             out["memory_calls"] = len(calls)
             out["prompt_tokens"] = _known_sum(_token_count(u, "prompt_tokens") for u in usages)
             out["completion_tokens"] = _known_sum(_token_count(u, "completion_tokens") for u in usages)
         embedded = self._call_ids(end.get("embedding_call_refs"))
         if embedded:
             out["embedding_calls"] = len(embedded)
-            out["embedding_tokens"] = _known_sum(self._embedding_tokens(call) for call in embedded)
+            out["embedding_tokens"] = _known_sum(_token_count(self._usage(call), "prompt_tokens") for call in embedded)
         return out or None
 
     @staticmethod
     def _call_ids(refs: Any) -> list[str]:
         if not isinstance(refs, list):
             return []
-        return [r["call_id"] for r in refs if isinstance(r, dict) and isinstance(r.get("call_id"), str)]
+        return list(dict.fromkeys(r["call_id"] for r in refs
+                                  if isinstance(r, dict) and isinstance(r.get("call_id"), str)))
 
-    def _embedding_tokens(self, call_id: str) -> int | None:
-        if call_id not in self._embedding:
-            usage = None
-            # a hand-edited id must never name a path outside calls/
+    def _usage(self, call_id: str) -> dict | None:
+        if call_id not in self._recorded:
+            body = None
+            # A hand-edited id must never name a path outside calls/.
             if _CALL_ID.fullmatch(call_id):
                 try:
-                    body = json.loads((self._dir / "calls" / call_id / "response.json").read_text(encoding="utf-8"))
-                    usage = body.get("usage") if isinstance(body, dict) else None
+                    body = json.loads((self._dir / "calls" / call_id / "call.json").read_text(encoding="utf-8"))
                 except (OSError, ValueError, RecursionError):
-                    usage = None
-            self._embedding[call_id] = _token_count(usage, "prompt_tokens")
-        return self._embedding[call_id]
+                    body = None
+            response = body.get("response") if isinstance(body, dict) else None
+            usage = response.get("usage") if isinstance(response, dict) else None
+            self._recorded[call_id] = usage if isinstance(usage, dict) else None
+        return self._recorded[call_id]
 
 
 def _op_anchor(operation: AnnotatedOperation) -> dict[str, Any]:
@@ -539,6 +532,8 @@ def _extract_op_from_generation(
         turn=_bound_turn(table, end.get("terminal_call_ref")) if end else None,
         source_event_index=anchor.get("_event_index"),
     )
+    extensions = anchor["payload"].get("extensions")
+    op.extensions = extensions if isinstance(extensions, dict) else {}
     op.trigger = operation.start["payload"].get("trigger")
     # Change events are recorded state effects — they survive a missing end
     # event (an already-flagged structural violation), like every other
@@ -705,6 +700,8 @@ def _recall_op_from_delivery(
             if isinstance(payload.get("placements"), list) else None
         ),
     )
+    extensions = payload.get("extensions")
+    op.extensions = extensions if isinstance(extensions, dict) else {}
     # a trajectory_message locator resolves through the delivery's own
     # session bindings — the same per-session resolver the session task uses
     # (no bindings resolves nothing). Computed before the memories loop: a
@@ -741,7 +738,7 @@ def _recall_op_from_delivery(
             "content_sha256": sha if text is None and isinstance(sha, str) else None,
         })
     for memory in op.memories:
-        exposures = [exposure_state(memory.get("value"), p["text"]) for p in op.placements]
+        exposures = [exposure_state(memory.get("value"), p["text"], placement_kind=p["kind"]) for p in op.placements]
         op.exposure.append(max(
             exposures,
             key=lambda exp: (exp.get("exposed_chars") or 0, exp["state"] == "full"),
@@ -1070,7 +1067,7 @@ def parse_trajectory(
             )
 
     ops: list[MemoryOp] = []
-    usage = _CallUsage(events, traj_dir)
+    usage = _CallUsage(traj_dir)
     n_extract = n_recall = 0
     generations = sorted(
         (op for op in index.operations.values() if op.kind == "generation"),

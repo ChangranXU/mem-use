@@ -2740,3 +2740,34 @@ def test_locator_duplicate_retraction_never_pops_beneath_its_copy():
     # the retraction annuls the newer record; its duplicate pops nothing —
     # the surviving un-annulled record still answers the digest-less ref
     assert resolved_content_text(ref, events, {"main": MAIN}) == "epoch one"
+
+
+@pytest.mark.parametrize("render", [
+    lambda value: json.dumps({"data": {"content": value}}),
+    lambda value: json.dumps({"output": json.dumps({"data": {"content": value}})}),
+    lambda value: "\n".join(f"  {i}\t{line}" for i, line in enumerate(value.splitlines(), 1)) + "\n<system-reminder>note</system-reminder>",
+    lambda value: "\n".join(f"  {i}→{line}" for i, line in enumerate(value.splitlines(), 1)),
+])
+def test_tool_renderings_preserve_exact_multiline_code_exposure(tmp_path, render):
+    value = 'def check(s):\n    return s == "a  b" and r"a\\.b"'
+    ref = cure_ref("code", value)
+    b = AnnotatedBuilder().agent_turn(with_task=True)
+    search = b.search(returned=[ref])
+    b.agent_turn().delivery(search, memories=[ref], bind=b.last_call, placements=[{
+        "slot": "result", "kind": "tool_result", "proof_kind": "canonical_message",
+        "content": {"availability": "inline", "text": render(value)},
+    }])
+    _, ops, _ = parse(b, tmp_path)
+    assert ops[0].exposure == [{"state": "full_normalized", "exposed_chars": len(value), "value_chars": len(value)}]
+
+
+def test_numbered_tool_exposure_never_joins_gaps_or_changes_code_whitespace():
+    from memgraph.annotations import exposure_state
+
+    value = 'first line\n    return "a  b"'
+    for text in ('1\tfirst line\n3\t    return "a  b"',
+                 '1\tfirst line\n2\t    return "a b"',
+                 '1\tfirst line\nwarning\n2\t    return "a  b"'):
+        assert exposure_state(value, text, placement_kind="tool_result")["state"] != "full_normalized"
+    assert exposure_state(value, '1\tfirst line\n2\t    return "a  b"',
+                          placement_kind="system_context")["state"] != "full_normalized"

@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from annotated_fixtures import AnnotatedBuilder, cure_ref
 from injudge.episodes import prepare_trajectory
 from injudge.evidence import build_episode_evidence
@@ -350,3 +352,45 @@ def test_gold_and_outcome_preserve_separate_join_sources(tmp_path):
     outcome = json.loads(build_episode_evidence(episode)["outcome.json"])
     assert outcome["status"] == "empty_patch_submission"
     assert outcome["join"] == "harness_report"
+
+
+def test_search_extensions_stay_in_audit_data_and_out_of_judge_evidence(tmp_path):
+    builder = AnnotatedBuilder().episode_open().agent_turn(with_task=True)
+    builder.search(query="find the retry policy")
+    hidden = "PRIVATE_UNDELIVERED_MEMORY"
+    extensions = {"provider": {"unexposed_candidate": hidden, "configuration": "bulk" * 1000}}
+    builder.events[-2]["payload"]["extensions"] = extensions
+    builder.episode_close()
+    episode = prepare_trajectory(*_prepare_args(tmp_path, builder)).episodes[0]
+    assert episode.searches[0]["extensions"] == extensions
+    files = build_episode_evidence(episode)
+    assert all(hidden not in text for text in files.values())
+    search = json.loads(files["searches.json"])["searches"][0]
+    assert search["query"] == "find the retry policy" and search["returned_count"] == 0
+    assert "extensions" not in search
+
+
+@pytest.mark.parametrize("expired", [False, True])
+def test_participant_search_without_delivery_stays_inside_its_session_episode(tmp_path, expired):
+    builder = AnnotatedBuilder().agent_turn(with_task=True)
+    child = "participant"
+    adapter = {"name": "test", "version": "1"}
+    builder.annotation("memory_session", {"trace_session_id": child, "session_kind": "other", "adapter": adapter},
+                       lane="CHILD")
+    for role, lane in (("main", "CHILD"), ("memory", builder.mem)):
+        builder.annotation("memory_role_bind", {"trace_session_id": child, "logical_role": role, "adapter": adapter}, lane=lane)
+    if expired:
+        builder.annotation("memory_session", {"trace_session_id": "next-episode", "session_kind": "episode", "adapter": adapter},
+                           lane=builder.main)
+        for role, lane in (("main", builder.main), ("memory", builder.mem)):
+            builder.annotation("memory_role_bind", {"trace_session_id": "next-episode", "logical_role": role, "adapter": adapter}, lane=lane)
+    search_id = builder.search(query="unanswered lookup")
+    for event in builder.events[-2:]:
+        event["payload"]["trace_session_id"] = child
+    result = prepare_trajectory(*_prepare_args(tmp_path, builder))
+    if expired:
+        assert all(not episode.searches for episode in result.episodes)
+        assert any(item.get("operation_id") == search_id for item in result.unassigned)
+    else:
+        assert not result.unassigned
+        assert [search["operation_id"] for search in result.episodes[0].searches] == [search_id]

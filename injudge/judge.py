@@ -196,7 +196,7 @@ def _memory_line(m: dict, mid: str, exposure: dict | None) -> str:
         return (
             f"{label}: {value}\n"
             "  [EXPOSURE NORMALIZED — the placement carries this whole value up to "
-            "whitespace/markdown-escape differences only; treat it as shown in full]"
+            "lossless display formatting differences; treat it as shown in full]"
         )
     if state == "unknown":
         return (

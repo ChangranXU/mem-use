@@ -120,6 +120,8 @@ class MemoryOp:
     # A count is None when any bound call's usage is unrecorded; None
     # overall when the operation bound no call.
     cost: dict[str, int | None] | None = None
+    # Opaque annotation provenance (tool calls, writer attempts, provider evidence).
+    extensions: dict[str, object] = field(default_factory=dict)
     declared_step: str | None = None  # adapter-declared step, for cross-checking
     flagged: str | None = None
     # Parsed-stream provenance used by injudge episode preparation. This is
@@ -161,6 +163,8 @@ class MemoryOp:
             d["status"] = self.status
         if self.cost is not None:
             d["cost"] = self.cost
+        if self.extensions:
+            d["extensions"] = self.extensions
         if self.kind == "extract":
             counts = self.rejection_counts or {}
             d.update(

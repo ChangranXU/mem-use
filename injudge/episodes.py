@@ -514,6 +514,8 @@ def _search_projection(search_id: str, events: list[dict[str, Any]],
     returned = _payload(end).get("returned") if end else None
     return {
         "operation_id": search_id,
+        "extensions": (_payload(start)["extensions"]
+                       if start and isinstance(_payload(start).get("extensions"), dict) else {}),
         "lane_id": _payload(start).get("lane_id") if start else None,
         "query": query_text,
         "trigger": _as_str(_payload(start).get("trigger")) if start else None,
@@ -596,11 +598,14 @@ def _delivery_projection(
     }
 
 
-def _episode_for_index(boundaries: list[_Boundary], index: int | None, event: dict[str, Any] | None = None) -> _Boundary | None:
+def _episode_for_index(boundaries: list[_Boundary], index: int | None, event: dict[str, Any] | None = None,
+                       participant_episodes: dict[str, str] | None = None) -> _Boundary | None:
     if index is None:
         return None
     explicit = _as_str(_payload(event or {}).get("episode_id"))
     session = _as_str(_payload(event or {}).get("trace_session_id"))
+    if participant_episodes and session in participant_episodes:
+        session = participant_episodes[session]
     matches = [b for b in boundaries if b.contains(index)
                and (explicit is None or b.episode_id == explicit)
                and (session is None or b.session_id in (None, session))]
@@ -643,6 +648,16 @@ def prepare_episodes(
         )
 
     annotation_index = build_annotation_index(events)
+    # Non-episode sessions opened inside an explicit session episode are
+    # participants of that episode. Their undelivered searches have no
+    # consumer turn to establish ownership; retain their recorded scope.
+    participant_episodes: dict[str, str] = {}
+    for session_id, session_event in annotation_index.sessions.items():
+        if _payload(session_event).get("session_kind") != "other":
+            continue
+        boundary = _episode_for_index(boundaries, _event_index(session_event, 0))
+        if boundary and boundary.open_event.get("type") == "memory_session" and boundary.session_id:
+            participant_episodes[session_id] = boundary.session_id
     main_lanes = _main_lanes(events, trajectory.memory_lanes, trajectory.side_lanes)
     turn_index, step_sources, call_map = _turn_maps(events, steps)
     views, occurrences, replay_diagnostics = _replay_context(events, steps, main_lanes)
@@ -754,7 +769,7 @@ def prepare_episodes(
             turn, _step = call_map[call_id]
             boundary = _episode_for_index(boundaries, turn_index.get(turn, source_index))
         else:
-            boundary = _episode_for_index(boundaries, source_index, event)
+            boundary = _episode_for_index(boundaries, source_index, event, participant_episodes)
         if boundary is None:
             diagnostics.append(f"{trajectory.run_id}: delivery {op.id} has ambiguous episode membership")
             unassigned.append({
@@ -806,7 +821,7 @@ def prepare_episodes(
         sid = _as_str(payload.get("operation_id"))
         if sid is None or sid in assigned_search_ids:
             continue
-        boundary = _episode_for_index(boundaries, _event_index(event, fallback), event)
+        boundary = _episode_for_index(boundaries, _event_index(event, fallback), event, participant_episodes)
         if boundary is None:
             diagnostics.append(f"{trajectory.run_id}: search {sid} has ambiguous episode membership")
             unassigned.append({

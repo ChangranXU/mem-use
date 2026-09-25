@@ -836,7 +836,8 @@ _EXPOSURE_MIN_PREFIX = 8
 # breaks indentation-sensitive content — none of that is a justified
 # rendering-aware mapping, so a value carrying quotes, backslashes, or line
 # structure compares VERBATIM ONLY (a mismatch then reads unknown, never a
-# fabricated full_normalized).
+# fabricated full_normalized). Lossless JSON and line-number decoding below
+# can instead establish an exact match without rewriting code whitespace.
 _EXPOSURE_WS = re.compile(r"\s+")
 _EXPOSURE_ESCAPE = re.compile(r"\\(?=[^A-Za-z0-9])")
 _EXPOSURE_PROSE_UNSAFE = re.compile(r'[\n\r\t\\"\']')
@@ -849,7 +850,48 @@ def _exposure_norm(text: str) -> str:
     return _EXPOSURE_ESCAPE.sub("", _EXPOSURE_WS.sub(" ", text)).strip()
 
 
-def exposure_state(value: Any, placement_text: str | None) -> dict:
+_JSON_STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
+_NUMBERED_LINE = re.compile(r"^\s*([0-9]{1,9})(?:\t|→)(.*)$")
+
+
+def _rendered_texts(text: str, numbered: bool) -> list[str]:
+    """Lossless display decoding, never whitespace rewriting inside code.
+
+    Shell wrappers can JSON-encode another JSON response. Numbered file
+    output is decoded only on tool-result placements, in contiguous line
+    runs; a gap or a diagnostic line cannot join two unseen file fragments.
+    """
+    rendered = []
+    pending = [text]
+    for _ in range(4):
+        nested = []
+        for source in pending:
+            for match in _JSON_STRING.finditer(source):
+                try:
+                    decoded = json.loads(match[0])
+                except (ValueError, RecursionError):
+                    continue
+                nested.append(decoded)
+            if numbered:
+                lines, previous = [], None
+                for line in [*source.splitlines(), ""]:
+                    match = _NUMBERED_LINE.fullmatch(line)
+                    number = int(match[1]) if match else None
+                    if match is None or (previous is not None and number != previous + 1):
+                        if lines:
+                            rendered.append("\n".join(lines))
+                        lines = []
+                    if match:
+                        lines.append(match[2])
+                    previous = number
+        rendered.extend(nested)
+        pending = nested
+        if not pending:
+            break
+    return rendered
+
+
+def exposure_state(value: Any, placement_text: str | None, *, placement_kind: str | None = None) -> dict:
     """What the recorded placement actually exposed of one delivered
     memory's canonical value — the content-grounding half of a delivery,
     kept apart from the MemoryRef's canonical identity (never a digest
@@ -864,9 +906,11 @@ def exposure_state(value: Any, placement_text: str | None) -> dict:
     the whole content was shown, modulo presentation, and the judge is told
     exactly that. The normalized compare is restricted to prose-safe values
     — one carrying quotes, backslashes, or line structure compares verbatim
-    only, since collapsing/escape-stripping inside strings, regexes, or
-    indentation-sensitive content changes semantics rather than
-    presentation. `clipped` — the placement carries only a proper prefix of
+    only under that normalization, since collapsing/escape-stripping inside
+    code changes semantics. Lossless JSON-string decoding and contiguous
+    numbered tool-result lines can also establish full_normalized exposure;
+    their decoded content must match exactly. `clipped` — the placement
+    carries only a proper prefix of
     the value (a delivery budget cutting the rendered line);
     `exposed_chars` is the longest occurring prefix (compared verbatim — a
     re-wrapped clip is indistinguishable from a transformed value), and
@@ -880,6 +924,8 @@ def exposure_state(value: Any, placement_text: str | None) -> dict:
         return {"state": "unknown", "exposed_chars": None, "value_chars": value_chars}
     if not value or value in placement_text:
         return {"state": "full", "exposed_chars": len(value), "value_chars": len(value)}
+    if any(value in text for text in _rendered_texts(placement_text, placement_kind == "tool_result")):
+        return {"state": "full_normalized", "exposed_chars": len(value), "value_chars": len(value)}
     if not _EXPOSURE_PROSE_UNSAFE.search(value) and (
         _exposure_norm(value) in _exposure_norm(placement_text)
     ):

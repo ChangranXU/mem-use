@@ -329,7 +329,9 @@ Easy to get wrong:
   share `prompts/injudge/scoring/uncertainty.md`.
 - The evidence grounds every memory to its recorded placement exposure
   (adapter-free value-vs-placement compare: full / whitespace-and-escape
-  normalized full (`full_normalized`) — prose-safe values only — clipped
+  normalized full (`full_normalized`) — prose-safe whitespace normalization,
+  lossless JSON-string decoding, or contiguous numbered tool-result lines
+  with exact code whitespace — clipped
   prefix only / unknown-marked with the canonical value WITHHELD from the
   folder; the memory's `memory_type` label is withheld alongside
   confidence). The judged evidence never exceeds what the agent could have
@@ -438,9 +440,14 @@ trajectories, ops, memories, edges, validation}`. Recall ops carry `searches`
 `queries` (each linked search's resolved query) — never a single
 search-operation id or query. Recall ops also carry `placement_kinds` and
 their searches' `trigger` (`explicit` = agent-directed). An op's `cost` is
-read only from the calls the recorder bound to it (`call_refs` usage on its
-turns, `embedding_call_refs` usage from `calls/<id>/response.json`), never
-from adapter extensions; trajectory rows total it as `memory_cost`. Fields the HTML does not read (e.g. `edges`,
+read only from the calls the recorder bound to it (`call_refs` and
+`embedding_call_refs`, using each call's normalized `call.json.response.usage`),
+never from adapter extensions; trajectory rows total it as `memory_cost`. Operation
+`extensions` preserve opaque provenance from the anchor annotation (generation
+end or delivery). Prepared search audit records also preserve their start
+extensions; judge-readable `searches.json` omits these opaque fields. They
+can carry configuration or unexposed content and are not grounding evidence.
+These fields never drive identity, exposure, or cost inference. Fields the HTML does not read (e.g. `edges`,
 recall `content_chars`, the per-injection verdict role marker, the singular
 `memory_lane`) are still part of the JSON contract.
 Candidate, delivered, and deletion refs carry `grouping_id`, the registry's

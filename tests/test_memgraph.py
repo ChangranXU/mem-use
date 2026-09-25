@@ -2365,9 +2365,6 @@ def test_operation_cost_comes_from_bound_calls_and_directed_recalls_are_marked(t
     b = TrajBuilder().agent_turn(with_task=True)
     b.memory_turn()
     billed = b.last_call
-    for e in b.events:
-        if e["type"] == "message_end" and e.get("turn") == b.turn:
-            e["usage"] = {"prompt_tokens": 120, "completion_tokens": 30}
     b.generate(produced=[ref], changes=[("create", [], [ref])], bind=billed)
     b.memory_turn()
     b.generate(produced=[ref], bind=b.last_call)  # its turn recorded no usage
@@ -2383,8 +2380,10 @@ def test_operation_cost_comes_from_bound_calls_and_directed_recalls_are_marked(t
         "slot": "search_result", "kind": "tool_result", "proof_kind": "canonical_message",
         "content": {"availability": "inline", "text": "Use a greedy prefix."}}])
     d = b.write(tmp_path / "t1")
-    (d / "calls" / "000090-e").mkdir(parents=True)
-    (d / "calls" / "000090-e" / "response.json").write_text(json.dumps({"usage": {"prompt_tokens": 7}}))
+    for call_id, usage in ((billed["call_id"], {"prompt_tokens": 120, "completion_tokens": 30}),
+                           ("000090-e", {"prompt_tokens": 7})):
+        (d / "calls" / call_id).mkdir(parents=True)
+        (d / "calls" / call_id / "call.json").write_text(json.dumps({"response": {"usage": usage}}))
 
     traj, ops, _ = parse_trajectory(d, [])
     extracts = [op.to_dict() for op in ops if op.kind == "extract"]
@@ -2398,3 +2397,35 @@ def test_operation_cost_comes_from_bound_calls_and_directed_recalls_are_marked(t
         "generation": {"memory_calls": 2, "prompt_tokens": None, "completion_tokens": None},
         "search": {"embedding_calls": 1, "embedding_tokens": 7},
     }
+
+
+@pytest.mark.parametrize("usage", [{"prompt_tokens": 41, "completion_tokens": 7}, None])
+def test_operation_cost_reads_capture_only_call_billing(tmp_path, usage):
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.memory_turn()
+    billed = b.last_call
+    # The response never folded, so no assistant message can supply usage.
+    b.events = [e for e in b.events if not (e["type"] == "message_end" and e.get("turn") == b.turn)]
+    b.generate(bind=billed)
+    directory = b.write(tmp_path / "capture-only")
+    call = directory / "calls" / billed["call_id"]
+    call.mkdir(parents=True)
+    (call / "call.json").write_text(json.dumps({"response": {"usage": usage}}))
+    traj, ops, _ = parse_trajectory(directory, [])
+    assert ops[0].cost == {"memory_calls": 1,
+                           "prompt_tokens": 41 if usage else None,
+                           "completion_tokens": 7 if usage else None}
+    assert traj.memory_cost["generation"] == ops[0].cost
+
+
+def test_operation_extensions_preserve_opaque_writer_and_tool_provenance(tmp_path):
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.generate()
+    writer = {"memory_bridge": {"write_attempts": [{"issued_call_id": "call-1", "tool_name": "Write"}]}}
+    b.events[-1]["payload"]["extensions"] = writer
+    search = b.search()
+    b.agent_turn().delivery(search, bind=b.last_call)
+    lookup = {"memory_bridge": {"issued_call_id": "call-2", "tool_name": "Bash"}}
+    b.events[-1]["payload"]["extensions"] = lookup
+    _, ops, _ = parse(b, tmp_path)
+    assert [op.to_dict()["extensions"] for op in ops] == [writer, lookup]

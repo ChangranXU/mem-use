@@ -28,7 +28,7 @@ JSON 产物——嵌在 HTML 里的是同一个 dict——的形状是：
 | 集合 | 内容 |
 |---|---|
 | `tool` | 工具身份——`{"name": "memgraph"}`；在 `--verdicts` 下会多出 `verdicts`，即所合并报告的路径。 |
-| `ops` | 记忆操作。`kind` 为 `extract`（生成）或 `recall`（投递）；每个操作锚定在 `(traj, step, seq)`。召回操作带 `searches`（投递的按泳道 `{lane_id, operation_id}` 链接）、`queries`（每条已链接搜索的解析查询）、`placement_kinds`，以及来自其搜索的 `trigger`（`explicit` 表示智能体主动读取，如记忆工具调用；缺省表示调度读取）。绑定了模型调用的操作带 `cost`：由记忆泳道 `call_refs` 得出 `memory_calls` / `prompt_tokens` / `completion_tokens`，由 `embedding_call_refs` 得出 `embedding_calls` / `embedding_tokens`（召回操作汇总其链接的搜索）；任一绑定调用未记录用量时该计数为 `null`。候选、投递与删除引用带 `grouping_id`，用于与注册表联结。 |
+| `ops` | 记忆操作。`kind` 为 `extract`（生成）或 `recall`（投递）；每个操作锚定在 `(traj, step, seq)`。召回操作带 `searches`（投递的按泳道 `{lane_id, operation_id}` 链接）、`queries`（每条已链接搜索的解析查询）、`placement_kinds`，以及来自其搜索的 `trigger`（`explicit` 表示智能体主动读取，如记忆工具调用；缺省表示调度读取）。绑定了模型调用的操作带 `cost`：由记忆泳道 `call_refs` 得出 `memory_calls` / `prompt_tokens` / `completion_tokens`，由 `embedding_call_refs` 得出 `embedding_calls` / `embedding_tokens`（召回操作汇总其链接的搜索）；任一绑定调用未记录用量时该计数为 `null`。用量取自每个调用规范化的 `call.json.response.usage`，也覆盖 embedding 调用和无法折叠为消息的调用。操作的 `extensions` 原样保留锚定注释的来源信息，包括 shell 调用 ID 和文件写入尝试；不用于推断记忆身份或成本。候选、投递与删除引用带 `grouping_id`，用于与注册表联结。 |
 | `trajectories` | 每个已加载运行一行；`memory_cost` 按 `{generation, search}` 汇总操作成本（每个搜索只计一次，无论是否投递）。 |
 | `memories` | 每个稳定条目身份一条记录：通常是 `(namespace, item_id)`，否则采用输入约定中的显示键或内容摘要回退。每条记录包含来源、创建位置、后续更新、召回与删除历史——`deletions` 列出每一次观察到的删除（重新创建会标记 `revived`，绝不抹除历史），`deleted` 是终态。 |
 | `edges` | 从操作指向记忆的关系：`creates`、`supersedes`、`deletes`、`recalls`。 |

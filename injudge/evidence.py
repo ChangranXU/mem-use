@@ -259,7 +259,10 @@ def build_episode_evidence(episode: EpisodeInput) -> dict[str, str]:
     files["deliveries.md"] = "\n".join(delivery_lines) + "\n"
 
     search_payload = {
-        "searches": episode.searches,
+        # Opaque adapter extensions are audit data, not grounded agent
+        # evidence: they can contain unexposed candidates or configuration.
+        "searches": [{key: value for key, value in search.items() if key != "extensions"}
+                     for search in episode.searches],
         "count": len(episode.searches),
     }
     files["searches.json"] = json.dumps(search_payload, ensure_ascii=False, indent=2) + "\n"
