@@ -45,6 +45,7 @@ turn is the consumer) — its step is therefore always >= 1 or None.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -387,6 +388,92 @@ def list_field(holder: dict[str, Any], key: str) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
+_CALL_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
+
+
+def _token_count(usage: Any, key: str) -> int | None:
+    value = usage.get(key) if isinstance(usage, dict) else None
+    return value if is_int(value) and value >= 0 else None
+
+
+def _known_sum(values: Any) -> int | None:
+    """One unknown part makes the total unknown, never smaller."""
+    total = 0
+    for value in values:
+        if value is None:
+            return None
+        total += value
+    return total
+
+
+def merge_costs(costs: Any) -> dict[str, int | None] | None:
+    """Field-wise sum of operation costs; a field unknown in any part is unknown."""
+    total: dict[str, int | None] = {}
+    for cost in costs:
+        for key, value in (cost or {}).items():
+            total[key] = value if key not in total else _known_sum((total[key], value))
+    return total or None
+
+
+class _CallUsage:
+    """Recorded token usage of the calls an operation's binding claimed.
+
+    The recorder stamps every bound operation end with its memory-lane
+    `call_refs` and, when an embedding lane is bound, `embedding_call_refs` —
+    portable evidence of what the operation itself spent. A chat call bills on
+    its turn's assistant message_end; an embedding call folds no turn, so its
+    usage is read from the call's recorded response."""
+
+    def __init__(self, events: list[dict], traj_dir: Path) -> None:
+        self._dir = traj_dir
+        turns = {
+            e["turn"]: e["call_id"] for e in events
+            if e.get("type") == "turn_start" and is_int(e.get("turn")) and isinstance(e.get("call_id"), str)
+        }
+        self._chat: dict[str, dict] = {}
+        for e in events:
+            if e.get("type") == "message_end" and e.get("role") == "assistant" and isinstance(e.get("usage"), dict):
+                call = turns.get(e["turn"]) if is_int(e.get("turn")) else None
+                if call is not None:
+                    self._chat.setdefault(call, e["usage"])
+        self._embedding: dict[str, int | None] = {}
+
+    def cost(self, end: dict[str, Any] | None) -> dict[str, int | None] | None:
+        if not isinstance(end, dict):
+            return None
+        out: dict[str, int | None] = {}
+        calls = self._call_ids(end.get("call_refs"))
+        if calls:
+            usages = [self._chat.get(call) for call in calls]
+            out["memory_calls"] = len(calls)
+            out["prompt_tokens"] = _known_sum(_token_count(u, "prompt_tokens") for u in usages)
+            out["completion_tokens"] = _known_sum(_token_count(u, "completion_tokens") for u in usages)
+        embedded = self._call_ids(end.get("embedding_call_refs"))
+        if embedded:
+            out["embedding_calls"] = len(embedded)
+            out["embedding_tokens"] = _known_sum(self._embedding_tokens(call) for call in embedded)
+        return out or None
+
+    @staticmethod
+    def _call_ids(refs: Any) -> list[str]:
+        if not isinstance(refs, list):
+            return []
+        return [r["call_id"] for r in refs if isinstance(r, dict) and isinstance(r.get("call_id"), str)]
+
+    def _embedding_tokens(self, call_id: str) -> int | None:
+        if call_id not in self._embedding:
+            usage = None
+            # a hand-edited id must never name a path outside calls/
+            if _CALL_ID.fullmatch(call_id):
+                try:
+                    body = json.loads((self._dir / "calls" / call_id / "response.json").read_text(encoding="utf-8"))
+                    usage = body.get("usage") if isinstance(body, dict) else None
+                except (OSError, ValueError, RecursionError):
+                    usage = None
+            self._embedding[call_id] = _token_count(usage, "prompt_tokens")
+        return self._embedding[call_id]
+
+
 def _op_anchor(operation: AnnotatedOperation) -> dict[str, Any]:
     """The event a generation operation's step/seq attribution anchors on:
     its end, else its latest change, else its start (always recorded)."""
@@ -588,6 +675,7 @@ def _recall_op_from_delivery(
     slots: dict[tuple[str | None, int], list[dict]],
     warnings: list[str],
     run_id: str,
+    usage: _CallUsage,
 ) -> MemoryOp:
     """One recall op from a memory_delivery annotation event."""
     payload = event["payload"]
@@ -696,6 +784,11 @@ def _recall_op_from_delivery(
             )
             if query is not None:
                 op.queries.append(query)
+            trigger = search.start["payload"].get("trigger")
+            # An agent-directed read marks the whole recall explicit.
+            if isinstance(trigger, str) and (op.trigger is None or trigger == "explicit"):
+                op.trigger = trigger
+            op.cost = merge_costs((op.cost, usage.cost(search.end)))
             if search.end is not None:
                 end_payload = search.end["payload"]
                 # the protocol's own match count first: `returned` is the
@@ -977,6 +1070,7 @@ def parse_trajectory(
             )
 
     ops: list[MemoryOp] = []
+    usage = _CallUsage(events, traj_dir)
     n_extract = n_recall = 0
     generations = sorted(
         (op for op in index.operations.values() if op.kind == "generation"),
@@ -989,6 +1083,7 @@ def parse_trajectory(
         op = _extract_op_from_generation(
             operation, f"{traj_id}:E{n_extract}", traj_id, table, warnings, run_id
         )
+        op.cost = usage.cost(operation.end)
         declared = op.declared_step
         if declared is not None:
             if declared == "final":
@@ -1021,6 +1116,11 @@ def parse_trajectory(
 
     searches = [op for op in index.operations.values() if op.kind == "search"]
     traj.n_searches = sum(1 for op in searches if op.end is not None)
+    # Every search once, delivered or not; recall ops repeat a shared search's cost.
+    traj.memory_cost = {
+        "generation": merge_costs(op.cost for op in ops),
+        "search": merge_costs(usage.cost(op.end) for op in searches),
+    }
     for event in index.deliveries:
         if event["payload"].get("status") != "placed":
             warnings.append(
@@ -1032,7 +1132,7 @@ def parse_trajectory(
         ops.append(
             _recall_op_from_delivery(
                 event, f"{traj_id}:R{n_recall}", traj_id, index, table, events,
-                slots, warnings, run_id
+                slots, warnings, run_id, usage
             )
         )
 

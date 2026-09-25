@@ -436,7 +436,11 @@ the memgraph reader cannot desync.
 trajectories, ops, memories, edges, validation}`. Recall ops carry `searches`
 (the delivery's per-lane `{lane_id, operation_id}` links, schema v9) and
 `queries` (each linked search's resolved query) — never a single
-search-operation id or query. Fields the HTML does not read (e.g. `edges`,
+search-operation id or query. Recall ops also carry `placement_kinds` and
+their searches' `trigger` (`explicit` = agent-directed). An op's `cost` is
+read only from the calls the recorder bound to it (`call_refs` usage on its
+turns, `embedding_call_refs` usage from `calls/<id>/response.json`), never
+from adapter extensions; trajectory rows total it as `memory_cost`. Fields the HTML does not read (e.g. `edges`,
 recall `content_chars`, the per-injection verdict role marker, the singular
 `memory_lane`) are still part of the JSON contract.
 Candidate, delivered, and deletion refs carry `grouping_id`, the registry's

@@ -49,6 +49,9 @@ class Trajectory:
     # history_rewritten markers; on_memory_lane flags memory-lane traffic per
     # the final classification set (the HTML colors rewrite markers by it)
     rewrites: list[dict] = field(default_factory=list)
+    # what the memory operations themselves spent, from their bound calls:
+    # {"generation": cost|None, "search": cost|None} (see MemoryOp.cost)
+    memory_cost: dict[str, dict | None] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -64,6 +67,7 @@ class Trajectory:
             "instance_id": self.instance_id,
             "n_searches": self.n_searches,
             "rewrites": self.rewrites,
+            "memory_cost": self.memory_cost,
         }
 
 
@@ -107,7 +111,15 @@ class MemoryOp:
     candidates: list[dict] = field(default_factory=list)
     deletions: list[dict] = field(default_factory=list)
     rejection_counts: dict[str, int] | None = None  # rejected candidates by reason
-    trigger: str | None = None  # generation trigger
+    # generation trigger; for a recall, its searches' trigger ("explicit":
+    # an agent-directed read such as a memory tool call; absent: scheduled)
+    trigger: str | None = None
+    # tokens the operation's own bound calls spent (recorder call_refs /
+    # embedding_call_refs): memory_calls, prompt_tokens, completion_tokens,
+    # embedding_calls, embedding_tokens; a recall sums its linked searches.
+    # A count is None when any bound call's usage is unrecorded; None
+    # overall when the operation bound no call.
+    cost: dict[str, int | None] | None = None
     declared_step: str | None = None  # adapter-declared step, for cross-checking
     flagged: str | None = None
     # Parsed-stream provenance used by injudge episode preparation. This is
@@ -147,6 +159,8 @@ class MemoryOp:
         }
         if self.status is not None:
             d["status"] = self.status
+        if self.cost is not None:
+            d["cost"] = self.cost
         if self.kind == "extract":
             counts = self.rejection_counts or {}
             d.update(
@@ -167,6 +181,10 @@ class MemoryOp:
                 d["declared_step"] = self.declared_step
         else:
             d.update({"memories": [_linked_memory(m) for m in self.memories]})
+            if self.trigger is not None:
+                d["trigger"] = self.trigger
+            if self.placements:
+                d["placement_kinds"] = [p["kind"] for p in self.placements]
             if self.searches:
                 d["searches"] = self.searches
             if self.queries:

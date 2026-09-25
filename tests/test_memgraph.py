@@ -2354,3 +2354,47 @@ def test_lone_surrogate_run_id_never_aborts_the_stdout_summary(tmp_path):
     # the recorded instance_id leads the line; the escaped run_id still
     # reaches stdout through the (warn-level) validation notes unharmed
     assert "T1 pydata__xarray-2905" in rc.stdout
+
+
+def test_operation_cost_comes_from_bound_calls_and_directed_recalls_are_marked(tmp_path):
+    """An operation's own spend is read from the calls the recorder bound to
+    it — memory-lane turns and embedding calls — never estimated; one call
+    without recorded usage makes the count unknown, not smaller. A recall
+    whose search was agent-directed carries that trigger and its slot kinds."""
+    ref = cure_ref("k1", "Use a greedy prefix.")
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.memory_turn()
+    billed = b.last_call
+    for e in b.events:
+        if e["type"] == "message_end" and e.get("turn") == b.turn:
+            e["usage"] = {"prompt_tokens": 120, "completion_tokens": 30}
+    b.generate(produced=[ref], changes=[("create", [], [ref])], bind=billed)
+    b.memory_turn()
+    b.generate(produced=[ref], bind=b.last_call)  # its turn recorded no usage
+    sid = b.search(returned=[ref], query="greedy prefix")
+    for e in b.events:
+        if e["type"] == "memory_search_start" and e["payload"]["operation_id"] == sid:
+            e["payload"]["trigger"] = "explicit"
+        if e["type"] == "memory_search_end" and e["payload"]["operation_id"] == sid:
+            e["embedding_call_refs"] = [{"call_sequence": 90, "call_id": "000090-e", "role_call_index": 1}]
+            e["embedding_binding_status"] = "bound"
+    b.agent_turn()
+    b.delivery(sid, memories=[ref], bind=b.last_call, placements=[{
+        "slot": "search_result", "kind": "tool_result", "proof_kind": "canonical_message",
+        "content": {"availability": "inline", "text": "Use a greedy prefix."}}])
+    d = b.write(tmp_path / "t1")
+    (d / "calls" / "000090-e").mkdir(parents=True)
+    (d / "calls" / "000090-e" / "response.json").write_text(json.dumps({"usage": {"prompt_tokens": 7}}))
+
+    traj, ops, _ = parse_trajectory(d, [])
+    extracts = [op.to_dict() for op in ops if op.kind == "extract"]
+    recall = next(op.to_dict() for op in ops if op.kind == "recall")
+    assert extracts[0]["cost"] == {"memory_calls": 1, "prompt_tokens": 120, "completion_tokens": 30}
+    assert extracts[1]["cost"] == {"memory_calls": 1, "prompt_tokens": None, "completion_tokens": None}
+    assert recall["trigger"] == "explicit"
+    assert recall["placement_kinds"] == ["tool_result"]
+    assert recall["cost"] == {"embedding_calls": 1, "embedding_tokens": 7}
+    assert traj.to_dict()["memory_cost"] == {
+        "generation": {"memory_calls": 2, "prompt_tokens": None, "completion_tokens": None},
+        "search": {"embedding_calls": 1, "embedding_tokens": 7},
+    }
