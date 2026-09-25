@@ -51,7 +51,9 @@ uv run -m calibration score <report.json>...  # agreement, stability, matched-pa
 nothing is a usage error, named explicitly. memgraph's HTML default is
 `memory-graph.html`. injudge's default output container is `output/`, one
 `<run-stamp>/` subfolder per run (`YYYYMMDD-HHMMSS-<8 hex>` — runs never
-share a folder); it exits 2 if any span errored.
+share a folder); it exits 2 on any span error or error-level validation
+item (`--dry-run` on the latter, `--prepare-only` also when scope or
+assignment needs review).
 
 `--verdicts output/<run-stamp>/injudge-report.json` merges injudge onto a
 memgraph
@@ -72,15 +74,23 @@ reaches the runner only through the `JUDGE_API_KEY` environment variable.
 
 `uv sync` creates `.venv` from `pyproject.toml` (runtime `tqdm`; tests use
 pytest). memgraph is stdlib-only. The judge agent is TypeScript under
-`agent/` (`@earendil-works/pi-agent-core` + `@earendil-works/pi-ai`, ESM,
-node >= 22.19 with type stripping, no build step); `npm install` there once.
+`agent/` (`@earendil-works/pi-agent-core` + `@earendil-works/pi-ai` +
+`typebox`, ESM, node >= 22.19 with type stripping, no build step);
+`npm install` there once.
 
 ## Layout
 
 ```
+.env.example               # template for the checkout .env (copy; never commit .env)
+.gitbook.yaml              # GitBook sync: doc/ is the book root
 pyproject.toml             # uv env; package = false; tools run as uv run -m …
+uv.lock                    # locked dependency versions for uv sync
+README.md                  # overview, install, and usage (English)
+README.zh-CN.md            # the same overview in Chinese
+CLAUDE.md                  # @AGENTS.md import only — no second contract
 util.py                    # atomic_write, tmp_sibling, utf8_safe, check_writable,
                            # print_safe, print_validation
+memgraph/__init__.py       # package docstring (module map; no re-exports)
 memgraph/annotations.py    # schema-v9 annotation index + MemoryRef mapping
 memgraph/model.py          # Trajectory / MemoryOp / MemoryUnit / Edge
 memgraph/parse_trajectory.py  # trajectory.jsonl → ops; shared step rule
@@ -104,9 +114,15 @@ injudge/__main__.py        # python3 -m injudge
 agent/                     # TS judge agent: runner.ts (pi Agent + budgets),
                            # evidence-tools.ts (scoped read-only tools),
                            # trajectory.ts (pi event-sourced recording), protocol.ts
+agent/package.json         # pi-agent-core + pi-ai + typebox; node >= 22.19; node --test
+agent/tsconfig.json        # noEmit; node strips types at runtime, no build step
+agent/*.test.ts            # node:test for evidence-tool path scoping and the runner
 prompts/                   # every LLM prompt, grouped by tool/purpose
 calibration/               # controlled judge cases (real judge) + report scoring
+calibration/__init__.py    # the cases and their expected labels
+calibration/__main__.py    # python3 -m calibration build | score
 doc/                       # GitBook: LANGS.md + en/ + zh-CN/, each with SUMMARY.md
+doc/README.md              # the book's landing page
 tests/conftest.py          # checkout root on sys.path
 tests/annotated_fixtures.py  # schema-v9 synthetic-trajectory builder
 tests/test_*.py            # pytest suite

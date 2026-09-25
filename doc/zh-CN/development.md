@@ -22,6 +22,7 @@ uv run pytest tests/test_injudge.py -q # 单个文件
 
 | 路径 | 作用 |
 |---|---|
+| `pyproject.toml` | uv 环境：`package = false`（工具以 `uv run -m …` 运行）、`tqdm` 运行时依赖，以及 `pytest` 开发依赖组 |
 | `util.py` | 共享工具（原子写产物、安全打印） |
 | `memgraph/` | 注解索引、解析、链接、HTML 渲染、判定合并、CLI（`python3 -m memgraph`） |
 | `injudge/` | 步骤流、注入区间、判定契约与评审提示词（`judge.py`）、证据文件夹（`evidence.py`）、智能体运行器客户端与纠正循环（`agent.py`）、gold 边车（`gold.py`）、聚合、报告、CLI（`python3 -m injudge`） |

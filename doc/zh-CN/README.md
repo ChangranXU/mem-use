@@ -22,7 +22,7 @@ icon: book-open
 | **memgraph** | 把每次记忆操作及其关系渲染成自包含的 HTML 图（可选 JSON 产物）。 |
 | **injudge** | 按五信号评分规则为 episode 内的召回区间打分，写出 `injudge.report/v13` 产物；用 `--verdicts` 可将其叠加回图上。 |
 
-贯穿两个工具的一条原则：召回注入以其对 agent 的**后续影响**来评判。最终任务结果可以佐证判断，但绝不单独决定判断。
+贯穿两个工具的一条原则：召回注入以其对 agent 的**后续影响**来评判。最终任务结果可以佐证判断，但绝不决定判断。
 
 ## 快速开始
 
@@ -32,13 +32,13 @@ uv sync
 npm --prefix agent install   # TS 评审智能体的依赖包（node ≥ 22.19）
 
 # 1 —— 可视化全部记忆操作
-uv run -m memgraph runs/ -o memgraph.html --json memgraph.json
+uv run -m memgraph <paths> -o memgraph.html --json memgraph.json
 
 # 2 —— 评审召回注入（先把 .env.example 复制为 .env 并填写）
-uv run -m injudge runs/ -o output/
+uv run -m injudge <paths> -o output/
 
 # 3 —— 把判定叠加回图
-uv run -m memgraph runs/ -o memgraph-verdicts.html --verdicts output/<run-stamp>/injudge-report.json
+uv run -m memgraph <paths> -o memgraph-verdicts.html --verdicts output/<run-stamp>/injudge-report.json
 ```
 
 {% hint style="tip" %}

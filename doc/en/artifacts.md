@@ -14,32 +14,34 @@ injudge writes all artifacts of a run to that run's own `<run-stamp>/` folder un
 | `injudge-report.json` | `injudge.report/v13` | Runtime judging record. Rewritten after every trajectory so a crash keeps completed work. Feed it to memgraph with `--verdicts`. |
 | `summary.json` | `injudge.summary/v11` | Final statistics set: counts, rates, and a narrative-free span index. |
 | `memgraph-verdicts.html` | — | Only with `--html` (off by default): memgraph with recall nodes colored by span verdict. |
-| `evidence/<span-dir>/` | — | One folder per span sent to the judge agent (error outcomes included): the exact files available to it. |
+| `evidence/<span-dir>/` | — | One folder per span the judge agent ran for: the exact files available to it. |
 | `agent-runs/<span-dir>.jsonl` | — | One trajectory per span sent to the judge agent: the pi event-sourced recording of the judging conversation (see [Judge agent](judge-client.md#trajectory-recording)). |
 
 An offline preparation run writes a different package under its own run folder:
 
 | File | Schema | Role |
 |---|---|---|
-| `episode-inputs.json` | `injudge.episode-inputs/v1` | Episode index, execution and benchmark identities, boundary provenance, readiness, attachment status, counts, audit projections, and unassigned diagnostics. It contains no verdicts. |
-| `episodes/<safe-episode-id>/episode.md` | — | Compact episode header and fixed file navigation. |
-| `episodes/<safe-episode-id>/task.md` | — | Recorded user task messages and updates with source provenance. |
-| `episodes/<safe-episode-id>/context.json` | — | Per-turn visible message occurrences and explicit replay gaps. |
-| `episodes/<safe-episode-id>/deliveries.md` | — | Chronological delivery, search, placement, and exposure evidence, including empty deliveries. |
-| `episodes/<safe-episode-id>/steps/` | — | Original global steps and tool-result availability. |
+| `episode-inputs.json` | `injudge.episode-inputs/v1` | Episode index, execution and benchmark identities, boundary provenance, readiness, attachment status, counts, audit projections, and unassigned diagnostics. It contains no verdicts; its `tool` block carries `mode: "prepare-only"`. |
+| `episodes/<safe-episode-id>-<8-char digest>/episode.md` | — | Compact episode header and fixed file navigation. |
+| `episodes/<safe-episode-id>-<8-char digest>/task.md` | — | Recorded user task messages and updates with source provenance. |
+| `episodes/<safe-episode-id>-<8-char digest>/context.json` | — | Per-turn visible message occurrences and explicit replay gaps. |
+| `episodes/<safe-episode-id>-<8-char digest>/deliveries.md` | — | Chronological delivery, search, placement, and exposure evidence, including empty deliveries. |
+| `episodes/<safe-episode-id>-<8-char digest>/searches.json` | — | The episode's recorded searches and their count. |
+| `episodes/<safe-episode-id>-<8-char digest>/manifest.json` | — | Index of the folder's files with their kind, source bounds, and the episode's step/search/delivery counts. |
+| `episodes/<safe-episode-id>-<8-char digest>/steps/` | — | Original global steps and tool-result availability. |
+| `episodes/<safe-episode-id>-<8-char digest>/gold.md` / `outcome.json` | — | Attachments when recorded: the golden answer, and the outcome status and correctness with its join key. |
 
 The paid path reuses these prepared episode files inside each span's own evidence
-root, alongside target `span.md`; no judge can read another episode or the
-audit-only canonical memory index. The report records episode execution identity,
-task/attachment provenance, evidence bounds, and per-phase judge health. Clipped
-or unverified canonical values are withheld from judge-readable files.
+root; no judge can read another episode or the audit-only canonical memory index.
+The report records episode execution identity, task/attachment provenance,
+evidence bounds, and per-phase judge health.
 
 The audit records gold and outcome attachment provenance separately as
 `gold_join` and `outcome_join`. A benchmark-keyed harness report cannot be
 joined across repeated executions or treatment arms. Conflicting or missing
 harness results remain explicit; a trajectory sidecar cannot override them.
 
-`<span-dir>` is the span id made filesystem-safe — non-`[A-Za-z0-9._-]` characters replaced by `_`, capped at 80 characters, plus an 8-char digest suffix (`span_dir_name`) — so arbitrary span ids cannot collide. The report's `input.transcript` points at the same derived name.
+`<span-dir>` is the span id made filesystem-safe — non-`[A-Za-z0-9._-]` characters replaced by `_`, capped at 80 characters, plus an 8-char digest suffix (`span_dir_name`) — so distinct span ids essentially never share a folder name. Preparation packages name their episode folders the same way (`episode_dir_name`). The report's `input.transcript` points at the same derived name.
 
 memgraph's `--json` artifact is `{tool, trajectories, ops, memories, edges, validation}` — the same dict embedded in the HTML. See [memgraph](memgraph.md#graph-model).
 
@@ -51,10 +53,26 @@ The **summary** is the numbers for reading and comparing memory systems. Judging
 
 Episode counts appear alongside trajectory/span counts. Each trajectory's detail
 includes a compact episode-to-span index. The CLI summarizes recording diagnostics;
-their complete messages remain in the report and graph. Report v13 and summary v11
-separate empty deliveries from unobserved consumers; obsolete versions are rejected.
+their complete messages remain in `injudge-report.json`, and with `--html` in
+the rendered graph. Empty deliveries and unobserved consumers are counted in
+separate classes (`empty`, `unassessable`), outside every directional denominator.
+`memgraph --verdicts` accepts a report only when its `tool.schema` is
+`injudge.report/v13`; it is the one artifact version checked at read time.
 
 When several identities share one display key, summary `key` fields (triage lists and `memory_usage`) carry a `key#<item-or-namespace>` suffix — an 8-character prefix, or the full base when prefixes collide — so two memories never conflate. The report always keeps the full identity.
+
+### The Report's Aggregates
+
+`aggregates.per_trajectory.<id>` and `aggregates.overall` hold the same numbers
+unprojected, in `injudge/aggregate.py`'s flat shape:
+
+| Field | Meaning |
+|---|---|
+| `n_trajectories` / `n_episodes` / `n_injections` / `n_spans` / `restated_injections` | Population counts; `n_trajectories` is overall-only |
+| `positive` / `negative` / `neutral` / `error` / `unjudged` / `unassessable` / `empty` | Verdict tallies — top-level keys here, not the summary's `verdicts.counts` |
+| `rates` | Positive/negative/neutral shares over judged spans |
+| `headline` / `cost` / `rubric` / `memory_usage` / `judge_compliance` / `mean_confidence_by_verdict` / `confidence_buckets` / `low_confidence` | The blocks the summary projects, re-nested and slimmed |
+| `input_paths` / `gold_scored` / `forced_answers` / `policy` | Overall only |
 
 ## How the Numbers Are Derived
 
@@ -81,7 +99,7 @@ $$
 \mathrm{rates}[v] = \frac{\mathrm{count}[v]}{\mathrm{positive} + \mathrm{negative} + \mathrm{neutral}}
 $$
 
-`headline.judged_spans` is that denominator. `headline.wasted_token_share` is the injected-token cost of neutral and negative spans as a share of judged spans' cost — an **estimated span-level non-beneficial-delivery proxy** (a neutral span means no attributable benefit was observed, not a measured absence of effect): a neutral span's referenced memories count as wasted, a positive span's ignored memories count as productive, and a mixed bundle is charged wholly to its verdict, so the share's numerator and denominator (`wasted_tokens` / `judged_tokens`) ride along named, the excluded error/unjudged tokens surface as `error_unjudged_tokens` when non-zero (unassessable tokens likewise as `unassessable_tokens`), and `headline.caveat` always rides a reported share, restating both coarsenesses — the proxy and the verdict asymmetry (ignored garbage is neutral; only acted-on influence with no effect or harm is negative). The caveat never disappears just because the share is low or a few negative spans exist.
+`headline.judged_spans` is that denominator. `headline.wasted_token_share` is the injected-token cost of neutral and negative spans as a share of judged spans' cost — an **estimated span-level non-beneficial-delivery proxy** whose numerator and denominator (`wasted_tokens` / `judged_tokens`) ride along named; the excluded error/unjudged tokens surface as `error_unjudged_tokens` when non-zero and a wasted share is reported (unassessable tokens likewise as `unassessable_tokens`), and `headline.caveat` always rides a reported share, never only a high one.
 
 ### Rubric Rates
 
@@ -103,17 +121,17 @@ The population is judge-scored deliveries (`span × delivered entry`, keyed by t
 
 ### Per-Memory Usage
 
-Tallies merge by `(namespace, item)` over LLM-judged spans only. A joint judgment on a multi-item delivery counts under each identity. `value_drift` is true when both the first and last *recorded* values exist and differ; a redacted (unrecorded) end is not drift. Identity-less entries tally span-scoped, as in the triage lists above.
+Tallies merge by `(namespace, item)` over LLM-judged spans only. A joint judgment on a multi-item delivery counts under each identity. `value_drift` is true when both the first and last *recorded* values exist and differ; a redacted (unrecorded) end is not drift.
 
 Operation-local display IDs are never roll-up identities. Their canonical content identity supplies a synthetic `content:<sha256>` item id; recorded refs stay intact. In memgraph, candidate, delivered, and deletion refs additionally carry `grouping_id` for the browser-to-registry join.
 
 ### Delivery Cost and Policy
 
-Delivery cost is deterministic: each span's cost is the sum of the recorded placement sizes over all of its deliveries — restated ones included — under a `chars / 4` token estimate, charged to the span's verdict class. Redacted placements that record no size count as 0 tokens and produce a warning. Error and unjudged tokens are counted in `cost` but excluded from the `wasted_token_share` denominator.
+Delivery cost is deterministic: each span's cost is the sum of the recorded placement sizes over all of its deliveries — restated ones included — under a `chars // 4` token estimate, charged to the span's verdict class. Redacted placements that record no size count as 0 tokens and produce a warning. Error and unjudged tokens are counted in `cost` but excluded from the `wasted_token_share` denominator.
 
-Delivery policy measures how heavily the memory system injects, per trajectory and overall: injection density (injections per agent step), restated ratio, and the injected share of the trajectory's billed prompt-token budget — every lane's usage records, including the memory lane's extraction calls. When only some trajectories have usage records, the overall share's numerator is `est_injected_tokens_billed`.
+Delivery policy measures how heavily the memory system injects, per trajectory and overall, against the trajectory's whole billed prompt-token budget: every lane's usage records count, including the memory lane's extraction calls.
 
-The billed budget takes the largest valid total across `run.json`'s `usage.prompt_tokens`, `agent_end`, and live assistant-message usage. Both snapshots include embedding calls that produce no conversation turns. They replace, rather than add to, the message sum. Invalid totals and smaller snapshots warn; without either snapshot, message usage is a lower bound, with an undercount warning when an embedding role is bound.
+The billed budget takes the largest valid total across `run.json`'s `usage.prompt_tokens`, `agent_end`, and live assistant-message usage. The recorder's contract has both snapshots include embedding calls that produce no conversation turns; they replace, rather than add to, the message sum. Invalid totals and smaller snapshots warn; without either snapshot, message usage is a lower bound, with an undercount warning when an embedding role is bound.
 
 ### Confidence
 
@@ -136,10 +154,8 @@ Read the file from results to detail; it uses two-space indentation:
 | `generated_at` | The source report's timestamp, not a new judging time. |
 | `tool` | `schema`, `source_report_schema`, `judge_model`, and resolved, secret-free `config`. No API key or URL userinfo/query. |
 
-For example, compare `trajectories[0].verdicts.counts`, then use that row's
-`id` (such as `T1`) to read `details.trajectories.T1.spans` and find an
-`operation_id` in the full report. Rates remain numeric fractions, not
-formatted percentage strings; `null` still means unassessed, not zero.
+Rates remain numeric fractions, not formatted percentage strings; `null` still
+means unassessed, not zero.
 
 ### Counts and Verdicts
 
@@ -150,9 +166,11 @@ These fields live under `overall` and in every trajectory comparison row:
 | `counts.n_trajectories` | Number of trajectories; overall only |
 | `counts.n_injections` | Recall injections delivered, restated re-deliveries included |
 | `counts.n_spans` | Injection spans — the judged unit |
+| `counts.n_episodes` | Episode groups the trajectory's spans were scoped to; overall sums them |
 | `counts.restated_injections` | `n_injections − n_spans` |
 | `verdicts.counts.positive` / `negative` / `neutral` | Span verdicts: beneficial acted-on influence / non-beneficial acted-on influence / neither established. Mere reference is never negative. |
 | `verdicts.counts.error` / `unjudged` / `unassessable` | Judge failures / skipped by `--limit` / no attributed agent step; these remain visible but are excluded from directional rates. |
+| `verdicts.counts.empty` | Nothing delivered; counted only, outside every directional denominator and the wasted-token share |
 | `verdicts.rates` | Positive/negative/neutral shares over judged spans; omitted when none were judged |
 
 ### Headline, Delivery, and Judge
@@ -164,11 +182,11 @@ These blocks live under `overall` and `details.trajectories.<id>`:
 | `headline.judged_spans` | The rate denominator (the whole `headline` is omitted when this is 0) |
 | `headline.positive_span_rate` / `negative_span_rate` | The verdict rates, always presented together; the wasted-token share rides beside them whenever it is representable |
 | `headline.wasted_token_share` | Neutral + negative injected-token cost as a share of judged spans' cost, with `wasted_tokens` / `judged_tokens` named beside it |
-| `headline.error_unjudged_tokens` | The error/unjudged token bucket no rate or share counts (written only when non-zero) |
+| `headline.error_unjudged_tokens` | The error/unjudged token bucket no rate or share counts (written only when non-zero and the wasted share is reported) |
 | `headline.unassessable_spans` / `unassessable_tokens` | Rule-judged no-subsequent-turn spans and their delivery cost (written only when non-zero and `headline` exists); in no directional denominator |
 | `headline.caveat` | On every reported wasted share: names the span-level proxy coarseness and the verdict asymmetry |
-| `delivery.cost` | Deterministic delivery cost: `content_chars_total`, `approx_tokens_total` (`chars // 4`), `approx_tokens_by_verdict` charged by span verdict class (omitted when zero) |
-| `delivery.policy` | `n_injections`, `n_steps`, `injection_density`, `restated_ratio`, `est_injected_tokens`, `prompt_tokens_total`, `injected_token_share`, `n_searches`, and `n_extractions` / `extraction_failures`. Overall also has `est_injected_tokens_billed`, the share's numerator when only some trajectories have usage records. Extraction failures are separate from judge errors. |
+| `delivery.cost` | Deterministic delivery cost: `content_chars_total`, `approx_tokens_total` (`chars // 4`), and `approx_tokens_by_verdict`, zero-filled for every counted class. The block is omitted when both totals are zero. |
+| `delivery.policy` | `n_injections`, `n_steps`, `injection_density` (injections per agent step), `restated_ratio`, `est_injected_tokens`, `prompt_tokens_total`, `injected_token_share` (the injected share of the billed prompt budget), `n_searches`, and `n_extractions` / `extraction_failures`. Overall also has `est_injected_tokens_billed`, the share's numerator when only some trajectories have usage records. Extraction failures are separate from judge errors. |
 | `judge.confidence.mean_by_verdict` / `buckets` | Non-null per-verdict means and `[0,0.5)` / `[0.5,0.8)` / `[0.8,1.0]` bucket counts over LLM-judged spans |
 | `judge.input_paths` | Overall only: spans run through the judge agent (`agent`), error outcomes included |
 | `judge.gold_scored` | Overall only: spans run with a golden answer attached |
@@ -196,7 +214,7 @@ These blocks live under `details.overall` and `details.trajectories.<id>`:
 |---|---|
 | `operation_id` | Span id — look it up in `injudge-report.json` for the full record |
 | `episode_execution_id` | Parent episode execution; omitted when its boundary was ambiguous |
-| `verdict` / `confidence` | Span outcome and judge confidence (`confidence` omitted when null). Auto-neutral spans use `unassessable`, matching the aggregate counts. |
+| `verdict` / `confidence` | Span outcome and judge confidence (`confidence` omitted when null). Auto-marked spans read as their counted class: `empty` for an empty delivery, `unassessable` for an unobserved consumer. |
 | `auto` | Rule reason on unassessable spans, e.g. `no_subsequent_turn`; omitted on judged spans |
 | `steps` | `[first, last]` agent step the span's deliveries landed on (omitted when the span has no attributed step) |
 | `n_injections` | Deliveries in the span |
@@ -204,8 +222,8 @@ These blocks live under `details.overall` and `details.trajectories.<id>`:
 
 ## Report-Only Fields
 
-`injudge-report.json` additionally carries, per operation: `episode_execution_id` and `episode_last_step`; `memories` (full recorded refs stamped with span-local ids); `memory_exposure` (`full`, `full_normalized`, `clipped`, or `unknown`, with unverified canonical values withheld from judge evidence); and `memory_windows` (per-entry global end steps, capped at the episode's last eligible step or the next same-episode delivery). `memory_window_starts` records same-step collision exceptions. The operation also retains rubric notes and action `anchors`, `analysis`, `evidence`, `step_gaps`, `new_keys` / `removed_keys` / `previous_keys` / `changed_keys`, `auto`, `error`, `judge_raw`, and `pe_pairing_corrections` when present. Judged spans, including errors, carry `input`: `path: agent`, attempts, retained `llm_calls` / `tool_calls` and successful step-file reads (`retained_evidence`), executed call counts, reported usage including rolled-back calls, context rollbacks, `any_phase_forced`, and the transcript path relative to the output directory. `gold` and final-answer `forced` appear when applicable. Trajectory episode rows record boundary, task, attachment, and evidence provenance without an episode verdict.
+`injudge-report.json` additionally carries, per operation: `kind` (`recall_injection_span`), `traj`, `seq`, `n_injections`, `steps` (omitted when no delivery has an attributed step), `payload_summary`, and `delivery_cost` (`deliveries`, `content_chars_total`, `approx_tokens_total`); `episode_execution_id` and `episode_last_step`; `memories` (full recorded refs stamped with span-local ids); `memory_exposure` — a **positional** list parallel to `memories` (index `i` describes `memories[i]`), each entry `{state, exposed_chars, value_chars}` with state `full`, `full_normalized`, `clipped`, or `unknown`, unverified canonical values withheld from judge evidence; and `memory_windows` (per-entry global end steps, capped at the episode's last eligible step or the next same-episode delivery), with `memory_window_starts` recording same-step collision exceptions. Unlike `memory_exposure`, `rubric`, `memory_usage`, and `memory_windows` are keyed by span-local ids. The operation also retains rubric notes and action `anchors`, `analysis`, `evidence`, `step_gaps`, `new_keys` / `removed_keys` / `previous_keys` / `changed_keys`, `auto`, `error`, `judge_raw`, and `pe_pairing_corrections` when present. Spans the judge agent ran for — its own error outcomes included — carry `input`: `path: agent`, attempts, retained `llm_calls` / `tool_calls` and successful step-file reads (`retained_evidence`), executed call counts, reported usage including rolled-back calls, context rollbacks, `any_phase_forced`, and the transcript path relative to the run folder; a span rejected before the agent ran (an unsafe or incomplete episode boundary, or a parent episode with no recorded task) takes an error verdict with no `input`, no evidence folder, and no transcript. `gold` and final-answer `forced` appear when applicable. Trajectory rows carry `id`, `run_id`, `path`, `instance_id`, `model`, `adapter`, `n_steps`, `n_injections`, `n_spans`, their `episodes` rows, and the trajectory's `policy`; episode rows record boundary, task, attachment, and evidence provenance without an episode verdict.
 
-The report's `tool.config` is the resolved, secret-free judge-agent configuration (URLs sanitized to `scheme://host[:port][/path]`).
+The report's `tool` block names the tool (`name: "injudge"`) and its `schema`, and carries the resolved, secret-free judge-agent configuration (`config`, URLs sanitized to `scheme://host[:port][/path]`) with `judge_model`.
 
-The `injections` array lists every raw delivery with its span, `role` (`first` or `restated`), `verdict`, `content_chars`, and its `op_id` / `seq` / `step`.
+The `injections` array lists every raw delivery with its span, its `episode_execution_id` when the span has one, `role` (`first` or `restated`), `verdict`, `content_chars`, and its `op_id` / `seq` / `step`.

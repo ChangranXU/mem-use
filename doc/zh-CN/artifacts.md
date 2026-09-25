@@ -14,43 +14,61 @@ injudge 把一次运行的全部产物写入输出容器（`-o DIR`，默认 `ou
 | `injudge-report.json` | `injudge.report/v13` | 运行时评审记录。每条轨迹完成后重写，崩溃也保留已完成部分。用 `--verdicts` 喂给 memgraph。 |
 | `summary.json` | `injudge.summary/v11` | 最终统计集合：计数、比率，以及无叙述的区间索引。 |
 | `memgraph-verdicts.html` | — | 仅在 `--html` 时产出（默认关闭）：召回节点按区间判定着色的 memgraph。 |
-| `evidence/<span-dir>/` | — | 每个送入评审智能体的区间一个文件夹（含 error 结局）：向智能体提供的原始文件。 |
+| `evidence/<span-dir>/` | — | 评审智能体实际运行的每个区间一个文件夹：它当时可用的原始文件。 |
 | `agent-runs/<span-dir>.jsonl` | — | 每个送入评审智能体的区间一条轨迹：评判对话的 pi 事件流记录（见[评审智能体](judge-client.md#轨迹记录)）。 |
 
 离线准备运行会在自己的运行目录下写出另一套产物：
 
 | 文件 | Schema | 作用 |
 |---|---|---|
-| `episode-inputs.json` | `injudge.episode-inputs/v1` | episode 索引、执行/基准身份、边界来源、准备状态、附件状态、计数、审计投影与未归属诊断；不包含 verdict。 |
-| `episodes/<safe-episode-id>/episode.md` | — | 紧凑身份与固定文件导航。 |
-| `episodes/<safe-episode-id>/task.md` | — | 带来源的实际用户任务与后续更新。 |
-| `episodes/<safe-episode-id>/context.json` | — | 每个回合可见的消息出现与重放缺口。 |
-| `episodes/<safe-episode-id>/deliveries.md` | — | 按时间排列的 delivery、搜索、槽位与曝光证据，也包含空 delivery。 |
-| `episodes/<safe-episode-id>/steps/` | — | 原始全局 step 与工具结果可用时间。 |
+| `episode-inputs.json` | `injudge.episode-inputs/v1` | episode 索引、执行/基准身份、边界来源、准备状态、附件状态、计数、审计投影与未归属诊断；不包含 verdict，其 `tool` 块带 `mode: "prepare-only"`。 |
+| `episodes/<safe-episode-id>-<8 字符摘要>/episode.md` | — | 紧凑的 episode 头信息与固定文件导航。 |
+| `episodes/<safe-episode-id>-<8 字符摘要>/task.md` | — | 已录制的用户任务消息与后续更新，附来源。 |
+| `episodes/<safe-episode-id>-<8 字符摘要>/context.json` | — | 每个回合可见的消息出现与显式重放缺口。 |
+| `episodes/<safe-episode-id>-<8 字符摘要>/deliveries.md` | — | 按时间排列的 delivery、搜索、槽位与曝光证据，也包含空 delivery。 |
+| `episodes/<safe-episode-id>-<8 字符摘要>/searches.json` | — | 该 episode 已记录的搜索及其计数。 |
+| `episodes/<safe-episode-id>-<8 字符摘要>/manifest.json` | — | 该文件夹各文件的索引，含种类、来源边界，以及 episode 的 step/搜索/投递计数。 |
+| `episodes/<safe-episode-id>-<8 字符摘要>/steps/` | — | 原始全局 step 与工具结果可用时间。 |
+| `episodes/<safe-episode-id>-<8 字符摘要>/gold.md` / `outcome.json` | — | 记录到附件时的内容：黄金答案，以及结果状态与正确性及其联结键。 |
 
-正常评审为每个区间建立独立 evidence root，复用其所属 episode 的准备文件，
-另加目标 `span.md`。规范记忆记录与审计数据不进入评审可读文件；裁剪或无法核实
-的值仍被隐藏。report 记录 episode 执行身份、附件来源、证据边界和评审过程计数。
+正常评审在每个区间自己的 evidence root 内复用这些已准备的 episode 文件；任何评审
+都无法读取另一个 episode 或仅供审计的规范记忆索引。report 记录 episode 执行身份、
+任务/附件来源、证据边界，以及分阶段的评审健康。
 
 审计记录使用 `gold_join` 与 `outcome_join` 分别保存黄金答案和评测结果的来源。
 仅按基准实例索引的 harness report 不能跨重复执行或不同实验组关联。结果冲突
 或缺失会明确保留，不会被轨迹目录中的 sidecar 覆盖。
 
-`<span-dir>` 是文件系统安全的区间 id——非 `[A-Za-z0-9._-]` 字符替换为 `_`、截到 80 字符，再加 8 字符摘要后缀（`span_dir_name`）——任意区间 id 都不会冲突。report 的 `input.transcript` 指向同一个派生名称。
+`<span-dir>` 是文件系统安全的区间 id——非 `[A-Za-z0-9._-]` 字符替换为 `_`、截到 80 字符，再加 8 字符摘要后缀（`span_dir_name`）——不同区间 id 基本不会共用同一个文件夹名。准备产物用同样的方式命名 episode 文件夹（`episode_dir_name`）。report 的 `input.transcript` 指向同一个派生名称。
 
 memgraph 的 `--json` 产物是 `{tool, trajectories, ops, memories, edges, validation}`——与 HTML 内嵌的同一个 dict。见 [memgraph](memgraph.md#图模型)。
 
 ## Report 与 Summary
 
-**report** 是评审记录。每个操作带有含 note 的评分、`analysis`、`evidence`、失败时的 `judge_raw`、投递成本，以及送入智能体运行的区间（含 error 结局）上的 `input` 智能体运行记录。report 顶层另带 validation 日志。区间的 `operation_id` 就是在该文件中查找所用的 id。
+**report** 是评审记录。每个操作带有含 note 的评分、`analysis`、`evidence`、失败时的 `judge_raw`、投递成本，以及评审智能体实际运行的区间（含 error 结局）上的 `input` 智能体运行记录。report 顶层另带 validation 日志。区间的 `operation_id` 就是在该文件中查找所用的 id。
 
 **summary** 是供阅读和比较记忆系统的数字。评判叙述只留在 report 中。
 
-计数包含 episode 数量，各轨迹详情包含 episode 到区间的简洁索引。CLI 汇总诊断数量，
-完整诊断保留在 report 和图中。Report v13 与 summary v11 将空投递和消费者未观测分开计数；
-不接受旧版产物。
+计数在轨迹/区间计数旁给出 episode 数量。每条轨迹的详情包含 episode 到区间的简洁
+索引。CLI 汇总录制诊断的数量；其完整消息保留在 `injudge-report.json`，带 `--html`
+时也在渲染出的图中。空投递与消费者未观测按独立类别（`empty`、`unassessable`）计数，
+不进入任何方向性分母。`memgraph --verdicts` 只在报告的 `tool.schema` 为
+`injudge.report/v13` 时接受它；它是读取时唯一校验的产物版本。
 
 当多个身份共用同一显示键时，summary 的 `key` 字段（排查清单与 `memory_usage`）会带上 `key#<item 或 namespace>` 后缀——取 8 字符前缀，前缀冲突时取完整 base——两条记忆绝不会被并成一条。report 始终保留完整身份。
+
+### Report 的 aggregates
+
+`aggregates.per_trajectory.<id>` 与 `aggregates.overall` 以 `injudge/aggregate.py`
+的扁平形状保存同一批未投影的数字：
+
+| 字段 | 含义 |
+|---|---|
+| `n_trajectories` / `n_episodes` / `n_injections` / `n_spans` / `restated_injections` | 总体计数；`n_trajectories` 仅全局 |
+| `positive` / `negative` / `neutral` / `error` / `unjudged` / `unassessable` / `empty` | 判定计数——这里是顶层键，不是 summary 的 `verdicts.counts` |
+| `rates` | 已评判区间中 positive/negative/neutral 的占比 |
+| `headline` / `cost` / `rubric` / `memory_usage` / `judge_compliance` / `mean_confidence_by_verdict` / `confidence_buckets` / `low_confidence` | summary 所投影的块，重新嵌套并精简 |
+| `input_paths` / `gold_scored` / `forced_answers` / `policy` | 仅全局 |
 
 ## 数字如何推导
 
@@ -77,7 +95,7 @@ $$
 \mathrm{rates}[v] = \frac{\mathrm{count}[v]}{\mathrm{positive} + \mathrm{negative} + \mathrm{neutral}}
 $$
 
-`headline.judged_spans` 就是该分母。`headline.wasted_token_share` 是 neutral 与 negative 区间的注入 token 成本占已评判区间成本的份额——一个**估算的区间级"无收益投递"代理**（neutral 区间表示未观察到可归因的收益，而非测得的无作用）：neutral 区间被引用的记忆计入浪费，positive 区间被无视的记忆计入产出，混合捆绑整体按其判定计费；因此份额的分子与分母（`wasted_tokens` / `judged_tokens`）随行命名，被排除的 error/unjudged token 在非零时以 `error_unjudged_tokens` 呈现（unassessable token 同理以 `unassessable_tokens` 呈现）；`headline.caveat` 随行于每一个报告的份额，重申两种已知的粗糙性（区间级代理，以及判定的不对称：被无视的垃圾是 neutral；只有 acted-on 且无效或有害才是 negative）——不会因为份额偏低或存在少量 negative 区间而消失。
+`headline.judged_spans` 就是该分母。`headline.wasted_token_share` 是 neutral 与 negative 区间的注入 token 成本占已评判区间成本的份额——一个**估算的区间级"无收益投递"代理**，其分子与分母（`wasted_tokens` / `judged_tokens`）随行命名；被排除的 error/unjudged token 在非零且报告了浪费份额时以 `error_unjudged_tokens` 呈现（unassessable token 同理以 `unassessable_tokens` 呈现），`headline.caveat` 随行于每一个报告的份额，而不只在份额偏高时出现。
 
 ### 评分比率
 
@@ -99,15 +117,15 @@ $$
 
 ### 逐记忆使用
 
-只在 LLM 已评判区间上按 `(namespace, item)` 合并。对多 item 投递的联合判断会在每个身份下计数。当首尾两个*已录制* value 都存在且不同时，`value_drift` 为 true；redact（未录制）的末端不是 drift。无身份条目与上文排查清单一样按区间作用域入账。
+只在 LLM 已评判区间上按 `(namespace, item)` 合并。对多 item 投递的联合判断会在每个身份下计数。当首尾两个*已录制* value 都存在且不同时，`value_drift` 为 true；redact（未录制）的末端不是 drift。
 
 操作本地显示 ID 不作为汇总身份。规范内容身份生成 `content:<sha256>` 形式的条目 ID，原始引用保持完整。memgraph 的候选、投递与删除引用另带 `grouping_id`，用于浏览器与图注册表联结。
 
 ### 交付成本与策略
 
-投递成本按确定性规则核算：每个区间的成本是其全部投递（含重述）的已录制放置内容大小之和，按 `chars / 4` 估算 token，计入该区间的判定类别。未记录大小的 redact 放置计 0 token，并产生警告。error 与 unjudged 的 token 计入 `cost`，但不进 `wasted_token_share` 的分母。
+投递成本按确定性规则核算：每个区间的成本是其全部投递（含重述）的已录制放置内容大小之和，按 `chars // 4` 估算 token，计入该区间的判定类别。未记录大小的 redact 放置计 0 token，并产生警告。error 与 unjudged 的 token 计入 `cost`，但不进 `wasted_token_share` 的分母。
 
-投递策略度量记忆系统注入的轻重，按轨迹与整体统计：注入密度（每 agent 步的注入数）、重述比例，以及注入占轨迹已计费 prompt token 预算的份额——覆盖所有泳道的用量记录，包括记忆泳道的提取调用。仅部分轨迹有计费记录时，整体份额的分子取 `est_injected_tokens_billed`。
+投递策略度量记忆系统注入的轻重：按轨迹与整体，对照该轨迹全部已计费的 prompt token 预算，所有泳道的用量记录都计入，包括记忆泳道的提取调用。
 
 计费预算在三个总量中取最大有效值：`run.json` 的 `usage.prompt_tokens`、`agent_end` 的 `usage.prompt_tokens`、所有 live assistant-message 的用量总和。两种快照均包含不产生对话轮次的 embedding 调用，替代消息总量而不与之相加。无效或较小的快照会警告；两种快照均缺失时，消息用量只是下界，已绑定 embedding 角色时会提示漏计风险。
 
@@ -115,9 +133,9 @@ $$
 
 均值与分桶（`[0,0.5)`、`[0.5,0.8)`、`[0.8,1.0]`）只覆盖 LLM 已评判区间。置信度从不加权计数。置信度 `< 0.5` 的区间列入 `low_confidence`。
 
-### 输入路径计数
+### 输入口径
 
-仅 overall：带 `input` 记录的区间——每个送入智能体运行的区间，含 error 结局——计入 `input_paths.agent`、`gold_scored` 与 `forced_answers`（`forced` 表示最终答案出自预算耗尽的强制作答轮）。按规则计数的空投递或不可归属区间，以及 unjudged 区间没有 `input`。
+仅 overall：带 `input` 记录的区间——评审智能体实际运行的每个区间，含 error 结局——计入 `input_paths.agent`、`gold_scored` 与 `forced_answers`（`forced` 表示最终答案出自预算耗尽的强制作答轮）。按规则计数的空投递或不可归属区间，以及 unjudged 区间没有 `input`。
 
 ## summary.json 字段
 
@@ -132,8 +150,6 @@ $$
 | `generated_at` | 源报告的时间戳，不表示重新评审的时间。 |
 | `tool` | `schema`、`source_report_schema`、`judge_model` 和已解析、无密钥的 `config`；不含 API key、URL 用户信息或查询参数。 |
 
-例如，先比较 `trajectories[0].verdicts.counts`，再用该行的 `id`（如 `T1`）
-查阅 `details.trajectories.T1.spans`，最后通过 `operation_id` 定位完整报告。
 比率仍是数值型小数，不转成百分比字符串；`null` 仍表示未确定，而不是零。
 
 ### 计数与判定
@@ -145,9 +161,11 @@ $$
 | `counts.n_trajectories` | 轨迹数；仅全局 |
 | `counts.n_injections` | 召回注入投递数，含重述的重复投递 |
 | `counts.n_spans` | 注入区间数——评审单元 |
+| `counts.n_episodes` | 该轨迹各区间被归属到的 episode 分组数；全局为其总和 |
 | `counts.restated_injections` | `n_injections − n_spans` |
 | `verdicts.counts.positive` / `negative` / `neutral` | 区间判定：已采取行动且有益 / 已采取行动但无益 / 两者均未建立。仅引用记忆不构成 negative。 |
 | `verdicts.counts.error` / `unjudged` / `unassessable` | 评审失败 / 被 `--limit` 跳过 / 没有可归属的 agent 步骤；保留计数，但不进入方向性比率。 |
+| `verdicts.counts.empty` | 未投递任何内容；只计数，不进入任何方向性分母与浪费 token 份额 |
 | `verdicts.rates` | 已评判区间中 positive/negative/neutral 的占比；无已评判区间时省略 |
 
 ### Headline、投递与评审
@@ -159,11 +177,11 @@ $$
 | `headline.judged_spans` | 比率的分母；为 0 时整个 `headline` 省略 |
 | `headline.positive_span_rate` / `negative_span_rate` | 两者始终一起呈现；wasted-token share 可表示时随行于旁 |
 | `headline.wasted_token_share` | neutral + negative 的注入 token 成本占已评判区间成本的份额，随行命名 `wasted_tokens` / `judged_tokens` |
-| `headline.error_unjudged_tokens` | 不进入任何比率或份额的 error/unjudged token 桶；仅非零时写出 |
+| `headline.error_unjudged_tokens` | 不进入任何比率或份额的 error/unjudged token 桶；仅非零且报告了浪费份额时写出 |
 | `headline.unassessable_spans` / `unassessable_tokens` | 规则判定的无后续回合区间及其投递成本；仅非零且 `headline` 存在时写出，不进入方向性分母 |
 | `headline.caveat` | 每一个浪费份额都附带的说明：区间级代理的粗糙性与判定的不对称 |
-| `delivery.cost` | 确定性投递成本：`content_chars_total`、`approx_tokens_total`（`chars // 4`）、按区间判定归类的 `approx_tokens_by_verdict`；总量为零时省略 |
-| `delivery.policy` | `n_injections`、`n_steps`、`injection_density`、`restated_ratio`、`est_injected_tokens`、`prompt_tokens_total`、`injected_token_share`、`n_searches`、`n_extractions` / `extraction_failures`。全局另含 `est_injected_tokens_billed`，用于只有部分轨迹有 usage 记录时的份额分子。提取失败与评审失败分开统计。 |
+| `delivery.cost` | 确定性投递成本：`content_chars_total`、`approx_tokens_total`（`chars // 4`）、`approx_tokens_by_verdict`（每个计数类别都补零填充）。两个总计都为零时省略该块。 |
+| `delivery.policy` | `n_injections`、`n_steps`、`injection_density`（每 agent 步的注入数）、`restated_ratio`、`est_injected_tokens`、`prompt_tokens_total`、`injected_token_share`（注入占已计费 prompt 预算的份额）、`n_searches`、`n_extractions` / `extraction_failures`。全局另含 `est_injected_tokens_billed`，用于只有部分轨迹有 usage 记录时的份额分子。提取失败与评审失败分开统计。 |
 | `judge.confidence.mean_by_verdict` / `buckets` | LLM 已评判区间的非空分类均值，以及 `[0,0.5)` / `[0.5,0.8)` / `[0.8,1.0]` 桶计数 |
 | `judge.input_paths` | 仅全局：通过评审智能体（`agent`）运行的区间，含 error 结果 |
 | `judge.gold_scored` | 仅全局：附带黄金答案运行的区间 |
@@ -191,7 +209,7 @@ $$
 |---|---|
 | `operation_id` | 区间 id；据此在 `injudge-report.json` 查找完整记录 |
 | `episode_execution_id` | 所属 episode 的执行身份；边界不明确时省略 |
-| `verdict` / `confidence` | 区间结果与评审置信度；confidence 为 null 时省略。auto-neutral 使用 `unassessable`，与汇总计数一致。 |
+| `verdict` / `confidence` | 区间结果与评审置信度；confidence 为 null 时省略。自动标记的区间读作其计数类别：空投递为 `empty`，消费者未观测为 `unassessable`。 |
 | `auto` | 不可评估区间的规则原因，如 `no_subsequent_turn`；已评审区间省略 |
 | `steps` | 区间投递所在的 `[first, last]` agent 步；未归属到 step 时省略 |
 | `n_injections` | 区间中的投递数 |
@@ -199,6 +217,8 @@ $$
 
 ## 仅 Report 中的字段
 
-`injudge-report.json` 的每个操作还带有 `episode_execution_id`、`episode_last_step`、完整的 `memories` 引用与区间本地 id、`memory_exposure`（`full`、`full_normalized`、`clipped` 或 `unknown`；未核实的规范值不会进入评审证据），以及逐条目的 `memory_windows`（全局步骤上界，至迟止于该 episode 的最后可用步骤；同 episode 的后续投递也可提前截断）。`memory_window_starts` 记录同一步投递冲突。评分 note、动作 `anchors`、`analysis`、`evidence`、`step_gaps`、`new_keys` / `removed_keys` / `previous_keys` / `changed_keys`、`auto`、`error`、`judge_raw` 和适用时的 `pe_pairing_corrections` 仍保留。送入智能体的区间（含 error）另有 `input`：尝试次数、保留的模型/工具调用及成功读取且仍保留的步骤文件数（`retained_evidence`）、实际执行调用数、包括回滚调用的用量、上下文回滚、`any_phase_forced` 和相对输出目录的 transcript 路径；适用时还有 `gold` 与仅代表最终答案的 `forced`。轨迹中的 episode 行记录边界、任务、附件与证据来源，但不产生 episode verdict。`tool.config` 记录已解析且无密钥的评审配置。
+`injudge-report.json` 的每个操作还带有：`kind`（`recall_injection_span`）、`traj`、`seq`、`n_injections`、`steps`（无投递归属到 step 时省略）、`payload_summary` 和 `delivery_cost`（`deliveries`、`content_chars_total`、`approx_tokens_total`）；`episode_execution_id` 与 `episode_last_step`；`memories`（带区间本地 id 的完整已录制引用）；`memory_exposure`——与 `memories` **按位置平行**的列表（下标 `i` 描述 `memories[i]`），每条为 `{state, exposed_chars, value_chars}`，state 取 `full`、`full_normalized`、`clipped` 或 `unknown`，未核实的规范值不会进入评审证据；以及逐条目的 `memory_windows`（全局步骤上界，至迟止于该 episode 的最后可用步骤；同 episode 的后续投递也可提前截断），`memory_window_starts` 记录同一步投递冲突的例外。与 `memory_exposure` 不同，`rubric`、`memory_usage` 和 `memory_windows` 按区间本地 id 键控。评分 note、动作 `anchors`、`analysis`、`evidence`、`step_gaps`、`new_keys` / `removed_keys` / `previous_keys` / `changed_keys`、`auto`、`error`、`judge_raw` 和适用时的 `pe_pairing_corrections` 仍保留。评审智能体实际运行的区间——含其自身的 error 结局——带有 `input`：`path: agent`、尝试次数、保留的 `llm_calls` / `tool_calls` 及成功读取且仍保留的步骤文件数（`retained_evidence`）、实际执行调用数、包括回滚调用的上报用量、上下文回滚、`any_phase_forced`，以及相对于运行文件夹的 transcript 路径；在智能体运行前就被拒的区间（episode 边界不安全或不完整，或父 episode 没有已录制任务）取 error 判定，没有 `input`、没有 evidence 文件夹、也没有 transcript。`gold` 与仅代表最终答案的 `forced` 在适用时出现。轨迹行带有 `id`、`run_id`、`path`、`instance_id`、`model`、`adapter`、`n_steps`、`n_injections`、`n_spans`、其 `episodes` 行以及该轨迹的 `policy`；episode 行记录边界、任务、附件与证据来源，但不产生 episode verdict。
 
-`injections` 数组列出每一次原始投递及其所属区间、`role`（`first` 或 `restated`）、`verdict`、`content_chars`，以及 `op_id` / `seq` / `step`。
+report 的 `tool` 块给出工具名（`name: "injudge"`）与其 `schema`，并带有已解析、无密钥的评审智能体配置（`config`，URL 规范化为 `scheme://host[:port][/path]`）以及 `judge_model`。
+
+`injections` 数组列出每一次原始投递及其所属区间、该区间的 `episode_execution_id`（若有时）、`role`（`first` 或 `restated`）、`verdict`、`content_chars`，以及 `op_id` / `seq` / `step`。

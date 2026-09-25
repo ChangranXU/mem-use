@@ -13,7 +13,7 @@ See [Configuration](configuration.md) for endpoint setup (`npm --prefix agent in
 
 ## The Conversation
 
-One span, one conversation, scoped to its parent episode. Python materializes the span's [evidence folder](scoring-input.md), assembles the system prompt from the five-signal rubric, and writes a secret-free job file; the runner builds the pi agent with exactly two evidence tools. The opening includes the exact target span and compact file navigation; the detailed manifest and episode files remain tool-readable. The result file returns retained and executed call counts, reported usage (including rolled-back rounds), context rollbacks, successful retained step-file reads (`retained_evidence`), and stop diagnostics. The operation's `input` preserves these across repair phases alongside the final `forced` and any-phase `any_phase_forced` markers.
+One span, one conversation, scoped to its parent episode. Python materializes the span's [evidence folder](scoring-input.md), assembles the system prompt from the five-signal rubric, and writes a secret-free job file; the runner builds the pi agent with exactly two evidence tools. The opening includes the exact target span and compact file navigation; the detailed manifest and episode files remain tool-readable. The result file returns retained and executed call counts, reported usage (including rolled-back rounds), context rollbacks, and successful retained step-file reads (`retained_evidence`). The operation's `input` sums executed calls, reported usage, and context rollbacks across repair phases, keeps the last phase's retained counts, and carries the final `forced` and any-phase `any_phase_forced` markers; stop reasons stay in the transcript.
 
 ## Trajectory Recording
 
@@ -24,7 +24,7 @@ Every conversation is recorded as a pi event-sourced trajectory: the runner subs
 - `tombstone` — `{removedSeqs, reason}` for what the context-budget rollback (`context_budget_rollback`) or a forced round's stripped tool tail (`forced_tool_tail`) removed from the live conversation.
 - `attempt_end` — answer, stop reason, forced flag, error, retained-conversation counts/usage, and this phase's executed calls/usage and rollbacks. Only the latter are summed across phases.
 
-The forced-answer message joins the conversation by context rewrite (no event fires for it), so the runner appends it to the trajectory explicitly. The runner records raw; Python rewrites the file masked after each attempt (the one masking implementation stays Python-side), so the kept artifact never carries the credential even when the endpoint echoed it. The operation's `input.transcript` names the file, relative to the output dir.
+The forced-answer message joins the conversation by context rewrite (no event fires for it), so the runner appends it to the trajectory explicitly. The runner records raw; Python rewrites the file masked after each attempt (the one masking implementation stays Python-side), so the kept artifact never carries the credential even when the endpoint echoed it. The operation's `input.transcript` names the file relative to the run folder — `agent-runs/<span-dir>.jsonl`.
 
 When a forced answer also contains blocked tool calls, the runner records the retained assistant text after tombstoning the tool tail, so replay preserves the final answer.
 
@@ -32,15 +32,15 @@ When a forced answer also contains blocked tool calls, the runner records the re
 
 Two budgets bound every conversation, and both end in a **forced final answer** instead of a failure:
 
-- **Step budget** (`MAX_STEPS`): when the LLM-call count reaches the cap, the conversation is cut to one final round: the forced-answer message is appended ("stop calling tools; answer from what you have gathered"), and any defiant tool call in the forced round is blocked.
+- **Step budget** (`MAX_STEPS`): when the LLM-call count reaches the cap, the conversation is cut to one final round: the forced-answer message tells the agent its budget is exhausted and to stop calling tools and write its final answer now from the evidence already gathered, and any defiant tool call in the forced round is blocked.
 - **Context budget** (`CONTEXT_WINDOW`): the estimate uses the last applicable assistant usage plus trailing messages; without usable input usage (including output-only usage), it estimates that content from messages, the system prompt, and tool schemas. The watermark reserves `MAX_OUTPUT_TOKENS` and the forced message's estimated size. Crossing it rolls back the overflowing round and injects the forced message.
 
 A missing-evidence continuation gets **at most four model calls including its final answer**, or `MAX_STEPS` if that is lower. At the four-call limit this allows three evidence-gathering rounds and one forced final round; it does not regain the initial full investigation budget. The existing context watermark can force an answer earlier. This is a fixed policy, not another configuration knob.
 
-Before a repair or resumed investigation, the runner caps output at the remaining
-context room when the prior answer has consumed part of the reservation. It
-keeps the evidence history intact and never exceeds `MAX_OUTPUT_TOKENS`.
-Out-of-range or empty step-file reads do not count as retained evidence.
+Before a repair or resumed investigation, the runner caps output at the
+smaller of `MAX_OUTPUT_TOKENS` and the context room the prior answer left,
+keeping the evidence history intact. Out-of-range or empty step-file reads do
+not count as retained evidence.
 
 A forced answer can be a valid verdict after retained investigation. Without a successful step-file read still in the conversation, even syntactically valid JSON goes to repair rather than becoming an ordinary neutral verdict; reading only navigation files is insufficient. The operation's `input` carries `"forced": true` only when the final answer was forced, while `any_phase_forced` preserves earlier forced phases across repair.
 
@@ -50,7 +50,7 @@ Python checks strict JSON shape and span-relative semantics (exact id coverage, 
 
 An invalid answer gets **one repair call with no evidence tools**, using the full transcript and the validation error. The repair preserves supported assessments and only fixes the contract violation. Python validates the result again; another invalid answer becomes a visible `error`, not another blind rewrite.
 
-Only an explicit repair control reply, `{"needs_evidence": "specific missing fact and step/file"}`, reopens investigation. It is not a verdict. The next runner restores the complete `job.history`, enables the evidence tools, and adds the targeted follow-up with `agent.prompt(...)`. This is pi's native continuation with a new instruction: it preserves existing messages. Bare `agent.continue()` adds no message and rejects a completed assistant tail unless a follow-up is queued, so it is not used here.
+Only an explicit repair control reply, `{"needs_evidence": "specific missing fact and step/file"}`, reopens investigation. It is not a verdict. The next runner restores the complete `job.history`, enables the evidence tools, and adds the targeted follow-up with `agent.prompt(...)`. This is pi's native continuation with a new instruction: it preserves existing messages.
 
 `MAX_ATTEMPTS` bounds all runner phases (initial investigation, repairs, and resumed investigations). Exhaustion keeps a visible error and the masked answer text. The parser is strict: no format-stripping fallback, and a valid answer is not sent back to the model.
 

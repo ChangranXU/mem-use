@@ -22,6 +22,7 @@ The suite does not use the network. Python tests stub paid judge calls with cann
 
 | Path | Role |
 |---|---|
+| `pyproject.toml` | uv environment: `package = false` (the tools run as `uv run -m …`), the `tqdm` runtime dependency, and the `pytest` dev group |
 | `util.py` | Shared helpers (atomic artifact writes, safe printing) |
 | `memgraph/` | Annotation index, parsing, linking, HTML renderer, verdict merge, CLI (`python3 -m memgraph`) |
 | `injudge/` | Step stream, injection spans, verdict contract and judge prompts (`judge.py`), evidence folders (`evidence.py`), the agent-runner client and corrective loop (`agent.py`), gold sidecars (`gold.py`), aggregates, report writer, CLI (`python3 -m injudge`) |

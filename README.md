@@ -45,26 +45,23 @@ Each `<path>` is a trajectory dir (containing `trajectory.jsonl`), a
 
 ## How it works
 
-injudge prepares episodes, then groups same-treatment re-injections into
-**spans** within each episode: the ordered entries, placement presentation,
-and per-entry exposure must match. For each span sent to the judge, it writes
-the target document and its parent episode's task, context, deliveries, global
-steps, and optional attachments into an isolated folder. A pi agent
-with read-only tools scoped to that folder scores every delivered memory on
-five signals — relevance, accuracy, novelty, influence, positive effect —
-under a stable span-local id. Python then derives the span verdict: any
+injudge groups each episode's same-treatment re-injections into **spans**,
+then materializes every judged span's evidence — the target document plus its
+parent episode's task, context, deliveries, and original steps — into an
+isolated folder a pi agent explores with read-only tools. The agent scores
+each delivered memory on five signals; Python derives the span verdict: any
 misused memory → **negative**, else any used → **positive**, else **neutral**.
-A span with no attributed agent step is not sent to the judge; it is counted
-as **unassessable**.
+A span with no attributed agent step is counted **unassessable** without a
+judge call.
 
-Judged evidence stays inside what the recorded placement actually exposed.
-Acted-on influence claims must cite action-step anchors inside the memory's
-footprint window. Mapping, examples, and aggregate formulas are in
+Judged evidence never exceeds what the recorded placement exposed, and
+acted-on influence must cite an action step inside that memory's footprint
+window. Two budgets bound each conversation — max steps and the context
+window — both ending in a forced final answer rather than a mid-run failure.
+
+The full pipeline is in the [English book](doc/en/README.md); the signals,
+usage labels, and aggregate formulas are in
 [Verdict derivation](doc/en/verdict-derivation.md).
-
-Two budgets bound every judge conversation — max steps and the context
-window — and both end in a forced final answer instead of a mid-run
-failure.
 
 ## Input contract
 
@@ -89,11 +86,10 @@ layout) — start at the [English book](doc/en/README.md) or the
 ## Tests
 
 ```bash
-uv sync
-npm --prefix agent install     # once, for the TypeScript agent tests
 uv run pytest tests -q
 ```
 
-The suite is offline: Python tests stub paid judge calls, and the TypeScript
-runner and evidence tools run under `node --test` through
-`tests/test_agent_tools.py`.
+The suite is offline: Python tests stub paid judge calls.
+`tests/test_agent_tools.py` drives the TypeScript runner and evidence tools
+through `node --test`, and is skipped when node or the agent packages are
+missing.

@@ -6,7 +6,7 @@ icon: sliders
 # Configuration
 
 {% hint style="info" %}
-Only injudge is configured, via a `.env` file (memgraph takes CLI flags alone). Copy `.env.example` — it carries full comments — and fill it in; every key is read and validated, there are no dead knobs. The judge is an agent, so the knobs are deliberately few: an endpoint triple, two budgets, and sampling.
+Only injudge is configured, via a `.env` file (memgraph takes CLI flags alone). Copy `.env.example` — it carries full comments — and fill it in; every key is read and validated, there are no dead knobs. The judge is an agent, so the knobs are deliberately few: the endpoint and wire format, sampling and thinking level, two budgets, retries, the per-call timeout, and span parallelism.
 {% endhint %}
 
 ## Setup
@@ -57,8 +57,8 @@ A verdict cut mid-answer is not a failure class: the answer simply fails the con
 | `--timeout` | `300` | Per-LLM-call timeout seconds |
 | `--max-attempts` | `MAX_ATTEMPTS` | Total judge/repair phases per span |
 | `--judge-max-tokens` | `MAX_OUTPUT_TOKENS` | Per-call output cap |
-| `--limit N` | unset | Judge at most *N* episode-scoped, nonempty spans with the agent; validate all episode and attachment scopes first. `--prepare-only` instead limits materialized episodes. |
-| `--dry-run` | off | Preview the target document and bounded navigation for each paid span job; no calls or files |
+| `--limit N` | unset | Judge at most *N* episode-scoped, nonempty spans with the agent; validate all episode and attachment scopes first. `--prepare-only` instead limits materialized episodes. A value below 1 fails fast. |
+| `--dry-run` | off | Print each paid span job's target document, file index, and opening message; no calls or files |
 | `--golden PATH` | unset | Golden answer for exactly one episode; use keyed metadata otherwise |
 | `--correctness resolved\|unresolved` | unset | Recorded outcome for exactly one episode, corroboration only |
 | `--gold-metadata PATH` | unset | verified-metadata.json patches joined by recorded episode benchmark identity |
@@ -76,11 +76,14 @@ Node, or contacting a judge:
 uv run -m injudge <paths> --prepare-only -o output/
 ```
 
-The mode accepts `--limit` (counting materialized episodes) and the keyed gold
-and harness attachment options. `--dry-run`, `--html`, and paid judge options
-are rejected. A package is written before a nonzero exit when a boundary or
-assignment needs review, so the diagnostics remain inspectable.
+The mode accepts `--limit` (counting materialized episodes), the two
+single-episode attachments (`--golden` / `--correctness`), and the keyed gold
+and harness attachment options. `--dry-run`, `--html`, and the judge options
+(`--env`, `--judge-model`, `--timeout`, `--max-attempts`,
+`--judge-max-tokens`) are rejected. A package is written before a nonzero exit
+when a boundary or assignment needs review, so the diagnostics remain
+inspectable.
 
 {% hint style="warning" %}
-The judge API key travels to the agent runner only through the `JUDGE_API_KEY` environment variable — never through a job file or an artifact — and is sent only to the judge endpoint. It must not appear in artifacts, reports, logs, or error messages. Endpoint output that echoes the request is masked before any of its text is kept.
+The judge API key must not appear in artifacts, reports, logs, or error messages; [Credentials](judge-client.md#credentials) documents how it travels to the runner and how echoed endpoint output is masked.
 {% endhint %}

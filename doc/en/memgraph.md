@@ -27,20 +27,22 @@ The JSON artifact — the same dict embedded in the HTML — is:
 
 | Collection | Contents |
 |---|---|
+| `tool` | Tool identity — `{"name": "memgraph"}`; under `--verdicts` it gains `verdicts`, the merged report's path. |
 | `ops` | Memory operations. `kind` is `extract` (generation) or `recall` (delivery); each op is anchored at `(traj, step, seq)`. Recall ops carry `searches` (the delivery's per-lane `{lane_id, operation_id}` links) and `queries` (each linked search's resolved query). Candidate, delivered, and deletion refs carry `grouping_id` for the registry join. |
 | `memories` | One record per stable item identity: normally `(namespace, item_id)`, otherwise the documented display-key or content-digest fallback. Each record carries origin, creation site, later updates, recalls, and deletion history — `deletions` lists every observed deletion (a re-creation marks `revived` and never erases it), while `deleted` is the terminal state. |
 | `edges` | Relationships from an op to a memory: `creates`, `supersedes`, `deletes`, `recalls`. |
+| `validation` | The run's `{level, msg}` notes (`info` / `warn`) for corrupt or skipped input, attribution gaps, and verdict-join mismatches. |
 
 Two chronology notes — both valid input rather than errors:
 
 - A recalled memory with no observed creation in the loaded set is registered with `origin: "not_observed"` and drawn with a ghost creation marker. The store entry simply predates the loaded trajectories.
-- A recall whose timestamp (or, within one trajectory, seq) precedes the first observed creation is flagged `recalled_before_creation`. The edge is still drawn; the warning is recorded in `validation`.
+- A recall whose timestamp (or, within one trajectory, seq) precedes the first observed creation is flagged `recalled_before_creation`: the store entry likely predates the loaded trajectories, or the lanes are misordered. The edge is still drawn; the warning is recorded in `validation`.
 
 ## HTML Features
 
 The rendered page provides:
 
-- One lane per trajectory (x = agent step), ordered by `run.json` `started_at` when present
+- One lane per trajectory (x = agent step), ordered by `run.json` `started_at` when it parses, else the directory name's `YYYYMMDD-HHMMSS` timestamp prefix, else the plain resolved directory name
 - Extraction (▲) and recall (▼) ops; consecutive-step recalls with the same delivered memory set collapse into ×n display spans
 - Creation → recall edges, plus dashed lifecycle chains (updates and deletions)
 - Ghost creation markers for memories whose origin is not in the loaded set

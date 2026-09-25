@@ -6,13 +6,14 @@ icon: file-lines
 # 输入约定
 
 {% hint style="info" %}
-两个工具都读取 **schema-v9 gate 轨迹**。记忆动作完全来自录制器的 `memory_*` 注解事件——绝不解析提示词、角色名或标签约定。录制器的 `bridge_*` 生命周期事件不产生记忆操作。成功的 bridge 删除若缺少同一操作的 `memory_*` 退役记录，会给出警告；bridge 原生版本 ID 不能替代可移植 MemoryRef。其余 bridge 事件被跳过；非 v9 的 run 会收到版本警告，不提供兼容解析器。
+两个工具都读取 **schema-v9 gate 轨迹**。记忆动作完全来自录制器的 `memory_*` 注解事件——绝不解析提示词、角色名或标签约定。录制器的 `bridge_*` 生命周期事件不产生记忆操作。成功的 bridge 删除若缺少来自同一会话、同一生成操作的 `memory_*` 退役记录，会给出警告；bridge 原生版本 ID 不能替代可移植 MemoryRef。其余 bridge 事件被跳过；`run.json` 记录的 `schema_version` 不是 9 时会给出版本警告，不提供兼容解析器。
 {% endhint %}
 
-`injudge --prepare-only` 是离线 episode 准备路径。它只使用
-`bridge_episode_open` / `bridge_episode_close` 建立 episode 范围与来源；记忆
-操作和 MemoryRef 仍然只能来自 `memory_*` 注释。边界或归属不明确时会保留
-诊断，不会从目录名、任务文字或历史重置中猜测。
+`injudge --prepare-only` 是离线 episode 准备路径。Episode 范围来自
+`bridge_episode_open` / `bridge_episode_close` 配对，没有记录时则来自明确
+属于某 episode 的 `memory_session`；无论哪种来源，生命周期事件都只提供范围
+与来源，记忆操作和 MemoryRef 仍然只能来自 `memory_*` 注释。准备产物会记录
+未解决的范围边界与归属缺口。
 
 没有注解的轨迹是合法输入：运行得到零个记忆操作，外加一条 validation 说明，而不是报错。
 
@@ -24,7 +25,7 @@ icon: file-lines
 | `memory_generate_*` | 记忆创建（produced 与 retired 引用） |
 | `memory_change` | 生命周期更新与删除 |
 | `memory_search_*` | 检索，每个读取泳道一个操作（`lane_id`） |
-| `memory_delivery` | 召回注入：每个读取泳道一条 `searches` 条目，每个渲染槽位一条 `placements` 条目 |
+| `memory_delivery` | 召回注入：每个读取泳道一条 `searches` 条目，每个渲染槽位一条 `placements` 条目。只有记录为 `status: "placed"` 的投递才产生召回操作；其他状态都会收到警告并被跳过 |
 
 可选的逻辑角色 `embedding` 绑定独立的代理泳道。生成或搜索结束事件可记录该泳道自己的游标、`embedding_call_refs` 和 `embedding_binding_status`；它们不会替代记忆调用引用，也不会产生 agent 步。记录 embedding 游标时，状态和引用列表必须同时存在；`no_call` 也必须显式记录空的 `embedding_call_refs`。损坏的 embedding 绑定会产生 validation 警告。
 
@@ -40,29 +41,29 @@ Generation 的 `retired` 引用补充 delete-change 记录，同一版本只计�
 |---|---|---|
 | 条目 | `(namespace, item_id)` 或稳定显示键 | 图注册表、使用汇总、区间集合差与足迹窗口。跨版本保持稳定；用作显示键的操作本地 ID 不参与比较。 |
 | 内容回退 | 隐去本地 ID 后的规范条目身份 | 仅有操作本地显示键时的跨操作归组。相同内容更换本地 ID 后仍归为一组，不同内容保持独立。 |
-| 版本 | `namespace` / `identity_scheme` / `version_id` / 内容 sha256 | 区间指纹与候选去重。 |
+| 版本 | `namespace` / `identity_scheme` / `version_id` / 内容 sha256，外加记录到的条目身份（`item_id`，否则为显示键回退） | 区间指纹与候选去重。 |
 
 不同 store 铸造的同名显示键，或同一 store 中不同条目持有的同名键，是两条不同的记忆。
 
 投递与搜索的一致性检查还比较每个 MemoryRef 的 `lane_id`，与录制器按泳道区分的身份规则一致。返回的记忆必须属于被搜索的泳道；另一泳道的相同版本不能满足投递的有序子序列检查。
 
-被搜索泳道取自搜索开始事件，且仅在两个泳道 ID 都为字符串时检查是否一致。跨会话搜索链接仍保留展示，但不提供查询或匹配数量。同一操作的重复链接只贡献一次查询和匹配数，原始链接仍保留。重复或无法解析的链接会使该投递跳过子序列检查，不会扩大可匹配的搜索结果。
+被搜索泳道取自搜索开始事件，且仅在两个泳道 ID 都为字符串时检查是否一致。跨会话搜索链接仍保留展示，但不提供查询或匹配数量。重复的操作链接只贡献一次查询和匹配数，记录到的链接仍保留展示。重复或无法解析的链接会使该投递的子序列检查失效，而不是扩大其搜索结果。
 
 适配器扩展（`extensions.cure`）只贡献**展示**投影：key、`memory_type`、confidence、评审状态、needs_verification、拒绝计数、声明的提取步骤。可移植字段仍是回退，因此非 CURE 适配器也能解析。
 
 {% hint style="info" %}
-**区间指纹回退。** 没有可移植版本身份的记忆（`operation_local` 的 version id 配上未摘要的内容）改用投递的 `(namespace, item, value)` 作指纹。被 redact 的内容不记录 value，因此同一 `(namespace, item)` 下不同的 redact 正文会共用一个区间：录制结果无法区分它们。重复投递只在处理方式相同时才并入区间：相同条目按相同顺序、相同 placement 呈现、且每条目曝光相同——曝光变化、重新排序的包、或重新框定的块都会开启新区间。
+**区间指纹回退。** 没有可移植版本身份的记忆（`operation_local` 的 version id 配上未摘要的内容）改用投递的 `(namespace, item, value)` 作指纹。被 redact 的内容不记录 value，因此同一 `(namespace, item)` 下不同的 redact 正文会共用一个区间：录制结果无法区分它们。
 
-用作显示键的操作本地 ID 不参与跨操作身份比较。没有稳定条目键时，图、使用汇总、区间集合差和足迹窗口采用与指纹相同的规范条目身份。因此，更换本地 ID 后采用新处理方式再次投递，仍会截断早前处理方式的窗口；稳定条目 ID 则继续跟踪同一条目的不同版本。
+没有稳定条目键时，图、使用汇总、区间集合差和足迹窗口采用与指纹相同的规范条目身份。因此，更换本地 ID 后采用新处理方式再次投递，仍会截断早前处理方式的窗口；稳定条目 ID 则继续跟踪同一条目的不同版本。
 {% endhint %}
 
 ## Agent 步骤
 
-操作归属于 **agent 步骤**：agent 自己泳道上已完成回合的 1-based 序号。泳道来自 `memory_role_bind`；记忆泳道上的回合——记忆系统自身的提取与检索——不是 agent 步骤。
+操作归属于 **agent 步骤**：agent 自己泳道上已完成回合的 1-based 序号。泳道来自 `memory_role_bind`；没有记录到的记忆绑定时，泳道取自操作事件自身的泳道，减去 session 与 delivery 事件打上的泳道，并给出警告。记忆泳道上的回合——记忆系统自身的提取与检索——不是 agent 步骤。
 
 在**任一**会话中承载主流量的泳道不是记忆泳道：它会连同警告从记忆泳道集合中剔除，其回合计入 agent 步骤。
 
-侧泳道（既不是 main 也不是 memory——例如未绑定的 query-rewrite 泳道）既不计 agent 步骤，也不计记忆回合。每条这样的泳道都会列入 `validation`。
+侧泳道（既不是 main 也不是 memory——例如未绑定的 query-rewrite 泳道）既不计 agent 步骤，也不计记忆回合。只有在存在 main 侧证据时才推导并列入 `validation`；没有该证据时，所有泳道都按 agent 流量处理。
 
 归属规则：
 
@@ -85,23 +86,28 @@ Generation 的 `retired` 引用补充 delete-change 记录，同一版本只计�
 ## Episode 准备
 
 准备阶段保留解析流中的全局 agent step 序号，在每个主泳道
-`turn_start` 重放泳道消息、工具结果消息槽、历史前缀和撤回。消息身份包含
-解析事件位置，因此重写后复用的 `msg` 槽不会覆盖旧消息。绑定的 delivery
+`turn_start` 重放泳道消息、工具结果消息槽、历史前缀和撤回。一次消息出现的
+身份由解析后的事件位置确定，proof 只对绑定 consumer 输入中可见的出现生效，
+因此被后续重写复用的槽位无法替代 consumer 当时看到的内容。绑定的 delivery
 跟随其 consumer call，即使注释在 episode 关闭后才写入；未绑定 delivery
 保留可观察的 episode 范围，但不会伪造 consumer step。
 
 Placement proof 只在绑定 consumer 的输入中解析，不会匹配后续复用同一消息槽
-的内容。`input_prefix` 和 `system_suffix` 可以只占据消息的一部分；准备阶段
-保留其余任务或系统文本，仅将记忆部分关联到 delivery。无法解析的 proof 和
-缺失的任务上下文会标记为待复核。历史重写按实际消息索引处理，episode reset
-与已证实的 wrapper 移除分别保留来源事件。
+的内容。Placement 可以只占据消息的一部分：已证实的 placement 会从其宿主出现
+中投影出来，与槽位名无关（录制器的 `input_prefix` 与 `system_suffix` 槽位也
+包括在内）；准备阶段保留其余任务或系统文本，仅将记忆部分关联到 delivery。
+只有 `canonical_message` proof 可以离线复核，`request_json_pointer` proof
+显式保持未知。无法解析的 proof 和缺失的任务上下文会标记为待复核。历史重写
+按实际消息索引处理，episode reset 与已证实的 wrapper 移除分别保留来源事件。
 
 ## 损坏输入
 
 {% hint style="warning" %}
-损坏数据降级处理，绝不让运行中断。
+畸形 JSONL 行、损坏的 seq、未知的绑定状态、非列表的载荷字段，以及断裂的
+session / operation 链接，都记入 `validation` 与警告，运行继续。
 {% endhint %}
 
-畸形 JSONL 行、损坏的 seq、未知的绑定状态、非列表的载荷字段，以及断裂的 session / operation 链接，都记入 `validation` 与警告，运行继续。手工编辑过的产物同样降级，不抛异常。
+无法使用的命令行附件则会快速失败，抛出针对性的 `SystemExit`：无法读取或
+schema 不匹配的 `--verdicts` 报告，或空的 `--golden` 文件。
 
 事件流保持文件顺序。缺失或非整数的 seq 会得到一个比当前已见最大值大 1 的合成 seq，使后续的撤回与顺序配对仍附着在目标上。真正非递增的 seq 只记说明，绝不重排。

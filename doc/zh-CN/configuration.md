@@ -6,7 +6,7 @@ icon: sliders
 # 配置
 
 {% hint style="info" %}
-只有 injudge 需要配置，通过 `.env` 文件（memgraph 只用命令行参数）。复制 `.env.example`——完整注释见该文件——并填写；每个键都会被读取和校验，没有无效旋钮。评审是一个智能体，因此旋钮刻意很少：端点三件套、两个预算、采样参数。
+只有 injudge 需要配置，通过 `.env` 文件（memgraph 只用命令行参数）。复制 `.env.example`——完整注释见该文件——并填写；每个键都会被读取和校验，没有无效旋钮。评审是一个智能体，因此旋钮刻意很少：端点与线格式、采样与思考层级、两个预算、重试、单次调用超时与区间并行。
 {% endhint %}
 
 ## 安装
@@ -57,12 +57,12 @@ npm --prefix agent install    # TS 侧执行一次（需要 PATH 上有 node >= 
 | `--timeout` | `300` | 单次 LLM 调用超时（秒） |
 | `--max-attempts` | `MAX_ATTEMPTS` | 每区间的调查/修复阶段总数 |
 | `--judge-max-tokens` | `MAX_OUTPUT_TOKENS` | 单次调用输出上限 |
-| `--limit N` | 不设 | 最多用智能体评判 *N* 个区间（其余为 `unjudged`）。必须为正。规则判定的 auto-neutral 区间仍会出判定；它们不消耗智能体运行。 |
-| `--dry-run` | 关 | 打印每个原本会使用智能体的区间的证据文档、文件索引与开场消息；不发起调用、不写文件 |
-| `--golden PATH` | 边车 | 每个智能体评审区间的证据所附 golden answer 正文 |
-| `--correctness resolved\|unresolved` | 边车 | 每个智能体评审区间所附的任务结果，仅作佐证 |
-| `--gold-metadata PATH` | 不设 | verified-metadata.json：按各轨迹记录的 `instance_id` 连接该实例的 gold patch（优先级介于 `--golden` 与边车之间） |
-| `--harness-report PATH` | 不设 | 整个运行共用一份 SWE-bench 风格评测报告，按 `instance_id` 逐轨迹连接（优先级介于 `--correctness` 与边车之间） |
+| `--limit N` | 不设 | 最多用智能体评判 *N* 个 episode 内、非空的区间；先校验全部 episode 与附件的适用范围。`--prepare-only` 则改为限制物化的 episode 数量。小于 1 的值会快速失败。 |
+| `--dry-run` | 关 | 打印每个付费区间任务的目标文档、文件索引与开场消息；不发起调用、不写文件 |
+| `--golden PATH` | 不设 | 只适用于恰好一个 episode 的 golden answer；其他情况请用带键的元数据 |
+| `--correctness resolved\|unresolved` | 不设 | 只适用于恰好一个 episode 的已记录结果，仅作佐证 |
+| `--gold-metadata PATH` | 不设 | verified-metadata.json：按已记录的 episode benchmark 身份连接 gold patch |
+| `--harness-report PATH` | 不设 | 按 episode 身份连接的 harness 结果；缺少执行级溯源时，重复执行或不同实验组会被拒绝 |
 | `-o DIR` | `output/` | 产物容器——每次运行写入自己的 `<run-stamp>/` 子目录；送入智能体的区间会增加 `evidence/` 与 `agent-runs/` 条目 |
 | `--html` | 关 | 同时写出 `memgraph-verdicts.html` |
 
@@ -75,10 +75,12 @@ episode 分区并写出 `injudge.episode-inputs/v1`：
 uv run -m injudge <paths> --prepare-only -o output/
 ```
 
-该模式支持 `--limit`（限制物化的 episode 数量）以及带键的 gold/harness
-附件。`--dry-run`、`--html` 和付费评审参数会被拒绝。若边界或归属需要复核，
-仍先写出带诊断的包，再以非零状态退出。
+该模式接受 `--limit`（按物化的 episode 计数）、两个单 episode 附件
+（`--golden` / `--correctness`），以及带键的 gold 与 harness 附件选项。
+`--dry-run`、`--html` 和评审参数（`--env`、`--judge-model`、`--timeout`、
+`--max-attempts`、`--judge-max-tokens`）会被拒绝。若边界或归属需要复核，
+仍先写出包，再以非零状态退出，好让诊断保持可查。
 
 {% hint style="warning" %}
-评审 API key 仅通过 `JUDGE_API_KEY` 环境变量传给智能体运行器——绝不经过作业文件或产物——且只发往评审端点。它不得出现在产物、报告、日志或错误信息中。回显了请求的端点输出会在任何文本被保留前先打码。
+评审 API key 不得出现在产物、报告、日志或错误信息中；[凭证](judge-client.md#凭证)说明了它如何传给运行器，以及回显了请求的端点输出如何被打码。
 {% endhint %}

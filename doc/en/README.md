@@ -32,13 +32,13 @@ uv sync
 npm --prefix agent install   # the TS judge agent's packages (node ≥ 22.19)
 
 # 1 — Visualize every memory operation
-uv run -m memgraph runs/ -o memgraph.html --json memgraph.json
+uv run -m memgraph <paths> -o memgraph.html --json memgraph.json
 
 # 2 — Judge recall injections (copy .env.example → .env and fill it in first)
-uv run -m injudge runs/ -o output/
+uv run -m injudge <paths> -o output/
 
 # 3 — Overlay the verdicts onto the graph
-uv run -m memgraph runs/ -o memgraph-verdicts.html --verdicts output/<run-stamp>/injudge-report.json
+uv run -m memgraph <paths> -o memgraph-verdicts.html --verdicts output/<run-stamp>/injudge-report.json
 ```
 
 {% hint style="tip" %}

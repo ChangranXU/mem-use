@@ -31,12 +31,18 @@ Each run writes its own `<run-stamp>/` folder (`YYYYMMDD-HHMMSS-<hex>`) under `-
 | `injudge-report.json` | The runtime judging record (`injudge.report/v13`), rewritten after every trajectory so a crash keeps completed work |
 | `summary.json` | The final statistics (`injudge.summary/v11`): counts, rates, per-memory usage |
 | `memgraph-verdicts.html` | Only with `--html`: memgraph with recall nodes colored by verdict |
-| `evidence/` | One folder per judged span (error outcomes included): target `span.md` plus only its parent's prepared episode files and optional attachments |
+| `evidence/` | One folder per span sent to the judge agent (error verdicts from a failed run included): target `span.md` plus only its parent's prepared episode files and optional attachments |
 | `agent-runs/` | One trajectory JSONL per span sent to the judge agent: the pi event-sourced recording of how each verdict was reached |
 
 Delivery cost and delivery-policy metrics are computed deterministically from the recordings, not judged — see [Artifacts](artifacts.md#delivery-cost-and-policy). The full field reference lives there too.
 
-The process exits `2` if any span ended in `error`.
+The process exits `2` if any span ended in `error` or any validation note carries level `error`; `--dry-run` exits `2` on error-level notes alone.
+
+A span is rejected before judging when its parent episode's boundary or assignment is not `prepared`, or when a span with deliveries and an attributed step has no recorded task in its parent episode: it takes an `error` verdict with no agent run — no evidence folder, no transcript, and no `input` record.
+
+## Offline Preparation
+
+`--prepare-only` writes the offline episode package instead of a judged run: `<run-stamp>/episode-inputs.json` (the `injudge.episode-inputs/v1` index) plus one `<run-stamp>/episodes/<episode-dir>/` folder per materialized episode. It loads no `.env`, needs no Node, and makes no judge calls; the package is written before a nonzero exit when a boundary or assignment needs review. See [Configuration](configuration.md#offline-preparation).
 
 ## Injection Spans
 
@@ -45,7 +51,7 @@ The same content is often re-injected, so the judged unit is the **injection spa
 Episodes are partitioned before span grouping. Identical treatments across episodes never merge; each episode retains global step numbers, its own task/context, and its own gold/outcome joins. Empty deliveries and unattributable spans are mechanically counted without paid calls.
 
 - Step gaps do not break a span; they are recorded in `step_gaps` and shown to the judge.
-- A content or treatment change does break a span — a re-ranked bundle, a re-framed block, or a changed per-entry exposure starts a new span even when the delivered content is identical. Each delivered entry's judged footprint window runs from the span's first step to that entry's next re-delivery **within the episode**; an entry never re-delivered remains eligible through that episode's last step. An unrelated span in between bounds nothing, and one entry's window ending never caps a co-delivered entry's window. Windows are per delivered ENTRY (the span-local id the rubric keys on): identities sharing one display key keep their own bounds, and every entry — keyed or not — is judged.
+- A content or treatment change does break a span — a re-ranked bundle, a re-framed block, or a changed per-entry exposure starts a new span even when the delivered content is identical. Every delivered entry is judged against its own footprint window; the window bounds and per-entry exposure are specified in [Judge evidence](scoring-input.md).
 - Re-deliveries roll up as `restated`: they count toward delivery cost and `n_injections`, but never appear in verdict rates.
 - A span with no attributed agent step (`step_first` is `None`) has no downstream footprint. It is rule-judged **neutral** with `auto: no_subsequent_turn`, and no judge call is made. Aggregates tally it as `unassessable`, out of every directional rate.
 
@@ -72,6 +78,6 @@ The scoring call accepts two optional attachments, joined to episodes **before**
 | Golden-answer body | `golden.txt` (wins over `golden.md` when both are usable), `--gold-metadata PATH` (verified-metadata.json: a `patch` joined by recorded episode benchmark identity), or `--golden PATH` | Switches that episode's span calls to the **gold rubric** (`GOLD_SYSTEM_PROMPT`) and supplies `gold.md`. Same five signals, schema, and derivation; the reference is not the verdict. |
 | Recorded correctness | `correctness.json`, `--harness-report PATH` (SWE-bench-style results joined by episode benchmark identity), or `--correctness resolved\|unresolved` | Supplies `outcome.json` as corroboration only. It cannot decide a signal or select the gold rubric. |
 
-`correctness.json` accepts a plain `{"resolved": true|false, "score": …}` record or a SWE-bench-style harness report (`resolved_ids` / `unresolved_ids`). Error, incomplete, missing, and conflicting harness results remain explicit statuses rather than being guessed as resolved/unresolved; a sidecar does not override a harness join. Because a benchmark-only harness report cannot identify repeated executions or treatment arms, those joins fail before judging; use execution-scoped results instead. Unusable linkage files fail before a paid call.
+`correctness.json` accepts a plain `{"resolved": true|false, "score": …}` record or a SWE-bench-style harness report (`resolved_ids` / `unresolved_ids`). Error, incomplete, missing, and conflicting harness results stay explicit statuses rather than being guessed as resolved/unresolved, a sidecar never overrides a harness join, and a benchmark-only report — which cannot identify repeated executions or treatment arms — fails before judging, as does any unusable linkage file; use execution-scoped results instead.
 
 With neither attachment, scoring uses the plain rubric. The gold regime is recorded on the operation's `input` (`"gold": true`) and counted in `aggregates.overall.gold_scored`.

@@ -27,20 +27,22 @@ JSON 产物——嵌在 HTML 里的是同一个 dict——的形状是：
 
 | 集合 | 内容 |
 |---|---|
+| `tool` | 工具身份——`{"name": "memgraph"}`；在 `--verdicts` 下会多出 `verdicts`，即所合并报告的路径。 |
 | `ops` | 记忆操作。`kind` 为 `extract`（生成）或 `recall`（投递）；每个操作锚定在 `(traj, step, seq)`。召回操作带 `searches`（投递的按泳道 `{lane_id, operation_id}` 链接）和 `queries`（每条已链接搜索的解析查询）。候选、投递与删除引用带 `grouping_id`，用于与注册表联结。 |
 | `memories` | 每个稳定条目身份一条记录：通常是 `(namespace, item_id)`，否则采用输入约定中的显示键或内容摘要回退。每条记录包含来源、创建位置、后续更新、召回与删除历史——`deletions` 列出每一次观察到的删除（重新创建会标记 `revived`，绝不抹除历史），`deleted` 是终态。 |
 | `edges` | 从操作指向记忆的关系：`creates`、`supersedes`、`deletes`、`recalls`。 |
+| `validation` | 本次运行的 `{level, msg}` 说明（`info` / `warn`），覆盖损坏或被跳过的输入、归属缺失，以及判定连接不匹配。 |
 
 两条时序说明——都属于合法输入而非错误：
 
 - 已加载集合中没有观察到创建的召回记忆，以 `origin: "not_observed"` 注册并画幽灵创建标记。store 条目只是早于已加载轨迹。
-- 时间戳（或在同一轨迹内按 seq）早于首次观察到的创建的召回，会标记 `recalled_before_creation`。边仍会画出；警告记入 `validation`。
+- 时间戳（或在同一轨迹内按 seq）早于首次观察到的创建的召回，会标记 `recalled_before_creation`：store 条目很可能早于已加载轨迹，或者泳道顺序有误。边仍会画出；警告记入 `validation`。
 
 ## HTML 功能
 
 页面提供：
 
-- 每条轨迹一条泳道（横轴为 agent 步骤；有 `run.json` 的 `started_at` 时按其排序）
+- 每条轨迹一条泳道（横轴为 agent 步骤），排序依次依据：能解析的 `run.json` `started_at`；否则目录名中的 `YYYYMMDD-HHMMSS` 时间戳前缀；再否则解析出的纯目录名
 - 提取（▲）与召回（▼）操作；相邻步骤中投递同一记忆集合的召回折叠为 ×n 显示区间
 - 创建 → 召回边，以及虚线生命周期链（更新与删除）
 - 来源不在已加载集合中的记忆的幽灵创建标记

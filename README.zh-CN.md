@@ -43,21 +43,19 @@ uv run -m memgraph <paths> --verdicts output/<run-stamp>/injudge-report.json -o 
 
 ## 工作原理
 
-injudge 把处理方式相同的重复注入归并为**区间（span）**：条目顺序、
-placement 呈现和逐条目曝光都必须一致。它为每个送入评审的区间建立证据
-文件夹（目标区间及其所属 episode 的任务、上下文、其他投递、全局步骤和可选附件）。
-一个工具只读且限定在该文件夹内的 pi 智能体，对投递的记忆条目打五个信号
-（relevance、accuracy、novelty、influence、positive effect），按稳定的
-区间本地 id 逐条评分。再由代码推导区间判定：任一记忆被误用 →
+injudge 在每个 episode 内把处理方式相同的重复注入归并为**区间（span）**，
+再为每个送入评审的区间建立独立的证据文件夹——目标区间及其所属 episode 的
+任务、上下文、投递与原始步骤——由一个 pi 智能体用只读工具探索。智能体对
+每条投递记忆打五个信号；再由代码推导区间判定：任一记忆被误用 →
 **negative**，否则任一被采纳 → **positive**，否则 **neutral**。没有可归属
 agent 步骤的区间不送评审，计为 **unassessable**。
 
-被评判的证据不超出录制 placement 实际曝光的内容。acted-on 的影响力断言
-必须携带落在该记忆足迹窗口内的动作步骤锚点。映射、示例与汇总公式见
-[判定推导](doc/zh-CN/verdict-derivation.md)。
+被评判的证据不超出录制 placement 实际曝光的内容，acted-on 的影响力断言
+必须携带落在该记忆足迹窗口内的动作步骤锚点。每条评审对话只受两个预算
+约束——最大步数与上下文窗口——且都以强制作答收尾，而非中途失败。
 
-每条评审对话只受两个预算约束——最大步数与上下文窗口——且都以强制作答
-收尾，而非中途失败。
+完整流程见[中文文档](doc/zh-CN/README.md)；信号、使用标签与汇总公式见
+[判定推导](doc/zh-CN/verdict-derivation.md)。
 
 ## 输入约定
 
@@ -80,10 +78,9 @@ agent 步骤的区间不送评审，计为 **unassessable**。
 ## 测试
 
 ```bash
-uv sync
-npm --prefix agent install     # 首次，供 TypeScript 智能体测试
 uv run pytest tests -q
 ```
 
-测试不走网络：Python 测试会替换付费评审调用，TypeScript 运行器与证据工具
-经 `node --test` 由 `tests/test_agent_tools.py` 驱动。
+测试不走网络：Python 测试用预制结果替换付费评审调用。TypeScript 运行器与
+证据工具经 `node --test` 由 `tests/test_agent_tools.py` 驱动，缺 node 或
+尚未安装 agent 包时跳过。
