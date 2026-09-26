@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from memgraph.graph import build_graph, discover_trajectories, load_and_build
-from memgraph.parse_trajectory import parse_trajectory
+from memgraph.parse_trajectory import merge_costs, parse_trajectory
 from annotated_fixtures import AnnotatedBuilder as TrajBuilder
 from annotated_fixtures import cure_ref, parse
 from injudge import REPORT_SCHEMA
@@ -2416,6 +2416,53 @@ def test_operation_cost_reads_capture_only_call_billing(tmp_path, usage):
                            "prompt_tokens": 41 if usage else None,
                            "completion_tokens": 7 if usage else None}
     assert traj.memory_cost["generation"] == ops[0].cost
+
+
+def test_every_search_is_listed_with_its_provenance_whether_or_not_it_was_delivered(tmp_path):
+    """An agent-directed read whose result never reached the model (redirected
+    output, a stopped agent) is still a memory action: the trajectory lists it
+    beside the delivered one, with the adapter's HTTP/tool provenance."""
+    ref = cure_ref("k1", "Use a greedy prefix.")
+    b = TrajBuilder().agent_turn(with_task=True)
+    delivered = b.search(returned=[ref], query="greedy prefix")
+    redirected = b.search(returned=[ref], query="saved to a file")
+    provenance = {"memory_bridge": {"route": "/memory-bridge/v3/atomic/search", "tool_call_id": "save",
+                                    "delivery": "result_not_shown"}}
+    for e in b.events:
+        if e["type"] == "memory_search_start":
+            e["payload"]["trigger"] = "explicit"
+            if e["payload"]["operation_id"] == redirected:
+                e["payload"]["extensions"] = provenance
+    b.agent_turn().delivery(delivered, memories=[ref], bind=b.last_call)
+    traj, ops, _ = parse(b, tmp_path)
+    recall = next(op for op in ops if op.kind == "recall")
+    listed = {entry["operation_id"]: entry for entry in traj.to_dict()["searches"]}
+    assert listed[delivered]["delivered_by"] == [recall.id]
+    assert listed[redirected]["delivered_by"] == []
+    assert listed[redirected] | {"operation_id": None} == {
+        "operation_id": None, "lane_id": "default", "trigger": "explicit", "query": "saved to a file",
+        "status": "completed", "returned_count": 1, "delivered_by": [], "cost": None, "extensions": provenance}
+
+
+def test_reported_upstream_price_is_summed_only_when_every_bound_call_reported_one(tmp_path):
+    ref = cure_ref("k1", "Use a greedy prefix.")
+    b = TrajBuilder().agent_turn(with_task=True)
+    priced = []
+    for _ in range(3):
+        b.memory_turn()
+        priced.append(b.last_call)
+        b.generate(produced=[ref], bind=b.last_call)
+    d = b.write(tmp_path / "t1")
+    for call, usage in zip(priced, ({"prompt_tokens": 10, "completion_tokens": 2, "cost": 0.25},
+                                    {"prompt_tokens": 10, "completion_tokens": 2, "cost": 0.5},
+                                    {"prompt_tokens": 10, "completion_tokens": 2})):
+        (d / "calls" / call["call_id"]).mkdir(parents=True)
+        (d / "calls" / call["call_id"] / "call.json").write_text(json.dumps({"response": {"usage": usage}}))
+    traj, ops, _ = parse_trajectory(d, [])
+    assert [op.cost.get("reported_cost", "absent") for op in ops if op.kind == "extract"] == [0.25, 0.5, "absent"]
+    # One operation's calls reported no price: the run's price is unknown, never understated.
+    assert traj.memory_cost["generation"]["reported_cost"] is None
+    assert merge_costs([ops[0].cost, ops[1].cost])["reported_cost"] == 0.75
 
 
 def test_operation_extensions_preserve_opaque_writer_and_tool_provenance(tmp_path):

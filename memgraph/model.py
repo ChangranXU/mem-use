@@ -46,6 +46,10 @@ class Trajectory:
     # like memory_lanes, never serialized into the artifacts)
     task: str | None = None
     n_searches: int = 0  # memory searches with a recorded end (any status: completed/failed/partial)
+    # every recorded search, delivered or not: {operation_id, lane_id, trigger,
+    # query, status, returned_count, delivered_by (recall op ids), cost,
+    # extensions (adapter provenance, e.g. the tool call and HTTP action)}
+    searches: list[dict] = field(default_factory=list)
     # history_rewritten markers; on_memory_lane flags memory-lane traffic per
     # the final classification set (the HTML colors rewrite markers by it)
     rewrites: list[dict] = field(default_factory=list)
@@ -66,6 +70,7 @@ class Trajectory:
             "adapter": self.adapter,
             "instance_id": self.instance_id,
             "n_searches": self.n_searches,
+            "searches": self.searches,
             "rewrites": self.rewrites,
             "memory_cost": self.memory_cost,
         }

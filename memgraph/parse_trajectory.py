@@ -406,12 +406,22 @@ def _known_sum(values: Any) -> int | None:
     return total
 
 
+def _reported_cost(usage: dict | None) -> int | float | None:
+    value = usage.get("cost") if isinstance(usage, dict) else None
+    return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
 def merge_costs(costs: Any) -> dict[str, int | None] | None:
     """Field-wise sum of operation costs; a field unknown in any part is unknown."""
     total: dict[str, int | None] = {}
-    for cost in costs:
-        for key, value in (cost or {}).items():
+    parts = [cost for cost in costs if cost]
+    for cost in parts:
+        for key, value in cost.items():
             total[key] = value if key not in total else _known_sum((total[key], value))
+    # A price total covers every billed part or is unknown: a part whose calls
+    # reported no price must not silently shrink it.
+    if "reported_cost" in total and any("reported_cost" not in cost for cost in parts):
+        total["reported_cost"] = None
     return total or None
 
 
@@ -443,6 +453,11 @@ class _CallUsage:
         if embedded:
             out["embedding_calls"] = len(embedded)
             out["embedding_tokens"] = _known_sum(_token_count(self._usage(call), "prompt_tokens") for call in embedded)
+        # The upstream's own price (`usage.cost`), only when it reported one;
+        # never derived from tokens. Unknown if any bound call reported none.
+        prices = [_reported_cost(self._usage(call)) for call in (*calls, *embedded)]
+        if any(price is not None for price in prices):
+            out["reported_cost"] = _known_sum(prices)
         return out or None
 
     @staticmethod
@@ -1132,6 +1147,31 @@ def parse_trajectory(
                 slots, warnings, run_id, usage
             )
         )
+
+    # Every read the memory system recorded, delivered or not: an
+    # agent-directed read whose result never reached the model (redirected,
+    # filtered away, or the agent stopped) is still a memory action.
+    delivered_by: dict[str, list[str]] = {}
+    for op in ops:
+        for link in op.searches:
+            delivered_by.setdefault(link["operation_id"], []).append(op.id)
+    for search in searches:
+        start = search.start["payload"] if search.start else {}
+        end = search.end["payload"] if search.end else {}
+        returned = end.get("returned")
+        extensions = start.get("extensions")
+        traj.searches.append({
+            "operation_id": search.operation_id,
+            "lane_id": start.get("lane_id"),
+            "trigger": start.get("trigger"),
+            "query": resolved_content_text(
+                start.get("query"), events, index.binds.get(start.get("trace_session_id"), {}), slots),
+            "status": end.get("status"),
+            "returned_count": len(returned) if isinstance(returned, list) else None,
+            "delivered_by": delivered_by.get(search.operation_id, []),
+            "cost": usage.cost(search.end),
+            **({"extensions": extensions} if isinstance(extensions, dict) and extensions else {}),
+        })
 
     ops.sort(key=lambda o: o.seq)
     traj.n_steps = table.n_agent_turns
