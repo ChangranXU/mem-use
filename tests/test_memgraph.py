@@ -858,7 +858,10 @@ def test_retiring_an_old_revision_keeps_its_replacement_alive(tmp_path, timing):
     assert memory["deletions"] == []
     assert [e["kind"] for e in graph["edges"]] == ["creates", "supersedes"]
     assert len(graph["ops"][-1]["deletions"]) == 1
-    assert any("different revision from the latest observed" in v["msg"] for v in graph["validation"])
+    # An op retiring the revision it replaces is an ordinary update, not an
+    # unordered retirement.
+    assert any("different revision from the latest observed" in v["msg"]
+               for v in graph["validation"]) is (timing == "later_operation")
 
 
 @pytest.mark.parametrize("strength", ["native_stable", "operation_local"])
@@ -2441,7 +2444,7 @@ def test_every_search_is_listed_with_its_provenance_whether_or_not_it_was_delive
     assert listed[redirected]["delivered_by"] == []
     assert listed[redirected] | {"operation_id": None} == {
         "operation_id": None, "lane_id": "default", "trigger": "explicit", "query": "saved to a file",
-        "status": "completed", "returned_count": 1, "delivered_by": [], "cost": None, "extensions": provenance}
+        "status": "completed", "error_codes": [], "returned_count": 1, "delivered_by": [], "cost": None, "extensions": provenance}
 
 
 def test_reported_upstream_price_is_summed_only_when_every_bound_call_reported_one(tmp_path):
@@ -2476,3 +2479,120 @@ def test_operation_extensions_preserve_opaque_writer_and_tool_provenance(tmp_pat
     b.events[-1]["payload"]["extensions"] = lookup
     _, ops, _ = parse(b, tmp_path)
     assert [op.to_dict()["extensions"] for op in ops] == [writer, lookup]
+
+
+@pytest.mark.parametrize("strength", ["native_stable", "operation_local"])
+@pytest.mark.parametrize("content_available", [True, False])
+def test_same_generation_retiring_its_current_revision_still_deletes(tmp_path, strength, content_available):
+    ref = cure_ref("k", "unchanged value", version_id="v1")
+    ref["identity_strength"] = strength
+    if not content_available:
+        ref["content"] = {"availability": "unavailable", "reason": "revision_only"}
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.generate(produced=[ref], extraction_step="1")
+    b.generate(produced=[ref], retired=[ref], extraction_step="1")
+    graph = load_and_build([b.write(tmp_path / "run")])
+    (memory,) = graph["memories"]
+    assert memory["deleted"] is True
+    assert [entry["op"] for entry in memory["deletions"]] == ["T1:E2"]
+    assert [edge["kind"] for edge in graph["edges"]] == ["creates", "supersedes", "deletes"]
+
+
+@pytest.mark.parametrize("missing_digest", ["previous", "retired"])
+def test_update_matches_native_revision_without_requiring_the_same_content_metadata(tmp_path, missing_digest):
+    old = cure_ref("k", "old value", version_id="v1")
+    retired = json.loads(json.dumps(old))
+    new = cure_ref("k", "new value", version_id="v2")
+    (old if missing_digest == "previous" else retired)["content"] = {
+        "availability": "unavailable", "reason": "revision_only",
+    }
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.generate(produced=[old], extraction_step="1")
+    b.generate(produced=[new], retired=[retired], extraction_step="1")
+    graph = load_and_build([b.write(tmp_path / "run")])
+    assert graph["memories"][0]["deleted"] is False
+    assert not any("different revision from the latest observed" in note["msg"]
+                   for note in graph["validation"])
+
+
+
+def test_one_generation_can_retire_each_revision_in_its_update_chain(tmp_path):
+    first = cure_ref("k", "first value", version_id="v1")
+    middle = cure_ref("k", "middle value", version_id="v2")
+    last = cure_ref("k", "last value", version_id="v3")
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.generate(produced=[first], extraction_step="1")
+    b.generate(produced=[last], retired=[first, middle], extraction_step="1", changes=[
+        ("update", [first], [middle]), ("update", [middle], [last]),
+    ])
+    graph = load_and_build([b.write(tmp_path / "run")])
+    (memory,) = graph["memories"]
+    assert memory["value"] == "last value" and memory["deleted"] is False
+    assert [update["value"] for update in memory["updates"]] == ["middle value", "last value"]
+    assert not any("different revision from the latest observed" in note["msg"]
+                   for note in graph["validation"])
+
+
+
+def test_native_operation_start_arguments_survive_terminal_metadata(tmp_path):
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.generate()
+    call = {"name": "mem0_memory", "arguments": {"action": "add", "content": "fact"}}
+    start = next(e for e in b.events if e["type"] == "memory_generate_start")
+    start["payload"]["extensions"] = {"memory_bridge": {"native_call": call, "phase": "started"}}
+    b.events[-1]["payload"]["extensions"] = {"memory_bridge": {
+        "phase": "finished", "usage": {"model_input_tokens": 11},
+    }}
+    graph = load_and_build([b.write(tmp_path / "run")])
+    assert graph["ops"][0]["extensions"]["memory_bridge"] == {
+        "native_call": call, "phase": "finished", "usage": {"model_input_tokens": 11},
+    }
+
+
+def test_search_summary_preserves_native_call_and_terminal_metadata(tmp_path):
+    b = TrajBuilder().agent_turn(with_task=True)
+    search = b.search()
+    call = {"name": "mem0_memory", "arguments": {"action": "search", "query": "earlier fix"}}
+    start = next(e for e in b.events if e["type"] == "memory_search_start")
+    start["payload"]["extensions"] = {"memory_bridge": {"native_call": call}}
+    b.events[-1]["payload"]["extensions"] = {"memory_bridge": {"usage": {"embedding_input_tokens": 7}}}
+    b.agent_turn().delivery(search, bind=b.last_call)
+    graph = load_and_build([b.write(tmp_path / "run")])
+    assert graph["trajectories"][0]["searches"][0]["extensions"]["memory_bridge"] == {
+        "native_call": call, "usage": {"embedding_input_tokens": 7},
+    }
+
+
+
+def test_search_delivery_links_name_final_graph_operation_ids(tmp_path):
+    for name in ("one", "two"):
+        b = TrajBuilder().agent_turn(with_task=True)
+        search = b.search()
+        b.agent_turn().delivery(search, bind=b.last_call)
+        b.write(tmp_path / name, run_id=name)
+    graph = load_and_build([tmp_path])
+    for trajectory in graph["trajectories"]:
+        expected = [op["id"] for op in graph["ops"] if op["traj"] == trajectory["id"] and op["kind"] == "recall"]
+        assert trajectory["searches"][0]["delivered_by"] == expected
+
+
+
+def test_missing_search_start_does_not_invent_search_provenance(tmp_path):
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.search()
+    b.events[-1]["payload"]["extensions"] = {"writer": {"outcome": "observed"}}
+    b.events = [event for event in b.events if event["type"] != "memory_search_start"]
+    graph = load_and_build([b.write(tmp_path / "run")])
+    assert graph["trajectories"][0]["searches"] == []
+    assert any("start" in note["msg"] for note in graph["validation"])
+
+
+
+def test_search_summary_keeps_diagnostics_on_successful_empty_recall(tmp_path):
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.search()
+    b.events[-1]["payload"]["error_codes"] = ["mem0_timeout"]
+    graph = load_and_build([b.write(tmp_path / "run")])
+    (search,) = graph["trajectories"][0]["searches"]
+    assert search["status"] == "completed" and search["returned_count"] == 0
+    assert search["error_codes"] == ["mem0_timeout"]

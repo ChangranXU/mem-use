@@ -129,6 +129,18 @@ def _register(
     return unit
 
 
+def _same_revision(left: dict[str, object] | None, right: dict[str, object] | None) -> bool | None:
+    # Missing content cannot contradict a shared native revision ID. Local
+    # IDs carry no identity across operations, so only their digests compare.
+    a = version_identity(left, withhold_local=True)
+    b = version_identity(right, withhold_local=True)
+    if a[2] is not None and b[2] is not None:
+        return a[1:3] == b[1:3]
+    if a[3] is not None and b[3] is not None:
+        return a[3] == b[3]
+    return None
+
+
 def build_graph(
     trajectories: list[Trajectory],
     ops_by_traj: dict[str, list[MemoryOp]],
@@ -156,12 +168,17 @@ def build_graph(
         for op in ops:
             if op.kind != "extract":
                 continue
+            # Include intermediate states when one generation updates an
+            # item more than once; candidate order follows the recorded series.
+            replaced: dict[tuple[str | None, str], list[dict[str, object]]] = {}
             for cand in op.candidates:
                 key = cand.get("key")
                 if not key:
                     note("warn", f"{op.id}: candidate without a key ignored")
                     continue
                 ident = item_ident(cand)
+                if ident in current_refs:
+                    replaced.setdefault(ident, []).append(current_refs[ident])
                 current_refs[ident] = cand
                 if ident not in registry:
                     unit = _register(registry, ident, cand, key, "observed")
@@ -263,16 +280,9 @@ def build_graph(
                 # Retiring an older revision does not delete its replacement.
                 # Missing digest metadata cannot contradict the same native id;
                 # operation-local ids compare only through content across ops.
-                current = version_identity(current_refs.get(ident), withhold_local=True)
-                retired = version_identity(ref, withhold_local=True)
-                if all(v is not None for v in (current[2], retired[2])):
-                    different = current[1:3] != retired[1:3]
-                else:
-                    different = (
-                        current[3] is not None and retired[3] is not None
-                        and current[3] != retired[3]
-                    )
-                if different:
+                if _same_revision(current_refs.get(ident), ref) is False:
+                    if any(_same_revision(prior, ref) is True for prior in replaced.get(ident, ())):
+                        continue  # this op replaced the retired revision
                     note(
                         "info", f"{op.id}: retired a different revision from the latest "
                         f"observed candidate for memory {key!r}; the graph's item state "
@@ -394,12 +404,17 @@ def load_trajectories(
     for i, (_, traj, ops, events) in enumerate(parsed, 1):
         old_id = traj.id
         traj.id = f"T{i}"
+        renamed: dict[str, str] = {}
         for op in ops:
             op.traj = traj.id
+            old_op_id = op.id
             # op ids are exactly "{traj}:{kind}{n}" — swap the placeholder
             # prefix for the final T-number (removeprefix, never a blind
             # replace: an id missing the prefix stays intact, not rewritten)
             op.id = f"{traj.id}:{op.id.removeprefix(f'{old_id}:')}"
+            renamed[old_op_id] = op.id
+        for search in traj.searches:
+            search["delivered_by"] = [renamed[op_id] for op_id in search["delivered_by"]]
         trajectories.append(traj)
         ops_by_traj[traj.id] = ops
         events_by_traj[traj.id] = events

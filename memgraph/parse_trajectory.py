@@ -488,6 +488,22 @@ def _op_anchor(operation: AnnotatedOperation) -> dict[str, Any]:
     return operation.end or (operation.changes[-1] if operation.changes else operation.start)
 
 
+def _operation_extensions(operation: AnnotatedOperation) -> dict[str, Any]:
+    # Arguments live on the start; outcomes/usage usually live on the end.
+    # Merge fields within each opaque namespace, with terminal values winning.
+    result: dict[str, Any] = {}
+    for event in (operation.start, _op_anchor(operation)):
+        if event is None:
+            continue
+        extensions = event["payload"].get("extensions")
+        if not isinstance(extensions, dict):
+            continue
+        for namespace, value in extensions.items():
+            prior = result.get(namespace)
+            result[namespace] = {**prior, **value} if isinstance(prior, dict) and isinstance(value, dict) else value
+    return result
+
+
 def _version_ident(entry: dict) -> tuple:
     """A mapped ref's identity for the candidate dedupe: the item-level
     pair leading, then the gate's version-level tuple
@@ -547,8 +563,7 @@ def _extract_op_from_generation(
         turn=_bound_turn(table, end.get("terminal_call_ref")) if end else None,
         source_event_index=anchor.get("_event_index"),
     )
-    extensions = anchor["payload"].get("extensions")
-    op.extensions = extensions if isinstance(extensions, dict) else {}
+    op.extensions = _operation_extensions(operation)
     op.trigger = operation.start["payload"].get("trigger")
     # Change events are recorded state effects — they survive a missing end
     # event (an already-flagged structural violation), like every other
@@ -1159,7 +1174,7 @@ def parse_trajectory(
         start = search.start["payload"] if search.start else {}
         end = search.end["payload"] if search.end else {}
         returned = end.get("returned")
-        extensions = start.get("extensions")
+        extensions = _operation_extensions(search)
         traj.searches.append({
             "operation_id": search.operation_id,
             "lane_id": start.get("lane_id"),
@@ -1167,6 +1182,7 @@ def parse_trajectory(
             "query": resolved_content_text(
                 start.get("query"), events, index.binds.get(start.get("trace_session_id"), {}), slots),
             "status": end.get("status"),
+            "error_codes": list_field(end, "error_codes"),
             "returned_count": len(returned) if isinstance(returned, list) else None,
             "delivered_by": delivered_by.get(search.operation_id, []),
             "cost": usage.cost(search.end),

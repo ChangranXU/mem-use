@@ -47,7 +47,7 @@ class Trajectory:
     task: str | None = None
     n_searches: int = 0  # memory searches with a recorded end (any status: completed/failed/partial)
     # every recorded search, delivered or not: {operation_id, lane_id, trigger,
-    # query, status, returned_count, delivered_by (recall op ids), cost,
+    # query, status, error_codes, returned_count, delivered_by (recall op ids), cost,
     # extensions (adapter provenance, e.g. the tool call and HTTP action)}
     searches: list[dict] = field(default_factory=list)
     # history_rewritten markers; on_memory_lane flags memory-lane traffic per
