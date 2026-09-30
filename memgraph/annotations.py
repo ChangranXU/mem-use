@@ -59,6 +59,7 @@ fields (item_id/version_id + content text) so non-CURE adapters still parse.
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import re
 from dataclasses import dataclass, field
@@ -850,6 +851,7 @@ def _exposure_norm(text: str) -> str:
     return _EXPOSURE_ESCAPE.sub("", _EXPOSURE_WS.sub(" ", text)).strip()
 
 
+_XML_TEXT = re.compile(r"<[A-Za-z][^<>]*>([^<]*)")
 _JSON_STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
 _NUMBERED_LINE = re.compile(r"^\s*([0-9]{1,9})(?:\t|→)(.*)$")
 
@@ -866,6 +868,10 @@ def _rendered_texts(text: str, numbered: bool) -> list[str]:
     for _ in range(4):
         nested = []
         for source in pending:
+            # Decode entities once inside markup text nodes. Keep nodes separate:
+            # neither tags nor missing fragments may join unrelated memory text.
+            # Decoded nodes never re-enter this queue (literal &amp;lt; stays &lt;).
+            rendered.extend(html.unescape(match[1]) for match in _XML_TEXT.finditer(source))
             for match in _JSON_STRING.finditer(source):
                 try:
                     decoded = json.loads(match[0])
@@ -908,7 +914,8 @@ def exposure_state(value: Any, placement_text: str | None, *, placement_kind: st
     — one carrying quotes, backslashes, or line structure compares verbatim
     only under that normalization, since collapsing/escape-stripping inside
     code changes semantics. Lossless JSON-string decoding and contiguous
-    numbered tool-result lines can also establish full_normalized exposure;
+    numbered tool-result lines and entity decoding within XML text nodes can
+    also establish full_normalized exposure;
     their decoded content must match exactly. `clipped` — the placement
     carries only a proper prefix of
     the value (a delivery budget cutting the rendered line);
@@ -924,7 +931,8 @@ def exposure_state(value: Any, placement_text: str | None, *, placement_kind: st
         return {"state": "unknown", "exposed_chars": None, "value_chars": value_chars}
     if not value or value in placement_text:
         return {"state": "full", "exposed_chars": len(value), "value_chars": len(value)}
-    if any(value in text for text in _rendered_texts(placement_text, placement_kind == "tool_result")):
+    renderings = [placement_text, *_rendered_texts(placement_text, placement_kind == "tool_result")]
+    if any(value in text for text in renderings[1:]):
         return {"state": "full_normalized", "exposed_chars": len(value), "value_chars": len(value)}
     if not _EXPOSURE_PROSE_UNSAFE.search(value) and (
         _exposure_norm(value) in _exposure_norm(placement_text)
@@ -938,7 +946,7 @@ def exposure_state(value: Any, placement_text: str | None, *, placement_kind: st
     lo, hi = 0, len(value) - 1
     while lo < hi:
         mid = (lo + hi + 1) // 2
-        if value[:mid] in placement_text:
+        if any(value[:mid] in text for text in renderings):
             lo = mid
         else:
             hi = mid - 1

@@ -121,6 +121,7 @@ class MemoryOp:
     trigger: str | None = None
     # tokens the operation's own bound calls spent (recorder call_refs /
     # embedding_call_refs): memory_calls, prompt_tokens, completion_tokens,
+    # cached_tokens, cache_write_tokens, cache_write_1h_tokens, reasoning_tokens,
     # embedding_calls, embedding_tokens; a recall sums its linked searches.
     # A count is None when any bound call's usage is unrecorded; None
     # overall when the operation bound no call.

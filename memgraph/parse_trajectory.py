@@ -392,6 +392,12 @@ _CALL_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
 
 def _token_count(usage: Any, key: str) -> int | None:
+    # The recorder omits zero read/reasoning details. Write counters preserve
+    # explicit zero, so an absent write field must stay unknown.
+    if isinstance(usage, dict) and key not in usage:
+        primary = {"cached_tokens": "prompt_tokens", "reasoning_tokens": "completion_tokens"}.get(key)
+        if primary and _token_count(usage, primary) is not None:
+            return 0
     value = usage.get(key) if isinstance(usage, dict) else None
     return value if is_int(value) and value >= 0 else None
 
@@ -447,8 +453,9 @@ class _CallUsage:
         if calls:
             usages = [self._usage(call) for call in calls]
             out["memory_calls"] = len(calls)
-            out["prompt_tokens"] = _known_sum(_token_count(u, "prompt_tokens") for u in usages)
-            out["completion_tokens"] = _known_sum(_token_count(u, "completion_tokens") for u in usages)
+            for field in ("prompt_tokens", "completion_tokens", "cached_tokens", "cache_write_tokens",
+                          "cache_write_1h_tokens", "reasoning_tokens"):
+                out[field] = _known_sum(_token_count(u, field) for u in usages)
         embedded = self._call_ids(end.get("embedding_call_refs"))
         if embedded:
             out["embedding_calls"] = len(embedded)

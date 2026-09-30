@@ -34,6 +34,15 @@ The JSON artifact — the same dict embedded in the HTML — is:
 | `edges` | Relationships from an op to a memory: `creates`, `supersedes`, `deletes`, `recalls`. |
 | `validation` | The run's `{level, msg}` notes (`info` / `warn`) for corrupt or skipped input, attribution gaps, and verdict-join mismatches. |
 
+Memory-call costs also preserve the recorder's `cached_tokens` (cache reads),
+`cache_write_tokens`, `cache_write_1h_tokens` (the one-hour subset of writes),
+and `reasoning_tokens`. These are subsets of prompt/output usage, not extra
+tokens to add to the bill or injudge's prompt budget. Zero read/reasoning
+details may be omitted by the recorder; write counters retain explicit zero.
+Missing or invalid write counters remain `null`, including in totals when any
+bound call lacks that counter. Operation costs are also visible in the HTML
+raw JSON panel. No response-body parser or rate-card estimate is used here.
+
 Two chronology notes — both valid input rather than errors:
 
 - A recalled memory with no observed creation in the loaded set is registered with `origin: "not_observed"` and drawn with a ghost creation marker. The store entry simply predates the loaded trajectories.

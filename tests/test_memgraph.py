@@ -2391,13 +2391,19 @@ def test_operation_cost_comes_from_bound_calls_and_directed_recalls_are_marked(t
     traj, ops, _ = parse_trajectory(d, [])
     extracts = [op.to_dict() for op in ops if op.kind == "extract"]
     recall = next(op.to_dict() for op in ops if op.kind == "recall")
-    assert extracts[0]["cost"] == {"memory_calls": 1, "prompt_tokens": 120, "completion_tokens": 30}
-    assert extracts[1]["cost"] == {"memory_calls": 1, "prompt_tokens": None, "completion_tokens": None}
+    assert extracts[0]["cost"] == {"memory_calls": 1, "prompt_tokens": 120, "completion_tokens": 30,
+                                    "cached_tokens": 0, "reasoning_tokens": 0,
+                                    "cache_write_tokens": None, "cache_write_1h_tokens": None}
+    assert extracts[1]["cost"] == {"memory_calls": 1, "prompt_tokens": None, "completion_tokens": None,
+                                    "cached_tokens": None, "reasoning_tokens": None,
+                                    "cache_write_tokens": None, "cache_write_1h_tokens": None}
     assert recall["trigger"] == "explicit"
     assert recall["placement_kinds"] == ["tool_result"]
     assert recall["cost"] == {"embedding_calls": 1, "embedding_tokens": 7}
     assert traj.to_dict()["memory_cost"] == {
-        "generation": {"memory_calls": 2, "prompt_tokens": None, "completion_tokens": None},
+        "generation": {"memory_calls": 2, "prompt_tokens": None, "completion_tokens": None,
+                       "cached_tokens": None, "reasoning_tokens": None,
+                       "cache_write_tokens": None, "cache_write_1h_tokens": None},
         "search": {"embedding_calls": 1, "embedding_tokens": 7},
     }
 
@@ -2417,7 +2423,10 @@ def test_operation_cost_reads_capture_only_call_billing(tmp_path, usage):
     traj, ops, _ = parse_trajectory(directory, [])
     assert ops[0].cost == {"memory_calls": 1,
                            "prompt_tokens": 41 if usage else None,
-                           "completion_tokens": 7 if usage else None}
+                           "completion_tokens": 7 if usage else None,
+                           "cached_tokens": 0 if usage else None,
+                           "reasoning_tokens": 0 if usage else None,
+                           "cache_write_tokens": None, "cache_write_1h_tokens": None}
     assert traj.memory_cost["generation"] == ops[0].cost
 
 

@@ -744,6 +744,7 @@ function showOp(opId){
       }
     }
   }
+  if(o.cost) body.cost=o.cost;
   h+=`<details class="rawjson"><summary>raw JSON</summary><pre>${esc(JSON.stringify(body,null,1))}</pre></details>`;
   detail.innerHTML=h;
   bindMemLinks();

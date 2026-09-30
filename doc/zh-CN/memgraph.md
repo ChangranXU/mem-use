@@ -34,6 +34,14 @@ JSON 产物——嵌在 HTML 里的是同一个 dict——的形状是：
 | `edges` | 从操作指向记忆的关系：`creates`、`supersedes`、`deletes`、`recalls`。 |
 | `validation` | 本次运行的 `{level, msg}` 说明（`info` / `warn`），覆盖损坏或被跳过的输入、归属缺失，以及判定连接不匹配。 |
 
+记忆模型调用的成本还保留 recorder 的 `cached_tokens`（缓存读取）、
+`cache_write_tokens`、`cache_write_1h_tokens`（写入中的一小时缓存部分）和
+`reasoning_tokens`。这些都是输入或输出 token 的子集，不会再次加到成本或
+injudge 的输入预算中。recorder 可以省略零值的缓存读取和推理计数，但缓存写入
+保留显式零值。写入计数缺失或无效时为 `null`；任何绑定调用缺少该计数时，
+相应汇总也为 `null`。HTML 的 raw JSON 面板同样显示操作成本。
+这里不重新解析响应正文，也不根据价格表估算费用。
+
 两条时序说明——都属于合法输入而非错误：
 
 - 已加载集合中没有观察到创建的召回记忆，以 `origin: "not_observed"` 注册并画幽灵创建标记。store 条目只是早于已加载轨迹。

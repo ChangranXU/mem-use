@@ -8,6 +8,7 @@ annotation events alone — never from prompt text or label conventions.
 """
 
 import hashlib
+import html
 import json
 
 import pytest
@@ -2743,6 +2744,8 @@ def test_locator_duplicate_retraction_never_pops_beneath_its_copy():
 
 
 @pytest.mark.parametrize("render", [
+    lambda value: '<memories><facts>' + html.escape(value) + '</facts></memories>',
+    lambda value: json.dumps({'output': '<memories><facts>' + html.escape(value) + '</facts></memories>'}),
     lambda value: json.dumps({"data": {"content": value}}),
     lambda value: json.dumps({"output": json.dumps({"data": {"content": value}})}),
     lambda value: "\n".join(f"  {i}\t{line}" for i, line in enumerate(value.splitlines(), 1)) + "\n<system-reminder>note</system-reminder>",
@@ -2771,3 +2774,24 @@ def test_numbered_tool_exposure_never_joins_gaps_or_changes_code_whitespace():
         assert exposure_state(value, text, placement_kind="tool_result")["state"] != "full_normalized"
     assert exposure_state(value, '1\tfirst line\n2\t    return "a  b"',
                           placement_kind="system_context")["state"] != "full_normalized"
+
+
+def test_entity_encoded_and_json_encoded_clips_preserve_the_exact_exposed_prefix():
+    from memgraph.annotations import exposure_state
+
+    value = 'Check "a < b" & preserve the literal &lt; in output. More unseen text.'
+    prefix = value[:52]
+    for shown in ('<facts>' + html.escape(prefix) + '...',
+                  json.dumps({'output': '<facts>' + html.escape(prefix) + '...'}),
+                  json.dumps({'output': prefix + '...'})):
+        assert exposure_state(value, shown, placement_kind='tool_result') == {
+            'state': 'clipped', 'exposed_chars': len(prefix), 'value_chars': len(value)}
+
+
+def test_entity_decoding_does_not_join_nodes_or_decode_twice():
+    from memgraph.annotations import exposure_state
+
+    assert exposure_state('first half second half', '<a>first half </a><b>second half</b>')['state'] != 'full_normalized'
+    assert exposure_state('a < b', '<facts>a &amp;lt; b</facts>')['state'] != 'full_normalized'
+    assert exposure_state('a &lt; b', '<facts>a &amp;lt; b</facts>')['state'] == 'full_normalized'
+    assert exposure_state('a < b', 'a &lt; b')['state'] != 'full_normalized'
