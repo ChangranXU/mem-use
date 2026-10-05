@@ -97,6 +97,7 @@ memgraph/__init__.py       # package docstring (module map; no re-exports)
 memgraph/annotations.py    # schema-v9 annotation index + MemoryRef mapping
 memgraph/model.py          # Trajectory / MemoryOp / MemoryUnit / Edge
 memgraph/parse_trajectory.py  # trajectory.jsonl → ops; shared step rule
+memgraph/episodes.py       # shared episode-scope rule (bridge boundaries) + graph episode rows
 memgraph/graph.py          # path discovery, cross-trajectory linking, validation
 memgraph/html.py           # self-contained HTML (template + embedded graph JSON)
 memgraph/verdicts.py       # merge injudge.report/v14 onto recall ops
@@ -104,7 +105,7 @@ memgraph/__main__.py       # python3 -m memgraph
 injudge/__init__.py        # REPORT_SCHEMA / SUMMARY_SCHEMA (writer + memgraph reader)
 injudge/model.py           # AgentStep / ToolExec / InjectionSpan
 injudge/steps.py           # agent-lane step stream + all-lane billed prompt tokens
-injudge/episodes.py        # offline episode scope and source assignments
+injudge/episodes.py        # offline episode preparation and source assignments
 injudge/spans.py           # episode recall ops → injection spans
 injudge/judge.py           # the verdict contract, judge prompts, evidence renderers
 injudge/evidence.py        # one span's judge evidence as a folder of files + manifest
@@ -229,6 +230,9 @@ adapter vocabulary.
 Both tools attribute steps through one rule:
 `parse_trajectory.classifying_messages`, with the ordinal in
 `parse_trajectory.agent_turns`. Reuse that rule; do not re-derive it.
+Episode scope is likewise one rule, `memgraph.episodes.episode_scopes`
+(bridge open/close pairs by event position, else episode-scoped sessions):
+injudge prepares episodes from it and memgraph lays out its rows by it.
 
 - Agent step = 1-based ordinal of completed turns that are neither memory
   lane nor side lane.
@@ -489,6 +493,11 @@ recall `content_chars`, the per-injection verdict role marker, the singular
 `memory_lane`) are still part of the JSON contract.
 Candidate, delivered, and deletion refs carry `grouping_id`, the registry's
 item identity, so content-grouped local refs link correctly in HTML.
+Trajectory rows carry `episodes` (`{episode_id, sequence_id, status,
+first_step, last_step}` per recorded scope, in order) and every op carries
+`episode`, its index there (null outside every scope); the HTML groups rows
+run → sequence → episode by them and adds no validation notes of its own
+(injudge's preparation reports scope problems).
 The HTML colors rewrite markers by each marker's own `on_memory_lane` flag,
 computed at parse time against the final lane set. Do not prune a field
 from one consumer only.

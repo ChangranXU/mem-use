@@ -13,13 +13,13 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from injudge.model import AgentStep, ContextView, EpisodeInput, PreparationResult, SourceRef
 from injudge.steps import build_step_stream
 from memgraph.annotations import AnnotationIndex, build_annotation_index, is_int, message_text, resolved_content_text
+from memgraph.episodes import Boundary, episode_for_index, episode_scopes
 from memgraph.model import MemoryOp, Trajectory
 
 
@@ -56,210 +56,6 @@ def _source(event: dict[str, Any], index: int | None = None) -> SourceRef:
         call_id=call_id if isinstance(call_id, str) else None,
         tool_call_id=(event.get("tool_call_id") if isinstance(event.get("tool_call_id"), str) else None),
     )
-
-
-def _identity(event: dict[str, Any], event_type: str) -> tuple[object, ...]:
-    payload = _payload(event)
-    event_id = _as_str(payload.get("event_id")) or _as_str(event.get("annotation_id"))
-    return (
-        event_type,
-        event_id,
-        _as_str(payload.get("trace_session_id")),
-        _as_str(payload.get("sequence_id")),
-        _as_str(payload.get("episode_id")),
-    )
-
-
-@dataclass
-class _Boundary:
-    ordinal: int
-    episode_id: str | None
-    session_id: str | None
-    sequence_id: str | None
-    open_index: int
-    open_event: dict[str, Any]
-    close_index: int | None = None
-    close_event: dict[str, Any] | None = None
-    diagnostics: list[str] = field(default_factory=list)
-    status: str = "open"
-
-    @property
-    def end_index(self) -> int:
-        return self.close_index if self.close_index is not None else 10**18
-
-    @property
-    def scope(self) -> tuple[str | None, str | None, str | None]:
-        return self.session_id, self.sequence_id, self.episode_id
-
-    def contains(self, index: int) -> bool:
-        return self.open_index <= index <= self.end_index
-
-
-def _boundary_payload(event: dict[str, Any]) -> tuple[str | None, str | None, str | None, str | None]:
-    payload = _payload(event)
-    return (
-        _as_str(payload.get("episode_id")),
-        _as_str(payload.get("trace_session_id")),
-        _as_str(payload.get("sequence_id")),
-        _as_str(payload.get("treatment_arm_id")),
-    )
-
-
-def _discover_boundaries(events: list[dict[str, Any]], diagnostics: list[str]) -> list[_Boundary]:
-    """Pair bridge episode events in file order, retaining corrupt scopes."""
-    boundaries: list[_Boundary] = []
-    active: dict[tuple[str | None, str | None, str | None], _Boundary] = {}
-    closed: dict[tuple[str | None, str | None, str | None], list[_Boundary]] = {}
-    seen_identity: dict[tuple[object, ...], dict[str, Any]] = {}
-
-    for fallback_index, event in enumerate(events):
-        typ = event.get("type")
-        if typ not in ("bridge_episode_open", "bridge_episode_close"):
-            continue
-        index = _event_index(event, fallback_index)
-        ident = _identity(event, typ)
-        # The recorder may retry the same lifecycle write.  The event id is
-        # the recorded identity; exact repeats must not create another run.
-        if ident[1] is not None and ident in seen_identity:
-            if _payload(event) != seen_identity[ident]:
-                note = f"event {index}: conflicting payload for repeated episode event identity"
-                diagnostics.append(note)
-                for boundary in boundaries:
-                    if any(source is not None and _identity(source, typ) == ident
-                           for source in (boundary.open_event, boundary.close_event)):
-                        boundary.status = "needs_review"
-                        boundary.diagnostics.append(note)
-            continue
-        if ident[1] is not None:
-            seen_identity[ident] = _payload(event)
-        episode_id, session_id, sequence_id, _arm = _boundary_payload(event)
-        key = (session_id, sequence_id, episode_id)
-        if typ == "bridge_episode_open":
-            if key in active:
-                previous = active[key]
-                previous.status = "needs_review"
-                previous.diagnostics.append(
-                    f"conflicting episode open at event {index} while episode "
-                    f"{episode_id or '(unknown)'} was still open"
-                )
-                previous.close_index = index - 1
-                diagnostics.append(
-                    f"event {index}: conflicting duplicate episode open for "
-                    f"{episode_id or '(unknown)'}; preceding scope was closed for review"
-                )
-                del active[key]
-            # A missing close for another episode in the same recorded session
-            # is an overlap. Split it before the new open rather than allowing
-            # later records to disappear into the old episode.
-            for other_key, previous in list(active.items()):
-                if session_id is not None and other_key[0] == session_id:
-                    previous.status = "needs_review"
-                    previous.diagnostics.append(
-                        f"overlap ended by episode open at event {index}"
-                    )
-                    previous.close_index = index - 1
-                    diagnostics.append(
-                        f"event {index}: episode scopes overlap in session {session_id}; "
-                        "preceding scope is incomplete"
-                    )
-                    del active[other_key]
-            boundary = _Boundary(
-                ordinal=len(boundaries),
-                episode_id=episode_id,
-                session_id=session_id,
-                sequence_id=sequence_id,
-                open_index=index,
-                open_event=event,
-            )
-            boundaries.append(boundary)
-            active[key] = boundary
-            if episode_id is None:
-                boundary.status = "needs_review"
-                boundary.diagnostics.append("episode open has no episode_id")
-                diagnostics.append(f"event {index}: episode open has no episode_id")
-            continue
-
-        # Close: use the explicit scope when present; an omitted episode id is
-        # only safe when one active scope exists in that session.
-        candidate_key = key
-        candidate = active.get(candidate_key)
-        if candidate is None and episode_id is None:
-            candidates = [
-                (k, b) for k, b in active.items()
-                if session_id is None or k[0] == session_id
-            ]
-            if len(candidates) == 1:
-                candidate_key, candidate = candidates[0]
-            elif candidates:
-                diagnostics.append(
-                    f"event {index}: episode close has ambiguous active scope"
-                )
-        if candidate is None:
-            # A repeated close after a valid close is harmless only when its
-            # recorded event identity is the same (handled above).
-            prior = closed.get(key, [])
-            if prior:
-                diagnostics.append(
-                    f"event {index}: conflicting duplicate close for episode "
-                    f"{episode_id or '(unknown)'}"
-                )
-            else:
-                diagnostics.append(
-                    f"event {index}: unmatched episode close for "
-                    f"{episode_id or '(unknown)'}"
-                )
-            continue
-        candidate.close_index = index
-        candidate.close_event = event
-        if candidate.status == "open":
-            candidate.status = "prepared"
-        active.pop(candidate_key, None)
-        closed.setdefault(candidate_key, []).append(candidate)
-
-    final_index = len(events) - 1
-    for boundary in boundaries:
-        if boundary.close_index is None:
-            boundary.close_index = final_index
-            if boundary.status == "open":
-                boundary.status = "incomplete"
-                boundary.diagnostics.append("episode open has no matching close")
-                diagnostics.append(
-                    f"episode {boundary.episode_id or '(unknown)'} opened at event "
-                    f"{boundary.open_index} without a close"
-                )
-    return boundaries
-
-
-def _session_boundaries(events: list[dict[str, Any]], diagnostics: list[str]) -> list[_Boundary]:
-    """Fallback scope from explicitly episode-scoped memory_session events."""
-    sessions: list[tuple[int, dict[str, Any], str | None, str | None]] = []
-    for fallback, event in enumerate(events):
-        if event.get("type") != "memory_session":
-            continue
-        payload = _payload(event)
-        episode_id = _as_str(payload.get("episode_id"))
-        if episode_id is None and payload.get("session_kind") != "episode":
-            continue
-        sessions.append(
-            (_event_index(event, fallback), event, episode_id, _as_str(payload.get("trace_session_id")))
-        )
-    out: list[_Boundary] = []
-    for i, (idx, event, episode_id, session_id) in enumerate(sessions):
-        next_idx = sessions[i + 1][0] if i + 1 < len(sessions) else len(events)
-        b = _Boundary(
-            ordinal=i,
-            episode_id=episode_id,
-            session_id=session_id,
-            sequence_id=_as_str(_payload(event).get("sequence_id")),
-            open_index=idx,
-            open_event=event,
-            close_index=max(idx, next_idx - 1),
-            status="prepared",
-        )
-        out.append(b)
-    if out:
-        diagnostics.append("episode scope came from explicitly episode-scoped memory_session events")
-    return out
 
 
 def _main_lanes(events: list[dict[str, Any]], memory_lanes: set[str | None], side_lanes: set[str | None]) -> set[str | None]:
@@ -727,21 +523,7 @@ def _delivery_projection(
     }
 
 
-def _episode_for_index(boundaries: list[_Boundary], index: int | None, event: dict[str, Any] | None = None,
-                       participant_episodes: dict[str, str] | None = None) -> _Boundary | None:
-    if index is None:
-        return None
-    explicit = _as_str(_payload(event or {}).get("episode_id"))
-    session = _as_str(_payload(event or {}).get("trace_session_id"))
-    if participant_episodes and session in participant_episodes:
-        session = participant_episodes[session]
-    matches = [b for b in boundaries if b.contains(index)
-               and (explicit is None or b.episode_id == explicit)
-               and (session is None or b.session_id in (None, session))]
-    return matches[0] if len(matches) == 1 else None
-
-
-def _assignment_key(boundary: _Boundary) -> str:
+def _assignment_key(boundary: Boundary) -> str:
     episode = boundary.episode_id or "unresolved"
     return f"{episode}@{boundary.open_index}"
 
@@ -754,9 +536,7 @@ def prepare_episodes(
 ) -> PreparationResult:
     """Partition one parsed trajectory into inspectable episode inputs."""
     diagnostics: list[str] = []
-    boundaries = _discover_boundaries(events, diagnostics)
-    if not boundaries:
-        boundaries = _session_boundaries(events, diagnostics)
+    boundaries = episode_scopes(events, diagnostics)
     if not boundaries:
         diagnostics.append(
             f"{trajectory.run_id}: no bridge episode boundary or episode-scoped memory_session; "
@@ -784,7 +564,7 @@ def prepare_episodes(
     for session_id, session_event in annotation_index.sessions.items():
         if _payload(session_event).get("session_kind") != "other":
             continue
-        boundary = _episode_for_index(boundaries, _event_index(session_event, 0))
+        boundary = episode_for_index(boundaries, _event_index(session_event, 0))
         if boundary and boundary.open_event.get("type") == "memory_session" and boundary.session_id:
             participant_episodes[session_id] = boundary.session_id
     main_lanes = _main_lanes(events, trajectory.memory_lanes, trajectory.side_lanes)
@@ -842,7 +622,7 @@ def prepare_episodes(
 
     # Assign global agent steps by their originating main-lane turn_start.
     for step in steps:
-        boundary = _episode_for_index(boundaries, turn_index.get(step.turn))
+        boundary = episode_for_index(boundaries, turn_index.get(step.turn))
         if boundary is None:
             diagnostics.append(f"{trajectory.run_id}: step {step.step} turn {step.turn} has no episode scope")
             unassigned.append({
@@ -872,7 +652,7 @@ def prepare_episodes(
     for view_index, view in views.items():
         if id(view) in assigned_views:
             continue
-        boundary = _episode_for_index(boundaries, view_index)
+        boundary = episode_for_index(boundaries, view_index)
         if boundary is not None:
             episode_data[boundary.ordinal].context.append(view)
             assigned_views.add(id(view))
@@ -893,12 +673,12 @@ def prepare_episodes(
             continue
         ref = event.get("terminal_call_ref")
         call_id = ref.get("call_id") if isinstance(ref, dict) else None
-        boundary: _Boundary | None = None
+        boundary: Boundary | None = None
         if isinstance(call_id, str) and call_id in call_map:
             turn, _step = call_map[call_id]
-            boundary = _episode_for_index(boundaries, turn_index.get(turn, source_index))
+            boundary = episode_for_index(boundaries, turn_index.get(turn, source_index))
         else:
-            boundary = _episode_for_index(boundaries, source_index, event, participant_episodes)
+            boundary = episode_for_index(boundaries, source_index, event, participant_episodes)
         if boundary is None:
             diagnostics.append(f"{trajectory.run_id}: delivery {op.id} has ambiguous episode membership")
             unassigned.append({
@@ -951,7 +731,7 @@ def prepare_episodes(
         sid = _as_str(payload.get("operation_id"))
         if sid is None or sid in assigned_search_ids:
             continue
-        boundary = _episode_for_index(boundaries, _event_index(event, fallback), event, participant_episodes)
+        boundary = episode_for_index(boundaries, _event_index(event, fallback), event, participant_episodes)
         if boundary is None:
             diagnostics.append(f"{trajectory.run_id}: search {sid} has ambiguous episode membership")
             unassigned.append({

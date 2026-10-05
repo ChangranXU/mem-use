@@ -66,6 +66,7 @@ from memgraph.annotations import (
     resolved_content_text,
     version_identity,
 )
+from memgraph.episodes import episode_rows
 from memgraph.model import MemoryOp, Trajectory
 
 # The bridge's memory-action contract is add/update/delete (memory-bridge
@@ -1197,6 +1198,7 @@ def parse_trajectory(
         })
 
     ops.sort(key=lambda o: o.seq)
+    traj.episodes = episode_rows(events, table.step_of_turn, ops)
     traj.n_steps = table.n_agent_turns
     if table.n_turns != table.n_agent_turns + table.n_mem_turns + table.n_side_turns:
         warnings.append(

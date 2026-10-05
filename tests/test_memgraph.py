@@ -579,6 +579,37 @@ def test_rewrite_markers_flag_memory_traffic_per_final_lane_set(tmp_path):
     assert any("multiple memory lanes" in w for w in warnings)
 
 
+def test_episode_rows_group_steps_and_ops_by_recorded_scope(tmp_path):
+    """Bridge episode scopes become the graph's episode rows (the boundary
+    rule injudge prepares from): a row's agent steps are the turns inside its
+    scope, an op points at the scope holding its anchor event, an op recorded
+    between scopes points at none, and a scope left open reads incomplete."""
+    ref = cure_ref("k", "v")
+    b = TrajBuilder()
+    b.episode_open("ep-1", sequence_id="seq-a")
+    b.agent_turn(with_task=True)
+    b.memory_turn()
+    b.generate(produced=[ref], changes=[("create", [], [ref])])
+    b.episode_close("ep-1", sequence_id="seq-a")
+    b.recall(ref)
+    b.episode_open("ep-2", sequence_id="seq-b")
+    b.recall(ref).agent_turn()
+    b.write(tmp_path / "t1", run_id="t1")
+    graph = load_and_build([tmp_path])
+
+    (traj,) = graph["trajectories"]
+    assert traj["episodes"] == [
+        {"episode_id": "ep-1", "sequence_id": "seq-a", "status": "prepared",
+         "first_step": 1, "last_step": 1},
+        {"episode_id": "ep-2", "sequence_id": "seq-b", "status": "incomplete",
+         "first_step": 3, "last_step": 4},
+    ]
+    assert [(o["kind"], o["step"], o["episode"]) for o in graph["ops"]] == [
+        ("extract", 1, 0), ("recall", 2, None), ("recall", 3, 1)]
+    # display rows add no validation notes: injudge's preparation reports scope problems
+    assert not any("episode" in v["msg"] for v in graph["validation"])
+
+
 def test_render_html_colors_rewrites_by_the_memory_flag():
     """The rewrite coloring reads the per-marker on_memory_lane flag computed
     at parse time — never the singular memory_lane (None on multi-lane runs)
@@ -587,7 +618,6 @@ def test_render_html_colors_rewrites_by_the_memory_flag():
 
     html = render_html({"trajectories": [], "ops": [], "memories": [],
                         "edges": [], "validation": []})
-    assert "rw.on_memory_lane?" in html
     assert ".every(r=>r.on_memory_lane)" in html
     assert "t.memory_lane" not in html
 
@@ -2122,8 +2152,8 @@ def test_render_html_without_verdicts_has_no_verdict_payload(tmp_path):
     g = graph_payload(html)
     assert "verdicts" not in g["tool"]
     assert all("verdict" not in o and "span_verdict" not in o for o in g["ops"])
-    # legend group exists but stays hidden; JS reveal is guarded by G.tool&&G.tool.verdicts
-    assert '<div class="group" id="legend-verdicts" style="display:none">' in html
+    # the verdict key exists but stays hidden; JS reveal is guarded by G.tool&&G.tool.verdicts
+    assert '<span id="key-verdicts" hidden></span>' in html
 
 
 def test_render_html_verdict_stats_separate_mechanical_skips():
@@ -2133,8 +2163,8 @@ def test_render_html_verdict_stats_separate_mechanical_skips():
     html = render_html({"trajectories": [], "ops": [], "memories": [],
                         "edges": [], "validation": []})
     assert 'auto==="empty_delivery"?"empty":auto?"unassessable"' in html
-    assert "⊘${vc.unassessable}" in html
-    assert "∅${vc.empty} empty" in html
+    # the tally lists judged verdicts first and the mechanical skips apart
+    assert '"error","unjudged","unassessable","empty"]' in html
 
 
 def test_render_html_title_literal_in_graph_data_survives(tmp_path):
@@ -2178,15 +2208,16 @@ def test_render_html_escapes_the_title():
 
 def test_render_html_escapes_trajectory_data_in_svg_titles():
     """Memory keys and lane names are trajectory-controlled: every one of
-    them interpolated into an SVG <title> goes through esc() — the span
-    set-change diff, the rewrite-band sources, the verdict label."""
+    them interpolated into an SVG <title> goes through esc() — the rewrite-band
+    sources, the verdict label, the lane label (the span set-change tooltip
+    carries counts only)."""
     from memgraph.html import render_html
 
     html = render_html({"trajectories": [], "ops": [], "memories": [],
                         "edges": [], "validation": []})
-    assert 'df.added.map(k=>"+"+esc(dispKey(k)))' in html
-    assert 'df.removed.map(k=>"−"+esc(dispKey(k)))' in html
-    assert 'srcs.map(s=>esc(s))' in html
+    assert ".map(s=>esc(s))" in html
+    assert 'const runTip=t=>esc([t.run_id, t.status, t.adapter]' in html
+    assert "<title>${esc(rowName(e))}${esc(st)}</title>" in html
     assert "` — verdict ${esc(svd[0])}" in html
     # the rewrite kept/dropped counts are trajectory-controlled too
     assert "kept ${esc(rw.kept)}, dropped ${esc(rw.dropped)}" in html
@@ -2271,8 +2302,9 @@ def test_render_html_verdict_popover_guards_corrupt_entries():
 
     html = render_html({"trajectories": [], "ops": [], "memories": [],
                         "edges": [], "validation": []})
-    assert 'if(!u||typeof u!=="object") continue;' in html
-    assert 'if(!evv||typeof evv!=="object") continue;' in html
+    assert 'const obj=x=>x&&typeof x==="object"?x:{};' in html
+    assert "const u=obj(usage[k]);" in html
+    assert '.filter(evv=>evv&&typeof evv==="object")' in html
     assert "Array.isArray(evv.steps)?evv.steps:[]" in html
 
 

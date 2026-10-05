@@ -56,6 +56,10 @@ class Trajectory:
     # what the memory operations themselves spent, from their bound calls:
     # {"generation": cost|None, "search": cost|None} (see MemoryOp.cost)
     memory_cost: dict[str, dict | None] = field(default_factory=dict)
+    # recorded episode scopes in order (memgraph.episodes.episode_rows):
+    # {episode_id, sequence_id, status, first_step, last_step}; empty when
+    # the recording names no episode
+    episodes: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -73,6 +77,7 @@ class Trajectory:
             "searches": self.searches,
             "rewrites": self.rewrites,
             "memory_cost": self.memory_cost,
+            "episodes": self.episodes,
         }
 
 
@@ -134,6 +139,9 @@ class MemoryOp:
     # intentionally internal: graph JSON remains keyed by (run_id, seq) and
     # never exposes recorder event indexes as a second public contract.
     source_event_index: int | None = field(default=None, repr=False)
+    # index into the trajectory's `episodes` (the scope containing the
+    # op's anchor event); None outside every recorded episode
+    episode: int | None = None
     # recall payload
     memories: list[dict] = field(default_factory=list)
     # the delivery's per-lane read links as recorded ({lane_id,
@@ -164,6 +172,7 @@ class MemoryOp:
             "seq": self.seq,
             "at": self.at,
             "turn": self.turn,
+            "episode": self.episode,
         }
         if self.status is not None:
             d["status"] = self.status
