@@ -94,7 +94,7 @@ Recall nodes are colored by `span_verdict`:
 | Gray | neutral |
 | Amber | error |
 
-With verdicts merged, unjudged recalls fade to light blue so judged spans stand out, and the header gains a verdict tally that keeps mechanical skips (`unassessable`, `empty`) apart; clicking a judged verdict's count zooms to each span with that verdict in turn. A recall's detail panel shows each covered span's verdict, the judge's analysis, one row per delivered entry (usage plus R/A/N/I/P rubric marks), the cited evidence, and the span's input record (the `agent` path, with gold / forced markers and the attempt count).
+With verdicts merged, unjudged recalls fade to light blue so judged spans stand out, and the header gains a verdict tally that keeps mechanical skips (`unassessable`, `empty`) apart; clicking a judged verdict's count zooms to each span with that verdict in turn. Clicking a verdict in the key line filters the rows to the episodes holding a recall with that verdict (several can be picked; click again to clear). While a memory is selected or a node is open in the detail panel, the episodes linked to it stay visible with a dashed outline, and they disappear when the selection clears. A recall's detail panel shows each covered span's verdict, the judge's analysis, one row per delivered entry (usage plus R/A/N/I/P rubric marks), the cited evidence, and the span's input record (the `agent` path, with gold / forced markers and the attempt count).
 
 {% hint style="info" %}
 Unmatched or ambiguous joins are validation notes, never errors. An ambiguous key — a `run_id` shared by several loaded trajectories, or one `(run_id, seq)` claimed by several report injections or several recall ops — is skipped rather than cross-annotated. The graph still renders.

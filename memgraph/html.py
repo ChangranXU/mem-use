@@ -46,7 +46,11 @@ _TEMPLATE = r"""<!DOCTYPE html>
   #search { width:210px; padding:3px 8px; border:1px solid var(--line); border-radius:5px; font:inherit; }
   #key { display:flex; flex-wrap:wrap; align-items:center; gap:3px 16px; padding:5px 16px; border-bottom:1px solid var(--line); background:var(--panel); color:var(--muted); font-size:12px; }
   #key > span, #key-verdicts > span { display:inline-flex; align-items:center; gap:5px; cursor:help; }
-  #key-verdicts { display:inline-flex; gap:12px; }
+  #key-verdicts { display:inline-flex; gap:4px; }
+  #key-verdicts > span { cursor:pointer; padding:0 6px; border-radius:9px; }
+  #key-verdicts > span:hover { background:#fff; }
+  #key-verdicts > span.on { background:#fff; color:var(--fg); font-weight:600; box-shadow:0 0 0 1px #c3cbd8; }
+  #key-verdicts.filtering > span:not(.on) { opacity:.55; }
   #key .hint { margin-left:auto; cursor:default; }
   kbd { font:11px ui-monospace, Menlo, monospace; border:1px solid var(--line); border-radius:3px; padding:0 3px; background:#fff; }
   .dot { display:inline-block; width:9px; height:9px; border-radius:50%; flex:0 0 auto; }
@@ -251,6 +255,10 @@ for(const t of G.trajectories){
 }
 const rows=outline.filter(e=>e.kind==="row");
 rows.forEach((r,i)=>r.i=i);
+// a recall's verdict class, as the header tally counts it: its judged span's
+// verdict, unjudged, or a mechanical skip (empty delivery, unobserved consumer)
+const vclass=o=>{ const auto=(o.verdict_detail||{}).auto; return auto==="empty_delivery"?"empty":auto?"unassessable":(o.span_verdict||"unjudged"); };
+for(const r of rows) r.verdicts=new Set(r.ops.filter(o=>o.kind==="recall").map(vclass));
 // an op's x is its step within its row; null parks it in the no-step gutter
 const localStep=o=>{ const r=rowOf[o.id]; return !r||r.loose||o.step==null? null : Math.max(0,o.step-r.base); };
 const maxSteps=G.ops.reduce((a,o)=>Math.max(a,localStep(o)||0), rows.reduce((a,r)=>Math.max(a,r.len),10));
@@ -330,6 +338,13 @@ const H={run:28, seq:24, row:40, empty:20};
 // step-less ops park in a gutter right of the last step instead of piling onto it
 const GUTTER=G.ops.some(o=>localStep(o)==null)?64:0;
 const collapsed=new Set(); // sequence keys whose episode rows are hidden
+// the key's verdict filter keeps the rows holding a recall of a picked
+// verdict, plus `extra`: the rows linked to the current selection, shown only
+// until the selection clears
+const vfilter=new Set();
+let extra=new Set();
+const matches=r=>[...r.verdicts].some(v=>vfilter.has(v));
+const shown=r=>!vfilter.size||matches(r)||extra.has(r);
 let PX=1, W=0, height=0, fitted=true, pos={}, ghostPos={}; // pos: drawn op id -> {x,y}
 const plotW=()=>W-LABEL_W-PAD-RIGHT-GUTTER;
 const X=s=>LABEL_W+PAD+(Math.max(0,s)/maxSteps)*plotW();
@@ -350,16 +365,20 @@ function links(m){
   if(!from) return [];
   return (m.recalls||[]).filter(r=>spanLeader[r.op]===r.op&&pos[r.op]).map(r=>curve(from,pos[r.op]));
 }
-// y and height per outline entry; rows of a collapsed sequence get y=null
+// y and height per outline entry; a filtered-out row, a row of a folded
+// sequence, and a header with no row passing the filter get y=null
 function layout(){
+  const live=new Map(); // run id / sequence key -> rows passing the filter
+  for(const r of rows) if(shown(r)) for(const k of [r.t.id, r.seq&&r.seq.key]) if(k) live.set(k,(live.get(k)||0)+1);
   let y=TOP;
   for(const e of outline){
     e.y=null;
-    if(e.kind==="row"&&e.seq&&collapsed.has(e.seq.key)) continue;
+    if(e.kind==="row"? !shown(e)||(e.seq&&collapsed.has(e.seq.key)) : !live.has(e.kind==="run"? e.t.id : e.key)) continue;
+    if(e.kind==="seq") e.nShown=live.get(e.key);
     e.h=e.kind==="row"? (e.ops.length? H.row : H.empty) : H[e.kind];
     e.y=y; y+=e.h+GAP;
   }
-  height=y+BOTTOM;
+  height=Math.max(y,TOP+30)+BOTTOM;
 }
 function buildSVG(){
   layout();
@@ -388,6 +407,7 @@ function buildSVG(){
     const x=X(st);
     s.push(`<line x1="${x}" y1="${TOP-10}" x2="${x}" y2="${height-BOTTOM}" stroke="#f0f2f5"/><text x="${x}" y="${TOP-14}" class="tick">${st}</text>`);
   }
+  if(!rows.some(r=>r.y!=null)) s.push(`<text x="${LABEL_W+PAD}" y="${TOP+18}" class="lsub">No episode has a recall with the picked verdict${vfilter.size>1?"s":""}.</text>`);
   const ghost=(t,x,y)=>{
     const n=ghostCount[t.id]; if(!n) return;
     ghostPos[t.id]={x,y};
@@ -402,7 +422,8 @@ function buildSVG(){
     }
     if(e.kind==="seq"){ s.push(`<rect y="${e.y}" width="${W}" height="${e.h}" class="hseq"/>`); continue; }
     const y=mid(e), x0=X(0)-6, end=X(e.len)+6;
-    s.push(`<rect x="${x0}" y="${e.y}" width="${end-x0}" height="${e.h}" rx="5" fill="#f8f9fb"/>`);
+    // a row shown only for its link to the selection is outlined dashed
+    s.push(`<rect x="${x0}" y="${e.y}" width="${end-x0}" height="${e.h}" rx="5" fill="#f8f9fb"${vfilter.size&&!matches(e)?' stroke="#98a2b3" stroke-dasharray="4 3"':""}/>`);
     for(const b of e.bands){
       const h=Math.max(1.5,Math.min(PX/2,6)), bx0=X(b.a)-h, bx1=X(b.b)+h, rw=b.items[0];
       const srcs=[...new Set(b.items.map(r=>r.proxy_source||"?"))].map(s=>esc(s)).join(" + ");
@@ -472,10 +493,10 @@ function buildSVG(){
     if(e.kind==="run"){
       s.push(`<g><rect y="${e.y}" width="${LABEL_W}" height="${e.h}" class="hrun"/><title>${runTip(t)}</title><text x="12" y="${y+4}" class="lname"><tspan>${esc(t.id)}</tspan> ${esc(shorten(runName(t),26))}</text></g>`);
     } else if(e.kind==="seq"){
-      s.push(`<g class="seqhead" data-seq="${esc(e.key)}"><rect y="${e.y}" width="${LABEL_W}" height="${e.h}" class="hseq"/><text x="12" y="${y+4}" class="lseq">${collapsed.has(e.key)?"▸":"▾"} ${esc(shorten(e.name??"no sequence",20))} · ${e.n} episode${e.n===1?"":"s"}</text></g>`);
+      s.push(`<g class="seqhead" data-seq="${esc(e.key)}"><rect y="${e.y}" width="${LABEL_W}" height="${e.h}" class="hseq"/><text x="12" y="${y+4}" class="lseq">${collapsed.has(e.key)?"▸":"▾"} ${esc(shorten(e.name??"no sequence",20))} · ${e.nShown<e.n?`${e.nShown} of `:""}${e.n} episode${e.n===1?"":"s"}</text></g>`);
     } else if(e.ep){
       const st=typeof e.ep.status==="string"&&e.ep.status!=="prepared"? ` · ${e.ep.status}` : "";
-      const sub=(e.len? `global steps ${e.base+1}–${e.base+e.len}` : "no agent step")+st;
+      const sub=(e.len? `global steps ${e.base+1}–${e.base+e.len}` : "no agent step")+st+(vfilter.size&&!matches(e)? " · linked" : "");
       s.push(`<g><title>${esc(rowName(e))}${esc(st)}</title><text x="22" y="${e.ops.length?y-2:y+4}" class="lep${e.ops.length?"":" none"}">${esc(shorten(rowName(e),30))}</text>${e.ops.length?`<text x="22" y="${y+11}" class="lsub${st?" warn":""}">${esc(sub)}</text>`:""}</g>`);
     } else {
       const sub=e.loose? "ops outside every recorded episode" : [`${t.n_steps} steps`, prettyLabel(t).sub, t.model].filter(Boolean).join(" · ");
@@ -490,7 +511,7 @@ function buildSVG(){
 const canvas=document.getElementById("canvas"), detail=document.getElementById("detail"),
       memlist=document.getElementById("memlist"), memhdr=document.getElementById("memhdr"),
       search=document.getElementById("search");
-let selected=null, hoverMem=null, hoverOp=null, focus=null; // focus={row,step}: the step inspector (row index, row-local step)
+let selected=null, hoverMem=null, hoverOp=null, shownOp=null, focus=null; // focus={row,step}: the step inspector (row index, row-local step)
 const HELP=`<div class="help"><p><b>Select a memory</b> in the list or <b>click a node</b> to see its details here.</p>
   <p>Rows are episodes, grouped by run and sequence (click a sequence header to fold it); x = step within the episode. Writes ▲ sit above the line, recalls ▼ below. Hover a node to see where its memories came from or went; hovering or selecting a memory traces its full path.</p>
   <p>Click empty row space to list the memory actions at that step; ←/→ moves the step.</p></div>`;
@@ -508,30 +529,42 @@ function hotSvg(id,m){
   }
   return s;
 }
-// a hovered node's own links: where a recall's memories came from, or where
-// a write's memories were recalled afterwards
-function opLinks(opId){
-  const o=opsById[opId], p=pos[opId]; if(!o||!p) return "";
-  const path=(d,id)=>`<path d="${d}" fill="none" stroke="${memColor(id)}" stroke-width="2" marker-end="url(#arr)"/>`;
-  let s="";
+// a node's own links as [memory id, partner op id]: where a recall's
+// memories were written (null: before the loaded runs), or where a write's
+// memories were recalled afterwards
+function partners(opId){
+  const o=opsById[opId], out=[];
   if(o.kind==="recall"){
-    for(const id of new Set(recallSpans[opId].memIds)){
-      const m=memById[id], c=m&&m.created&&m.created.op, from=c? pos[c] : ghostPos[ghostRun[id]];
-      if(from&&from!==p) s+=path(curve(from,p),id);
-    }
+    for(const id of new Set(recallSpans[spanLeader[opId]].memIds)){ const m=memById[id]; if(m) out.push([id, m.created&&m.created.op||null]); }
   } else {
     for(const c of o.candidates){
       const id=memId(c), m=c.key&&memById[id];
-      if(m) for(const r of m.recalls||[]) if(spanLeader[r.op]===r.op&&pos[r.op]&&opOrder[r.op]>opOrder[opId]) s+=path(curve(p,pos[r.op]),id);
+      if(m) for(const r of m.recalls||[]) if(spanLeader[r.op]===r.op&&opOrder[r.op]>opOrder[opId]) out.push([id, r.op]);
     }
   }
-  return s;
+  return out;
+}
+function opLinks(opId){
+  const o=opsById[opId], p=pos[opId]; if(!o||!p) return "";
+  return partners(opId).map(([id,q])=>{
+    const at=q? pos[q] : ghostPos[ghostRun[id]];
+    return !at||at===p? "" : `<path d="${o.kind==="recall"? curve(at,p) : curve(p,at)}" fill="none" stroke="${memColor(id)}" stroke-width="2" marker-end="url(#arr)"/>`;
+  }).join("");
+}
+// the rows linked to the selection; under a verdict filter a change re-lays
+// the rows out (returns whether it did)
+function setExtra(list){
+  const next=new Set(list.filter(Boolean)), changed=next.size!==extra.size||[...next].some(r=>!extra.has(r));
+  extra=next;
+  if(changed&&vfilter.size){ mount(); return true; }
+  return false;
 }
 function paint(){
   const hot=document.getElementById("hot"); if(!hot) return;
   const id=selected||hoverMem, m=id&&memById[id];
-  hot.innerHTML=m? hotSvg(id,m) : hoverOp? opLinks(hoverOp) : "";
-  document.getElementById("edges").classList.toggle("dim", !!(m||hoverOp));
+  const op=hoverOp||shownOp;
+  hot.innerHTML=m? hotSvg(id,m) : op? opLinks(op) : "";
+  document.getElementById("edges").classList.toggle("dim", !!(m||op));
   // outline the recall spans that delivered the traced memory
   document.querySelectorAll(".op-recall").forEach(n=>n.classList.toggle("hot", !!(m&&recallSpans[n.dataset.op].memIds.includes(id))));
 }
@@ -575,7 +608,9 @@ function actionsAt(row, step){
   return acts;
 }
 function setFocus(f){
-  focus=f; selected=null; paint(); drawFocus(); renderList();
+  focus=f; selected=null; shownOp=null;
+  setExtra(f? [rows[f.row]] : []);
+  paint(); drawFocus(); renderList();
   if(!focus){ detail.innerHTML=HELP; return; }
   const ops=opsAt(focus.row,focus.step), r=rows[focus.row];
   detail.innerHTML=`<h3>${esc(rowName(r))} step ${focus.step}</h3>${r.ep&&focus.step?`<div class="sub">global step ${r.base+focus.step}</div>`:""}`+(ops.length
@@ -646,6 +681,8 @@ function selectMemory(id){
   if(li) li.scrollIntoView({block:"nearest"});
   const m=memById[id]; if(!m){ detail.innerHTML=HELP; return; }
   const c=m.created||{};
+  shownOp=null;
+  setExtra([c.op, ...(m.updates||[]).map(u=>u.op), ...(m.deletions||[]).map(d=>d.op), ...(m.recalls||[]).map(r=>r.op)].map(op=>rowOf[op]));
   locate(c.op||((m.recalls||[])[0]||{}).op);
   // one history line: creation → updates → deletions in op order (a revived
   // memory keeps its deletions — the deletes edges carry the same record)
@@ -737,7 +774,9 @@ function verdictsHtml(vops){
 }
 function showOp(opId){
   const o=opsById[opId]; if(!o) return;
-  selected=null; paint();
+  selected=null; shownOp=spanLeader[opId]||opId;
+  if(setExtra([rowOf[opId], ...partners(opId).map(([,q])=>rowOf[q])])) locate(opId);
+  paint();
   const L=localStep(o);
   if(L!=null){ focus={row:rowOf[o.id].i, step:L}; drawFocus(); renderList(); } // sync the step inspector
   let h, body;
@@ -864,15 +903,22 @@ document.addEventListener("keydown",ev=>{
   if(G.tool&&G.tool.verdicts){
     const kv=document.getElementById("key-verdicts");
     kv.hidden=false;
-    kv.innerHTML=TALLY.slice(0,6).map(v=>`<span title="${VD_TIP[v]}"><i class="dot" style="background:${TALLY_COLOR[v]}"></i>${v}</span>`).join("");
+    kv.innerHTML=TALLY.slice(0,6).map(v=>`<span data-vf="${v}" title="${VD_TIP[v]} — click to show only the episodes with such a recall (click again to clear)"><i class="dot" style="background:${TALLY_COLOR[v]}"></i>${v}</span>`).join("");
+    kv.addEventListener("click",ev=>{
+      const it=ev.target.closest("[data-vf]"); if(!it) return;
+      const v=it.dataset.vf;
+      vfilter.has(v)? vfilter.delete(v) : vfilter.add(v);
+      it.classList.toggle("on", vfilter.has(v));
+      kv.classList.toggle("filtering", vfilter.size>0);
+      mount();
+    });
     const seen=new Set(), vc=Object.create(null);
     for(const o of G.ops){
       if(o.kind!=="recall"||!o.verdict_span||seen.has(o.verdict_span)) continue;
       seen.add(o.verdict_span);
       // mechanical skips (empty delivery, unobserved consumer) stay apart
       // from judged verdicts: they sit outside every rate
-      const auto=(o.verdict_detail||{}).auto;
-      const v=auto==="empty_delivery"?"empty":auto?"unassessable":(o.span_verdict||"unjudged");
+      const v=vclass(o);
       vc[v]=(vc[v]||0)+1;
     }
     // a judged verdict's count jumps through its spans (VD_COLOR names exactly
