@@ -80,7 +80,7 @@ const searchSchema = Type.Object({
 });
 
 export function createEvidenceTools(root: string): AgentTool<any>[] {
-	const readEvidence: AgentTool<typeof readSchema, { path: string; lines_read: number }> = {
+	const readEvidence: AgentTool<typeof readSchema, { path: string; lines_read: number; line_start?: number; line_end?: number; truncated?: boolean }> = {
 		label: "Read evidence",
 		name: "read_evidence",
 		description:
@@ -101,13 +101,21 @@ export function createEvidenceTools(root: string): AgentTool<any>[] {
 			const selected = params.limit ? lines.slice(from, from + params.limit) : lines.slice(from);
 			let body = selected.map((line, i) => `${from + i + 1}: ${line}`).join("\n");
 			let note = "";
-			if (body.length > READ_CHAR_CAP) {
+			const truncated = body.length > READ_CHAR_CAP;
+			if (truncated) {
 				body = body.slice(0, READ_CHAR_CAP);
 				note = `\n(... cut at ${READ_CHAR_CAP} chars; call again with an offset/limit to read the rest)`;
 			}
+			// A cut inside the next line's number exposes no content on that
+			// line; do not count the dangling prefix as evidence or coverage.
+			const returned = body.split("\n").filter((line) => /^\d+: /.test(line));
 			return {
 				content: [{ type: "text", text: body + note }],
-				details: { path: relative, lines_read: selected.filter((line) => line.trim()).length },
+				// Coverage describes only text returned, never the selected tail
+				// removed by the character cap. The final line may be partial.
+				details: { path: relative,
+					lines_read: returned.filter((line) => line.replace(/^\d+: /, "").trim()).length,
+					line_start: from + 1, line_end: from + returned.length, truncated },
 			};
 		},
 	};

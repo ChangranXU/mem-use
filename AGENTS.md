@@ -7,7 +7,7 @@ mem-eval scores memory-system quality from schema-v9 gate trajectories
   self-contained HTML/JSON graph.
 - **injudge** scores each episode-scoped recall span's subsequent influence
   with an agentic LLM rubric (a pi agent searching one evidence folder per
-  span) and writes `injudge.report/v13`, which memgraph can overlay with
+  span) and writes `injudge.report/v14`, which memgraph can overlay with
   `--verdicts`.
 
 An injection is judged by its influence on later agent turns. The final
@@ -58,7 +58,10 @@ assignment needs review).
 `--verdicts output/<run-stamp>/injudge-report.json` merges injudge onto a
 memgraph
 render. injudge also accepts `--golden`, `--correctness`, `--gold-metadata`,
-`--harness-report`, `--limit`, and `--env` (see `doc/en/configuration.md`).
+`--harness-report`, `--episode`, `--limit`, and `--env` (see
+`doc/en/configuration.md`). `--episode ID` (repeatable) judges only the
+episodes whose recorded episode id, benchmark identity, or execution id
+matches; other spans are `unjudged`, and an unmatched ID fails fast.
 
 `--prepare-only` is a staged offline path. It uses bridge episode lifecycle
 events only for scope/provenance, keeps memory operations annotation-only, and
@@ -96,7 +99,7 @@ memgraph/model.py          # Trajectory / MemoryOp / MemoryUnit / Edge
 memgraph/parse_trajectory.py  # trajectory.jsonl → ops; shared step rule
 memgraph/graph.py          # path discovery, cross-trajectory linking, validation
 memgraph/html.py           # self-contained HTML (template + embedded graph JSON)
-memgraph/verdicts.py       # merge injudge.report/v13 onto recall ops
+memgraph/verdicts.py       # merge injudge.report/v14 onto recall ops
 memgraph/__main__.py       # python3 -m memgraph
 injudge/__init__.py        # REPORT_SCHEMA / SUMMARY_SCHEMA (writer + memgraph reader)
 injudge/model.py           # AgentStep / ToolExec / InjectionSpan
@@ -109,7 +112,7 @@ injudge/agent.py           # .env → AgentConfig, runner subprocess, corrective
 injudge/gold.py            # golden-answer / correctness sidecars and CLI joins
 injudge/prompts.py         # loads prompts/ (never inline prompts in code)
 injudge/aggregate.py       # verdict counts/rates, per-memory usage roll-ups
-injudge/report.py          # injudge.report/v13 + injudge.summary/v11 + stdout
+injudge/report.py          # injudge.report/v14 + injudge.summary/v12 + stdout
 injudge/__main__.py        # python3 -m injudge
 agent/                     # TS judge agent: runner.ts (pi Agent + budgets),
                            # evidence-tools.ts (scoped read-only tools),
@@ -205,6 +208,15 @@ adapter vocabulary.
     placement presentation, and the same per-entry exposure. A changed
     exposure, a re-ranked bundle, or a re-framed block starts a new span — a
     wider later exposure never merges backward onto anchors that predate it.
+  - Footprint windows are per item, but only a RE-EXPOSURE (a later delivery
+    whose verified text contains everything this entry showed) supersedes
+    one. A different or narrower verified text of the same item (a search
+    preview vs a full read) leaves the earlier window open and is listed in
+    `memory_variant_steps`; unverifiable text keeps the item convention.
+    Deliveries reaching one consuming turn are all eligible there; only a
+    same-step copy adding no verified text opens after the shared step.
+    Overlapping credit is surfaced as `rubric.shared_anchors`, never
+    prevented by falsifying when content was visible.
 - **`extensions.cure`** is a display projection only (key, memory_type,
   confidence, review status, needs_verification, rejection counts, declared
   extraction step — falling back to the protocol `main_step` when
@@ -281,10 +293,22 @@ values) fails fast with a targeted `SystemExit` before any paid judge call.
 ## Judging
 
 The span verdict is derived in code from the rubric (any misused ⇒
-negative, else any used ⇒ positive, else neutral). It is never asked of the
-LLM. `used` is acted-on influence that improved the work; `misused` is
-acted-on influence with `positive_effect` `no_effect` or `harmed`. Mere
-reference is never misuse.
+negative, else any used ⇒ positive, else any unclear ⇒ unresolved, else
+neutral). It is never asked of the LLM. `used` is acted-on influence that
+improved the work; `misused` is acted-on influence with `positive_effect`
+`no_effect` or `harmed`; `unclear` is acted-on influence whose effect is
+null — an established footprint of unknown direction, never neutral's "no
+influence established". Mere reference is never misuse. Selecting a
+delivered entry for a follow-up by its shown identifier (reading a listed
+candidate) is acted-on influence; its effect is what that follow-up led to.
+An explicit search using an entry's shown key is recorded as `memory_followups`
+only when its proven tool-result host links to an in-window action using that
+identifier and returning the same portable item in that specific placement.
+An identifier embedded in a longer identifier is not a shown selector.
+Records carry `step`,
+`delivery_step`, `tool_call_id`, and `operation_id`; delivery timing never
+stands in for action timing. A rejected read can improve work by resolving
+uncertainty; rejection alone does not establish `no_effect`.
 
 The judge is an AGENT, not one prompt. Python prepares episodes before
 grouping spans, then materializes each span's target and parent episode evidence
@@ -323,7 +347,9 @@ Easy to get wrong:
   whether it is a verdict — exact id coverage, action anchors (acted-on/
   decisive claims cite global step numbers in the parent episode and inside
   that entry's footprint window), and the anchor/influence shape
-  (`anchors` stay empty when influence is `none`). A violation takes the
+  (`anchors` stay empty when influence is `none`); injudge/agent.py adds
+  that every cited anchor and structured `evidence[].steps` citation names a
+  step file the retained conversation actually read. A violation takes the
   single-call repair with no evidence tools, continuing job.history. Only
   an explicit `needs_evidence` repair reply reopens investigation, with a
   follow-up prompt over that same history. Each resumed investigation gets
@@ -467,7 +493,7 @@ The HTML colors rewrite markers by each marker's own `on_memory_lane` flag,
 computed at parse time against the final lane set. Do not prune a field
 from one consumer only.
 
-**injudge** writes `injudge.report/v13` (`{tool, generated_at, trajectories,
+**injudge** writes `injudge.report/v14` (`{tool, generated_at, trajectories,
 operations, injections, aggregates, validation}`), checkpointed after every
 completed span (including parallel completions), with pending spans explicitly
 `unjudged`, so interruption within a multi-episode trajectory keeps completed
@@ -481,7 +507,9 @@ to its run.
 - Rubric and `memory_usage` are keyed by span-local entry ids (`m1`, `m2`,
   …), stamped on the operation's `memories`. Display keys are labels only,
   so two entries sharing a key are judged independently. Each rubric entry
-  carries judged action `anchors` (validated against `memory_windows`).
+  carries judged action `anchors` (validated against `memory_windows` and
+  `memory_window_starts`; `memory_variant_steps` and `memory_followups`
+  record the deterministic window and selection facts).
   `memory_exposure` records per entry what the placement showed (`full` /
   `full_normalized` / clipped prefix length / `unknown`). Canonical values
   and digests are
@@ -501,8 +529,12 @@ to its run.
   conversation's final answer came from a budget-exhausted forced round).
   Only mechanically counted empty/unattributable spans and unjudged spans
   omit it.
-  `retained_evidence` counts successful step-file reads still in the
-  conversation; reading only navigation files cannot validate a neutral answer.
+  `read_steps` lists the global steps whose files a successful read left in
+  the retained conversation (`retained_evidence` is the runner's read
+  count); reading only navigation files cannot validate a neutral answer,
+  and an anchor or structured evidence step outside `read_steps` takes the
+  repair. Tool-result metadata records the actual returned line range and
+  truncation; a partial read is not proof that the whole step was inspected.
 - `aggregates.overall` counts the regimes: `input_paths`, `gold_scored`,
   `forced_answers`.
 - The run also writes `<output>/<run-stamp>/evidence/<span-dir>/` — the
@@ -519,7 +551,7 @@ to its run.
   (non-`[A-Za-z0-9._-]` replaced by `_`, capped at 80 chars) plus an
   8-char digest suffix — `evidence.span_dir_name`.
 
-The companion `summary.json` (`injudge.summary/v11`) is the run's final
+The companion `summary.json` (`injudge.summary/v12`) is the run's final
 statistics: counts/rates, rubric distributions, cost, confidence, judge
 compliance (the positive_effect↔influence correction rate), per-trajectory
 extraction reliability (`n_extractions` / `extraction_failures`), and slim
@@ -531,18 +563,21 @@ memory usage; `details.trajectories` is keyed by trajectory id and holds
 headline, delivery, judge, rubric, usage, and a narrative-free `spans` index
 (verdict / confidence / usage labels). Mechanical-skip index rows retain `auto`: empty deliveries use
 `verdict: "empty"`; unobserved consumers use `verdict: "unassessable"`. Both
-are outside directional denominators and the wasted-token share. Counts include
+are outside directional denominators and the benefit share. Counts include
 `n_episodes`, and each trajectory detail includes a compact episode-to-span index.
 `generated_at` and `tool` follow the
 results; `tool.source_report_schema` records the source report's version.
 Empty rate / headline / rubric / confidence shells are omitted with no
 judged population; zero-cost shells are omitted, but error-only delivery
 cost remains visible. The JSON uses two-space indentation.
-The headline binds span rates to the wasted-token share, names
-`wasted_tokens` / `judged_tokens`, shows `error_unjudged_tokens` when
-non-zero, and states the proxy caveat on every reported share. Rule-judged
+The headline binds span rates (positive / negative / unresolved) to
+`share_without_demonstrated_benefit` — never "waste": negative + neutral +
+unresolved tokens over judged tokens, naming
+`tokens_without_demonstrated_benefit`, its `unresolved_tokens` part, and
+`judged_tokens` — shows `error_unjudged_tokens` when non-zero, and states the
+proxy caveat on every reported share. Rule-judged
 auto-neutral (no-subsequent-turn) spans tally as `unassessable`, out of
-every directional denominator and the wasted-token share, with
+every directional denominator and the benefit share, with
 `unassessable_spans` / `unassessable_tokens` named in an existing headline
 when non-zero — observation missingness is not a measured null effect.
 Identities sharing one display key carry a `key#<item-or-namespace>`

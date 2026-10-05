@@ -46,7 +46,7 @@ A forced answer can be a valid verdict after retained investigation. Without a s
 
 ## Corrective Retries
 
-Python checks strict JSON shape and span-relative semantics (exact id coverage, action-anchor windows, anchors empty for `none`). A valid answer needs no additional model call.
+Python checks strict JSON shape and span-relative semantics (exact id coverage, action-anchor windows, anchors empty for `none`), and that every cited anchor and structured `evidence[].steps` citation names a step file the retained conversation actually read (`read_steps` in the operation's `input`); an anchor resting on an unread step takes the repair, which can request the file with `needs_evidence`. A valid answer needs no additional model call.
 
 An invalid answer gets **one repair call with no evidence tools**, using the full transcript and the validation error. The repair preserves supported assessments and only fixes the contract violation. Python validates the result again; another invalid answer becomes a visible `error`, not another blind rewrite.
 
@@ -68,3 +68,5 @@ The API key travels from Python to the runner only through the `JUDGE_API_KEY` e
 
 Masking also follows JSON string escaping, including answer JSON embedded inside a transcript record, so escaped credentials cannot survive in saved output.
 Excessively nested string wrappers are masked as a whole. An interrupted UTF-8 write still gets masked; if saving the masked transcript fails, the raw file is removed and the span records an error with its input diagnostics.
+
+Successful read metadata includes `line_start`, `line_end`, and `truncated`, counting only text actually returned after the character cap. A step-file read can be partial: `read_steps` establishes file access, not full-window coverage or the truth of the judgment.

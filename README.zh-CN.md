@@ -47,7 +47,8 @@ injudge 在每个 episode 内把处理方式相同的重复注入归并为**区�
 再为每个送入评审的区间建立独立的证据文件夹——目标区间及其所属 episode 的
 任务、上下文、投递与原始步骤——由一个 pi 智能体用只读工具探索。智能体对
 每条投递记忆打五个信号；再由代码推导区间判定：任一记忆被误用 →
-**negative**，否则任一被采纳 → **positive**，否则 **neutral**。没有可归属
+**negative**，否则任一被采纳 → **positive**，否则任一已采取行动但效果未定 →
+**unresolved**，否则 **neutral**。没有可归属
 agent 步骤的区间不送评审，计为 **unassessable**。
 
 被评判的证据不超出录制 placement 实际曝光的内容，acted-on 的影响力断言

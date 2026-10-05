@@ -579,6 +579,11 @@ def project_occurrence(item: dict[str, Any], deliveries: list[dict[str, Any]]) -
     if refs:
         projected["content"] = None if unresolved else text
         projected["memory_delivery_refs"] = list(dict.fromkeys(refs))
+        # An emptied host is not an empty message: name where its memory text went.
+        projected["memory_delivery_text"] = (
+            f"moved to deliveries.md ({', '.join(projected['memory_delivery_refs'])}); "
+            "content keeps only this message's other text"
+        )
         projected["source_ownership"] = "memory_delivery_unknown" if unresolved else "memory_delivery"
     return projected
 

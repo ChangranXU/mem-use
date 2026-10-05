@@ -17,11 +17,13 @@ import pytest
 
 from injudge import __main__ as injudge_main
 from injudge.agent import AgentConfig, judge_span as _episode_judge_span, resolve_config
-from injudge.aggregate import WASTE_SHARE_CAVEAT, aggregate, policy_rollup
+from injudge.aggregate import BENEFIT_SHARE_CAVEAT, aggregate, policy_rollup
 from injudge.evidence import build_span_evidence, span_dir_name, write_evidence
 from injudge.judge import (
     GOLD_SYSTEM_PROMPT,
+    MEMORIES_NOTE,
     SYSTEM_PROMPT,
+    _render_span_header,
     _assemble_verdict,
     _error_verdict,
     _strict_parse,
@@ -833,6 +835,127 @@ def test_spans_window_same_step_collision_three_carriers_disjoint(tmp_path):
     assert _acted_claim(spans[3], "m1", [5], 6) is not None
 
 
+_PREVIEW = cure_ref("kb-1", "Issue: stale cache reads after set()", item_id="kb-1")
+_FULL = cure_ref("kb-1", "Fix: drop the key from the memo inside set()", item_id="kb-1")
+
+
+def _line(ref):
+    return f"- [insight] kb-1: {ref['content']['text']}"
+
+
+def test_spans_window_same_step_preview_and_full_read_both_eligible(tmp_path):
+    """A search preview and a full read of one item reach one turn: both were
+    in that turn's input, so the full read is creditable at the shared step,
+    and neither caps the other (each is credited only for its own text) —
+    never the first-carrier split that made the full text eligible one turn
+    late."""
+    b = TrajBuilder().agent_turn(with_task=True)
+    for _ in range(4):
+        b.agent_turn()  # steps 2-5
+    for ref, query in ((_PREVIEW, "stale cache"), (_FULL, "kb-1")):
+        sid = b.search(returned=[ref], query=query)
+        b.delivery(sid, memories=[ref], main_step=3, content=_line(ref))
+    warnings: list[str] = []
+    preview, full = group_spans(_recall_ops(b, tmp_path), "T1", warnings, last_step=5)
+    assert full.memory_window_starts == {}
+    assert preview.memory_windows == full.memory_windows == {"m1": 5}
+    assert preview.memory_variant_steps == {"m1": [3]}
+    assert not warnings
+    assert _acted_claim(full, "m1", [3], 5) is None
+    assert _acted_claim(preview, "m1", [4], 5) is None
+    header = _render_span_header(preview, MEMORIES_NOTE)
+    assert "steps 3–5 (episode's last eligible step), also delivered with different content at step(s) [3]" in header
+
+
+def test_spans_window_survives_a_later_narrower_redelivery(tmp_path):
+    """A full read, then the item's search preview at a later step: the
+    preview does not re-show the full text, so the full read's window stays
+    open past it (its step listed for the judge) until an identical copy
+    re-exposes the full text."""
+    b = TrajBuilder().agent_turn(with_task=True)
+    b.recall(_FULL, content=_line(_FULL))  # step 2
+    b.agent_turn()
+    b.recall(_PREVIEW, content=_line(_PREVIEW))  # step 4
+    b.agent_turn()
+    b.recall(_FULL, content=_line(_FULL))  # step 6
+    full, preview, again = group_spans(_recall_ops(b, tmp_path), "T1")
+    assert full.memory_windows == {"m1": 5}
+    assert full.memory_variant_steps == {"m1": [4]}
+    assert preview.memory_windows == {"m1": None}
+    assert preview.memory_variant_steps == {"m1": [6]}
+    assert again.memory_windows == {"m1": None}
+
+
+@pytest.mark.parametrize("fault", [None, "key_ends_sentence", "scheduled", "hidden_key",
+                                  "hidden_key_prefix", "hidden_key_version", "wrong_store", "pre_exposure",
+                                  "unproven_host", "unrelated_host"])
+def test_spans_record_only_proven_candidate_followups(tmp_path, fault):
+    """A delayed result cannot move its issuing action to delivery minus one,
+    and an automatic/key-matching search alone never proves selection."""
+    import hashlib
+    from injudge.episodes import prepare_trajectory
+
+    preview = cure_ref("kb-7", "Issue: stale reads", item_id="kb-7")
+    full = cure_ref("kb-7", "Fix: clear memo in set()", item_id="kb-7")
+    if fault == "wrong_store":
+        full["namespace"] = "another-store"
+    b = TrajBuilder().episode_open().agent_turn(with_task=True)
+    shown = {"hidden_key": "Issue: stale reads", "hidden_key_prefix": "kb-70: Issue: stale reads",
+             "hidden_key_version": "kb-7.1: Issue: stale reads",
+             # sentence punctuation after a key still shows it (unlike kb-7.1)
+             "key_ends_sentence": "Issue: stale reads, see kb-7."}
+    b.recall(preview, content=shown.get(fault))
+    content = full["content"]["text"]
+    b.agent_turn(command="kb-7", result="unrelated output" if fault == "unrelated_host" else content)
+    tool_id = b.last_call["call_id"]
+    search = b.search(returned=[full], query="kb-7")
+    next(e for e in b.events if e.get("type") == "memory_search_start"
+         and e["payload"]["operation_id"] == search)["payload"]["trigger"] = (
+             "automatic" if fault == "scheduled" else "explicit")
+    if fault == "unrelated_host":
+        b.user_message(content, msg=5)
+    b.agent_turn(result=None).agent_turn(result=None)  # result first delivered at step 5
+    b.delivery(search, memories=[full], bind=b.last_call, content=content)
+    if fault != "unproven_host":
+        b.events[-1]["binding"] = {"proofs": [{"slot": "memory_block", "kind": "canonical_message",
+            "msg_index": 3, "content_sha256": hashlib.sha256(content.encode()).hexdigest()}]}
+    if fault == "unrelated_host":
+        # The memory rides the user slot; a second slot carries an unrelated
+        # tool result with the same selector. Only that second host has a tool id.
+        delivery = b.events[-1]
+        delivery["payload"]["placements"].append({"slot": "other_result", "kind": "tool_result",
+            "content": {"availability": "inline", "text": "unrelated output"},
+            "proof_kind": "canonical_message"})
+        delivery["binding"] = {"proofs": [
+            {"slot": "memory_block", "kind": "canonical_message", "msg_index": 5,
+             "content_sha256": hashlib.sha256(content.encode()).hexdigest()},
+            {"slot": "other_result", "kind": "canonical_message", "msg_index": 3,
+             "content_sha256": hashlib.sha256(b"unrelated output").hexdigest()}]}
+    b.episode_close()
+    t, ops, events = parse_trajectory(b.write(tmp_path / "run"), [])
+    ep = prepare_trajectory(t, events, ops).episodes[0]
+    if fault == "pre_exposure":
+        ep.steps[2].step = 1  # recorded action predates the preview; a later result does not rescue it
+    spans = group_spans([o for o in ops if o.kind == "recall"], t.id, last_step=5, episode=ep)
+    listing = spans[0]
+    if fault not in (None, "key_ends_sentence"):
+        assert listing.memory_followups == {}
+    else:
+        assert listing.memory_followups == {"m1": [{"step": 3, "delivery_step": 5,
+            "tool_call_id": tool_id, "operation_id": search}]}
+        assert "action step 3, result delivery step 5" in _render_span_header(listing, MEMORIES_NOTE)
+
+
+def test_same_step_unverified_preview_cannot_delay_verified_content(tmp_path):
+    b = TrajBuilder().agent_turn(with_task=True).agent_turn()
+    for ref, content in ((_PREVIEW, None), (_FULL, _line(_FULL))):
+        sid = b.search(returned=[ref])
+        b.delivery(sid, memories=[ref], main_step=2, content=content)
+    _, full = group_spans(_recall_ops(b, tmp_path), "T1", last_step=2)
+    assert full.memory_window_starts == {}
+    assert _acted_claim(full, "m1", [2], 2) is None
+
+
 def test_spans_thread_the_delivery_context(tmp_path):
     """The span carries the delivery context the judge input renders: the
     distinct recorded search queries (a rewrite between identical
@@ -1214,8 +1337,9 @@ def test_parse_verdict_garbage_is_error_unmatched_ids_degrade():
                                   "confidence": 0.5}), _FakeSpan(), warnings)
     # the shape is valid, so assembly degrades the unmatched entries; the
     # live path (the attempt loop) rejects unknown ids as a semantic
-    # violation before assembly ever runs — see the semantics tests
-    assert v["verdict"] == "neutral"
+    # violation before assembly ever runs — see the semantics tests; an
+    # unanswered entry is unresolved, never a measured neutral
+    assert v["verdict"] == "unresolved"
     assert all(e["usage"] == "unclear" for e in v["memory_usage"].values())
     # the unknown id is dropped WITH a warning, never silently
     assert any("unknown id" in w and "m9" in w for w in warnings)
@@ -1430,7 +1554,9 @@ def test_derived_verdict_matrix():
         (("referenced", None, "none", None), "neutral"),           # mere reference never negative
         (("decisive", "improved", "acted_on", "harmed"), "negative"),  # harm dominates help
         (("none", None, "none", None), "neutral"),                 # everything ignored
-        (("acted_on", None, "none", None), "neutral"),             # influence w/o pe ⇒ unclear
+        (("acted_on", None, "none", None), "unresolved"),          # influence w/o pe ⇒ unclear
+        (("acted_on", None, "acted_on", "improved"), "positive"),  # use outranks uncertainty
+        (("acted_on", None, "acted_on", "no_effect"), "negative"),  # so does misuse
     ]
     for args, want in cases:
         warnings = []
@@ -1544,7 +1670,8 @@ def test_aggregate_rates_exclude_error_and_unjudged():
     ]
     agg = aggregate(ops, n_injections=6)
     assert agg["restated_injections"] == 2
-    assert agg["rates"] == {"positive": 0.5, "negative": 0.0, "neutral": 0.5}
+    assert agg["rates"] == {"positive": 0.5, "negative": 0.0, "neutral": 0.5,
+                            "unresolved": 0.0}
     assert agg["error"] == 1 and agg["unjudged"] == 1
     assert agg["low_confidence"] == ["T1:S2"]
     assert agg["confidence_buckets"]["[0.8,1.0]"] == 1
@@ -1557,7 +1684,8 @@ def test_aggregate_rates_exclude_error_and_unjudged():
 
 def test_aggregate_zero_operations():
     agg = aggregate([], 0, n_trajectories=1)
-    assert agg["rates"] == {"positive": None, "negative": None, "neutral": None}
+    assert agg["rates"] == {"positive": None, "negative": None, "neutral": None,
+                            "unresolved": None}
     assert agg["n_spans"] == 0 and agg["restated_injections"] == 0
     assert agg["rubric"]["deliveries"] == 0
     assert agg["cost"]["approx_tokens_total"] == 0
@@ -1565,7 +1693,7 @@ def test_aggregate_zero_operations():
 
 def test_aggregate_cost_share_survives_an_unrepresentable_quotient():
     """Hand-edited delivery costs (a negative chars next to a >308-digit one)
-    can make the wasted-token share's quotient overflow the double range:
+    can make the benefit share's quotient overflow the double range:
     the exact totals stay recorded and the derived share degrades to None —
     a corrupt artifact must never abort the aggregation (the rule __main__
     and policy_rollup give their token-share divides)."""
@@ -1577,7 +1705,7 @@ def test_aggregate_cost_share_survives_an_unrepresentable_quotient():
             cost={"content_chars_total": 0, "approx_tokens_total": -big}),
     ]
     agg = aggregate(ops, 2)
-    assert agg["headline"]["wasted_token_share"] is None
+    assert agg["headline"]["share_without_demonstrated_benefit"] is None
     assert agg["headline"]["judged_spans"] == 2
     # the exact int totals stay recorded, never float-converted
     assert agg["cost"]["approx_tokens_total"] == 1
@@ -1624,7 +1752,7 @@ def test_summary_is_statistics_only():
     """The summary is the final statistics set, not a second copy of the
     judging narrative: no notes, no recorded memory text, no namespace
     hashes, no validation log, no empty triage placeholders; the headline
-    binds the span rates to the wasted-token share; a value drift earns a
+    binds the span rates to the benefit share; a value drift earns a
     one-line marker; two identities sharing a key get a short item_id
     suffix."""
     ops = [
@@ -1664,9 +1792,10 @@ def test_summary_is_statistics_only():
     assert '"v1"' not in blob and '"v2"' not in blob  # no recorded memory text
     ov = summary["overall"]
     assert set(ov["headline"]) == {"judged_spans", "positive_span_rate",
-                                   "negative_span_rate", "wasted_token_share",
-                                   "wasted_tokens", "judged_tokens",
-                                   "caveat"}
+                                   "negative_span_rate", "unresolved_span_rate",
+                                   "share_without_demonstrated_benefit",
+                                   "tokens_without_demonstrated_benefit", "unresolved_tokens",
+                                   "judged_tokens", "caveat"}
     assert ov["judge"]["low_confidence"] == ["T1:S2"]
     # memory usage: bare tallies keyed by display key, drift marked, the two
     # identities sharing key "k" disambiguated with a short item_id suffix
@@ -1754,8 +1883,8 @@ def test_summary_keeps_comparisons_ahead_of_drilldown(tmp_path):
     assert list(summary) == ["overall", "trajectories", "details", "generated_at", "tool"]
     assert list(summary["overall"])[0] == "headline"
     assert summary["tool"] == {
-        "name": "injudge", "schema": "injudge.summary/v11",
-        "source_report_schema": "injudge.report/v13",
+        "name": "injudge", "schema": "injudge.summary/v12",
+        "source_report_schema": "injudge.report/v14",
         "judge_model": "judge", "config": {"max_steps": 4},
     }
     assert summary["generated_at"] == artifact["generated_at"]
@@ -1781,12 +1910,13 @@ def test_summary_keeps_comparisons_ahead_of_drilldown(tmp_path):
             "n_episodes", "n_injections", "n_spans", "restated_injections",
         )}
         assert row["verdicts"]["counts"] == {k: ta[k] for k in (
-            "positive", "negative", "neutral", "error", "unjudged", "unassessable", "empty",
+            "positive", "negative", "unresolved", "neutral", "error", "unjudged",
+            "unassessable", "empty",
         )}
         if row["id"] == "T1":
             assert row["verdicts"]["rates"] == ta["rates"]
             assert detail["delivery"] == {"cost": ta["cost"], "policy": policy}
-            assert detail["headline"]["caveat"] == WASTE_SHARE_CAVEAT
+            assert detail["headline"]["caveat"] == BENEFIT_SHARE_CAVEAT
             assert detail["spans"][0]["operation_id"] == op["operation_id"]
         else:
             assert "rates" not in row["verdicts"]
@@ -1812,7 +1942,7 @@ def test_cli_writes_results_first_summary(monkeypatch, tmp_path):
     summary = json.loads(text)
     report = json.loads((run_dir / "injudge-report.json").read_text())
     assert text.startswith('{\n  "overall": {\n') and text.endswith("\n")
-    assert summary["tool"]["schema"] == "injudge.summary/v11"
+    assert summary["tool"]["schema"] == "injudge.summary/v12"
     assert summary["tool"]["source_report_schema"] == report["tool"]["schema"]
     assert "test-key-only" not in text
     (row,) = summary["trajectories"]
@@ -1932,7 +2062,7 @@ def test_cli_runs_share_the_container_without_clobbering(monkeypatch, tmp_path):
     assert len(run_dirs) == 2  # distinct stamps even for same-second runs
     for run_dir in run_dirs:
         report = json.loads((run_dir / "injudge-report.json").read_text())
-        assert report["tool"]["schema"] == "injudge.report/v13"
+        assert report["tool"]["schema"] == "injudge.report/v14"
         assert (run_dir / "summary.json").is_file()
         (span_evidence,) = (run_dir / "evidence").iterdir()
         assert (span_evidence / "manifest.json").is_file()
@@ -2405,6 +2535,9 @@ def test_rubric_rollup_excludes_auto_neutral_placeholders(capsys):
 
 
 def test_aggregate_headline_metrics():
+    """An acted-on span of undetermined effect is its own judged class: its
+    tokens lack demonstrated benefit but are named apart as unresolved,
+    never folded into neutral's "no influence established"."""
     ops = [
         _op("T1:S1", "positive", 0.9,
             cost={"deliveries": 1, "content_chars_total": 400, "approx_tokens_total": 100}),
@@ -2412,26 +2545,51 @@ def test_aggregate_headline_metrics():
             cost={"deliveries": 1, "content_chars_total": 400, "approx_tokens_total": 100}),
         _op("T1:S3", "neutral", 0.9,
             cost={"deliveries": 2, "content_chars_total": 800, "approx_tokens_total": 200}),
+        _op("T1:S4", "unresolved", 0.9,
+            cost={"deliveries": 1, "content_chars_total": 400, "approx_tokens_total": 100}),
     ]
-    agg = aggregate(ops, 4)
+    agg = aggregate(ops, 5)
+    assert agg["neutral"] == 1 and agg["unresolved"] == 1
     assert agg["headline"] == {
-        "judged_spans": 3,
-        "positive_span_rate": round(1 / 3, 4),
-        "negative_span_rate": round(1 / 3, 4),
-        # (negative + neutral) cost / judged-class cost = 300 / 400
-        "wasted_token_share": 0.75,
-        "wasted_tokens": 300,
-        "judged_tokens": 400,
+        "judged_spans": 4,
+        "positive_span_rate": 0.25,
+        "negative_span_rate": 0.25,
+        "unresolved_span_rate": 0.25,
+        # (negative + neutral + unresolved) cost / judged-class cost = 400 / 500
+        "share_without_demonstrated_benefit": 0.8,
+        "tokens_without_demonstrated_benefit": 400,
+        "unresolved_tokens": 100,
+        "judged_tokens": 500,
         # the proxy caveat rides every reported share
-        "caveat": WASTE_SHARE_CAVEAT,
+        "caveat": BENEFIT_SHARE_CAVEAT,
     }
-    assert aggregate([], 0)["headline"]["wasted_token_share"] is None
+    assert aggregate([], 0)["headline"]["share_without_demonstrated_benefit"] is None
+
+
+def test_aggregate_lists_an_action_two_spans_credit_to_one_memory():
+    """Overlapping windows of one memory's differently-shown deliveries can
+    let two spans credit one action: each judgment stands, and the shared
+    step is listed instead of silently counting as two benefits."""
+    def credited(op_id, anchors, item="kb-1"):
+        memory = {"id": "m1", "key": item, "namespace": "ns", "item_id": item}
+        rubric = {"m1": {**_signals(inf="acted_on", pe="improved"), "anchors": anchors}}
+        return _op(op_id, "positive", 0.9, {"m1": {"usage": "used", "evidence": ""}},
+                   memories=[memory], rubric=rubric)
+
+    ops = [credited("T1:S1", [3, 4]), credited("T1:S2", [4]), credited("T1:S3", [4], "kb-2")]
+    shared = aggregate(ops, 3)["rubric"]["shared_anchors"]
+    assert shared == [{"namespace": "ns", "item_id": "kb-1", "key": "kb-1",
+                       "anchors": [{"traj": "T1", "step": 4, "spans": ["T1:S1", "T1:S2"]}]}]
+    artifact = build_artifact({}, [{"id": "T1", "run_id": "r"}], ops, [], {"T1": 3}, [])
+    summary = build_summary(artifact)["details"]["overall"]["rubric"]
+    assert summary["shared_anchors"] == [
+        {"key": "kb-1", "anchors": [{"traj": "T1", "step": 4, "spans": ["T1:S1", "T1:S2"]}]}]
 
 
 def test_aggregate_unassessable_spans_leave_every_directional_denominator():
     """R5/R9: a rule-judged auto-neutral span is observation missingness, not
     a measured null effect — it leaves the verdict-rate denominators, the
-    wasted-token share, and the judged-span headline count, and is reported
+    benefit share, and the judged-span headline count, and is reported
     apart with its delivery cost (the assessable fraction stays readable)."""
     auto = {**_op("T1:S1", "neutral", None,
                   {"m1": {"usage": "unclear", "evidence": "no subsequent turn"}},
@@ -2450,8 +2608,8 @@ def test_aggregate_unassessable_spans_leave_every_directional_denominator():
     assert agg["rates"]["positive"] == 1.0
     assert agg["headline"]["judged_spans"] == 1
     # the probe case from the re-review: an unobserved span's tokens are not
-    # wasted tokens — 0 of 100 judged-class tokens, not 25 of 25
-    assert agg["headline"]["wasted_token_share"] == 0.0
+    # tokens without demonstrated benefit — 0 of 100 judged-class tokens, not 25 of 25
+    assert agg["headline"]["share_without_demonstrated_benefit"] == 0.0
     assert agg["headline"]["judged_tokens"] == 100
     assert agg["headline"]["unassessable_spans"] == 1
     assert agg["headline"]["unassessable_tokens"] == 25
@@ -2478,14 +2636,14 @@ def test_empty_delivery_has_separate_cost_and_summary_population():
     assert overall["verdicts"]["counts"]["unassessable"] == 0
     assert overall["verdicts"]["rates"]["positive"] == 1
     assert overall["headline"]["judged_tokens"] == 100
-    assert overall["headline"]["wasted_token_share"] == 0
+    assert overall["headline"]["share_without_demonstrated_benefit"] == 0
     assert overall["delivery"]["cost"]["approx_tokens_by_verdict"]["empty"] == 10
     assert summary["details"]["trajectories"]["T1"]["spans"][0]["verdict"] == "empty"
 
 
-def test_headline_wasted_share_is_over_judged_cost_only():
+def test_headline_benefit_share_is_over_judged_cost_only():
     """Error/unjudged spans' delivery cost is a count, never a denominator:
-    judge failures must not dilute the wasted-token share toward zero."""
+    judge failures must not dilute the benefit share toward zero."""
     ops = [
         _op("T1:S1", "positive", 0.9,
             cost={"deliveries": 1, "content_chars_total": 400, "approx_tokens_total": 100}),
@@ -2495,7 +2653,7 @@ def test_headline_wasted_share_is_over_judged_cost_only():
             cost={"deliveries": 1, "content_chars_total": 10000, "approx_tokens_total": 2500}),
     ]
     headline = aggregate(ops, 3)["headline"]
-    assert headline["wasted_token_share"] == 0.5
+    assert headline["share_without_demonstrated_benefit"] == 0.5
 
 
 def test_policy_rollup():
@@ -2652,8 +2810,8 @@ def test_aggregate_cost_by_verdict():
     assert cost["content_chars_total"] == 1240
     assert cost["approx_tokens_total"] == 310
     assert cost["approx_tokens_by_verdict"] == {
-        "positive": 200, "negative": 0, "neutral": 100, "error": 10, "unjudged": 0,
-        "unassessable": 0, "empty": 0}
+        "positive": 200, "negative": 0, "neutral": 100, "unresolved": 0, "error": 10,
+        "unjudged": 0, "unassessable": 0, "empty": 0}
 
 
 def _judge_input_fixture():
@@ -2726,8 +2884,8 @@ def test_pe_pairing_corrections_counted_and_aggregated(tmp_path):
                                                             {"deliveries": 0})
 
 
-def test_headline_wasted_share_always_carries_the_caveat(capsys):
-    """The wasted-token share is a span-level proxy whatever its value: the
+def test_headline_benefit_share_always_carries_the_caveat(capsys):
+    """The share without demonstrated benefit is a span-level proxy whatever its value: the
     caveat rides every reported share (a low share's coarse bundle charging
     is just as present), in the aggregate, the summary projection, and the
     stdout summary."""
@@ -2739,16 +2897,16 @@ def test_headline_wasted_share_always_carries_the_caveat(capsys):
     ]
     agg = aggregate(ops, 2)
     assert agg["headline"]["negative_span_rate"] == 0.0
-    assert agg["headline"]["wasted_token_share"] == 0.75
-    assert "span-level non-beneficial-delivery proxy" in agg["headline"]["caveat"]
-    assert "asymmetric" in agg["headline"]["caveat"]
+    assert agg["headline"]["share_without_demonstrated_benefit"] == 0.75
+    assert "not waste, harm, or net gain" in agg["headline"]["caveat"]
+    assert "unresolved_tokens" in agg["headline"]["caveat"]
     artifact = build_artifact({}, [{"id": "T1", "run_id": "r"}], ops, [], {"T1": 2}, [])
     slim = build_summary(artifact)["overall"]["headline"]
     assert slim["negative_span_rate"] == 0.0 and "caveat" in slim
     print_summary(artifact)
-    assert "caveat: wasted_token_share" in capsys.readouterr().out
+    assert "caveat: share_without_demonstrated_benefit" in capsys.readouterr().out
 
-    # a low wasted share carries the same caveat
+    # a low share carries the same caveat
     ops[0]["delivery_cost"] = {"deliveries": 1, "content_chars_total": 400,
                                "approx_tokens_total": 40}
     assert "caveat" in aggregate(ops, 2)["headline"]
@@ -2928,9 +3086,16 @@ def test_cli_timeout_override_must_be_finite(monkeypatch, timeout):
                         "MODEL": "test"}, timeout=timeout)
 
 
+def _reads(*steps):
+    """Retained successful step-file reads, shaped like the runner's toolResult messages."""
+    return [{"role": "toolResult", "toolName": "read_evidence", "isError": False,
+             "details": {"path": f"steps/step_{s:06d}.md", "lines_read": 3}} for s in steps]
+
+
 def _result(answer, *, error=None, forced=False, llm_calls=3, tool_calls=4,
             messages=None, stop_reason="answer"):
-    """One canned runner result."""
+    """One canned runner result; by default the conversation read every
+    step file a fixture episode can have."""
     return {
         "answer": answer,
         "error": error,
@@ -2938,8 +3103,8 @@ def _result(answer, *, error=None, forced=False, llm_calls=3, tool_calls=4,
         "llm_calls": llm_calls,
         "tool_calls": tool_calls,
         "retained_evidence": 1,
-        "messages": messages if messages is not None else [{"role": "user"},
-                                                           {"role": "assistant"}],
+        "messages": messages if messages is not None else [
+            {"role": "user"}, *_reads(*range(1, 60)), {"role": "assistant"}],
         "stop_reason": stop_reason,
     }
 
@@ -3115,9 +3280,42 @@ def test_agent_corrective_retry_continues_the_conversation(monkeypatch, tmp_path
     assert verdict["input"]["attempts"] == 2
     violation = "not valid JSON" if failure == "format" else "covers ids"
     assert violation in calls[1]["message"]
-    assert calls[1]["history"] == [{"role": "user"}, {"role": "assistant"}]
+    assert calls[1]["history"] == _result(answer)["messages"]
     assert calls[0]["history"] is None
     assert [call["repair"] for call in calls] == [False, True]
+
+
+def test_agent_anchor_must_name_a_step_the_conversation_read(monkeypatch, tmp_path):
+    """One retained step read is not evidence for every cited step: an
+    anchor whose file the retained conversation never read takes the repair
+    (which can ask for the file), and the input record keeps the steps read."""
+    only_step_1 = [{"role": "user"}, *_reads(1), {"role": "assistant"}]
+    calls = stub_runner(monkeypatch, [_result(GOOD, messages=only_step_1),
+                                      _result("not json", messages=only_step_1)])
+    span, steps = _judge_input_fixture()
+    verdict = judge_span(span, steps, _agent_cfg(), [], None,
+                         evidence_root=tmp_path, transcripts_root=tmp_path / "runs")
+    assert verdict["verdict"] == "error"
+    assert "cites m1 anchor step(s) [2]" in calls[1]["message"] and calls[1]["repair"]
+    assert verdict["input"]["read_steps"] == [1]
+    calls = stub_runner(monkeypatch, [_result(GOOD, messages=[*only_step_1, *_reads(2, 3)])])
+    verdict = judge_span(span, steps, _agent_cfg(), [], None,
+                         evidence_root=tmp_path, transcripts_root=tmp_path / "runs2")
+    assert verdict["verdict"] == "positive" and len(calls) == 1
+    assert verdict["input"]["read_steps"] == [1, 2, 3]
+
+
+def test_agent_evidence_citations_require_retained_step_reads(monkeypatch, tmp_path):
+    obj = json.loads(GOOD)
+    obj["evidence"] = [{"claim": "Later verification", "steps": [3], "seqs": []}]
+    messages = _reads(1, 2)
+    calls = stub_runner(monkeypatch, [_result(json.dumps(obj), messages=messages),
+                                     _result("not json", messages=messages)])
+    span, steps = _judge_input_fixture()
+    verdict = judge_span(span, steps, _agent_cfg(), [], None,
+                         evidence_root=tmp_path, transcripts_root=tmp_path / "runs")
+    assert verdict["verdict"] == "error"
+    assert "cites evidence step(s) [3]" in calls[1]["message"]
 
 
 def test_agent_invalid_repair_stops_with_raw(monkeypatch, tmp_path):
@@ -3203,11 +3401,13 @@ def test_agent_forced_answer_lands_in_the_input_record(monkeypatch, tmp_path):
 
 
 def test_context_rollback_repair_cannot_erase_missing_investigation(monkeypatch, tmp_path):
-    first = {**_result(GOOD, forced=True), "context_rollbacks": 1,
+    # the rollback took every step read out of the retained conversation
+    unread = [{"role": "user"}, {"role": "assistant"}]
+    first = {**_result(GOOD, forced=True, messages=unread), "context_rollbacks": 1,
              "retained_evidence": 0, "executed_llm_calls": 2,
              "executed_tool_calls": 1,
              "reported_usage": {"input": 100, "output": 20, "cache_read": 0, "cache_write": 0}}
-    repair = {**_result(GOOD), "retained_evidence": 0,
+    repair = {**_result(GOOD, messages=unread), "retained_evidence": 0,
               "executed_llm_calls": 1, "executed_tool_calls": 0,
               "reported_usage": {"input": 50, "output": 10, "cache_read": 0, "cache_write": 0}}
     calls = stub_runner(monkeypatch, [first, repair])
@@ -3243,7 +3443,7 @@ def test_agent_trajectory_masks_an_echoed_credential(monkeypatch, tmp_path):
     echo = f"auth failed: Bearer {key} (logged as {key.replace('+', '%2B')})"
     canned = _result(
         GOOD,
-        messages=[{"role": "user"},
+        messages=[{"role": "user"}, *_reads(1, 2, 3),
                   {"role": "assistant", "content": [{"type": "text", "text": echo}]}],
     )
     stub_runner(monkeypatch, [canned])
@@ -3378,7 +3578,7 @@ def test_config_validates_the_budget_knobs(monkeypatch):
     ("referenced", None, "noted", "neutral"),
     ("acted_on", "improved", "used", "positive"),
     ("decisive", "harmed", "misused", "negative"),
-    ("acted_on", None, "unclear", "neutral"),
+    ("acted_on", None, "unclear", "unresolved"),
 ])
 def test_agent_unknown_novelty_preserves_independent_signals(
     monkeypatch, tmp_path, influence, effect, usage, verdict,
@@ -3403,14 +3603,14 @@ def test_agent_unknown_novelty_preserves_independent_signals(
     path = tmp_path / "report.json"
     path.write_text(json.dumps(artifact))
     saved = json.loads(path.read_text())
-    assert saved["tool"]["schema"] == "injudge.report/v13"
+    assert saved["tool"]["schema"] == "injudge.report/v14"
     assert saved["operations"][0]["rubric"]["m1"]["novelty"]["value"] is None
     rub = saved["aggregates"]["overall"]["rubric"]
     assert rub["deliveries"] == 2
     assert rub["counts"]["novelty"] == {"null": 1, "novel": 1}
     assert rub["rates"]["novelty"] == 1.0  # unknown does not dilute the rate
     summary = build_summary(saved)
-    assert summary["tool"]["schema"] == "injudge.summary/v11"
+    assert summary["tool"]["schema"] == "injudge.summary/v12"
     assert summary["details"]["overall"]["rubric"]["counts"]["novelty"] == rub["counts"]["novelty"]
     if usage == "ignored":
         assert rub["no_footprint_reasons"] == {"ignored_unknown_novelty": 1, "irrelevant": 1}

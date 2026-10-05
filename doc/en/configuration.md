@@ -57,6 +57,7 @@ A verdict cut mid-answer is not a failure class: the answer simply fails the con
 | `--timeout` | `300` | Per-LLM-call timeout seconds |
 | `--max-attempts` | `MAX_ATTEMPTS` | Total judge/repair phases per span |
 | `--judge-max-tokens` | `MAX_OUTPUT_TOKENS` | Per-call output cap |
+| `--episode ID` | unset | Judge only episodes whose recorded episode id, benchmark identity, or execution id equals *ID* (repeatable); every other span is `unjudged`. An unmatched *ID* fails fast before any call. Not combinable with `--prepare-only`. |
 | `--limit N` | unset | Judge at most *N* episode-scoped, nonempty spans with the agent; validate all episode and attachment scopes first. `--prepare-only` instead limits materialized episodes. A value below 1 fails fast. |
 | `--dry-run` | off | Print each paid span job's target document, file index, and opening message; no calls or files |
 | `--golden PATH` | unset | Golden answer for exactly one episode; use keyed metadata otherwise |

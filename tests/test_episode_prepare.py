@@ -139,6 +139,8 @@ def test_input_prefix_preserves_task_and_marks_only_memory_text(tmp_path):
     user = next(item for item in context["message_occurrences"] if item["role"] == "user")
     assert task in user["content"] and memory not in user["content"]
     assert user["memory_delivery_refs"] == ["D1"]
+    # the stripped memory text is named as moved, never left reading as absent
+    assert "deliveries.md (D1)" in user["memory_delivery_text"]
     assert memory in files["deliveries.md"]
 
 

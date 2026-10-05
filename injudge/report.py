@@ -48,11 +48,16 @@ from injudge.judge import _ACCURACY, _NOVELTY
 from injudge.model import InjectionSpan, memory_id, step_range
 
 
+def _summary_label(m: dict) -> str:
+    """Key plus the adapter's type/confidence when recorded; an adapter that
+    records neither (a read-only experience store) gets the bare key."""
+    meta = ([str(m["memory_type"])] if m.get("memory_type") is not None else []) + (
+        [f"conf {m['confidence']}"] if m.get("confidence") is not None else [])
+    return f"{m.get('key') or '?'}" + (f" ({', '.join(meta)})" if meta else "")
+
+
 def payload_summary(span: InjectionSpan) -> str:
-    mems = "; ".join(
-        f"{m.get('key') or '?'} ({m.get('memory_type')}, conf {m.get('confidence')})"
-        for m in span.memories
-    )
+    mems = "; ".join(_summary_label(m) for m in span.memories)
     n = len(span.memories)
     noun = "memory" if n == 1 else "memories"
     if span.step_first is None:
@@ -97,12 +102,20 @@ def operation_record(span: InjectionSpan, verdict: dict, delivery_cost: dict) ->
         # auditable from the artifact; omitted like `steps` when no delivery
         # has an attributed agent step (no window bounds anything there).
         # `memory_window_starts` carries the same-step collision exception:
-        # the entries whose window opens only AFTER the shared step the
-        # earlier carrier owns (empty unless a collision bumped one)
+        # the entries whose same-step copy adds no verified text and so opens
+        # only AFTER the shared step the earlier carrier owns (empty unless a collision bumped one);
+        # `memory_variant_steps` names in-window deliveries of the same item
+        # with different text (they left the window open), and
+        # `memory_followups` the proven selection actions, with their tool and
+        # search provenance and separate result-delivery steps
         **({"memory_windows": span.memory_windows}
            if span.step_first is not None and span.memory_windows else {}),
         **({"memory_window_starts": span.memory_window_starts}
            if span.step_first is not None and span.memory_window_starts else {}),
+        **({"memory_variant_steps": span.memory_variant_steps}
+           if span.step_first is not None and span.memory_variant_steps else {}),
+        **({"memory_followups": span.memory_followups}
+           if span.step_first is not None and span.memory_followups else {}),
         "step_gaps": span.step_gaps,
         "new_keys": span.new_keys,
         "removed_keys": span.removed_keys,
@@ -244,27 +257,30 @@ def _rubric_line(rub: dict) -> str | None:
 def _headline_line(headline: dict, rates: dict) -> str | None:
     """The one-line headline summary for the stdout summary; None when no
     spans were judged. The judged-span count leads: every rate is over it.
-    Neutral is spelled out because it means no attributable benefit was
-    observed, not a measured absence of effect."""
+    Neutral and unresolved are spelled out: neither is a measured absence
+    of effect."""
     if headline.get("negative_span_rate") is None:
         return None
     txt = (
         f"headline: {headline['judged_spans']} judged spans — "
         f"positive {rates['positive']:.0%}, negative {rates['negative']:.0%}, "
-        f"neutral (no attributable benefit observed) {rates['neutral']:.0%}"
+        f"unresolved (acted on, effect undetermined) {rates['unresolved']:.0%}, "
+        f"neutral (no influence established) {rates['neutral']:.0%}"
     )
     if headline.get("unassessable_spans"):
         # assessability is a headline property: these spans held no
         # observable downstream and sit in no directional denominator
         txt += f", {headline['unassessable_spans']} unassessable (no subsequent turn)"
-    if headline.get("wasted_token_share") is not None:
+    if headline.get("share_without_demonstrated_benefit") is not None:
         # the denominator is the judged classes' injected tokens, not the
         # all-class total printed above — label both sides so the share
         # never reads as per-memory truth
         txt += (
-            f", estimated span-level wasted-token proxy {headline['wasted_token_share']:.0%} "
-            f"(neutral+negative ≈{headline.get('wasted_tokens', 0):,} of "
-            f"≈{headline.get('judged_tokens', 0):,} judged-class injected tokens)"
+            f"; span-level share without demonstrated benefit "
+            f"{headline['share_without_demonstrated_benefit']:.0%} "
+            f"(≈{headline.get('tokens_without_demonstrated_benefit', 0):,} of "
+            f"≈{headline.get('judged_tokens', 0):,} judged-class injected tokens, "
+            f"≈{headline.get('unresolved_tokens', 0):,} of them unresolved)"
         )
         excluded = []
         if headline.get("error_unjudged_tokens"):
@@ -277,9 +293,9 @@ def _headline_line(headline: dict, rates: dict) -> str | None:
 
 
 def _verdict_tally(a: dict) -> str:
-    """The +N −N ○N per-trajectory verdict tally for the stdout summary, with
-    the error and unassessable counts marked when any."""
-    return f"+{a['positive']} −{a['negative']} ○{a['neutral']}" + (
+    """The +N −N ~N ○N per-trajectory verdict tally for the stdout summary,
+    with the error and unassessable counts marked when any."""
+    return f"+{a['positive']} −{a['negative']} ~{a['unresolved']} ○{a['neutral']}" + (
         f" !{a['error']}" if a["error"] else ""
     ) + (f" ⊘{a['unassessable']}" if a.get("unassessable") else "") + (
         f" ∅{a['empty']} empty" if a.get("empty") else ""
@@ -456,7 +472,8 @@ def _slim_aggregate(a: dict) -> dict:
             "n_trajectories", "n_episodes", "n_injections", "n_spans", "restated_injections",
         ) if k in a},
         "verdicts": {"counts": {k: a[k] for k in (
-            "positive", "negative", "neutral", "error", "unjudged", "unassessable", "empty",
+            "positive", "negative", "unresolved", "neutral", "error", "unjudged",
+            "unassessable", "empty",
         )}},
     }
     rates = a.get("rates") or {}
@@ -472,16 +489,17 @@ def _slim_aggregate(a: dict) -> dict:
             "judged_spans": judged,
             "positive_span_rate": headline.get("positive_span_rate"),
             "negative_span_rate": headline.get("negative_span_rate"),
+            "unresolved_span_rate": headline.get("unresolved_span_rate"),
         }
-        if headline.get("wasted_token_share") is not None:
-            h["wasted_token_share"] = headline["wasted_token_share"]
-            # the share's named numerator/denominator (and the excluded
-            # error/unjudged/unassessable classes): a bare share next to the
-            # all-class total has read as per-memory truth
-            if headline.get("wasted_tokens") is not None:
-                h["wasted_tokens"] = headline["wasted_tokens"]
-            if headline.get("judged_tokens") is not None:
-                h["judged_tokens"] = headline["judged_tokens"]
+        if headline.get("share_without_demonstrated_benefit") is not None:
+            h["share_without_demonstrated_benefit"] = headline["share_without_demonstrated_benefit"]
+            # the share's named numerator/denominator, its unresolved part,
+            # and the excluded error/unjudged/unassessable classes: a bare
+            # share next to the all-class total has read as per-memory truth
+            for name in ("tokens_without_demonstrated_benefit", "unresolved_tokens",
+                         "judged_tokens"):
+                if headline.get(name) is not None:
+                    h[name] = headline[name]
             if headline.get("error_unjudged_tokens"):
                 h["error_unjudged_tokens"] = headline["error_unjudged_tokens"]
         if headline.get("unassessable_spans"):
@@ -527,6 +545,12 @@ def _slim_aggregate(a: dict) -> dict:
             entries = rub.get(name) or []
             if entries:
                 rubric[name] = _slim_key_list(entries)
+        shared = rub.get("shared_anchors") or []
+        if shared:
+            rubric["shared_anchors"] = [
+                {"key": display, "anchors": e.get("anchors") or []}
+                for e, display in zip(shared, _display_keys(shared))
+            ]
         out["rubric"] = rubric
     if a.get("memory_usage"):
         out["memory_usage"] = _slim_usage_rollup(a["memory_usage"])
@@ -617,7 +641,7 @@ def print_summary(artifact: dict) -> int:
         f"injudge: {agg.get('n_trajectories', 0)} trajectories, "
         f"{agg.get('n_episodes', 0)} episodes, {agg['n_injections']} injections "
         f"({agg['restated_injections']} restated), {agg['n_spans']} spans: "
-        f"+{agg['positive']} −{agg['negative']} ○{agg['neutral']}"
+        f"+{agg['positive']} −{agg['negative']} ~{agg['unresolved']} ○{agg['neutral']}"
         + (f" !{agg['error']} error" if agg["error"] else "")
         + (f" ?{agg['unjudged']} unjudged" if agg["unjudged"] else "")
         + (f" ⊘{agg.get('unassessable', 0)} unassessable" if agg.get("unassessable") else "")
@@ -628,7 +652,7 @@ def print_summary(artifact: dict) -> int:
         byv = cost.get("approx_tokens_by_verdict") or {}
         judged = (
             f"+{byv.get('positive', 0):,} −{byv.get('negative', 0):,} "
-            f"○{byv.get('neutral', 0):,}"
+            f"~{byv.get('unresolved', 0):,} ○{byv.get('neutral', 0):,}"
         )
         extra = []
         if byv.get("error"):
@@ -651,7 +675,7 @@ def print_summary(artifact: dict) -> int:
         print_safe(line + ")")
     if (txt := _headline_line(agg.get("headline") or {}, rates)) is not None:
         print_safe(f"  {txt}")
-        # the wasted-token share never reads alone: every reported share
+        # the benefit share never reads alone: every reported share
         # carries its proxy caveat stated outright
         caveat = (agg.get("headline") or {}).get("caveat")
         if caveat:

@@ -16,7 +16,10 @@ The verdict rests on subsequent influence, never on the final task result:
   attention spent for nothing; mere reference never counts as misuse);
 - else any memory `used` (acted-on influence that improved the work) ⇒
   span **positive**;
-- else ⇒ **neutral** (no demonstrated footprint).
+- else any memory `unclear` (acted-on influence whose effect the evidence
+  could not determine) ⇒ span **unresolved** — an established footprint
+  of unknown direction, never folded into neutral;
+- else ⇒ **neutral** (no established influence).
 
 Parsing is strict, and the contract keys each rubric entry by the
 SPAN-LOCAL memory id (m1, m2, … per delivered entry — display keys are
@@ -466,45 +469,66 @@ def _render_span_header(span: InjectionSpan, memories_note: str) -> str:
             label = m.get("key") or "(unkeyed)"
             bump = ""
             if start != span.step_first:
-                # a same-step delivery collision pushed this entry's window
-                # start past the span's first step: an earlier span's delivery
-                # of the SAME memory owns the shared step (first carrier),
-                # so this span cannot claim it
+                # an earlier span delivered this memory to the same consuming
+                # step and this copy adds no verified text: indistinguishable
+                # credit is counted once, under the earlier carrier
                 bump = (
-                    f" (also delivered at step {start - 1} — an earlier span's "
-                    "delivery of this same memory owns that shared step)"
+                    f" (an earlier span delivered this memory at step {start - 1} "
+                    "and this copy adds no verified text, so that shared step is "
+                    "the earlier span's)"
                 )
             if end is not None and start > end:
                 reason = (f"episode ends at step {end}" if end == span.episode_last_step
-                          else f"re-delivered from step {end + 1}")
+                          else f"re-exposed from step {end + 1}")
                 frags.append(
                     f"{mid} ({label}) — no eligible action steps{bump} "
                     f"({reason})"
                 )
             elif end is not None:
-                if span.same_step_bound == end and not bump:
+                if span.same_step_bound == end and start == span.step_first:
                     # the bound came from a same-step collision (a later
-                    # span delivered this memory at this span's last delivery
+                    # span re-exposed this memory at this span's last delivery
                     # step), not from a cleanly separated re-delivery — saying
                     # "re-delivered from step N" would name a step separation
                     # the recording does not carry
                     frags.append(
-                        f"{mid} ({label}) — {step_range(start, end)} "
-                        "(another span delivered this memory at this same step; "
+                        f"{mid} ({label}) — {step_range(start, end)}{bump} "
+                        "(another span re-exposed this memory at this same step; "
                         "steps beyond it are that span's to claim)"
                     )
                 else:
                     reason = ("episode's last eligible step" if end == span.episode_last_step
-                              else f"re-delivered from step {end + 1}; later steps belong to that span")
+                              else f"re-exposed from step {end + 1}; later steps belong to that span")
                     frags.append(
                         f"{mid} ({label}) — {step_range(start, end)}{bump} "
                         f"({reason})"
                     )
             else:
                 frags.append(
-                    f"{mid} ({label}) — steps {start} onward{bump} (not re-delivered in a later span)"
+                    f"{mid} ({label}) — steps {start} onward{bump} (not re-exposed in a later span)"
+                )
+            variants = span.memory_variant_steps.get(mid)
+            if variants:
+                # a differently-shown delivery of the same item left this
+                # window open: name it so credit follows each delivery's text
+                frags[-1] += (
+                    f", also delivered with different content at step(s) {variants} "
+                    "(see deliveries.md)"
                 )
         parts.append("Footprint windows: " + "; ".join(frags) + ".")
+        followups = [
+            f"{memory_id(i)} ({m.get('key')}) — "
+            + "; ".join(f"action step {hit['step']}, result delivery step {hit['delivery_step']}"
+                        for hit in span.memory_followups[memory_id(i)])
+            for i, m in enumerate(span.memories) if memory_id(i) in span.memory_followups
+        ]
+        if followups:
+            parts.append(
+                "Follow-up retrievals (explicit searches linked through their proven "
+                "tool-result hosts to actions using this entry's exposed identifier; "
+                "this establishes selection, not benefit): "
+                + "; ".join(followups) + "."
+            )
     parts.append(memories_note)
     parts.extend(
         _memory_line(m, memory_id(i), exp)
@@ -721,12 +745,16 @@ def _footprint_reason(signals: dict) -> str:
 
 
 def derive_verdict(memory_usage: dict) -> str:
-    """Span verdict from derived per-memory usage: harm dominates."""
+    """Span verdict from derived per-memory usage: misuse dominates, then
+    use; an acted-on entry of undetermined effect keeps the span out of
+    neutral, which claims no established influence."""
     usages = [e.get("usage") for e in memory_usage.values()]
     if "misused" in usages:
         return "negative"
     if "used" in usages:
         return "positive"
+    if "unclear" in usages:
+        return "unresolved"
     return "neutral"
 
 
@@ -1010,7 +1038,7 @@ def auto_verdict_no_subsequent_turn(span: InjectionSpan) -> dict:
     censored, the consumer unrecorded, or the delivery never reached an
     agent turn — so the aggregates report these spans apart as
     unassessable, never inside the directional-effect denominators or the
-    wasted-token share. No judge ran, so there is
+    token share without demonstrated benefit. No judge ran, so there is
     no confidence and the rubric is a null placeholder — the aggregates
     exclude both from the judged stats."""
     verdict = blank_verdict()

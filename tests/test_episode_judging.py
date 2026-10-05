@@ -75,6 +75,26 @@ def test_three_spans_in_one_episode_have_independent_judges_and_graph_links(tmp_
     assert {op["verdict_span"] for op in recalls} == {op["operation_id"] for op in operations}
 
 
+def test_episode_selector_judges_only_the_named_episode(tmp_path, monkeypatch):
+    """--episode judges one episode of a multi-episode recording without a
+    custom driver; every other span is unjudged (outside every rate), and a
+    selector naming nothing fails before any judge call."""
+    builder = AnnotatedBuilder()
+    for episode_id in ("episode-1", "episode-2"):
+        builder.episode_open(episode_id).agent_turn(with_task=True)
+        builder.recall(cure_ref(episode_id, f"{episode_id} fact")).agent_turn()
+        builder.episode_close(episode_id)
+    status, report, _run_dir, calls, source = _run(
+        tmp_path, monkeypatch, builder, [_result(_answer())], ["--episode", "episode-2"])
+    assert status == 0 and len(calls) == 1
+    assert [op["verdict"] for op in report["operations"]] == ["unjudged", "neutral"]
+    assert report["aggregates"]["overall"]["rates"]["neutral"] == 1.0
+    with pytest.raises(SystemExit, match="--episode 'episode-9' matches no prepared episode"):
+        main([str(source), "--env", str(tmp_path / ".env"), "-o", str(tmp_path / "out2"),
+              "--episode", "episode-9"])
+    assert len(calls) == 1
+
+
 def test_identical_delivery_is_partitioned_then_merged_within_each_episode(tmp_path):
     builder = AnnotatedBuilder()
     ref = cure_ref("same", "same fact")

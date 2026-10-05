@@ -4,7 +4,9 @@ Parser tests with canned answers cannot show that the judge's labels are
 right. These development regressions run through the REAL judge: each is a
 synthetic schema-v9 episode delivering one memory. They cover explicit and
 uncited use, routine practice, source and novelty distinctions, uncertainty,
-plan execution and reversal, harmful advice, and paraphrased baselines.
+plan execution and reversal, harmful advice, selecting a listed candidate
+whose advice is then set aside, a historically scoped claim, and paraphrased
+baselines.
 Only labels decided by the construction are pinned.
 
 `score` compares injudge reports against those expectations. It never picks
@@ -342,6 +344,60 @@ CASES: dict[str, dict] = {
         ],
         "expect": {"novelty": ["novel"], "influence": ["decisive"],
                    "positive_effect": ["improved"], "verdict": ["positive"]},
+    },
+    # Reading a listed candidate by its shown id is an action the memory
+    # shaped. The plan is voiced before the read and the read's advice shares
+    # nothing with the fix, so the unused output is no_effect by construction.
+    "selected_then_rejected": {
+        "task": "cache.get() returns a stale value right after cache.set() on the "
+                "same key. Fix it.",
+        "before": [
+            ("Reproduce.", "python repro.py", "set 2 -> get 1 (stale)"),
+            ("set() probably leaves the per-key memo stale. Check set() next.",
+             "grep -n 'def set' src/cache.py", "14:    def set(self, k, v):"),
+        ],
+        "memory": ("kb-4821", "Issue: stale reads in an in-memory cache "
+                              "(read the full fix with: kb read kb-4821)"),
+        "consumer": ("Candidate kb-4821 looks related; read it.",
+                     "kb read kb-4821",
+                     "kb-4821 fix: give every cache entry a one-second TTL so stale "
+                     "values expire."),
+        "after": [
+            ("A TTL would only hide the bug. Continue with set() as planned.",
+             "sed -n 14,17p src/cache.py",
+             "def set(self, k, v):\n    self._store[k] = v\n    # self._memo is never cleared"),
+            ("set() leaves the per-key memo stale. Drop the key from _memo in set().",
+             "sed -i 's/self._store\\[k\\] = v/self._store[k] = v; self._memo.pop(k, None)/' src/cache.py",
+             ""),
+            ("Verify.", "python repro.py", "set 2 -> get 2"),
+        ],
+        "expect": {"influence": ["acted_on", "decisive"],
+                   "positive_effect": ["no_effect"], "verdict": ["negative"]},
+    },
+    # A claim scoped to an old release is not refuted by today's code; the
+    # mismatch is a reason it does not apply, not evidence it was false.
+    "historical_scope": {
+        "task": "Config.load() ignores the YAML file's timeout key and always uses "
+                "30. Fix it.",
+        "before": [
+            ("Find the loader.", "sed -n 1,8p src/config.py",
+             "def load(path):\n    with open(path) as fh:\n        data = yaml.safe_load(fh)\n"
+             "    return Config(timeout=30, **{k: v for k, v in data.items() if k != 'timeout'})"),
+        ],
+        "memory": ("loader_handle_leak",
+                   "In release 1.2, Config.load() opened the YAML file without closing "
+                   "it and leaked file handles; wrapping open() in a with block fixed it."),
+        "consumer": ("load() hard-codes timeout=30 and drops the file's value. Pass it "
+                     "through with 30 as the default.",
+                     "sed -i \"s/timeout=30, \\*\\*{k: v for k, v in data.items() if k != 'timeout'}/"
+                     "**{'timeout': 30, **data}/\" src/config.py",
+                     ""),
+        "after": [
+            ("Verify.", "python -c 'from config import load; print(load(\"t.yaml\").timeout)'",
+             "5"),
+        ],
+        "expect": {"relevance": [False], "accuracy": ["uncontradicted", "corroborated"],
+                   "influence": ["none"], "positive_effect": [None], "verdict": ["neutral"]},
     },
 }
 

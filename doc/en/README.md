@@ -20,7 +20,7 @@ Two read-only tools share one parsing core:
 | Tool | Purpose |
 |---|---|
 | **memgraph** | Renders every memory operation and its relationships as a self-contained HTML graph, with an optional JSON artifact. |
-| **injudge** | Scores episode-scoped recall spans against a five-signal rubric and writes the `injudge.report/v13` artifact, which overlays onto the graph with `--verdicts`. |
+| **injudge** | Scores episode-scoped recall spans against a five-signal rubric and writes the `injudge.report/v14` artifact, which overlays onto the graph with `--verdicts`. |
 
 One principle runs through both: a recall injection is judged by its **subsequent influence** on the agent. The final task result may corroborate a judgment; it never decides one.
 
@@ -57,7 +57,7 @@ memgraph shows which `(trajectory, step)` created each memory and which `(trajec
 {% step %}
 ### Judge
 
-injudge groups same-treatment re-injections into **spans** and scores every delivered memory with an LLM. A span with no attributed agent step is rule-judged without an LLM call and tallied as **unassessable**. The span verdict is then derived in code. Harm dominates: any misused memory makes the span negative; otherwise any used memory makes it positive; otherwise it is neutral.
+injudge groups same-treatment re-injections into **spans** and scores every delivered memory with an LLM. A span with no attributed agent step is rule-judged without an LLM call and tallied as **unassessable**. The span verdict is then derived in code. Harm dominates: any misused memory makes the span negative; otherwise any used memory makes it positive; otherwise an acted-on memory of undetermined effect makes it unresolved; otherwise it is neutral.
 {% endstep %}
 
 {% step %}

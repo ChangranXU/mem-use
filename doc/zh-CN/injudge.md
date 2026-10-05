@@ -6,7 +6,7 @@ icon: gavel
 # injudge
 
 {% hint style="info" %}
-injudge 根据召回区间在后续 agent 回合中的足迹，将可评判区间判为 **positive**、**negative** 或 **neutral**。没有可归属 agent 步骤的区间单独报告为 **unassessable**。
+injudge 根据召回区间在后续 agent 回合中的足迹，将可评判区间判为 **positive**、**negative**、**unresolved**（已采取行动、效果未定）或 **neutral**。没有可归属 agent 步骤的区间单独报告为 **unassessable**。
 {% endhint %}
 
 ```bash
@@ -28,8 +28,8 @@ uv run -m injudge <paths> --dry-run --limit 3
 
 | 文件 | 内容 |
 |---|---|
-| `injudge-report.json` | 运行时评审记录（`injudge.report/v13`），付费调用前写入并将待评区间标为 `unjudged`；每个区间完成后保存，包括并行完成的结果 |
-| `summary.json` | 最终统计（`injudge.summary/v11`）：计数、比率、逐记忆使用 |
+| `injudge-report.json` | 运行时评审记录（`injudge.report/v14`），付费调用前写入并将待评区间标为 `unjudged`；每个区间完成后保存，包括并行完成的结果 |
+| `summary.json` | 最终统计（`injudge.summary/v12`）：计数、比率、逐记忆使用 |
 | `memgraph-verdicts.html` | 仅在 `--html` 时产出：召回节点按判定着色的 memgraph |
 | `evidence/` | 每个送入评审智能体的区间一个文件夹（含运行失败产生的 error 判定）：只包含目标 `span.md`，加上其父 episode 已准备的文件与可选附件 |
 | `agent-runs/` | 每个送入评审智能体的区间一条轨迹 JSONL：判定如何得出的 pi 事件流记录 |
@@ -67,7 +67,7 @@ uv run -m injudge <paths> --dry-run --limit 3
 
 1. **物化证据。** 目标区间及其父 episode 已录制的任务、可见上下文、其他投递、原始全局步骤与可选附件，写入同一个由工具访问范围限定的文件夹。→ [评审证据](scoring-input.md)
 2. **按评分规则打分。** 一条智能体对话检索证据，为每条投递记忆返回五个信号——`relevance`、`accuracy`、`novelty`、`influence`、`positive_effect`——绝不返回判定。→ [评分规则与判定推导](verdict-derivation.md)
-3. **代码推导判定。** 先得出使用标签，再得出区间判定：任一误用即为 negative；否则任一采纳即为 positive；否则为 neutral。→ [评分规则与判定推导](verdict-derivation.md)
+3. **代码推导判定。** 先得出使用标签，再得出区间判定：任一误用即为 negative；否则任一采纳即为 positive；否则任一已采取行动但效果未定即为 unresolved；否则为 neutral。→ [评分规则与判定推导](verdict-derivation.md)
 
 预算、强制作答与对话的重试/失败行为见[评审智能体](judge-client.md)。
 

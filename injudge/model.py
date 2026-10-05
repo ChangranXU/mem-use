@@ -289,33 +289,40 @@ class InjectionSpan:
     group_spans). `memory_windows` bounds each delivered memory's judged
     footprint window individually, keyed by the entry's span-local id
     (memory_id; every delivered entry carries one) → the window's last
-    step, the first later re-delivery of that ENTRY'S (namespace, item)
+    step, the first later RE-EXPOSURE of that ENTRY'S (namespace, item)
     identity starting strictly after this span's last delivery step, minus
-    one (a re-delivery supersedes — from then on the memory's influence is
-    the newer span's to claim), or None when none qualifies: overlapping
-    re-deliveries are skipped, not terminal. When no cleanly separated
-    re-delivery exists, the prepared episode's last step caps the window.
-    The strict > keeps
+    one (a delivery showing everything this entry showed supersedes — from
+    then on that content's influence is the newer span's to claim), or None
+    when none qualifies: overlapping re-deliveries are skipped, not
+    terminal. When no cleanly separated re-exposure exists, the prepared
+    episode's last step caps the window. The strict > keeps
     the bound from ever cutting the span's own delivery steps. An entry
     with no stable item identity matches by the canonical entry used for
     span fingerprints, so fresh operation-local ids cannot reopen the same
     content's window. Empty when built directly, not via group_spans.
+    `memory_variant_steps` lists, per entry, the in-window steps where the
+    same item was delivered with different or narrower verified text (a
+    preview after a full read, or the reverse): such a delivery leaves this
+    window open, and each delivery is credited only for the text it showed.
     `memory_window_starts` holds the one exception to the default window
-    start (the span's first step): when a LATER span starts at an earlier
-    carrier's last delivery step (a same-step delivery collision), the
-    recording carries no causal order within the step, so the shared step
-    is allocated once under a first-carrier rule — the earlier span keeps
-    it, and this span's window for that entry opens at the step after.
-    Only the bumped entries appear here.
-    `same_step_bound` (the step, or None) marks the other half of the same
-    exception: a LATER span
-    starting at this span's last delivery step (two memory blocks placed in
-    one call, or a declared step collision) that also carries one of this
-    span's entries would leave that memory's window open in both spans — one
-    memory, two windows, the same action creditable twice — so the entry's
-    window caps at that step inclusive, even if already finitely bounded
-    (the steps beyond are the later carrier's to claim). The collision is
-    named in the run's validation notes.
+    start (the span's first step): when a LATER span delivers a copy adding
+    no verified text at an earlier carrier's last delivery step (a same-step
+    delivery collision), the copies are indistinguishable, so the shared step
+    is allocated once — the earlier span keeps it, and this span's copy opens
+    at the step after. Different or wider verified text stays eligible at its
+    own consuming step. Only the bumped entries appear here.
+    `same_step_bound` (the step, or None) marks the other half: a LATER
+    span starting at this span's last delivery step (two memory blocks
+    placed in one call, or a declared step collision) that re-exposes one
+    of this span's entries caps that entry's window at that step inclusive,
+    even if already finitely bounded (the steps beyond are the re-exposing
+    carrier's to claim). The collision is named in the run's validation
+    notes.
+    `memory_followups` lists, per entry, explicit searches proven through
+    their tool-result hosts to actions using the exposed key and returning
+    the same portable item. Each record names the actual action `step`,
+    `delivery_step`, `tool_call_id`, and search `operation_id`; action steps
+    must lie inside the entry's window.
     `previous_partial_keys` qualifies `previous_keys`: the identities whose
     every EARLIER delivery was clipped or exposure-unverifiable, so the
     "delivered in an earlier span" cue cannot mean the agent saw
@@ -346,6 +353,8 @@ class InjectionSpan:
     total: int = 0
     memory_windows: dict[str, int | None] = field(default_factory=dict)
     memory_window_starts: dict[str, int] = field(default_factory=dict)
+    memory_variant_steps: dict[str, list[int]] = field(default_factory=dict)
+    memory_followups: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     same_step_bound: int | None = None
     episode_execution_id: str | None = None
     episode_last_step: int | None = None

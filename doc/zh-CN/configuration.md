@@ -57,6 +57,7 @@ npm --prefix agent install    # TS 侧执行一次（需要 PATH 上有 node >= 
 | `--timeout` | `300` | 单次 LLM 调用超时（秒） |
 | `--max-attempts` | `MAX_ATTEMPTS` | 每区间的调查/修复阶段总数 |
 | `--judge-max-tokens` | `MAX_OUTPUT_TOKENS` | 单次调用输出上限 |
+| `--episode ID` | 不设 | 只评判已录制 episode id、benchmark 身份或执行 id 等于 *ID* 的 episode（可重复）；其余区间均为 `unjudged`。无匹配的 *ID* 在任何调用前快速失败。不可与 `--prepare-only` 同用。 |
 | `--limit N` | 不设 | 最多用智能体评判 *N* 个 episode 内、非空的区间；先校验全部 episode 与附件的适用范围。`--prepare-only` 则改为限制物化的 episode 数量。小于 1 的值会快速失败。 |
 | `--dry-run` | 关 | 打印每个付费区间任务的目标文档、文件索引与开场消息；不发起调用、不写文件 |
 | `--golden PATH` | 不设 | 只适用于恰好一个 episode 的 golden answer；其他情况请用带键的元数据 |

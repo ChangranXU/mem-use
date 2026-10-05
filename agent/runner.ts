@@ -21,6 +21,7 @@
 import * as fs from "node:fs";
 import {
 	Agent,
+	type AgentContext,
 	type AgentMessage,
 	type AgentTool,
 	type ThinkingLevel,
@@ -30,7 +31,6 @@ import {
 	createProvider,
 	type ApiKeyAuth,
 	type AssistantMessage,
-	type Context,
 	type Message,
 	type Model,
 	type Models,
@@ -163,10 +163,13 @@ function lastAssistantText(messages: readonly AgentMessage[]): string {
 	return "";
 }
 
-function estimateInput(context: Context): number {
+function estimateInput(context: AgentContext): number {
 	// Output-only usage says nothing about the input prefix, including when
 	// a conversation is restored for repair. Use pi's content estimate then.
-	const messages = context.messages.map((m) => {
+	// Match pi's default wire projection: internal agent events are not LLM
+	// messages, and cannot be passed to the provider's context estimator.
+	const messages = context.messages.filter((m): m is Message =>
+		m.role === "user" || m.role === "assistant" || m.role === "toolResult").map((m) => {
 		if (m.role !== "assistant") return m;
 		const input = m.usage.input + m.usage.cacheRead + m.usage.cacheWrite;
 		return Number.isFinite(input) && input > 0 ? m : {
@@ -317,7 +320,7 @@ async function main(): Promise<number> {
 		const inputTokens = estimateInput({
 			systemPrompt: agent.state.systemPrompt,
 			tools: agent.state.tools,
-			messages: [...agent.state.messages, opening] as Message[],
+			messages: [...agent.state.messages, opening],
 		});
 		// A final answer can consume some of the reserved output room before
 		// needing repair. Keep its evidence and cap the continuation's output

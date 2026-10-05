@@ -12,7 +12,9 @@ forced final round instead of an error.
 Python still owns the verdict contract: the runner reports the
 conversation's final assistant text, and _strict_parse /
 _verdict_semantics / _assemble_verdict (injudge.judge) decide whether it
-is a verdict. A violation gets one tool-free repair call over the SAME
+is a verdict, and every cited anchor must name a step file the retained
+conversation actually read (a nonzero read count alone does not ground a
+claim about step N). A violation gets one tool-free repair call over the SAME
 conversation through job.history. Only an explicit needs_evidence request
 reopens investigation; an invalid repair or exhausted phase budget stays
 a visible error verdict, never a silent neutral.
@@ -28,6 +30,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -415,6 +418,52 @@ def _invoke_runner(
         return result
 
 
+_STEP_FILE = re.compile(r"steps/step_(\d{1,9})\.md")
+
+
+def _read_steps(messages: list) -> list[int]:
+    """Global steps whose files a successful, non-empty read left in the
+    retained conversation (rolled-back rounds are gone from it). The runner
+    normalizes `details.path`; anything else shaped differently reads as no
+    evidence, never a crash."""
+    steps: set[int] = set()
+    for m in messages:
+        if not isinstance(m, dict) or m.get("role") != "toolResult" or m.get("isError"):
+            continue
+        details = m.get("details")
+        if m.get("toolName") != "read_evidence" or not isinstance(details, dict):
+            continue
+        path, lines = details.get("path"), details.get("lines_read")
+        match = _STEP_FILE.fullmatch(path) if isinstance(path, str) else None
+        if match and isinstance(lines, int) and not isinstance(lines, bool) and lines > 0:
+            steps.add(int(match[1]))
+    return sorted(steps)
+
+
+def _unread_anchor_error(obj: dict, read: set[int]) -> str | None:
+    """A cited anchor is a claim about a step's content; one that was never
+    read in the retained conversation rests on a preview or a guess."""
+    for entry in obj["memories"]:
+        unread = sorted({a for a in entry["anchors"] if a not in read})
+        if unread:
+            return (
+                f"cites {entry['id']} anchor step(s) {unread} whose step files were not "
+                "read in this conversation (read every cited step; request the missing "
+                "files with needs_evidence)"
+            )
+    evidence = obj.get("evidence")
+    for entry in evidence if isinstance(evidence, list) else []:
+        steps = entry.get("steps") if isinstance(entry, dict) else None
+        unread = sorted({step for step in steps if isinstance(step, int)
+                         and not isinstance(step, bool) and step not in read}) if isinstance(steps, list) else []
+        if unread:
+            return (
+                f"cites evidence step(s) {unread} whose step files were not read "
+                "in this conversation (request the missing files with needs_evidence)"
+            )
+    return None
+
+
 def _input_record(
     gold: GoldInput, attempts: int, result: dict | None, transcript: str | None,
     health: dict | None = None,
@@ -570,7 +619,11 @@ def judge_span(
         health["retained_llm_calls"] = result.get("llm_calls", 0)
         health["retained_tool_calls"] = result.get("tool_calls", 0)
         health["retained_evidence"] = result.get("retained_evidence", 0)
-        investigation_failed = not bool(result.get("retained_evidence"))
+        read_steps = _read_steps(result["messages"])
+        # which step files the retained conversation actually read: the
+        # coverage a no-influence answer rests on, and the set anchors need
+        health["read_steps"] = read_steps
+        investigation_failed = not read_steps
         if result.get("error"):
             masked = _mask_key(str(result["error"]), cfg.api_key)
             warnings.append(f"{span.id}: the judge agent run failed: {masked}")
@@ -612,6 +665,8 @@ def judge_span(
                 error = _verdict_semantics(obj, span, last_step, {step.step for step in steps})
                 if error is None and investigation_failed:
                     error = "required investigation evidence was not retained; inspect the episode again"
+                if error is None:
+                    error = _unread_anchor_error(obj, set(read_steps))
                 if error is not None:
                     obj = None  # a semantic violation is as out-of-contract as a parse one
         if obj is not None:

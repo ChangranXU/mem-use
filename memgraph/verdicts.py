@@ -6,7 +6,8 @@ T-numbers when run on different path sets — and annotates each recall op in
 place:
 
 - `verdict`: the span verdict for the span's first injection
-  (positive/negative/neutral/error/unjudged), `restated` for re-deliveries;
+  (positive/negative/unresolved/neutral/error/unjudged), `restated` for
+  re-deliveries;
 - `verdict_span`: the injudge span id;
 - `span_verdict`: the span's verdict on every one of its injections, first
   or restated (the role-independent outcome, for coloring);

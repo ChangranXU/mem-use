@@ -31,20 +31,26 @@ A gap in delivery steps does not break a span (the missing steps are
 recorded in `step_gaps` and surfaced to the judge); a content or treatment
 change does.
 Each delivered memory's judged footprint window is bounded individually at
-THAT memory's first re-delivery starting strictly after this span's
-deliveries end (`memory_windows`): a re-delivery supersedes,
-so a memory delivered in two spans is never credited in both — while an
-unrelated span in between bounds nothing, an overlapping re-delivery
-(possible only from declared-back or corrupt steps) is skipped rather than
-terminal, and a co-delivered memory with no cleanly separated re-delivery
-keeps the rest of the stream. The one bound a clean re-delivery never sets:
-a LATER span starting at this span's last delivery step (two memory blocks
-placed in one call, or a declared step collision) that also carries one of
-this span's entries. The collision step is then credited exactly ONCE under
-a first-carrier rule: this span's window caps at that step
-inclusive (`same_step_bound`), the later span's window for the same entry
-opens only AFTER it (`memory_window_starts`), and the collision is noted in
-warnings — so one action at the shared step can never anchor both spans.
+THAT memory's first RE-EXPOSURE starting strictly after this span's
+deliveries end (`memory_windows`): a later delivery of the same item that
+shows everything this entry showed supersedes it, so identical content is
+never credited in two spans — while an unrelated span in between bounds
+nothing, an overlapping re-delivery (possible only from declared-back or
+corrupt steps) is skipped rather than terminal, and a co-delivered memory
+with no cleanly separated re-exposure keeps the rest of the stream.
+Re-delivery is an attribution convention, not proof that earlier content
+left the context: a later delivery of the same item with DIFFERENT or
+narrower verified text (a search preview after a full read, or the reverse)
+leaves this window open, and its step is recorded in
+`memory_variant_steps` so the judge credits each delivery only for the text
+it showed. When either text is unverifiable, the item-level convention
+stands. A later span starting at this span's last delivery step (two memory
+blocks placed in one call, or a declared step collision) consumed both
+deliveries in one turn: a re-exposure caps this window at that step
+inclusive (`same_step_bound`), with the collision noted in warnings. A copy
+showing new verified text is eligible at that step too; one adding nothing
+verifiable — indistinguishable, so creditable once — opens after it
+(`memory_window_starts`).
 A delivery carries no step only when no agent turn ever classified in the
 run (a memory-only or pre-first-response recording) or its bound consumer
 never completed a classified turn; such ops sort last and
@@ -58,10 +64,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from bisect import bisect_right
 
-from injudge.model import InjectionSpan, memory_id
-from memgraph.annotations import canonical_entry, grouping_item_key, namespace_of
+from injudge.model import EpisodeInput, InjectionSpan, ToolExec, memory_id
+from memgraph.annotations import canonical_entry, exposure_state, grouping_item_key, namespace_of
 from memgraph.model import MemoryOp
 
 
@@ -121,16 +128,15 @@ def _same_treatment(span: InjectionSpan, op: MemoryOp) -> bool:
 def group_spans(
     recall_ops: list[MemoryOp], traj_id: str, warnings: list[str] | None = None,
     *, episode_execution_id: str | None = None, id_offset: int = 0,
-    last_step: int | None = None,
+    last_step: int | None = None, episode: EpisodeInput | None = None,
 ) -> list[InjectionSpan]:
     """Maximal runs of same-treatment recall ops, in (step, seq) order.
 
     `warnings`, when given, receives the same-step delivery collision notes
-    (a later span delivering different content at this span's last delivery
-    step): the earlier span's window for a memory the colliding
-    span also carries is then bounded at that step, and the colliding span's
-    window for that memory opens only after it — the shared step is credited
-    exactly once, and the bound is named."""
+    (a later span re-exposing one of this span's memories at this span's
+    last delivery step): the earlier span's window for that memory is then
+    bounded at that step, and a copy adding no verified text opens only
+    after it — the bound is named."""
     spans, steps_seen = _merge_spans(recall_ops, traj_id, id_offset)
     entry_idents = _stamp_novelty(spans, steps_seen)
     _stamp_windows(spans, entry_idents, warnings)
@@ -142,6 +148,8 @@ def group_spans(
                 mid: min(end, last_step) if end is not None else last_step
                 for mid, end in span.memory_windows.items()
             }
+    if episode is not None:
+        _stamp_followups(spans, episode)
     return spans
 
 
@@ -304,72 +312,153 @@ def _stamp_novelty(
     return entry_idents
 
 
+def _exposed_text(memory: dict, exposure: dict | None) -> str | None:
+    """The text the placement verifiably showed of one entry; None when
+    unverifiable. No exposure record (a span built directly) shows the
+    canonical value bare, like the judge renderer."""
+    value = memory.get("value")
+    if not isinstance(value, str):
+        return None
+    state = exposure.get("state") if exposure is not None else "full"
+    if state in ("full", "full_normalized"):
+        return value
+    shown = exposure.get("exposed_chars") if state == "clipped" else None
+    return value[:shown] if isinstance(shown, int) and not isinstance(shown, bool) else None
+
+
+def _reexposes(later: tuple[dict, dict | None], earlier: tuple[dict, dict | None]) -> bool:
+    """Whether a later delivery of the same item showed everything the
+    earlier one did. Only verified texts can prove a narrower or different
+    re-delivery; otherwise the item-level convention (supersede) stands."""
+    before, after = _exposed_text(*earlier), _exposed_text(*later)
+    return before is None or after is None or before in after
+
+
 def _stamp_windows(
     spans: list[InjectionSpan],
     entry_idents: list[list[str]],
     warnings: list[str] | None,
 ) -> None:
-    """A re-delivery bounds only the entries it carries. Strictly later
-    re-deliveries end the earlier window before their first step. A same-step
-    collision instead allocates the shared step to its first carrier and
-    the following steps to its last carrier. Both bounds must change even
-    when a still-later delivery already set a finite end, or actions before
-    that end remain creditable to both spans. Unrelated entries keep their
-    windows; intervening same-step carriers can have empty windows.
+    """A re-exposure bounds only the entries it re-exposes. A strictly later
+    one ends the earlier window before its first step. A same-step one ends
+    it at the shared step, which both consumed. A same-step copy adding no
+    verified text opens after that step, since its credit there is
+    indistinguishable; one showing new text keeps its consuming step. A later
+    delivery with different or narrower text bounds nothing and is listed in
+    `memory_variant_steps`. Spans are ordered, so same-step carriers are met
+    before strictly later ones and the shared-step cap always wins.
     """
     carriers: dict[str, list[int]] = {}
     for j, idents in enumerate(entry_idents):
         if spans[j].step_first is None:
             continue
-        for ident in idents:
+        for ident in dict.fromkeys(idents):
             carriers.setdefault(ident, []).append(j)
-    starts: dict[int, list[int]] = {}
-    for j, s in enumerate(spans):
-        if s.step_first is not None:
-            starts.setdefault(s.step_first, []).append(j)
+    exposed = [list(span.iter_exposed()) for span in spans]
     for i, span in enumerate(spans):
         span.position = i + 1
         span.total = len(spans)
         windows: dict[str, int | None] = {}
-        for j, ident in enumerate(entry_idents[i]):
+        colliding: list[str] = []
+        for a, ident in enumerate(entry_idents[i]):
+            mid = memory_id(a)
+            entry = exposed[i][a]
             end = None
-            if span.step_last is not None:
-                js = carriers.get(ident)
-                if js:
-                    for k in js[bisect_right(js, i) :]:
-                        first = spans[k].step_first
-                        if first > span.step_last:
-                            end = first - 1
-                            break
-            windows[memory_id(j)] = end
-        if span.step_last is not None:
-            collisions = [j for j in starts.get(span.step_last, ()) if j > i]
-            corrected = False
-            if collisions:
-                for j_pos, ident in enumerate(entry_idents[i]):
-                    carriers_hit = [j for j in collisions if ident in entry_idents[j]]
-                    if not carriers_hit:
-                        continue
-                    # A finite end can still overlap the later carrier;
-                    # capping and advancing must always happen together.
-                    windows[memory_id(j_pos)] = span.step_last
-                    corrected = True
-                    for j in carriers_hit:
-                        for j_later, later_ident in enumerate(entry_idents[j]):
-                            if later_ident == ident:
-                                spans[j].memory_window_starts[memory_id(j_later)] = (
-                                    span.step_last + 1
-                                )
-            if corrected:
-                span.same_step_bound = span.step_last
-                if warnings is not None:
-                    warnings.append(
-                        f"{span.id}: same-step delivery collision with later "
-                        f"span(s) {', '.join(spans[j].id for j in collisions)} at "
-                        f"step {span.step_last}; this span's footprint windows "
-                        f"for the re-delivered memories are bounded at step "
-                        f"{span.step_last} and the colliding span's window for the "
-                        "same memory opens only after it, so one memory is never "
-                        "credited to two spans"
-                    )
+            js = carriers.get(ident, []) if span.step_last is not None else []
+            for k in js[bisect_right(js, i):]:
+                first = spans[k].step_first
+                if first < span.step_last:
+                    continue  # overlapping (declared-back/corrupt) steps: never terminal
+                hits = [b for b, other in enumerate(entry_idents[k]) if other == ident]
+                if first == span.step_last:
+                    # one consuming turn saw both: a copy adding no verified
+                    # text has no separate claim on the shared step
+                    for b in hits:
+                        before, after = _exposed_text(*entry), _exposed_text(*exposed[k][b])
+                        if after is None or (before is not None and after in before):
+                            spans[k].memory_window_starts[memory_id(b)] = first + 1
+                if not any(_reexposes(exposed[k][b], entry) for b in hits):
+                    steps = span.memory_variant_steps.setdefault(mid, [])
+                    if first not in steps:
+                        steps.append(first)
+                    continue
+                if first > span.step_last:
+                    end = first - 1
+                    break
+                end = first
+                span.same_step_bound = first
+                colliding.append(spans[k].id)
+                break
+            windows[mid] = end
+        if colliding and warnings is not None:
+            warnings.append(
+                f"{span.id}: same-step delivery collision with later span(s) "
+                f"{', '.join(dict.fromkeys(colliding))} at step {span.step_last}; this "
+                "span's footprint windows for the re-exposed memories end at that "
+                "step, which both deliveries' consumer saw; a copy adding no "
+                "verified text opens only after it, so indistinguishable credit is "
+                "never counted twice"
+            )
         span.memory_windows = windows
+
+
+def _stamp_followups(spans: list[InjectionSpan], episode: EpisodeInput) -> None:
+    """Link explicit searches to their proven tool-result hosts and actions.
+
+    Query equality alone proves neither agent selection nor its timing. The
+    tool must use the shown identifier as an argument and return the same
+    portable item; its recorded step, never delivery step minus one, anchors
+    the selection. Ambiguous hosts/identifiers remain for the judge to assess.
+    """
+    tools: dict[str, list[tuple[int, ToolExec]]] = {}
+    for step in episode.steps:
+        for tool in step.tools:
+            tools.setdefault(tool.tool_call_id, []).append((step.step, tool))
+    for span in spans:
+        if span.step_first is None:
+            continue
+        texts = [p.get("text") for p in span.placements if isinstance(p.get("text"), str)]
+        for a, m in enumerate(span.memories):
+            key = m.get("key")
+            if not isinstance(key, str) or not key:
+                continue
+            # A hidden kb-7 is not exposed by a visible kb-70, store/kb-7, or
+            # kb-7.1; sentence punctuation after the key ("see kb-7.") is.
+            shown_key = re.compile(rf"(?<![\w./-]){re.escape(key)}(?![\w/-]|\.\w)")
+            if not any(shown_key.search(t) for t in texts):
+                continue
+            mid = memory_id(a)
+            start = span.memory_window_starts.get(mid, span.step_first)
+            end = span.memory_windows.get(mid)
+            for delivery in episode.deliveries:
+                shown = [ref["exposure"].get("shown") for ref in delivery["memories"]
+                         if namespace_of(ref["audit"]) == namespace_of(m)
+                         and grouping_item_key(ref["audit"]) == grouping_item_key(m)]
+                if not shown:
+                    continue
+                searches = [s for s in delivery["searches"]
+                            if s.get("trigger") == "explicit" and s.get("query") == key]
+                for placement in delivery["placements"]:
+                    # The same delivery can have several hosts. A proof for an
+                    # unrelated slot cannot attribute this item's follow-up.
+                    if not any(isinstance(value, str) and value and exposure_state(
+                        value, placement.get("text"), placement_kind=placement.get("kind")
+                    )["state"] in ("full", "full_normalized") for value in shown):
+                        continue
+                    proof = placement["source_resolution"]
+                    source = proof.get("source") or {}
+                    call_id = source.get("tool_call_id")
+                    owners = tools.get(call_id, []) if isinstance(call_id, str) else []
+                    if proof.get("status") != "resolved" or len(owners) != 1:
+                        continue
+                    step, tool = owners[0]
+                    args = tool.args.values() if isinstance(tool.args, dict) else [tool.args]
+                    if (not any(isinstance(v, str) and v == key for v in args)
+                            or step < start or (end is not None and step > end)):
+                        continue
+                    for search in searches:
+                        hit = {"step": step, "delivery_step": delivery["step"],
+                               "tool_call_id": call_id, "operation_id": search["operation_id"]}
+                        hits = span.memory_followups.setdefault(mid, [])
+                        if hit not in hits:
+                            hits.append(hit)

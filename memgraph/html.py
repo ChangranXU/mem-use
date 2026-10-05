@@ -124,7 +124,8 @@ _TEMPLATE = r"""<!DOCTYPE html>
       <h4>▼ verdicts <span>— injudge outcome per injection span</span></h4>
       <div class="item"><svg width="14" height="14"><path d="M7,12 L2,2 L12,2 Z" fill="#2e9e5b"/></svg><span><b>positive</b> — a memory was used and improved later work (LLM judge assessment)</span></div>
       <div class="item"><svg width="14" height="14"><path d="M7,12 L2,2 L12,2 Z" fill="#d64545"/></svg><span><b>negative</b> — a memory was acted on without benefit (judge assessment; not proven harm)</span></div>
-      <div class="item"><svg width="14" height="14"><path d="M7,12 L2,2 L12,2 Z" fill="#98a2b3"/></svg><span><b>neutral</b> — no demonstrated footprint (includes referenced-but-unacted)</span></div>
+      <div class="item"><svg width="14" height="14"><path d="M7,12 L2,2 L12,2 Z" fill="#7a5af8"/></svg><span><b>unresolved</b> — a memory was acted on, but its effect could not be determined (uncertainty, not a null effect)</span></div>
+      <div class="item"><svg width="14" height="14"><path d="M7,12 L2,2 L12,2 Z" fill="#98a2b3"/></svg><span><b>neutral</b> — no influence established (includes referenced-but-unacted)</span></div>
       <div class="item"><svg width="14" height="14"><path d="M7,12 L2,2 L12,2 Z" fill="#e2a93b"/></svg><span><b>error</b> — judge failed (excluded from rates)</span></div>
       <div class="item"><svg width="14" height="14"><path d="M7,12 L2,2 L12,2 Z" fill="#3567d6"/></svg><span>blue = not judged (no verdicts merged)</span></div>
       <div class="note">click a recall node for the judge's analysis, cited evidence, and per-memory usage</div>
@@ -184,7 +185,7 @@ const idByKey=Object.create(null);
   for(const m of G.memories) if(n[m.key]===1) idByKey[m.key]=memId(m);
 }
 // injudge verdict colors (ops carry verdicts only when merged via --verdicts)
-const VD_COLOR={positive:"#2e9e5b",negative:"#d64545",neutral:"#98a2b3",error:"#e2a93b"};
+const VD_COLOR={positive:"#2e9e5b",negative:"#d64545",unresolved:"#7a5af8",neutral:"#98a2b3",error:"#e2a93b"};
 function shorten(s,n){ s=String(s||""); return s.length>n? s.slice(0,n-1)+"…" : s; }
 // "20260727-065319.391Z-cure-v2-9eb25cc9" → {main:"cure-v2 · #9eb25cc9", sub:"2026-07-27 06:53Z"}
 // run_id is stringified first: a hand-edited run.json can carry a non-string,
@@ -598,7 +599,7 @@ function selectMemory(id){
     <div class="kv">created: ${c.op?`${esc(c.op)} @ ${esc(c.traj)} step ${c.step}`:"— (origin not observed)"}</div>
     ${trailHtml}
     ${m.recalled_before_creation&&m.recalled_before_creation.length?`<div class="kv" style="color:var(--flag)">⚠ ${m.recalled_before_creation.length} recall(s) precede this creation — the store entry likely predates the loaded trajectories</div>`:""}
-    <div class="kv">used (${m.recalls.length}): ${collapseUses(m.recalls)||"—"}</div>
+    <div class="kv">recalled (${m.recalls.length}): ${collapseUses(m.recalls)||"—"}</div>
     ${m.updates&&m.updates.length?`<div class="kv">updates: ${m.updates.map(u=>`${esc(u.op)}@${u.step}${u.duplicate?" (duplicate)":""}`).join(", ")}</div>`:""}
     ${(m.deletions||[]).length?`<div class="kv">deleted by ${m.deletions.map(d=>`${esc(d.op)} @ step ${d.step}`).join(", ")}</div>`:""}
     <pre>${esc(m.value||"")}</pre>`;
@@ -796,13 +797,13 @@ function mount(keepScroll){
       const v=auto==="empty_delivery"?"empty":auto?"unassessable":(o.span_verdict||"unjudged");
       vc[v]=(vc[v]||0)+1;
     }
-    vdStats=` · verdicts +${vc.positive||0}/−${vc.negative||0}/○${vc.neutral||0}`
+    vdStats=` · verdicts +${vc.positive||0}/−${vc.negative||0}/~${vc.unresolved||0}/○${vc.neutral||0}`
       +(vc.unassessable?` ⊘${vc.unassessable}`:"")
       +(vc.empty?` ∅${vc.empty} empty`:"")
       +(vc.error?` !${vc.error}`:"")+(vc.unjudged?` ?${vc.unjudged}`:"");
   }
   document.getElementById("stats").textContent=
-    `${trajs.length} trajectories · ${nE} extractions · ${nR} recalls · ${G.memories.length} memories · ${nDeliv} deliveries along ${nDrawnEdges} create→use paths${nLifeEdges?` · ${nLifeEdges} lifecycle links`:""}${vdStats}`;
+    `${trajs.length} trajectories · ${nE} extractions · ${nR} recalls · ${G.memories.length} memories · ${nDeliv} deliveries along ${nDrawnEdges} create→recall paths${nLifeEdges?` · ${nLifeEdges} lifecycle links`:""}${vdStats}`;
 }
 canvas.addEventListener("scroll",()=>{
   const lab=document.getElementById("labels");

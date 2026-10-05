@@ -3,15 +3,18 @@
 The counting rules:
 
 - rates are over judged spans only: denominator = positive + negative +
-  neutral. `error` (judge failures), `unjudged` (--limit truncation), and
-  `unassessable` (rule-judged no-subsequent-turn spans) are counts, never
-  denominators; restated re-injections never appear in rates at all (they
-  roll up into their span).
+  neutral + unresolved (acted-on influence whose effect the judge could
+  not determine — an established footprint of unknown direction, kept apart
+  from neutral's "no established influence"). `error` (judge failures),
+  `unjudged` (--limit/--episode truncation), and `unassessable`
+  (rule-judged no-subsequent-turn spans) are counts, never denominators;
+  restated re-injections never appear in rates at all (they roll up into
+  their span).
 - auto-neutral spans (no subsequent turn) are UNASSESSABLE, not neutral:
   no downstream footprint is observable in the recording, which is
   observation missingness (a censored run, an unrecorded consumer), never
   a measured null effect — they stay out of every directional rate and of
-  the wasted-token share, and are reported apart with their delivery cost.
+  the benefit share, and are reported apart with their delivery cost.
 - confidence never weights counts; it is reported as per-class means,
   buckets, and a low-confidence list for triage — LLM-judged spans only:
   rule-judged auto-neutral spans carry no confidence (no judge ran), the
@@ -42,26 +45,31 @@ The counting rules:
   excluded: `deliveries` counts LLM-judged deliveries only.
 - delivery cost is deterministic: each span's full injection cost (all
   deliveries, including restated ones — they really cost tokens) is charged
-  to its verdict class; the neutral+negative total is budget spent on
-  injections that did not help. Unassessable (auto-neutral) spans charge
-  to their own class — the observation was missing, so their cost is
-  neither waste nor productive spend. The wasted-token share divides the
-  neutral+negative total
-  by the judged classes' tokens only — the same judged-only rule as rates —
-  and is a SPAN-LEVEL non-beneficial-delivery proxy: a neutral span's
-  referenced memories count as wasted, a positive span's ignored memories
-  count as productive, and a mixed bundle is charged wholly to its verdict,
-  so it never reads as per-memory truth.
+  to its verdict class. Unassessable (auto-neutral) spans charge to their
+  own class — the observation was missing, so their cost is neither
+  benefit nor its absence. The headline names what the judged tokens
+  measure, never "waste": tokens without demonstrated benefit (negative +
+  neutral + unresolved spans) over the judged classes' tokens — the same
+  judged-only rule as rates — with the unresolved part named separately,
+  because an undetermined effect is uncertainty, not an observed lack of
+  benefit. It is a SPAN-LEVEL proxy: a positive span's ignored memories
+  count as benefit-bearing and a mixed bundle is charged wholly to its
+  verdict, so it never reads as per-memory truth or net gain.
+- footprint windows of one memory can overlap when its deliveries showed
+  different text (a preview and a full read); each judge credits only its
+  own entry's text, and `rubric.shared_anchors` lists any action step two
+  spans both credited for one memory, so a shared action is never silently
+  counted twice.
 """
 
 from __future__ import annotations
 
-from injudge.judge import _ACCURACY, RUBRIC_SIGNALS
+from injudge.judge import _ACCURACY, _ACTED, RUBRIC_SIGNALS
 from injudge.model import stamped_entry_id
 from injudge.steps import _mixed_sum, _token_share
-from memgraph.annotations import item_ident
+from memgraph.annotations import is_int, item_ident
 
-_VERDICTS = ("positive", "negative", "neutral")
+_VERDICTS = ("positive", "negative", "neutral", "unresolved")
 _USAGES = ("used", "noted", "ignored", "misused", "unclear")
 _BUCKETS = ("[0,0.5)", "[0.5,0.8)", "[0.8,1.0]")
 # the verdict classes every count/cost rollup tallies (error, unjudged, and
@@ -79,21 +87,19 @@ def counted_verdict(op: dict) -> str:
     verdict = op.get("verdict")
     return verdict if verdict in _COUNTED else "error"
 
-# The wasted-token share is a SPAN-LEVEL non-beneficial-delivery proxy, and
-# it must never read as measured harm — the caveat rides the headline
-# whenever the share is reported at all (a few negative spans do not make
-# the proxy per-memory truth, and its coarse bundle charging is just as
-# present then).
-WASTE_SHARE_CAVEAT = (
-    "wasted_token_share is an estimated span-level non-beneficial-delivery "
-    "proxy: a neutral span means no attributable benefit was observed, not a "
-    "measured absence of effect; a neutral span's referenced memories count "
-    "as wasted, a positive span's "
-    "ignored memories count as productive, and a mixed bundle is charged "
-    "wholly to its verdict — a high share reads as 'most injected budget "
-    "not shown beneficial', never as measured harm; and the verdict rule is "
-    "asymmetric (ignored garbage judges neutral; only acted-on influence "
-    "with no_effect or harmed judges negative)"
+# The share without demonstrated benefit is a SPAN-LEVEL proxy, and it must
+# never read as measured waste, harm, or net gain — the caveat rides the
+# headline whenever the share is reported at all (its coarse bundle charging
+# is present at any value).
+BENEFIT_SHARE_CAVEAT = (
+    "share_without_demonstrated_benefit is an estimated span-level proxy, "
+    "not waste, harm, or net gain: it counts judged-class injected tokens in "
+    "spans with no demonstrated benefit — negative (acted on without benefit), "
+    "neutral (no influence established, not a measured absence of effect), "
+    "and unresolved (influence established, effect undetermined; named "
+    "separately as unresolved_tokens); a positive span's ignored memories "
+    "count as benefit-bearing and a mixed bundle is charged wholly to its "
+    "verdict"
 )
 
 
@@ -167,6 +173,8 @@ def _rubric_rollup(operations: list[dict]) -> dict:
     counts: dict[str, dict[str, int]] = {s: {} for s in RUBRIC_SIGNALS}
     contradicted: dict[tuple[str | None, str], list[str]] = {}
     irrelevant: dict[tuple[str | None, str], list[str]] = {}
+    # identity -> (trajectory, anchor step) -> spans crediting acted-on influence there
+    credited: dict[tuple[str | None, str], dict[tuple[str, int], list[str]]] = {}
     key_of: dict[tuple[str | None, str], str] = {}  # identity -> display key
     reasons: dict[str, int] = {}
     deliveries = 0
@@ -198,6 +206,13 @@ def _rubric_rollup(operations: list[dict]) -> dict:
                 hits = irrelevant.setdefault(ident, [])
                 if op["operation_id"] not in hits:
                     hits.append(op["operation_id"])
+            if (signals.get("influence") or {}).get("value") in _ACTED:
+                anchors = signals.get("anchors")
+                for step in anchors if isinstance(anchors, list) else []:
+                    if is_int(step):
+                        hits = credited.setdefault(ident, {}).setdefault((op["traj"], step), [])
+                        if op["operation_id"] not in hits:
+                            hits.append(op["operation_id"])
         for entry in (op.get("memory_usage") or {}).values():
             r = entry.get("reason")
             if r:
@@ -244,6 +259,18 @@ def _rubric_rollup(operations: list[dict]) -> dict:
             for (ns, item), spans in sorted(
                 irrelevant.items(), key=lambda entry: (entry[0][0] or "", entry[0][1])
             )
+        ],
+        # one action credited to the same memory by several spans (overlapping
+        # windows of differently-shown deliveries): each span's judgment stands,
+        # but the shared action is one benefit/cost, never two
+        "shared_anchors": [
+            {"namespace": ns, "item_id": item, "key": key_of[(ns, item)],
+             "anchors": [{"traj": traj, "step": step, "spans": spans}
+                         for (traj, step), spans in sorted(steps.items()) if len(spans) > 1]}
+            for (ns, item), steps in sorted(
+                credited.items(), key=lambda entry: (entry[0][0] or "", entry[0][1])
+            )
+            if any(len(spans) > 1 for spans in steps.values())
         ],
     }
 
@@ -382,21 +409,23 @@ def aggregate(operations: list[dict], n_injections: int, n_trajectories: int | N
             "pe_pairing_correction_rate": round(pe_corrected / llm_judged, 4),
         }
     # headline: the pre-registered numbers for cross-system claims; the
-    # wasted-token share follows the same judged-only rule as the rates —
+    # benefit share follows the same judged-only rule as the rates —
     # error/unjudged/unassessable cost is a count, never a denominator. The
-    # share's numerator and denominator ride along named: a bare percentage
-    # next to the all-class total has read as per-memory wasted-token truth,
-    # which a span-level bundle charge is not
+    # share's numerator and denominator ride along named, and its unresolved
+    # part is named apart: an undetermined effect is uncertainty, not an
+    # observed lack of benefit
     byv = out["cost"]["approx_tokens_by_verdict"]
     judged_tok = sum(byv[v] for v in _VERDICTS)
-    wasted = byv["negative"] + byv["neutral"]
+    no_benefit = byv["negative"] + byv["neutral"] + byv["unresolved"]
     out["headline"] = {
         "judged_spans": denom,
         "positive_span_rate": out["rates"]["positive"],
         "negative_span_rate": out["rates"]["negative"],
-        "wasted_tokens": wasted,
+        "unresolved_span_rate": out["rates"]["unresolved"],
+        "tokens_without_demonstrated_benefit": no_benefit,
+        "unresolved_tokens": byv["unresolved"],
         "judged_tokens": judged_tok,
-        "wasted_token_share": _token_share(wasted, judged_tok),
+        "share_without_demonstrated_benefit": _token_share(no_benefit, judged_tok),
     }
     if counts["unassessable"]:
         # the assessable fraction is a headline property: these spans'
@@ -410,11 +439,11 @@ def aggregate(operations: list[dict], n_injections: int, n_trajectories: int | N
         # the share's missing class, visible beside it: error/unjudged spans
         # really spent these tokens and no rate counts them
         out["headline"]["error_unjudged_tokens"] = other_tok
-    if out["headline"]["wasted_token_share"] is not None:
+    if out["headline"]["share_without_demonstrated_benefit"] is not None:
         # the proxy's limitations do not vanish when the share is low or a
         # few negative spans exist — the caveat rides every reported share
-        # (see WASTE_SHARE_CAVEAT), never only a high one
-        out["headline"]["caveat"] = WASTE_SHARE_CAVEAT
+        # (see BENEFIT_SHARE_CAVEAT), never only a high one
+        out["headline"]["caveat"] = BENEFIT_SHARE_CAVEAT
     return out
 
 

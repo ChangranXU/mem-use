@@ -50,7 +50,8 @@ then materializes every judged span's evidence — the target document plus its
 parent episode's task, context, deliveries, and original steps — into an
 isolated folder a pi agent explores with read-only tools. The agent scores
 each delivered memory on five signals; Python derives the span verdict: any
-misused memory → **negative**, else any used → **positive**, else **neutral**.
+misused memory → **negative**, else any used → **positive**, else any acted on
+with undetermined effect → **unresolved**, else **neutral**.
 A span with no attributed agent step is counted **unassessable** without a
 judge call.
 

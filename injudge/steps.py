@@ -381,7 +381,7 @@ def _token_share(part: int | float, whole: int | float) -> float | None:
     (1e16 / 1e-308 is inf, never an exception) — either spelling would write
     the RFC-8259-invalid `Infinity` into the artifacts. The exact totals stay
     recorded; the derived share degrades, never raises — the one rule the
-    headline's wasted-token share and both injected-token shares divide by."""
+    headline's share without demonstrated benefit and both injected-token shares divide by."""
     if not whole:
         return None
     try:

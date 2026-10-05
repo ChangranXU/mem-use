@@ -2667,7 +2667,9 @@ def test_local_memory_treatment_split_bounds_windows(tmp_path, digest, same_step
     assert first.fingerprint == second.fingerprint
     assert first.memory_windows == {"m1": 1}
     assert second.memory_windows == {"m1": None}
-    assert second.memory_window_starts == ({"m1": 2} if same_step else {})
+    # the full re-exposure shows text the clip lacked: it stays eligible at
+    # its own consuming step even when both reached one turn
+    assert second.memory_window_starts == {}
     assert second.new_keys == second.removed_keys == []
     assert second.previous_keys == second.previous_partial_keys == ["note-1"]
 

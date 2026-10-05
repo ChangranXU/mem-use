@@ -73,6 +73,38 @@ test("search_evidence matches across files and honors scoping", async () => {
 	fs.rmSync(root, { recursive: true, force: true });
 });
 
+test("read coverage excludes lines removed by the character cap", async () => {
+	const root = makeRoot();
+	try {
+		fs.writeFileSync(path.join(root, "steps", "step_000001.md"), "x".repeat(200_100) + "\nUNSEEN ACTION\n");
+		const read = createEvidenceTools(root).find((t) => t.name === "read_evidence")!;
+		const result = await read.execute("t", { path: "steps/step_000001.md" });
+		assert.deepEqual(result.details, { path: "steps/step_000001.md", lines_read: 1,
+			line_start: 1, line_end: 1, truncated: true });
+		assert.doesNotMatch(result.content[0].type === "text" ? result.content[0].text : "", /UNSEEN ACTION/);
+		const tail = await read.execute("t2", { path: "steps/step_000001.md", offset: 2, limit: 1 });
+		assert.deepEqual(tail.details, { path: "steps/step_000001.md", lines_read: 1,
+			line_start: 2, line_end: 2, truncated: false });
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("a truncated line number is not returned evidence", async () => {
+	const root = makeRoot();
+	try {
+		const read = createEvidenceTools(root).find((t) => t.name === "read_evidence")!;
+		for (const first of ["x".repeat(199_995), " ".repeat(199_995)]) {
+			fs.writeFileSync(path.join(root, "steps", "step_000001.md"), first + "\nUNSEEN ACTION");
+			const result = await read.execute("t", { path: "steps/step_000001.md" });
+			assert.deepEqual(result.details, { path: "steps/step_000001.md",
+				lines_read: first.trim() ? 1 : 0, line_start: 1, line_end: 1, truncated: true });
+		}
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("search_evidence shows the match, not just the start of a long reasoning line", async () => {
 	const root = makeRoot();
 	// The recorded KMeans step 4 mentions random_state after column 300.

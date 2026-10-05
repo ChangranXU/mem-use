@@ -676,6 +676,10 @@ def main(argv: list[str] | None = None) -> int:
         help="SWE-bench-style harness report joined by episode benchmark "
         "identity; repeated executions or treatment arms are rejected",
     )
+    ap.add_argument("--episode", action="append", default=None, metavar="ID",
+                    help="judge only the spans of episodes whose recorded episode id, "
+                    "benchmark identity, or execution id equals ID (repeatable); every "
+                    "other span is reported unjudged, outside every rate")
     ap.add_argument("--limit", type=int, default=None,
                     help="judge at most N episode-scoped spans with the agent (rest: unjudged); "
                     "also caps --dry-run to printing the first N spans' evidence "
@@ -712,6 +716,8 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit("error: --prepare-only cannot be combined with --dry-run")
         if args.html:
             raise SystemExit("error: --prepare-only cannot be combined with --html")
+        if args.episode:
+            raise SystemExit("error: --prepare-only cannot be combined with --episode")
         paid_options = {
             "--judge-model": args.judge_model,
             "--env": args.env,
@@ -761,6 +767,16 @@ def main(argv: list[str] | None = None) -> int:
                               for note in episode.diagnostics)
     all_episodes = [episode for trajectory in trajs for episode in episodes_by_traj[trajectory.id]]
     _prepare_attachment_scope(all_episodes, trajs, args, validation)
+    selected: set[str | None] | None = None
+    if args.episode:
+        # a selector naming nothing is misuse, caught before any paid call
+        selected = set()
+        for wanted in args.episode:
+            hits = {episode.execution_id for episode in all_episodes if wanted in (
+                episode.episode_id, episode.benchmark_identity, episode.execution_id)}
+            if not hits:
+                raise SystemExit(f"error: --episode {wanted!r} matches no prepared episode")
+            selected |= hits
 
     # run isolation: every artifact of this run lands in its own folder
     # under the output container, so another run — earlier, later, or
@@ -838,7 +854,8 @@ def main(argv: list[str] | None = None) -> int:
             scoped = group_spans(episode_ops, t.id, span_warnings,
                                  episode_execution_id=episode.execution_id,
                                  id_offset=len(spans),
-                                 last_step=episode.steps[-1].step if episode.steps else None)
+                                 last_step=episode.steps[-1].step if episode.steps else None,
+                                 episode=episode)
             spans.extend(scoped)
             episode_by_span.update({span.id: episode for span in scoped})
             episode_rows.append({
@@ -977,6 +994,10 @@ def main(argv: list[str] | None = None) -> int:
         for i, span in enumerate(spans):
             episode = episode_by_span.get(span.id)
             problem = None
+            if selected is not None and (episode is None or episode.execution_id not in selected):
+                verdicts[i] = _unjudged("outside --episode")
+                progress.advance_span()
+                continue
             if episode is None or episode.boundary_provenance.get("status") != "prepared":
                 problem = "ambiguous or missing episode boundary/assignment"
             elif span.memories and span.step_first is not None and not episode.task:
