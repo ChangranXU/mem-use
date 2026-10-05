@@ -294,6 +294,17 @@ under `<output>/<run-stamp>/evidence/` (`injudge/evidence.py`: `span.md`,
 agent in `agent/runner.ts` receives `span.md` and compact file navigation in
 its opening; detailed episode evidence is read through tools scoped
 to that folder (absolute paths, `..`, and out-of-root symlinks refused).
+Request-pointer placement proofs are checked against the bound call's recorded
+request and JSON-value digest, then matched uniquely to the consumer's visible
+host occurrence; wire indexes never stand in for recorder message slots.
+Unresolved placement ownership or gaps in delivery consumers' context block
+assessable spans before a paid call (and make dry-run exit 2). A valid history
+rewrite clears that lane's active gaps when every retained slot `0..kept-1`
+is known (including `kept=1` preserving a known system prompt), while retaining
+prior audit notes. Incomplete prefixes stay uncertain. Informational preparation
+notes alone do not block judging; empty/unobserved spans retain mechanical skips. `not_in_request`,
+`adapter_defined`, and missing proofs remain unverified for input-grounded
+judging; recorder validity does not establish exposure ownership.
 Two budgets bound the conversation, both ending in a FORCED final answer
 (the harness pattern), never a mid-run failure: MAX_STEPS caps LLM calls,
 and the CONTEXT_WINDOW watermark (minus MAX_OUTPUT_TOKENS and the forced
@@ -457,8 +468,12 @@ computed at parse time against the final lane set. Do not prune a field
 from one consumer only.
 
 **injudge** writes `injudge.report/v13` (`{tool, generated_at, trajectories,
-operations, injections, aggregates, validation}`), rewritten after every
-trajectory so a crash keeps completed work. All of a run's artifacts land
+operations, injections, aggregates, validation}`), checkpointed after every
+completed span (including parallel completions), with pending spans explicitly
+`unjudged`, so interruption within a multi-episode trajectory keeps completed
+work. Interruptions cancel queued parallel work; in-flight jobs may finish.
+Validation notes retain span order even when completion order differs.
+All of a run's artifacts land
 in that run's own `<output>/<run-stamp>/` folder — no run overwrites or
 mixes another run's artifacts, and the folder name traces every artifact
 to its run.

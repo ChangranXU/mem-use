@@ -38,6 +38,7 @@ from urllib.request import Request
 
 from util import atomic_write, print_safe
 from injudge.evidence import build_span_evidence, span_dir_name, write_evidence
+from injudge.episodes import evidence_problem
 from injudge.judge import (
     GoldInput,
     _assemble_verdict,
@@ -490,6 +491,12 @@ def judge_span(
     (setup fault, endpoint auth) is that span's error verdict; the run
     continues.
     """
+    problem = evidence_problem(episode)
+    if problem is not None:
+        verdict = blank_verdict()
+        verdict["error"] = f"unsafe episode evidence: {problem}"
+        warnings.append(f"{span.id}: {verdict['error']}")
+        return verdict
     steps = episode.steps
     gold = gold or GoldInput()
     system = _scoring_system(gold)

@@ -103,12 +103,30 @@ a later reuse of the same message slot. A placement can occupy part of a
 message: a proven placement is projected out of its host occurrence,
 whatever its slot name (the recorder's `input_prefix` and `system_suffix`
 slots included), the surrounding task or system text staying with the
-message while only the memory portion links to the delivery. Only
-`canonical_message` proofs can be re-verified offline; a
-`request_json_pointer` proof stays explicitly unknown. Unresolved proofs
-and missing task context require review. History
-rewrites use recorded message indexes; episode resets and proven wrapper
-removals retain separate source events.
+message while only the memory portion links to the delivery. Both
+`canonical_message` and `request_json_pointer` proofs can be verified offline.
+Request pointers require the bound call's `calls/<call_id>/request.json`, a
+matching JSON-value digest, and a unique visible host message with matching
+text, role, and tool-call identity when recorded. Supported request fields
+include message/input content, tool output, and Anthropic `/system` or
+`/system/N/text` (using the same `message_text` projection as recorded system
+block lists, with newline separators). Wire indexes are
+never treated as recorder message slots. Missing or corrupt requests, ambiguous
+hosts, and out-of-root symlinks leave the proof unresolved. Unsafe placement
+ownership and gaps in delivery consumers' context block paid judging and make
+dry-run exit 2; gaps in unrelated views remain review notes. A valid
+`history_rewritten(kept=k)` clears that lane's active gaps when all retained
+slots `0..k-1` are known, including a `kept=1` reset retaining a known system
+prompt. Earlier views and audit diagnostics remain intact. Invalid rewrites or
+missing retained slots cannot establish recovery. Episode resets and proven
+wrapper removals retain separate source events.
+
+Recorder-valid `not_in_request` and `adapter_defined` declarations do not prove
+how a placement reached the agent's captured input. They and missing binding
+proofs remain unsupported for input-grounded judging, rather than being treated
+as resolved or harmless by default. Offline preparation still preserves their
+audit records for review. Use `--prepare-only` before judging a new adapter or
+API format; recorder validity alone does not establish evaluator support.
 
 ## Corrupt Input
 

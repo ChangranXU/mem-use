@@ -14,6 +14,7 @@ import copy
 import hashlib
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from injudge.model import AgentStep, ContextView, EpisodeInput, PreparationResult, SourceRef
@@ -362,16 +363,26 @@ def _replay_context(
         if typ == "history_rewritten":
             kept = _as_int(event.get("kept"))
             if kept is None or kept < 0:
-                gaps.setdefault(lane, []).append(f"event {index}: invalid history prefix; visibility unknown")
+                note = f"event {index}: invalid history prefix; visibility unknown"
+                gaps.setdefault(lane, []).append(note)
+                diagnostics.append(note)
                 prior.clear()
             else:
                 history[lane] = {slot: item for slot, item in prior.items() if slot < kept}
+                if len(history[lane]) == kept:
+                    # Slots are distinct nonnegative integers below kept, so
+                    # this proves the entire prefix without iterating a corrupt
+                    # huge index. A retained system prompt can restore visibility
+                    # too. Past views and audit diagnostics retain their gaps.
+                    gaps.pop(lane, None)
             continue
         if typ == "message_retracted":
             msg = _as_int(event.get("msg"))
             target = prior.get(msg) if msg is not None and msg >= 0 else None
             if target is None:
-                gaps.setdefault(lane, []).append(f"event {index}: retraction has no visible message target")
+                note = f"event {index}: retraction has no visible message target"
+                gaps.setdefault(lane, []).append(note)
+                diagnostics.append(note)
             else:
                 del prior[msg]
             continue
@@ -392,8 +403,6 @@ def _replay_context(
                 messages=[{"occurrence_id": item["occurrence_id"]} for item in visible],
                 gaps=list(gaps.get(lane, [])),
             )
-    for lane_gaps in gaps.values():
-        diagnostics.extend(lane_gaps)
     return views, occurrences, diagnostics
 
 
@@ -401,23 +410,108 @@ def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
 
 
+def _request_for_delivery(event: dict[str, Any], directory: Path) -> object:
+    """Only the bound call's local request can prove a request-pointer value."""
+    ref = event.get("terminal_call_ref")
+    call_id = ref.get("call_id") if isinstance(ref, dict) else None
+    if not isinstance(call_id, str) or not call_id or Path(call_id).name != call_id or call_id in (".", ".."):
+        return None
+    try:
+        root = directory.resolve()
+        path = (root / "calls" / call_id / "request.json").resolve()
+        if not path.is_relative_to(root):
+            return None
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError, RuntimeError):
+        return None
+
+
+def _pointer_value(value: object, parts: list[str]) -> object:
+    """Invalid RFC 6901 paths remain unresolved, including oversized indices."""
+    for part in parts:
+        if isinstance(value, dict):
+            value = value.get(part)
+        elif isinstance(value, list):
+            if (not part.isascii() or not part.isdecimal()
+                    or len(part) > len(str(len(value)))
+                    or (len(part) > 1 and part.startswith("0"))):
+                return None
+            index = int(part)
+            value = value[index] if index < len(value) else None
+        else:
+            return None
+    return value
+
+
+def _request_message(request: object, proof: dict[str, Any]) -> tuple[str, str, str | None] | None:
+    """Verify the JSON-value digest, then identify its containing input message.
+
+    Wire indices are not recorder message slots (Responses includes reasoning
+    items). Match the verified host's text/role and, for tool results, call id
+    against the bound consumer's visible occurrences instead.
+    """
+    pointer = proof.get("pointer")
+    if not isinstance(pointer, str) or not pointer.startswith("/"):
+        return None
+    encoded = pointer[1:].split("/")
+    if any("~" in part.replace("~0", "").replace("~1", "") for part in encoded):
+        return None
+    parts = [part.replace("~1", "/").replace("~0", "~") for part in encoded]
+    value = _pointer_value(request, parts)
+    if not isinstance(value, str) or _sha256(json.dumps(value, ensure_ascii=False, separators=(",", ":"))) != proof.get("value_sha256"):
+        return None
+    if parts == ["input"]:
+        return value, "user", None
+    if parts == ["system"] or (len(parts) == 3 and parts[0] == "system" and parts[2] == "text"):
+        system = _pointer_value(request, ["system"])
+        if isinstance(system, str):
+            return system, "system", None
+        if isinstance(system, list) and all(
+            isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str)
+            for block in system
+        ):
+            # Use the same text projection as the recorded block-list message.
+            return message_text(system), "system", None
+        return None
+    if len(parts) < 3 or parts[0] not in ("input", "messages") or parts[2] not in ("content", "output"):
+        return None
+    if len(parts) != 3 and not (len(parts) == 5 and parts[2] == "content" and parts[4] == "text"):
+        return None
+    host = _pointer_value(request, parts[:2])
+    if not isinstance(host, dict):
+        return None
+    if parts[2] == "output" and host.get("type") == "function_call_output":
+        text, role, tool_id = host.get("output"), "tool", _as_str(host.get("call_id"))
+    elif parts[2] == "content":
+        text, role, tool_id = message_text(host.get("content")), _as_str(host.get("role")), _as_str(host.get("tool_call_id"))
+    else:
+        return None
+    if not isinstance(text, str) or not value or value not in text or role is None:
+        return None
+    return text, role, tool_id
+
+
 def _proof_sources(
     event: dict[str, Any],
     occurrences: dict[int, dict[str, Any]],
     view: ContextView | None,
+    directory: Path,
 ) -> list[dict[str, Any]]:
     """A proof can name only an occurrence in its bound consumer's input.
 
     The same message slot may be reused in later episodes. Searching the
     whole recording by digest or proximity would turn that later text into
-    earlier evidence. Request-pointer proofs cannot be verified from the
-    folded message stream and stay explicitly unresolved.
+    earlier evidence. Request pointers require the exact recorded request,
+    not a guessed correspondence between wire indices and message slots.
     """
     binding = event.get("binding")
     proofs = binding.get("proofs") if isinstance(binding, dict) else None
     if not isinstance(proofs, list):
         return []
     visible = {item["occurrence_id"] for item in view.messages} if view else set()
+    request = (_request_for_delivery(event, directory)
+               if any(isinstance(proof, dict) and proof.get("kind") == "request_json_pointer" for proof in proofs)
+               else None)
     out: list[dict[str, Any]] = []
     for proof in proofs:
         if not isinstance(proof, dict):
@@ -427,14 +521,21 @@ def _proof_sources(
         digest = _as_str(proof.get("content_sha256"))
         candidates = [
             item for item in occurrences.values()
-            if proof.get("kind") == "canonical_message"
-            and msg is not None and msg >= 0 and item.get("msg") == msg
-            and item["occurrence_id"] in visible
+            if item["occurrence_id"] in visible
             and item.get("lane") == event.get("proxy_source")
         ]
-        matched = [item for item in candidates if digest is not None
-                   and isinstance(item.get("content"), str)
-                   and _sha256(item["content"]) == digest]
+        if proof.get("kind") == "canonical_message":
+            candidates = [item for item in candidates if msg is not None and msg >= 0 and item.get("msg") == msg]
+            matched = [item for item in candidates if digest is not None
+                       and isinstance(item.get("content"), str) and _sha256(item["content"]) == digest]
+        elif proof.get("kind") == "request_json_pointer":
+            host = _request_message(request, proof)
+            candidates = [item for item in candidates if host is not None
+                          and item.get("content") == host[0] and item.get("role") == host[1]
+                          and (host[2] is None or item["source"].get("tool_call_id") == host[2])]
+            matched = candidates
+        else:
+            candidates, matched = [], []
         record = {"slot": _as_str(proof.get("slot")), "kind": _as_str(proof.get("kind"))}
         if len(matched) == 1:
             item = matched[0]
@@ -480,6 +581,28 @@ def project_occurrence(item: dict[str, Any], deliveries: list[dict[str, Any]]) -
         projected["memory_delivery_refs"] = list(dict.fromkeys(refs))
         projected["source_ownership"] = "memory_delivery_unknown" if unresolved else "memory_delivery"
     return projected
+
+
+def evidence_problem(episode: EpisodeInput) -> str | None:
+    """Block unsafe ownership/context, not every preparation diagnostic.
+
+    Unobserved consumers are mechanical skips. They need not prevent judging
+    a sibling with established input, unlike ambiguity in visible evidence.
+    """
+    consumer_turns = {delivery["consumer"]["turn"] for delivery in episode.deliveries
+                      if delivery["consumer"]["status"] == "observed"}
+    if any(view.gaps for view in episode.context if view.turn in consumer_turns):
+        return "consumer context has unresolved visibility gaps"
+    for delivery in episode.deliveries:
+        if delivery["consumer"]["status"] == "observed" and any(
+            placement["source_resolution"].get("status") != "resolved"
+            for placement in delivery["placements"]
+        ):
+            return "memory placement ownership is unresolved in the consumer input"
+    if any(project_occurrence(item, episode.deliveries).get("source_ownership") == "memory_delivery_unknown"
+           for item in episode.message_occurrences):
+        return "memory placement cannot be separated from its host message"
+    return None
 
 
 def _safe_exposure(memory: dict[str, Any], exposure: dict[str, Any] | None) -> dict[str, Any]:
@@ -537,6 +660,7 @@ def _delivery_projection(
     step_source_by_turn: dict[int, SourceRef],
     view: ContextView | None,
     index: AnnotationIndex,
+    directory: Path,
 ) -> dict[str, Any]:
     payload = _payload(event)
     ref = event.get("terminal_call_ref")
@@ -557,7 +681,7 @@ def _delivery_projection(
         projections.append({"entry_id": audit["entry_id"], "audit": audit, "exposure": safe})
     placements = []
     raw_placements = payload.get("placements") if isinstance(payload.get("placements"), list) else []
-    proof_sources = _proof_sources(event, occurrences, view)
+    proof_sources = _proof_sources(event, occurrences, view, directory)
     proof_by_slot = {
         proof.get("slot"): proof
         for proof in proof_sources
@@ -796,6 +920,7 @@ def prepare_episodes(
             views.get(turn_index.get(call_map.get(call_id, (None, None))[0], -1))
             if isinstance(call_id, str) else None,
             annotation_index,
+            Path(trajectory.path),
         )
         episode = episode_data[boundary.ordinal]
         episode.deliveries.append(projection)
@@ -933,6 +1058,9 @@ def prepare_episodes(
             episode.diagnostics.append("no main-lane user task message was recorded")
         if not episode.steps and episode.deliveries:
             episode.diagnostics.append("deliveries exist but no completed main-lane consumer step was observed")
+        problem = evidence_problem(episode)
+        if problem is not None:
+            episode.diagnostics.append(problem)
         if episode.diagnostics and episode.preparation_status == "prepared":
             episode.preparation_status = "needs_review"
 

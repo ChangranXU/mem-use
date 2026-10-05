@@ -98,9 +98,23 @@ Placement proof 只在绑定 consumer 的输入中解析，不会匹配后续复
 的内容。Placement 可以只占据消息的一部分：已证实的 placement 会从其宿主出现
 中投影出来，与槽位名无关（录制器的 `input_prefix` 与 `system_suffix` 槽位也
 包括在内）；准备阶段保留其余任务或系统文本，仅将记忆部分关联到 delivery。
-只有 `canonical_message` proof 可以离线复核，`request_json_pointer` proof
-显式保持未知。无法解析的 proof 和缺失的任务上下文会标记为待复核。历史重写
-按实际消息索引处理，episode reset 与已证实的 wrapper 移除分别保留来源事件。
+`canonical_message` 和 `request_json_pointer` proof 均可离线复核。请求指针需要
+绑定调用的 `calls/<call_id>/request.json`、匹配的 JSON 值摘要，以及文本、角色和
+已录制工具调用标识相符的唯一可见宿主消息。支持消息/input 内容、工具输出，以及
+Anthropic 的 `/system` 和 `/system/N/text`（使用与已录制系统消息块列表相同的
+`message_text` 投影，以换行分隔）；不会把请求
+数组下标当作录制器消息槽位。
+请求缺失或损坏、宿主有歧义、符号链接越出录制目录时，proof 仍保持未解析。
+不安全的 placement 归属和 delivery consumer 的上下文缺口会阻止付费评审，并使
+dry-run 返回 2；其他视图中的缺口仍是复核提示。有效的 `history_rewritten(kept=k)`
+在保留槽位 `0..k-1` 全部已知时清除该 lane 后续视图的活动缺口，包括 `kept=1`
+保留已知系统提示的重置，但旧视图与审计诊断保持不变。无效重写或保留槽位缺失
+不会被视为已恢复。Episode reset 与已证实的 wrapper 移除分别保留来源事件。
+
+录制器允许的 `not_in_request` 和 `adapter_defined` 声明并不能证明 placement 如何
+进入被捕获的智能体输入。它们以及缺少绑定 proof 的情况仍不支持基于输入证据的评审，
+不会默认当作已解析或无害。离线准备仍保留审计记录供复核。对新 adapter 或 API 格式
+进行付费评审前，先运行 `--prepare-only`；录制格式有效不等于评估器支持。
 
 ## 损坏输入
 

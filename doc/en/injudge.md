@@ -28,7 +28,7 @@ Each run writes its own `<run-stamp>/` folder (`YYYYMMDD-HHMMSS-<hex>`) under `-
 
 | File | Contents |
 |---|---|
-| `injudge-report.json` | The runtime judging record (`injudge.report/v13`), rewritten after every trajectory so a crash keeps completed work |
+| `injudge-report.json` | The runtime judging record (`injudge.report/v13`), written before paid work with pending spans marked `unjudged`, then checkpointed after each completed span, including parallel completions |
 | `summary.json` | The final statistics (`injudge.summary/v11`): counts, rates, per-memory usage |
 | `memgraph-verdicts.html` | Only with `--html`: memgraph with recall nodes colored by verdict |
 | `evidence/` | One folder per span sent to the judge agent (error verdicts from a failed run included): target `span.md` plus only its parent's prepared episode files and optional attachments |
@@ -39,6 +39,8 @@ Delivery cost and delivery-policy metrics are computed deterministically from th
 The process exits `2` if any span ended in `error` or any validation note carries level `error`; `--dry-run` exits `2` on error-level notes alone.
 
 A span is rejected before judging when its parent episode's boundary or assignment is not `prepared`, or when a span with deliveries and an attributed step has no recorded task in its parent episode: it takes an `error` verdict with no agent run — no evidence folder, no transcript, and no `input` record.
+
+Assessable spans are also rejected when the episode has unresolved placement ownership, inseparable placement/host text, or visibility gaps in a delivery consumer's context. Dry-run uses the same guard and exits 2. Informational preparation diagnostics alone do not block judging; empty and unobserved spans still use their mechanical skip paths. `summary.json` is written only when the run finishes; an interrupted run's report retains completed results and explicit pending spans. Interruption cancels queued parallel jobs; already-running jobs may finish. Checkpoints persist completion immediately while validation notes retain source span order.
 
 ## Offline Preparation
 

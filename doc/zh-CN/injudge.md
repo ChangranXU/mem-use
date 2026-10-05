@@ -28,7 +28,7 @@ uv run -m injudge <paths> --dry-run --limit 3
 
 | 文件 | 内容 |
 |---|---|
-| `injudge-report.json` | 运行时评审记录（`injudge.report/v13`），每条轨迹后重写，崩溃也保留已完成部分 |
+| `injudge-report.json` | 运行时评审记录（`injudge.report/v13`），付费调用前写入并将待评区间标为 `unjudged`；每个区间完成后保存，包括并行完成的结果 |
 | `summary.json` | 最终统计（`injudge.summary/v11`）：计数、比率、逐记忆使用 |
 | `memgraph-verdicts.html` | 仅在 `--html` 时产出：召回节点按判定着色的 memgraph |
 | `evidence/` | 每个送入评审智能体的区间一个文件夹（含运行失败产生的 error 判定）：只包含目标 `span.md`，加上其父 episode 已准备的文件与可选附件 |
@@ -39,6 +39,8 @@ uv run -m injudge <paths> --dry-run --limit 3
 任一区间以 `error` 结束、或任一 validation 说明的级别为 `error` 时，进程以退出码 `2` 退出；`--dry-run` 仅凭 error 级说明即以 `2` 退出。
 
 区间在评审前被拒绝的情形：其父 episode 的边界或归属不是 `prepared`，或一个带投递且已归属步骤的区间在其父 episode 中没有已录制的任务。此时该区间得到 `error` 判定，且没有智能体运行——没有证据文件夹、没有轨迹记录、也没有 `input` 记录。
+
+可评区间还会因 episode 中未解析的 placement 归属、无法分离的 placement 与宿主文本，或 delivery consumer 上下文的可见性缺口而被拒绝。Dry-run 使用同一检查并返回 2；单纯的信息性诊断不会阻止评审，空区间和 consumer 不可观察的区间仍按规则跳过。`summary.json` 仅在运行完成后写入；中断时的 report 保留已完成结果和显式待评区间。中断会取消尚在队列中的并行任务，已经运行的任务可能继续完成。完成结果立即保存，validation 诊断仍按源区间顺序排列。
 
 ## 离线准备
 

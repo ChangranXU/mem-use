@@ -399,8 +399,15 @@ class AnnotatedBuilder:
         elif content == "redacted":
             content = None
         sid = self.search(returned=refs, query=query)
+        if content is not None:
+            self._emit("message_end", proxy_source=self.main, role="system", msg=4, content=content)
         self.agent_turn()
         self.delivery(sid, memories=refs, bind=self.last_call, content=content)
+        if content is not None:
+            self.events[-1]["binding"] = {"proofs": [{
+                "kind": "canonical_message", "slot": "memory_block", "msg_index": 4,
+                "content_sha256": hashlib.sha256(content.encode()).hexdigest(),
+            }]}
         return self
 
     def write(self, directory, run_id="test-run", task_preview="fix the bug"):

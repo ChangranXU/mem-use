@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 
 import pytest
 
 from annotated_fixtures import AnnotatedBuilder, cure_ref
-from injudge.episodes import prepare_trajectory
-from injudge.evidence import build_episode_evidence
+from injudge.episodes import evidence_problem, prepare_trajectory
+from injudge.evidence import build_episode_evidence, build_span_evidence
+from injudge.spans import group_spans
 from memgraph.parse_trajectory import parse_trajectory
 
 
@@ -175,6 +177,137 @@ def test_pointer_proof_does_not_claim_an_arbitrary_message(tmp_path):
     episode = prepare_trajectory(*_prepare_args(tmp_path, builder)).episodes[0]
     assert episode.deliveries[0]["delivery_source_proofs"][0]["status"] == "unknown"
     assert "real task" in build_episode_evidence(episode)["task.md"]
+
+
+def _pointer_fixture(tmp_path, shape="responses"):
+    memory = "Use the distinctive λ helper to preserve coordinate dtype."
+    task = "Repair this copy bug without changing the public interface."
+    builder = AnnotatedBuilder().episode_open()
+    ref = cure_ref("hint", memory)
+    sid = builder.search(returned=[ref])
+    if shape in ("responses", "chat_tool"):
+        builder.user_message(task).agent_turn(result=memory)
+        tool_id = builder.last_call["call_id"]
+        if shape == "responses":
+            request = {"input": [{"type": "reasoning", "summary": []},
+                                 {"type": "function_call_output", "call_id": tool_id, "output": memory}]}
+            pointer = "/input/1/output"
+        else:
+            request = {"messages": [{"role": "tool", "tool_call_id": tool_id, "content": memory}]}
+            pointer = "/messages/0/content"
+        value = memory
+    elif shape in ("system_string", "system_blocks"):
+        system = "Keep the task's existing interface."
+        if shape == "system_blocks":
+            request = {"system": [{"type": "text", "text": system},
+                                  {"type": "text", "text": memory, "cache_control": {"type": "ephemeral"}}]}
+            value, pointer = memory, "/system/1/text"
+            recorded = [{"type": "text", "text": system}, {"type": "text", "text": memory}]
+        else:
+            value, pointer = system + memory, "/system"
+            request = {"system": value}
+            recorded = value
+        builder._emit("message_end", proxy_source=builder.main, role="system", msg=0, content=recorded)
+        builder.user_message(task)
+    else:
+        value = memory + "\n" + task
+        builder.user_message(value)
+        content = [{"type": "text", "text": value}] if shape == "parts" else value
+        request = {"messages": [{"role": "user", "content": content}]}
+        pointer = "/messages/0/content/0/text" if shape == "parts" else "/messages/0/content"
+    builder.agent_turn()
+    builder.delivery(sid, memories=[ref], bind=builder.last_call, content=memory)
+    proof = {"kind": "request_json_pointer", "slot": "memory_block", "pointer": pointer,
+             "value_sha256": hashlib.sha256(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()}
+    builder.events[-1]["binding"] = {"proofs": [proof]}
+    builder.episode_close()
+    source = builder.write(tmp_path / "run")
+    request_path = source / "calls" / builder.last_call["call_id"] / "request.json"
+    request_path.parent.mkdir(parents=True)
+    request_path.write_text(json.dumps(request))
+    return builder, source, request_path, proof, memory, task
+
+
+@pytest.mark.parametrize("shape", ["responses", "chat_tool", "mixed_message", "parts", "system_string", "system_blocks"])
+def test_request_pointer_excludes_target_from_baseline_and_preserves_task(tmp_path, shape):
+    _builder, source, _request, _proof, memory, task = _pointer_fixture(tmp_path, shape)
+    trajectory, ops, events = parse_trajectory(source, [])
+    episode = prepare_trajectory(trajectory, events, ops).episodes[0]
+    (span,) = group_spans(ops, trajectory.id, last_step=episode.steps[-1].step)
+    files, baseline = build_span_evidence(span, episode)
+    assert episode.preparation_status == "prepared" and evidence_problem(episode) is None
+    assert episode.deliveries[0]["delivery_source_proofs"][0]["status"] == "resolved"
+    assert memory not in baseline and task in baseline
+    assert memory not in files["task.md"] and task in files["task.md"]
+    assert memory in files["deliveries.md"] and memory in files["span.md"]
+    assert not any(memory in text for path, text in files.items() if path.startswith("steps/"))
+    baseline_view = json.loads(files["context.json"])["target_baseline"]
+    assert any(item.get("memory_delivery_refs") for item in baseline_view["visible_occurrences"])
+    if shape.startswith("system"):
+        assert "Keep the task's existing interface." in baseline
+
+
+def test_system_pointer_does_not_resolve_against_user_text(tmp_path):
+    builder, source, _request, _proof, _memory, _task = _pointer_fixture(tmp_path, "system_blocks")
+    next(event for event in builder.events if event.get("role") == "system")["role"] = "user"
+    builder.write(source)
+    trajectory, ops, events = parse_trajectory(source, [])
+    episode = prepare_trajectory(trajectory, events, ops).episodes[0]
+    assert episode.deliveries[0]["delivery_source_proofs"][0]["status"] == "unknown"
+    assert evidence_problem(episode) is not None
+
+
+@pytest.mark.parametrize("fault", ["missing", "malformed", "digest", "pointer", "huge_index", "negative_index", "leading_zero", "symlink", "duplicate", "future"])
+def test_request_proof_failures_remain_unresolved(tmp_path, fault):
+    builder, source, path, proof, memory, _task = _pointer_fixture(tmp_path)
+    if fault == "missing":
+        path.unlink()
+    elif fault == "malformed":
+        path.write_text("not json")
+    elif fault == "digest":
+        proof["value_sha256"] = "0" * 64
+    elif fault == "pointer":
+        proof["pointer"] = {"corrupt": True}
+    elif fault in ("huge_index", "negative_index", "leading_zero"):
+        index = {"huge_index": "9" * 5000, "negative_index": "-1", "leading_zero": "01"}[fault]
+        proof["pointer"] = f"/input/{index}/output"
+    elif fault == "symlink":
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        path.rename(outside / "request.json")
+        path.parent.rmdir()
+        path.parent.symlink_to(outside, target_is_directory=True)
+    else:
+        tool = next(event for event in builder.events if event.get("type") == "tool_execution_end")
+        starts = [event for event in builder.events if event.get("type") == "turn_start"]
+        consumer_index = builder.events.index(starts[-1])
+        if fault == "duplicate":
+            builder.events.insert(consumer_index, {**tool, "msg": 5})
+        else:
+            builder.events.remove(tool)
+            builder.events.append(tool)
+    builder.write(source)
+    trajectory, ops, events = parse_trajectory(source, [])
+    episode = prepare_trajectory(trajectory, events, ops).episodes[0]
+    assert episode.deliveries[0]["delivery_source_proofs"][0]["status"] == "unknown"
+    assert episode.preparation_status == "needs_review"
+    assert "ownership" in evidence_problem(episode)
+
+
+def test_request_tool_id_disambiguates_identical_visible_results(tmp_path):
+    builder, source, _path, _proof, memory, _task = _pointer_fixture(tmp_path)
+    tool = next(event for event in builder.events if event.get("type") == "tool_execution_end")
+    consumer = [event for event in builder.events if event.get("type") == "turn_start"][-1]
+    builder.events.insert(builder.events.index(consumer), {**tool, "msg": 5, "tool_call_id": "other-call"})
+    builder.write(source)
+    trajectory, ops, events = parse_trajectory(source, [])
+    episode = prepare_trajectory(trajectory, events, ops).episodes[0]
+    (span,) = group_spans(ops, trajectory.id)
+    _files, baseline = build_span_evidence(span, episode)
+    proof = episode.deliveries[0]["delivery_source_proofs"][0]
+    assert proof["status"] == "resolved"
+    assert proof["source"]["tool_call_id"] == tool["tool_call_id"]
+    assert memory in baseline  # the other tool's independent result survives
 
 
 def test_replay_uses_message_slots_for_kept_prefix(tmp_path):

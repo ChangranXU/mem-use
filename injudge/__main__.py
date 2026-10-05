@@ -34,7 +34,7 @@ import bisect
 import json
 import sys
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
@@ -62,7 +62,7 @@ from injudge.agent import (
     resolve_config,
 )
 from injudge.evidence import build_episode_evidence, episode_dir_name, write_evidence
-from injudge.episodes import prepare_trajectory
+from injudge.episodes import evidence_problem, prepare_trajectory
 from injudge.gold import (
     load_gold_patches,
     load_harness_report,
@@ -773,7 +773,7 @@ def main(argv: list[str] | None = None) -> int:
     transcripts_root = run_dir / "agent-runs"
     if not args.dry_run:
         # fail fast on an unwritable output folder, before any paid judge
-        # call: flush() rewrites the report artifact after every trajectory,
+        # call: flush() rewrites the report artifact after each judged span,
         # so an output that cannot be written would abort the run mid-way
         # and lose the completed judging.
         try:
@@ -796,7 +796,7 @@ def main(argv: list[str] | None = None) -> int:
     artifact: dict = {}
 
     def flush() -> None:
-        """Rewrite the report artifact after every trajectory so a crash keeps
+        """Rewrite the report artifact after each completed span so a crash keeps
         completed work (the contract's incremental artifact; summary.json is
         the FINAL statistics set, written once after the loop); keeps
         `artifact` current for the final report."""
@@ -992,6 +992,11 @@ def main(argv: list[str] | None = None) -> int:
             elif span.step_first is None:
                 verdicts[i] = auto_verdict_no_subsequent_turn(span)
                 progress.advance_span()
+            elif problem := evidence_problem(episode):
+                verdicts[i] = blank_verdict()
+                verdicts[i]["error"] = f"unsafe episode evidence: {problem}"
+                validation.append({"level": "error", "msg": f"{span.id}: {verdicts[i]['error']}"})
+                progress.advance_span()
             elif args.limit is not None and taken >= args.limit:
                 verdicts[i] = _unjudged("beyond --limit")
                 progress.advance_span()
@@ -1036,28 +1041,51 @@ def main(argv: list[str] | None = None) -> int:
             progress.advance_span()
             return i, verdict, span_warnings, error_note
 
+        # Persist pending entries before paid work, then replace them as each
+        # result arrives. One recorder trajectory can contain an entire benchmark.
+        operation_start = len(operations)
+        for i, span in enumerate(spans):
+            verdict = verdicts.get(i, _unjudged("pending judge"))
+            verdict_by_span[span.id] = verdict
+            operations.append(operation_record(span, verdict, span_costs[span.id]))
+        injection_start = len(injections)
+        injections.extend(injection_rollup(spans, ops_by_id, verdict_by_span, content_chars))
+        injection_positions = {row["op_id"]: j for j, row in enumerate(injections[injection_start:], injection_start)}
+        flush()
+        validation_start = len(validation)
+        outcome_notes: dict[int, list[dict]] = {}
+
+        def retain(outcome: tuple[int, dict, list[str], str | None]) -> None:
+            i, verdict, span_warnings, error_note = outcome
+            outcome_notes[i] = ([{"level": "error", "msg": error_note}] if error_note is not None else [])
+            outcome_notes[i].extend({"level": "warn", "msg": w} for w in span_warnings)
+            # Persist completions immediately, but keep diagnostics in source
+            # span order regardless of worker scheduling.
+            validation[validation_start:] = [note for j in sorted(outcome_notes) for note in outcome_notes[j]]
+            span = spans[i]
+            verdict_by_span[span.id] = verdict
+            operations[operation_start + i] = operation_record(span, verdict, span_costs[span.id])
+            for row in injection_rollup([span], ops_by_id, verdict_by_span, content_chars):
+                injections[injection_positions[row["op_id"]]] = row
+            flush()
+
         if judged:
             if judge_parallel <= 1 or len(judged) <= 1:
-                outcomes = [_judge(item) for item in judged]
+                for item in judged:
+                    retain(_judge(item))
             else:
-                with ThreadPoolExecutor(max_workers=judge_parallel) as pool:
-                    outcomes = list(pool.map(_judge, judged))
-            for i, verdict, span_warnings, error_note in outcomes:
-                # drained on the main thread, in span order — deterministic
-                # validation; a failed span's attempt diagnostics (masking
-                # notes, confidence clamps, contract corrections) are never
-                # lost with its generic failure note
-                if error_note is not None:
-                    validation.append({"level": "error", "msg": error_note})
-                for w in span_warnings:
-                    validation.append({"level": "warn", "msg": w})
-                verdicts[i] = verdict
-
-        for i, span in enumerate(spans):
-            verdict_by_span[span.id] = verdicts[i]
-            operations.append(operation_record(span, verdicts[i], span_costs[span.id]))
-        injections.extend(injection_rollup(spans, ops_by_id, verdict_by_span, content_chars))
-        flush()  # incremental: completed trajectories survive a crash
+                pool = ThreadPoolExecutor(max_workers=judge_parallel)
+                try:
+                    futures = [pool.submit(_judge, item) for item in judged]
+                    for future in as_completed(futures):
+                        retain(future.result())
+                except BaseException:
+                    # A context manager would wait and drain the paid queue on
+                    # Ctrl-C. Running jobs may finish; queued jobs must not start.
+                    pool.shutdown(wait=False, cancel_futures=True)
+                    raise
+                else:
+                    pool.shutdown(wait=True)
         progress.finish_trajectory()
     progress.close()
 
