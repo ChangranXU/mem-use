@@ -51,7 +51,7 @@ from injudge.judge import (
     _mask_key,
     _masked_head,
     _scoring_system,
-    _source_claim_warnings,
+    _prose_warnings,
     _substitute_enums,
     _strict_parse,
     _verdict_semantics,
@@ -736,7 +736,7 @@ def judge_span(
             verdict = _assemble_verdict(obj, text, span, warnings, cfg.api_key)
             verdict["input"] = _input_record(gold, attempt, result, transcript, health)
             _echo_overlap_warnings(verdict, span, baseline, warnings)
-            _source_claim_warnings(verdict, span, files["task.md"], warnings)
+            _prose_warnings(verdict, span, files, warnings)
             return verdict
         last_text, last_error = text, error
         if repair:

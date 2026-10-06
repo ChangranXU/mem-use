@@ -23,8 +23,10 @@ from util import atomic_write, utf8_safe
 from injudge.judge import MEMORIES_NOTE, _render_span_header, _cmd_of
 from injudge import EPISODE_INPUT_SCHEMA
 from injudge.episodes import project_occurrence
-from injudge.model import AgentStep, EpisodeInput, InjectionSpan
+from injudge.model import AgentStep, EpisodeInput, InjectionSpan, memory_id
 from injudge.prompts import load_prompt
+from injudge.spans import _exposed_text, entry_ident
+from memgraph.annotations import exposure_state, is_int
 
 _SPAN_CONTEXT = load_prompt("injudge/scoring/span_context")
 
@@ -128,6 +130,8 @@ def span_baseline(episode: EpisodeInput, span: InjectionSpan, files: dict[str, s
     occurrences = {item["occurrence_id"]: item for item in episode.message_occurrences}
     visible = [project_occurrence(occurrences[ref["occurrence_id"]], episode.deliveries)
                for ref in view.messages if ref.get("occurrence_id") in occurrences] if view else []
+    # Occurrences that still carry text once placement text moved out; a host
+    # holding only memory text stays visible but contributes no baseline text.
     independent = [item for item in visible if item.get("content")]
     prior_steps = [step for step in episode.steps if span.step_first is not None
                    and step.step < span.step_first
@@ -149,9 +153,86 @@ def span_baseline(episode: EpisodeInput, span: InjectionSpan, files: dict[str, s
     baseline = "\n".join(parts)
     return ({"target_delivery_source": (delivery or {}).get("source"),
              "consumer": consumer, "visible_occurrences": visible,
-             "independent_occurrence_ids": [item["occurrence_id"] for item in independent],
+             "non_memory_text_occurrence_ids": [item["occurrence_id"] for item in independent],
              "prior_step_numbers": [step.step for step in prior_steps],
              "visibility_gaps": view.gaps if view else ["consumer input view unavailable"]}, baseline, copies)
+
+
+def _earlier_deliveries(span: InjectionSpan, episode: EpisodeInput, baseline: dict) -> str | None:
+    """Where each entry's earlier deliveries stand in the consumer's input.
+
+    Recorded delivery alone does not prove later visibility, and the recorded
+    input views decide it exactly. Stating the result keeps the judge from
+    rediscovering it in context.json. A delivery consumed at the target's
+    own first step arrived with it, not before it.
+    """
+    starts = [item["source"].get("event_index") for item in episode.deliveries
+              if item["op_id"] in span.op_ids]
+    starts = [index for index in starts if isinstance(index, int)]
+    if span.step_first is None or not starts:
+        return None
+    earlier = [item for item in episode.deliveries if item["op_id"] not in span.op_ids
+               and isinstance(item["source"].get("event_index"), int)
+               and item["source"]["event_index"] < min(starts)]
+    visible = {occurrence["occurrence_id"] for occurrence in baseline["visible_occurrences"]}
+    lines = []
+    for i, (memory, exposure) in enumerate(span.iter_exposed()):
+        ident, text = entry_ident(memory), _exposed_text(memory, exposure)
+        notes, same_input, still_visible = [], [], False
+        for delivery in earlier:
+            step = delivery.get("step")
+            when = f"consumed from step {step}" if is_int(step) else "consumed at an unobserved step"
+            placements = [p for p in delivery["placements"]
+                          if p["source_resolution"].get("status") == "resolved"
+                          and p["source_resolution"].get("occurrence_id") in visible]
+            for entry in delivery["memories"]:
+                if entry_ident(entry["audit"]) != ident:
+                    continue
+                shown = entry["exposure"].get("shown")
+                if isinstance(shown, str):
+                    # One surviving host says nothing about entries in other
+                    # slots. Recheck only the text still proven in this input.
+                    parts = [_exposed_text({"value": shown}, exposure_state(
+                        shown, p.get("text"), placement_kind=p.get("kind"))) for p in placements]
+                    shown = max((part for part in parts if part is not None), key=len, default=None)
+                    if placements and shown is None:
+                        notes.append(f"{entry['entry_id']} {when}, no verified text remains in this input")
+                        continue
+                elif placements and len(placements) < len(delivery["placements"]):
+                    # Unverified text names no slot, so a partial survivor
+                    # cannot show that this entry's slot is the one left.
+                    notes.append(f"{entry['entry_id']} {when}, only some of its slots remain in this "
+                                 "input, text not comparable (exposure unverified)")
+                    continue
+                if step == span.step_first:
+                    note = f"{entry['entry_id']} arrived in this same step-{step} input, not before it"
+                elif placements:
+                    note = f"{entry['entry_id']} {when}, still in this input"
+                    still_visible = True
+                else:
+                    notes.append(f"{entry['entry_id']} {when}, not in this input")
+                    continue
+                if text is None or not isinstance(shown, str):
+                    note += ", text not comparable (exposure unverified)"
+                elif text in shown:
+                    note += ", shows all of this entry's text"
+                else:
+                    note += ", shows different or partial text"
+                (same_input if step == span.step_first else notes).append(note)
+        # A copy arriving with this delivery cannot make it less new than one
+        # the agent already had; naming both invites the wrong comparison.
+        if not still_visible:
+            notes.extend(same_input)
+        if notes:
+            lines.append(f"- {memory_id(i)} ({memory.get('key') or '(unkeyed)'}): " + "; ".join(notes) + ".")
+    if not lines:
+        return None
+    gaps = baseline["visibility_gaps"]
+    caveat = (f" That input's recorded view has gaps ({'; '.join(map(str, gaps))}), so absence "
+              "from it is unproven." if gaps else "")
+    return (f"Earlier deliveries of the same items, checked against step {span.step_first}'s "
+            f"recorded input (their text is in deliveries.md; entries not listed had none).{caveat}\n"
+            + "\n".join(lines))
 
 
 def build_span_evidence(span: InjectionSpan, episode: EpisodeInput) -> tuple[dict[str, str], str]:
@@ -172,7 +253,7 @@ def build_span_evidence(span: InjectionSpan, episode: EpisodeInput) -> tuple[dic
         if step.step in copies:
             sources.append(copies[step.step])
         step_sources.append({"step": step.step, "sources": sources})
-    header = _render_span_header(span, MEMORIES_NOTE)
+    header = _render_span_header(span, MEMORIES_NOTE, _earlier_deliveries(span, episode, baseline))
     delivery_refs = [item for item in episode.deliveries if item["op_id"] in span.op_ids]
     files["span.md"] = (f"# Target span in parent episode {episode.execution_id}\n\n"
                         f"Delivery provenance: {json.dumps([{'op_id': item['op_id'], 'source': item['source'], 'consumer': item['consumer']} for item in delivery_refs], ensure_ascii=False)}\n\n"

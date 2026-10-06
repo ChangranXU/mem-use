@@ -267,7 +267,9 @@ class InjectionSpan:
     in BOTH lists (its old identity left, its new one arrived).
     `previous_keys` labels the identities delivered in an earlier span —
     ANY earlier span in the episode, not only the immediately previous one;
-    recorded delivery is a cue to check current visibility, not proof of it.
+    recorded delivery is not proof of current visibility, so the judge's
+    span.md states, per entry, where each earlier delivery stands in the
+    consumer's recorded input (injudge.evidence).
     `changed_keys` labels
     identities whose RECORDED VALUE drifted against their last recorded
     earlier delivery — membership alone would hide a same-identity value
@@ -323,11 +325,6 @@ class InjectionSpan:
     the same portable item. Each record names the actual action `step`,
     `delivery_step`, `tool_call_id`, and search `operation_id`; action steps
     must lie inside the entry's window.
-    `previous_partial_keys` qualifies `previous_keys`: the identities whose
-    every EARLIER delivery was clipped or exposure-unverifiable, so the
-    "delivered in an earlier span" cue cannot mean the agent saw
-    the whole substance — this delivery may be the first to expose the
-    suffix.
     """
 
     id: str  # f"{traj_id}:S{n}"
@@ -346,7 +343,6 @@ class InjectionSpan:
     removed_keys: list[str] = field(default_factory=list)
     previous_keys: list[str] = field(default_factory=list)
     changed_keys: list[str] = field(default_factory=list)
-    previous_partial_keys: list[str] = field(default_factory=list)
     queries: list[str] = field(default_factory=list)
     placements: list[dict] = field(default_factory=list)
     position: int = 0

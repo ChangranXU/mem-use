@@ -2,15 +2,19 @@
 
 Parser tests with canned answers cannot show that the judge's labels are
 right. These development regressions run through the REAL judge: each is a
-synthetic schema-v10 episode delivering one memory (a `followup` case adds the
-recorded full read its preview selected, scored as a second target,
-`<case>/read`). They cover explicit and
+synthetic schema-v10 episode delivering one memory, or a list of them (each
+further entry is scored as its own target, `<case>/m2`, …; a `followup` case
+adds a second recorded delivery, the full read its preview selected or a
+repeated search's list, scored as `<case>/read`, `<case>/read/m2`, …).
+They cover explicit and
 uncited use, routine practice, source and novelty distinctions, uncertainty,
 plan execution and reversal, harmful advice, a benefit followed by harm,
-unproductive use, reading a listed candidate whose unrecorded full text is
+unproductive use, a change kept without a check that could show its benefit,
+reading a listed candidate whose unrecorded full text is
 then set aside or used,
-recorded preview/full-read pairs, a historically scoped claim, and
-paraphrased baselines.
+recorded preview/full-read pairs, a historically scoped claim, whole-list
+versus named-entry remarks on a result list, a repeated search re-showing
+entries still in the agent's input, and paraphrased baselines.
 Only labels decided by the construction are pinned.
 
 `score` compares injudge reports against those expectations. It never picks
@@ -29,9 +33,11 @@ from tests.annotated_fixtures import AnnotatedBuilder, cure_ref
 
 _SIGNALS = ("relevance", "accuracy", "novelty", "influence", "positive_effect")
 
-# Each case: task text, turns before the delivery, the memory, the consumer
-# turn (the first to see the memory), later turns, and the acceptable
-# values of each label it pins. Turns are (reasoning, command, result).
+# Each case: task text, turns before the delivery, the memory (or a list of
+# `memories`), the consumer turn (the first to see the memory), later turns,
+# and the acceptable values of each label it pins: `expect` for the span
+# verdict and its first entry, `entries` for the others by span-local id.
+# Turns are (reasoning, command, result).
 CASES: dict[str, dict] = {
     "explicit_use": {
         "task": "tests/unit/test_parser.py fails with a cache permission error "
@@ -412,6 +418,22 @@ CASES: dict[str, dict] = {
         "expect": {"influence": ["acted_on"],
                    "positive_effect": ["no_effect"], "verdict": ["neutral"]},
     },
+    # Acted on and submitted, but the only check passed before the change too:
+    # nothing observed ties a benefit to it, and nothing shows it unproductive.
+    "unverified_change": {
+        "task": "Deleting a tag leaves its rows in tag_links. Remove a deleted tag's links too.",
+        "before": [("Run the tag tests first.", "pytest tests/test_tags.py -q", "9 passed")],
+        "memory": ("kb-tag-links", "When deleting a tag, also delete its tag_links rows "
+                                   "inside the same transaction in src/tags.py delete_tag()."),
+        "consumer": ("Apply the memory's fix: delete the tag_links rows inside delete_tag's transaction.",
+                     "python delete_links_in_transaction.py src/tags.py", "delete_tag updated"),
+        "after": [
+            ("Rerun the tag tests.", "pytest tests/test_tags.py -q", "9 passed"),
+            ("Write the patch and submit.", "git diff > patch.txt && submit", ""),
+        ],
+        "expect": {"influence": ["acted_on"],
+                   "positive_effect": [None], "verdict": ["unresolved"]},
+    },
     # One entry helps, then harms later in its window: harm decides the effect.
     "benefit_then_harm": {
         "task": "tests/test_upload.py::test_upload_large times out in CI. Make it pass.",
@@ -537,6 +559,72 @@ CASES["matched_b"] = {**_ISO, "before": [
     ("Root cause: on Python 3.10 fromisoformat does not accept the 'Z' suffix, so "
      "parse_date must map Z to +00:00 first.", *_ISO_READ)]}
 
+# The list pair: one task and four unrelated previews. A remark on the list as
+# a whole references no entry; naming one entry references that entry only.
+# The same whole-list remark on a one-entry list does single that entry out.
+_LIST = {
+    "task": "load_settings() drops the retry limit declared in a base profile when a "
+            "child profile omits it. Keep the inherited limit unless the child sets one.",
+    "before": [("Reproduce.", "python profile_repro.py", "child retry limit: None (base declares 5)")],
+    "memories": [
+        ("kb-widget-order", "Issue: form widgets declared in a base class rendered in "
+                            "alphabetical rather than declaration order."),
+        ("kb-log-rotation", "Issue: log files rotated twice when two workers shared one "
+                            "rotation lock."),
+        ("kb-csv-quote", "Issue: CSV export dropped the quotes around fields containing "
+                         "the delimiter."),
+        ("kb-thumbnail-size", "Issue: thumbnails of portrait images were generated with "
+                              "swapped width and height."),
+    ],
+    "after": [
+        ("merge_profile() assigns the child's retry_limit unconditionally. Assign it only "
+         "when the child sets one.", "python keep_inherited_limit.py src/profiles.py", "edited"),
+        ("Verify.", "python profile_repro.py", "child retry limit: 5 (base declares 5)"),
+    ],
+}
+_LIST_READ = ("grep -n retry_limit src/profiles.py", "22:    merged.retry_limit = child.retry_limit")
+_WHOLE_LIST = ("None of the stored results matches this bug. Inspect how profiles are merged.",
+               *_LIST_READ)
+_NONE = {"influence": ["none"], "positive_effect": [None]}
+CASES["list_dismissed"] = {
+    **_LIST, "consumer": _WHOLE_LIST,
+    "expect": {**_NONE, "verdict": ["neutral"]},
+    "entries": {"m2": _NONE, "m3": _NONE, "m4": _NONE},
+}
+CASES["list_named"] = {
+    **_LIST,
+    "consumer": ("kb-log-rotation is about log rotation, a different bug, and no other "
+                 "stored result matches either. Inspect how profiles are merged.", *_LIST_READ),
+    "expect": {**_NONE, "verdict": ["neutral"]},
+    "entries": {"m2": {"influence": ["referenced"], "positive_effect": [None]},
+                "m3": _NONE, "m4": _NONE},
+}
+CASES["list_single_dismissed"] = {
+    **_LIST, "memories": _LIST["memories"][:1], "consumer": _WHOLE_LIST,
+    "expect": {"influence": ["referenced"], "positive_effect": [None], "verdict": ["neutral"]},
+}
+# A repeated search re-shows two previews still in the agent's input from the
+# first list: those are redundant there, and only the new preview is novel.
+_REPEAT = {"influence": ["none"], "novelty": ["redundant"]}
+CASES["list_repeated"] = {
+    **_LIST,
+    "consumer": ("None of the stored results matches this bug. Search the store again "
+                 "with other words.", None, None),
+    "followup": {
+        "query": "inherited retry limit lost in child profile",
+        "memories": [*_LIST["memories"][1:3],
+                     ("kb-yaml-anchor", "Issue: YAML anchors in config files were expanded "
+                                        "after validation, so anchored keys skipped type checks.")],
+        "expect": {**_REPEAT, "verdict": ["neutral"]},
+        "entries": {"m2": _REPEAT, "m3": {"influence": ["none"], "novelty": ["novel"]}},
+    },
+    "after": [
+        ("No new stored result matches either. Inspect how profiles are merged.", *_LIST_READ),
+        *_LIST["after"],
+    ],
+    "expect": {"influence": ["none"], "verdict": ["neutral"]},
+}
+
 
 _MEMORY_MSG = 4  # past the builder's task (1), reply (2), and tool-result (3) slots
 
@@ -557,51 +645,74 @@ def build(root: Path) -> list[Path]:
         b.episode_open(ident, treatment_arm_id="arm-a").user_message(case["task"])
         for reasoning, command, result in case["before"]:
             b.agent_turn(reasoning=reasoning, command=command, result=result)
-        key, value = case["memory"]
-        ref = cure_ref(key, value)
-        search = b.search(returned=[ref], query=case["task"])
+        memories = case.get("memories") or [case["memory"]]
+        key = memories[0][0]
+        refs = [cure_ref(k, v) for k, v in memories]
+        search = b.search(returned=refs, query=case["task"])
         # Like a real bridge: the memory rides its own message in the
         # consumer's request, and the delivery carries the proof naming it.
-        text = f"- [insight] {key}: {value}"
+        text = "\n".join(f"- [insight] {k}: {v}" for k, v in memories)
         b.user_message(text, msg=_MEMORY_MSG)
         reasoning, command, result = case["consumer"]
         followup = case.get("followup")
+        if followup:
+            # the second delivery: a full read by the preview's key, or a
+            # repeated search returning a list
+            listed = followup.get("memories")
+            second = listed or [(key, followup["value"])]
+            second_text = ("\n".join(f"- [insight] {k}: {v}" for k, v in second)
+                           if listed else followup["value"])
+            tool, args, query = (("exp_search", {"query": followup["query"]}, followup["query"])
+                                 if listed else ("exp_read", {"id": key}, key))
         if followup and not followup.get("lookup"):
-            b.agent_turn(reasoning=reasoning, tool_name="exp_read", tool_args={"id": key}, result=followup["value"])
+            b.agent_turn(reasoning=reasoning, tool_name=tool, tool_args=args, result=second_text)
         else:
             b.agent_turn(reasoning=reasoning, command=command, result=result)
-        b.delivery(search, memories=[ref], bind=b.last_call, content=text)
+        b.delivery(search, memories=refs, bind=b.last_call, content=text)
         b.events[-1]["binding"] = {"proofs": [{
             "slot": "memory_block", "kind": "canonical_message", "msg_index": _MEMORY_MSG,
             "content_sha256": hashlib.sha256(text.encode()).hexdigest()}]}
         if followup and followup.get("lookup"):
-            b.agent_turn(reasoning=followup["lookup"], tool_name="exp_read", tool_args={"id": key}, result=followup["value"])
+            b.agent_turn(reasoning=followup["lookup"], tool_name=tool, tool_args=args, result=second_text)
         for i, (reasoning, command, result) in enumerate(case["after"]):
             if followup and i == 0:
-                full = cure_ref(key, followup["value"])
-                search = b.search(returned=[full], query=key, trigger="explicit")
+                second_refs = [cure_ref(k, v) for k, v in second]
+                search = b.search(returned=second_refs, query=query, trigger="explicit")
             b.agent_turn(reasoning=reasoning, command=command, result=result)
             if followup and i == 0:
-                b.delivery(search, memories=[full], bind=b.last_call, content=followup["value"],
+                b.delivery(search, memories=second_refs, bind=b.last_call, content=second_text,
                            placements=[{"slot": "memory_block", "kind": "tool_result",
                                         "proof_kind": "canonical_message", "content": {
-                                            "availability": "inline", "text": followup["value"]}}])
+                                            "availability": "inline", "text": second_text}}])
                 b.events[-1]["binding"] = {"proofs": [{
                     "slot": "memory_block", "kind": "canonical_message", "msg_index": 3,
-                    "content_sha256": hashlib.sha256(followup["value"].encode()).hexdigest()}]}
+                    "content_sha256": hashlib.sha256(second_text.encode()).hexdigest()}]}
         b.episode_close(ident, treatment_arm_id="arm-a")
         out.append(b.write(root / ident, run_id=ident, task_preview=case["task"]))
     return out
 
 
 def expected_labels() -> dict[str, dict]:
-    """Each recorded delivery is a target, including the follow-up read."""
+    """Each recorded delivery is a target, including the follow-up read, and
+    so is each further entry of a delivered list."""
     out = {}
     for name, case in CASES.items():
         out[name] = case["expect"]
+        for i in range(2, len(case.get("memories", [])) + 1):
+            mid = f"m{i}"
+            out[f"{name}/{mid}"] = case.get("entries", {}).get(mid, {})
         if case.get("followup"):
             out[name + "/read"] = case["followup"]["expect"]
+            for i in range(2, len(case["followup"].get("memories", [])) + 1):
+                mid = f"m{i}"
+                out[f"{name}/read/{mid}"] = case["followup"].get("entries", {}).get(mid, {})
     return out
+
+
+def _target(target: str) -> tuple[str, int, str]:
+    """(case, span index, entry id) of one scored target."""
+    name, *parts = target.split("/")
+    return name, int("read" in parts), parts[-1] if parts and parts[-1].startswith("m") else "m1"
 
 
 def _labels(report: dict) -> dict[str, dict]:
@@ -614,17 +725,17 @@ def _labels(report: dict) -> dict[str, dict]:
             ops.setdefault(runs.get(op.get("traj")), []).append(op)
     out: dict[str, dict] = {}
     for target in expected_labels():
-        name = target.removesuffix("/read")
+        name, index, mid = _target(target)
         found = ops.get(name, [])
         required = 2 if CASES[name].get("followup") else 1
         if len(found) != required:
             out[target] = {"problem": f"expected {required} spans, found {len(found)}"}
             continue
-        op = found[1 if target.endswith("/read") else 0]
-        if op.get("error") or "m1" not in (op.get("rubric") or {}):
-            out[target] = {"problem": op.get("error") or "no m1 rubric"}
+        op = found[index]
+        if op.get("error") or mid not in (op.get("rubric") or {}):
+            out[target] = {"problem": op.get("error") or f"no {mid} rubric"}
             continue
-        entry = op["rubric"]["m1"]
+        entry = op["rubric"][mid]
         out[target] = {s: (entry.get(s) or {}).get("value") for s in _SIGNALS}
         out[target]["verdict"] = op.get("verdict")
         out[target]["notes"] = {s: (entry.get(s) or {}).get("note") for s in _SIGNALS}
@@ -659,7 +770,9 @@ def score(reports: list[dict]) -> list[str]:
         stable = total = unavailable = 0
         unstable = []
         for name in expected:
-            for label in (*_SIGNALS, "verdict"):
+            # a span's verdict is counted once, with its first entry
+            span_labels = (*_SIGNALS, "verdict") if _target(name)[2] == "m1" else _SIGNALS
+            for label in span_labels:
                 if any("problem" in c[name] for c in labeled):
                     unavailable += 1
                     continue

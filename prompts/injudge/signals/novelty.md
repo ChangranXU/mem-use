@@ -18,5 +18,7 @@
    the tier of the rest (confirming if all were open, else novel) and name
    which claims were known and which were new. Do not drop a claim from
    novelty because it is irrelevant to this task. Cite the task text or step
-   the tier rests on. An earlier delivery is a cue to check visibility,
-   not proof.
+   the tier rests on. Earlier deliveries are part of the baseline only
+   while still in the consuming input: span.md states this for each entry.
+   A copy still there is earlier visible input; one that arrived in the
+   same input is not earlier.

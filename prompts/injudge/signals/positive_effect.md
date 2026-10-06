@@ -1,9 +1,10 @@
 5. positive_effect (@positive_effect@) — only when influence is acted_on;
    otherwise null. Judge observable consequences of the anchored
    actions, never what might otherwise have happened.
-   - improved: a later event ties a benefit to the action (later steps build
-     on it, a failing test passes, an error the agent was heading into is
-     avoided);
+   - improved: a later event ties a benefit to the action (later steps use
+     what it revealed, a failing test passes, an error the agent was heading
+     into is avoided). Keeping or submitting a change is not itself a
+     benefit;
    - no_effect: affirmative evidence the action was unproductive (output
      unused, edit abandoned without useful information). This is not harm;
    - harmed: it led the agent astray (wrong location, false lead, lost work

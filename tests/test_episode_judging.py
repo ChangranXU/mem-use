@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 
 import pytest
@@ -594,3 +595,137 @@ def test_global_attachment_rejects_multiple_episodes_before_limit(tmp_path):
     golden.write_text("one episode only")
     with pytest.raises(SystemExit, match="exactly one episode before --limit"):
         main([str(source), "--dry-run", "--golden", str(golden), "--limit", "1"])
+
+
+def _deliver(builder, refs, msg, text=None, *, consume=True):
+    """One proven delivery riding its own message slot, so later turns keep
+    it in their recorded input unless the slot is retracted or reused."""
+    text = text or "\n".join(f"- [insight] {ref['extensions']['cure']['key']}: {ref['content']['text']}"
+                             for ref in refs)
+    search = builder.search(returned=refs)
+    builder.user_message(text, msg=msg)
+    if consume:
+        builder.agent_turn()
+    return search, text
+
+
+def _bind(builder, search, refs, text, msg):
+    builder.delivery(search, memories=refs, bind=builder.last_call, content=text)
+    builder.events[-1]["binding"] = {"proofs": [{
+        "slot": "memory_block", "kind": "canonical_message", "msg_index": msg,
+        "content_sha256": hashlib.sha256(text.encode()).hexdigest()}]}
+
+
+def _span_docs(tmp_path, builder):
+    source = builder.write(tmp_path / "trajectory")
+    trajectories, ops_by_traj, events_by_traj, _warnings = load_trajectories([source])
+    trajectory = trajectories[0]
+    (episode,) = prepare_trajectory(trajectory, events_by_traj[trajectory.id],
+                                    ops_by_traj[trajectory.id]).episodes
+    recalls = {op.id: op for op in ops_by_traj[trajectory.id] if op.kind == "recall"}
+    spans = group_spans([recalls[item["op_id"]] for item in episode.deliveries], trajectory.id,
+                        episode_execution_id=episode.execution_id, last_step=episode.steps[-1].step)
+    return [build_span_evidence(span, episode)[0]["span.md"] for span in spans]
+
+
+_KB_A = cure_ref("kb-a", "Cached index maps go stale after a removal; rebuild them.")
+_KB_B = cure_ref("kb-b", "Retry limits are inherited from the base profile.")
+
+
+@pytest.mark.parametrize("retract,expected", [
+    (False, "- m2 (kb-a): D1.E1 consumed from step 2, still in this input, "
+            "shows all of this entry's text."),
+    (True, "- m2 (kb-a): D1.E1 consumed from step 2, not in this input."),
+])
+def test_span_states_whether_an_earlier_delivery_is_still_in_the_input(tmp_path, retract, expected):
+    builder = AnnotatedBuilder().episode_open().agent_turn(with_task=True)
+    search, text = _deliver(builder, [_KB_A], msg=4)
+    _bind(builder, search, [_KB_A], text, 4)
+    if retract:
+        builder._emit("message_retracted", proxy_source=builder.main, msg=4)
+    search, text = _deliver(builder, [_KB_B, _KB_A], msg=5)
+    _bind(builder, search, [_KB_B, _KB_A], text, 5)
+    builder.agent_turn().episode_close()
+    first, second = _span_docs(tmp_path, builder)
+    assert "Earlier deliveries" not in first
+    assert "checked against step 3's recorded input" in second
+    assert expected in second
+    assert "(kb-b)" not in second.split("Earlier deliveries")[1].split("Footprint windows")[0]
+    assert "Check the visible context" not in second
+
+
+def test_same_step_delivery_is_not_stated_as_earlier(tmp_path):
+    builder = AnnotatedBuilder().episode_open().agent_turn(with_task=True)
+    first_search, first_text = _deliver(builder, [_KB_A], msg=4, consume=False)
+    second_search, second_text = _deliver(builder, [_KB_B, _KB_A], msg=5)
+    _bind(builder, first_search, [_KB_A], first_text, 4)
+    _bind(builder, second_search, [_KB_B, _KB_A], second_text, 5)
+    builder.agent_turn().episode_close()
+    _first, second = _span_docs(tmp_path, builder)
+    assert ("- m2 (kb-a): D1.E1 arrived in this same step-2 input, not before it, "
+            "shows all of this entry's text.") in second
+
+
+def test_earlier_clipped_copy_shows_partial_text(tmp_path):
+    builder = AnnotatedBuilder().episode_open().agent_turn(with_task=True)
+    clipped = "- [insight] kb-a: Cached index maps go stale"
+    search, text = _deliver(builder, [_KB_A], msg=4, text=clipped)
+    _bind(builder, search, [_KB_A], text, 4)
+    search, text = _deliver(builder, [_KB_B, _KB_A], msg=5)
+    _bind(builder, search, [_KB_B, _KB_A], text, 5)
+    builder.agent_turn().episode_close()
+    _first, second = _span_docs(tmp_path, builder)
+    assert ("- m2 (kb-a): D1.E1 consumed from step 2, still in this input, "
+            "shows different or partial text.") in second
+
+
+def test_same_step_copy_is_omitted_when_an_earlier_copy_is_still_visible(tmp_path):
+    builder = AnnotatedBuilder().episode_open().agent_turn(with_task=True)
+    search, text = _deliver(builder, [_KB_A], msg=4)
+    _bind(builder, search, [_KB_A], text, 4)
+    same_search, same_text = _deliver(builder, [_KB_A], msg=5, consume=False)
+    target_search, target_text = _deliver(builder, [_KB_B, _KB_A], msg=6)
+    _bind(builder, same_search, [_KB_A], same_text, 5)
+    _bind(builder, target_search, [_KB_B, _KB_A], target_text, 6)
+    builder.agent_turn().episode_close()
+    *_, target = _span_docs(tmp_path, builder)
+    assert ("- m2 (kb-a): D1.E1 consumed from step 2, still in this input, "
+            "shows all of this entry's text.\n") in target
+    assert "D2.E1" not in target.split("Footprint windows")[0]
+
+
+@pytest.mark.parametrize("retained", ["unrelated", "partial", "full_normalized", "unverified"])
+def test_earlier_visibility_checks_the_entrys_surviving_placement(tmp_path, retained):
+    builder = AnnotatedBuilder().episode_open().agent_turn(with_task=True)
+    value = _KB_A["content"]["text"]
+    # a transforming renderer leaves the entry's exposure unverified
+    removed = value.upper() if retained == "unverified" else value
+    other = {"unrelated": _KB_B["content"]["text"],
+             "partial": "Cached index maps go stale",
+             "full_normalized": value.replace(" ", "  "),
+             "unverified": _KB_B["content"]["text"]}[retained]
+    search = builder.search(returned=[_KB_A, _KB_B])
+    builder.user_message(removed, msg=4).user_message(other, msg=5).agent_turn()
+    builder.delivery(search, memories=[_KB_A, _KB_B], bind=builder.last_call, placements=[
+        {"slot": slot, "kind": "prompt_message", "proof_kind": "canonical_message",
+         "content": {"availability": "inline", "text": text}}
+        for slot, text in [("removed", removed), ("retained", other)]
+    ])
+    builder.events[-1]["binding"] = {"proofs": [
+        {"slot": slot, "kind": "canonical_message", "msg_index": msg,
+         "content_sha256": hashlib.sha256(text.encode()).hexdigest()}
+        for slot, msg, text in [("removed", 4, removed), ("retained", 5, other)]
+    ]}
+    builder._emit("message_retracted", proxy_source=builder.main, msg=4)
+    search, text = _deliver(builder, [_KB_A], msg=6)
+    _bind(builder, search, [_KB_A], text, 6)
+    builder.agent_turn().episode_close()
+    _first, target = _span_docs(tmp_path, builder)
+    expected = {
+        "unrelated": "no verified text remains in this input",
+        "partial": "still in this input, shows different or partial text",
+        "full_normalized": "still in this input, shows all of this entry's text",
+        "unverified": "only some of its slots remain in this input, text not comparable "
+                      "(exposure unverified)",
+    }[retained]
+    assert f"- m1 (kb-a): D1.E1 consumed from step 2, {expected}." in target

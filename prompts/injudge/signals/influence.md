@@ -2,7 +2,11 @@
    stated footprint window:
    - none: after inspecting the whole window, no reference or attributable
      action was established. This is not proof of zero effect;
-   - referenced: mentioned or quoted, but no changed action established;
+   - referenced: mentioned or quoted, but no changed action established.
+     The mention must single out this entry (its shown identifier,
+     distinctive content, or list position); a remark about the results as
+     a whole, such as "nothing matched", references no entry unless this
+     entry was the only one shown;
    - selected: its shown identifier or preview caused retrieval of fuller
      memory content that the record shows as its own memory delivery (the
      step's result reads [memory delivery …]; span.md lists proven

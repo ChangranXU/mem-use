@@ -15,9 +15,9 @@ usage and span verdicts. Task success never decides a memory verdict.
 |---|---|
 | `relevance` | `true` / `false`: the exposed claim applies to the task or subgoal at delivery. A proposed remedy can be relevant even when wrong. Shared names alone do not establish relevance. |
 | `accuracy` | `corroborated` / `uncontradicted` / `contradicted`, within the claim's own repository/version/situation. Uncontradicted means neither confirmed nor refuted. |
-| `novelty` | `novel` / `confirming` / `redundant` / `null`, relative to the recorded pre-exposure input. Confirming settles a voiced doubt; redundant requires already-established substance. Expected task outputs do not automatically supply the solution mechanism. Mixed entries are redundant only when every material claim was established. |
+| `novelty` | `novel` / `confirming` / `redundant` / `null`, relative to the recorded pre-exposure input. Confirming settles a voiced doubt; redundant requires already-established substance. Expected task outputs do not automatically supply the solution mechanism. Mixed entries are redundant only when every material claim was established. An earlier delivery counts as baseline only while still in the consuming input, as `span.md` states; a copy arriving in the same input is not earlier. |
 | `influence` | `none` / `referenced` / `selected` / `acted_on` / `null`, defined below. |
-| `positive_effect` | `improved` / `no_effect` / `harmed` / `null`. Non-null only for `acted_on`; judge observed consequences of the anchored action. Any harm among the entry's actions makes it `harmed`, even after an earlier benefit. Unknown direction remains null. |
+| `positive_effect` | `improved` / `no_effect` / `harmed` / `null`. Non-null only for `acted_on`; judge observed consequences of the anchored action. Keeping or submitting a change is not itself a benefit. Any harm among the entry's actions makes it `harmed`, even after an earlier benefit. Unknown direction remains null. |
 
 Novelty, correctness, influence and effect are independent. A redundant reminder
 can shape an action; an inaccurate claim can trigger a useful diagnostic. A
@@ -37,7 +37,9 @@ but do not determine a signal.
 - `none`: after inspecting the complete window, no reference or attributable
   action was established. This does not prove zero effect.
 - `referenced`: mentioned, with no changed action established after inspecting
-  the complete window.
+  the complete window. The mention must single out the entry (its shown
+  identifier, distinctive content, or list position); a remark about the
+  results as a whole references no entry unless only that entry was shown.
 - `selected`: the shown identifier or preview caused retrieval of fuller
   memory content that was recorded as its own memory delivery, without other
   demonstrated content use. Anchor the selection action, not the
@@ -104,7 +106,11 @@ a budget-limited investigation.
 
 A violation takes one tool-free repair over the same history. Only a
 `needs_evidence` reply reopens tools. Invalid repair or exhaustion is `error`,
-never neutral. Prose-source warnings are advisory and do not rewrite labels.
+never neutral. Prose warnings are advisory and do not rewrite labels: a quoted
+fragment of three or more words must occur, word for word, in some evidence
+file (punctuation, quote marks, invisible format characters, and case are
+ignored; ellipses and bracketed insertions mark gaps), and an analysis over 60
+words is noted.
 
 ## Usage and span verdicts
 

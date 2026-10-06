@@ -125,6 +125,13 @@ export function createEvidenceTools(root: string): AgentTool<any>[] {
 				}
 			}
 			const truncated = !!note;
+			// A limit that stops early must say so: a clean slice boundary reads
+			// like the end of the file, and coverage needs every non-blank line.
+			const next = from + selected.length, last = lines.findLastIndex((line) => line.trim());
+			if (!note && last >= next) {
+				const more = last + 1 - next;
+				note = `\n(... ${more} more line${more === 1 ? "" : "s"}; continue with offset=${next + 1})`;
+			}
 			return {
 				content: [{ type: "text", text: returned.join("\n") + note }],
 				// Coverage describes only text returned, never the selected tail

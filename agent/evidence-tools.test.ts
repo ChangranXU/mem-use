@@ -53,6 +53,22 @@ test("read_evidence returns file text, offset/limit slices in lines", async () =
 	fs.rmSync(root, { recursive: true, force: true });
 });
 
+test("a limit that stops before the file end says how many lines remain", async () => {
+	const root = makeRoot();
+	fs.writeFileSync(path.join(root, "steps", "step_000003.md"), "one\ntwo\nthree\n\nfive\n");
+	const read = createEvidenceTools(root).find((t) => t.name === "read_evidence")!;
+	const text = (result: { content: { type: string; text?: string }[] }) => result.content[0].text;
+	const head = await read.execute("t1", { path: "steps/step_000003.md", limit: 2 });
+	assert.equal(text(head), "1: one\n2: two\n(... 3 more lines; continue with offset=3)");
+	assert.equal(head.details.truncated, false);
+	const last = await read.execute("t2", { path: "steps/step_000003.md", offset: 4, limit: 1 });
+	assert.equal(text(last), "4: \n(... 1 more line; continue with offset=5)");
+	// only the empty line after the final newline remains: nothing to continue
+	const tail = await read.execute("t3", { path: "steps/step_000003.md", offset: 5, limit: 1 });
+	assert.equal(text(tail), "5: five");
+	fs.rmSync(root, { recursive: true, force: true });
+});
+
 test("search_evidence matches across files and honors scoping", async () => {
 	const root = makeRoot();
 	const tools = createEvidenceTools(root);

@@ -46,6 +46,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Any
 
@@ -261,114 +262,79 @@ def _echo_overlap_warnings(
             )
 
 
-# A task mention alone does not attribute every later quote to it: novelty
-# notes also quote content ABSENT from the task. Recognize direct citation
-# prefixes conservatively; leave other attribution styles to manual review.
+# A quotation mark claims verbatim text, whichever source the prose names, so
+# any quoted fragment must occur in the evidence the judge could read.
+# Backticks format code, not quotations.
 _QUOTED_TEXT = re.compile(
     r'"([^"\n]+)"|“([^”\n]+)”|'
-    r"(?<!\w)'([^'\n]+)'(?!\w)|‘([^’\n]+)’|`([^`\n]+)`"
+    r"(?<!\w)'([^'\n]+)'(?!\w)|‘([^’\n]+)’"
 )
-_TASK_CITATION = re.compile(
-    r"\b(?:task(?:\.md)?(?:['’]s)?|submission instructions?)\s*"
-    r"(?:(?:own|explicit|text|submission|workflow|instructions?|requirements?|rules|"
-    r"says?|states?|requires?|specifies?|mandates?|prescribes?|already|recommended|"
-    r"asks?|for|calls|that|to)\s+)*"
-    r"[:(]?\s*$",
-    re.IGNORECASE,
-)
-_INDEPENDENCE = re.compile(
-    r"\b(?:independent(?:ly)?|unassisted|unaided|"
-    r"from\s+(?:the\s+)?(?:code|source(?:\s+code)?)\s+alone)\b", re.IGNORECASE,
-)
-_TASK_SOURCE = r"\btask(?:\.md)?(?:['’]s)?"
-_TASK_ATTRIBUTION = re.compile(
-    _TASK_SOURCE + r"\s+(?:(?:own|explicit|instructions?|workflow|submission|"
-    r"steps?|\d+|recommended|already)\s+){0,6}"
-    r"(?:requires?|mandates?|prescribes?|specifies?|implies?|states?|says?)\b|"
-    r"\b(?:required|mandated|prescribed)\s+by\s+(?:the\s+)?" + _TASK_SOURCE + r"|"
-    r"\b(?:follows?|followed|mirrors?|restates?)\s+(?:the\s+)?" + _TASK_SOURCE + r"|"
-    r"\btask[- ]mandated\b",
-    re.IGNORECASE,
-)
+_QUOTE_MIN_WORDS = 3  # a shorter fragment is an identifier or label, not a quotation
+_WORD = re.compile(r"\w+")
+# An ellipsis or a bracketed editorial insertion ("[s]", "[...]") marks text
+# the quotation omits or alters; each may fall inside a word.
+_QUOTE_GAP = re.compile(r"\.\.\.|\[[^\]]*\]")
 
 
-def _task_quote_matches(quote: str, task: str) -> tuple[bool, int]:
-    """Match in order; count one fragment so omissions cannot pool words."""
-    fragments = [part.strip() for part in quote.replace("…", "...").split("...")
-                 if part.strip()]
-    longest_fragment_words = max(
-        (len(part.split()) for part in fragments), default=0)
-    offset = 0
-    for fragment in fragments:
-        offset = task.find(fragment, offset)
-        if offset < 0:
-            return False, longest_fragment_words
-        offset += len(fragment)
-    return bool(fragments), longest_fragment_words
+def _quote_words(text: str) -> str:
+    """The word sequence a presence comparison uses. Punctuation and quote
+    marks (often dropped when quotations nest), invisible format characters
+    such as an issue tracker's zero-width spaces, compatibility forms, and
+    case decide nothing."""
+    text = "".join(c for c in text if unicodedata.category(c) != "Cf")
+    return " ".join(_WORD.findall(unicodedata.normalize("NFKC", text).casefold()))
 
 
-def _source_claim_warnings(
-    verdict: dict, span: InjectionSpan, task_text: str, warnings: list[str],
-) -> None:
-    """Flag suspect prose after masking, without retries or label changes.
-
-    Analysis is span-wide, so independence there can only be flagged for
-    review when any entry has influence=none; it cannot be assigned to one
-    entry by a lexical check. Even negated independence can trigger a warning.
-    Warning bodies name fields, never copy endpoint text or task contents.
-    """
-    fields: list[tuple[str, str, bool]] = []
-    none_ids = []
-    for mid, signals in verdict["rubric"].items():
-        no_influence = signals["influence"]["value"] == "none"
-        if no_influence:
-            none_ids.append(mid)
-        fields.extend((f"{mid}.{signal}.note", signals[signal]["note"], no_influence)
-                      for signal in _SIGNALS)
-    analysis = verdict["analysis"]
-    fields.append(("analysis", analysis, bool(none_ids)))
-    # This is a presence hint, not a syntax check: Markdown code delimiters
-    # and capitalization in quoted prose should not fabricate a missing source.
-    task = " ".join(task_text.replace("`", "").split()).casefold()
-    for field, text, no_influence in fields:
-        if no_influence and _INDEPENDENCE.search(text):
-            warnings.append(
-                f"{span.id}: {field} uses independence language with influence='none' "
-                "in the rubric; attribution may be overstated (review only; verdict unchanged)"
-            )
-        if field != "analysis" and not field.endswith((".influence.note", ".novelty.note")):
-            continue
-        task_quote = False
-        verified_quote = False
-        missing_quote = False
-        previous_end = 0
-        for match in _QUOTED_TEXT.finditer(text):
-            prefix = text[previous_end:match.start()]
-            task_quote = bool(_TASK_CITATION.search(prefix)) or (
-                task_quote and bool(re.fullmatch(r"[\s,;]*(?:and\s+|\.\.\.\s*)?", prefix))
-            )
-            previous_end = match.end()
-            quote = next(part for part in match.groups() if part is not None)
-            normalized_quote = " ".join(quote.replace("`", "").split()).casefold()
-            matches_task, longest_fragment_words = _task_quote_matches(
-                normalized_quote, task)
-            if task_quote and not matches_task:
-                warnings.append(
-                    f"{span.id}: {field} has a task-attributed quote absent from task.md "
-                    "after whitespace/backtick/case normalization (review only; verdict unchanged)"
-                )
-                missing_quote = True
+def _quote_found(fragments: list[str], texts: list[str]) -> bool:
+    """Every fragment, in order, inside ONE evidence file: a gap cannot pool
+    words from different files. The quotation's own ends fall on word
+    boundaries; a fragment's edge at a gap need not."""
+    last = len(fragments) - 1
+    needles = [(" " if i == 0 else "") + fragment + (" " if i == last else "")
+               for i, fragment in enumerate(fragments)]
+    for text in texts:
+        offset = 0
+        for needle in needles:
+            offset = text.find(needle, offset)
+            if offset < 0:
                 break
-            # Identifiers and short labels are not requirement quotations.
-            verified_quote |= matches_task and longest_fragment_words >= 3
-        if (not verified_quote and not missing_quote
-                and _TASK_ATTRIBUTION.search(_QUOTED_TEXT.sub("", text))):
-            warnings.append(
-                f"{span.id}: {field} attributes requirements to the task without a "
-                "matching task quote with a fragment of at least three words "
-                "(review only; verdict unchanged)"
-            )
-    words = len(analysis.split())
+            offset += len(needle.rstrip())
+        else:
+            return True
+    return False
+
+
+def _prose_warnings(
+    verdict: dict, span: InjectionSpan, evidence: dict[str, str], warnings: list[str],
+) -> None:
+    """Flag judge prose for review after masking, without retries or label changes.
+
+    A quoted fragment of at least three words must occur in some evidence
+    file; which source the prose credits is not checked. Warning bodies name
+    fields, never copy endpoint text or evidence contents.
+    """
+    fields = [(f"{mid}.{signal}.note", signals[signal]["note"])
+              for mid, signals in verdict["rubric"].items() for signal in _SIGNALS]
+    fields.append(("analysis", verdict["analysis"]))
+    fields.extend((f"evidence[{i}].claim", entry["claim"])
+                  for i, entry in enumerate(verdict["evidence"]))
+    texts: list[str] | None = None
+    for field, text in fields:
+        for match in _QUOTED_TEXT.finditer(text):
+            quote = next(part for part in match.groups() if part is not None)
+            parts = _QUOTE_GAP.split(unicodedata.normalize("NFKC", quote))
+            fragments = [words for words in map(_quote_words, parts) if words]
+            if max((len(words.split()) for words in fragments), default=0) < _QUOTE_MIN_WORDS:
+                continue
+            if texts is None:
+                texts = [f" {_quote_words(t)} " for t in evidence.values()]
+            if not _quote_found(fragments, texts):
+                warnings.append(
+                    f"{span.id}: {field} quotes text absent from the evidence files after "
+                    "normalization (review only; verdict unchanged)"
+                )
+                break
+    words = len(verdict["analysis"].split())
     if words > 60:
         warnings.append(
             f"{span.id}: analysis has {words} words, above the 60-word target "
@@ -376,9 +342,11 @@ def _source_claim_warnings(
         )
 
 
-def _render_span_header(span: InjectionSpan, memories_note: str) -> str:
+def _render_span_header(span: InjectionSpan, memories_note: str, earlier: str | None = None) -> str:
     """The target and delivered-memories header of the span document the
-    judge agent reads first."""
+    judge agent reads first. `earlier` is the episode-checked statement of
+    each entry's earlier deliveries (injudge.evidence), which only the
+    parent episode's recorded input views can decide."""
     # a step-less span (no attributed consumer — the CLI rule-judges
     # it auto-neutral) names no step range
     consumed = (
@@ -420,22 +388,8 @@ def _render_span_header(span: InjectionSpan, memories_note: str) -> str:
         parts.append(f"NOTE: the memory was NOT delivered at steps {span.step_gaps}.")
     if span.new_keys:
         parts.append(f"New memories vs the previous span: {span.new_keys}.")
-    if span.previous_keys:
-        # history cue, not a visibility claim: these keys were recorded
-        # in an earlier span of this episode
-        line = (f"Recorded in an earlier span of this episode: {span.previous_keys}. "
-                "Check the visible context at this delivery before claiming prior knowledge; "
-                "earlier delivery alone does not prove current visibility.")
-        if span.previous_partial_keys:
-            # those earlier deliveries were only ever clipped or
-            # exposure-unverifiable: the "not new" cue cannot mean the agent
-            # saw the whole substance — this delivery may first expose it
-            line += (
-                f" Earlier placements of {span.previous_partial_keys} exposed the "
-                "value only partially or unverifiably, so their substance may not "
-                "have been fully seen before."
-            )
-        parts.append(line)
+    if earlier:
+        parts.append(earlier)
     if span.changed_keys:
         parts.append(
             f"Same memory, changed value vs its last earlier delivery: {span.changed_keys}."

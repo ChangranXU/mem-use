@@ -10,15 +10,26 @@ from test_injudge import _result, _fill_reads
 
 
 def _answer(case, followup=False, anchor=1):
-    labels = {"relevance": True, "accuracy": "uncontradicted", "novelty": "novel",
-              "influence": "none", "positive_effect": None}
-    expected = case["followup"]["expect"] if followup else case["expect"]
-    labels.update({k: v[0] for k, v in expected.items() if k in labels})
-    acted = labels["influence"] in ("acted_on", "selected")
-    entry = {k: {"value": v, "note": "canned"} for k, v in labels.items()}
-    entry.update(id="m1", anchors=[anchor] if acted else [])
-    return json.dumps({"memories": [entry], "analysis": "canned", "evidence": [],
+    source = case["followup"] if followup else case
+    expected = {"m1": source["expect"], **source.get("entries", {})}
+    delivered = len(source.get("memories") or [None])
+    entries = []
+    for mid in (f"m{i}" for i in range(1, delivered + 1)):
+        pinned = expected.get(mid, {})
+        labels = {"relevance": True, "accuracy": "uncontradicted", "novelty": "novel",
+                  "influence": "none", "positive_effect": None}
+        labels.update({k: v[0] for k, v in pinned.items() if k in labels})
+        acted = labels["influence"] in ("acted_on", "selected")
+        entry = {k: {"value": v, "note": "canned"} for k, v in labels.items()}
+        entry.update(id=mid, anchors=[anchor] if acted else [])
+        entries.append(entry)
+    return json.dumps({"memories": entries, "analysis": "canned", "evidence": [],
                        "confidence": 0.7})
+
+
+def _stability_labels(names):
+    """Six labels per span (five signals plus its verdict), five per further entry."""
+    return sum(5 if "/m" in name else 6 for name in names)
 
 
 def _judge_cases(tmp_path, monkeypatch, roots=None):
@@ -32,9 +43,8 @@ def _judge_cases(tmp_path, monkeypatch, roots=None):
              warnings, *, repair):
         if roots is not None:
             roots.append(evidence_dir)
-        task = (evidence_dir / "task.md").read_text()
-        (case,) = [c for c in CASES.values() if c["task"] in task
-                   and c["before"][0][0] in (evidence_dir / "steps/step_000001.md").read_text()]
+        span = (evidence_dir / "span.md").read_text()
+        (case,) = [c for n, c in CASES.items() if case_id(n) in span]
         manifest = json.loads((evidence_dir / "manifest.json").read_text())
         return _fill_reads(_result(_answer(case, manifest["span_id"].endswith(":S2"),
                                           manifest["footprint_from_step"])), evidence_dir)
@@ -63,7 +73,7 @@ def test_calibration_score_lists_disagreement_and_instability(tmp_path, monkeypa
     op["rubric"]["m1"]["novelty"] = {"value": "novel", "note": "reworded baseline"}
     lines = score([report, flipped])
     assert "    matched_b.novelty: expected ['redundant'], got 'novel' — reworded baseline" in lines
-    labels = len(expected_labels()) * 6
+    labels = _stability_labels(expected_labels())
     assert any(line.startswith(f"stability: {labels - 1}/{labels} labels identical across 2 reports") for line in lines)
     assert "    matched_b.novelty: 'redundant' ×1, 'novel' ×1" in lines
     assert any("report 2: novelty INCONSISTENT" in line for line in lines)
@@ -75,7 +85,7 @@ def test_calibration_missing_cases_are_unavailable_not_stable(tmp_path, monkeypa
     pair = {case_id("matched_a"), case_id("matched_b")}
     report["operations"] = [o for o in report["operations"] if runs[o["traj"]] not in pair]
     lines = score([report, report, report])
-    available = (len(expected_labels()) - 2) * 6
+    available = _stability_labels(expected_labels()) - 12
     assert f"stability: {available}/{available} labels identical across 3 reports; 12 unavailable (missing or errored in a report)" in lines
     assert all("novelty unavailable" in line for line in lines if line.startswith("matched pair"))
 
@@ -83,7 +93,7 @@ def test_calibration_missing_cases_are_unavailable_not_stable(tmp_path, monkeypa
 def test_calibration_evidence_does_not_name_the_case(tmp_path, monkeypatch):
     roots = []
     _judge_cases(tmp_path, monkeypatch, roots)
-    assert len(roots) == len(expected_labels())
+    assert len(roots) == len(CASES) + sum(bool(c.get("followup")) for c in CASES.values())
     for root in roots:
         text = "".join(f.read_text() for f in root.rglob("*") if f.is_file())
         assert not any(name in text for name in CASES)
@@ -113,8 +123,8 @@ def test_recorded_followup_cases_have_real_host_links_and_separate_credit(tmp_pa
     by_span = {json.loads((p / "manifest.json").read_text())["span_id"]: p for p in roots}
     run_of = {t["id"]: t["run_id"] for t in report["trajectories"]}
     for name, case in CASES.items():
-        if not case.get("followup"):
-            continue
+        if not case.get("followup") or case["followup"].get("memories"):
+            continue  # a repeated search selects by query, not by a shown key
         preview, full = [o for o in report["operations"] if run_of[o["traj"]] == case_id(name)]
         hit, = preview["memory_followups"]["m1"]
         action = len(case["before"]) + 1 + bool(case["followup"].get("lookup"))
@@ -136,3 +146,23 @@ def test_followup_scoring_keeps_missing_or_errored_read_separate(tmp_path, monke
     assert "recorded_followup_used.influence: unscored" not in text
     assert "6 unavailable" in text
     assert preview["verdict"] == "neutral"
+
+
+def test_list_entries_are_scored_as_their_own_targets(tmp_path, monkeypatch):
+    _status, report = _judge_cases(tmp_path, monkeypatch)
+    runs = {t["id"]: t["run_id"] for t in report["trajectories"]}
+    (op,) = [o for o in report["operations"] if runs[o["traj"]] == case_id("list_named")]
+    op["rubric"]["m2"]["influence"] = {"value": "none", "note": "whole-list remark"}
+    lines = score([report, report])
+    assert "    list_named/m2.influence: expected ['referenced'], got 'none' — whole-list remark" in lines
+    assert not any(line.startswith(("    list_named.", "    list_named/m3")) for line in lines)
+
+
+def test_unpinned_list_entries_still_count_toward_stability(tmp_path, monkeypatch):
+    _status, report = _judge_cases(tmp_path, monkeypatch)
+    changed = json.loads(json.dumps(report))
+    runs = {t["id"]: t["run_id"] for t in changed["trajectories"]}
+    first, _second = [o for o in changed["operations"] if runs[o["traj"]] == case_id("list_repeated")]
+    first["rubric"]["m2"]["accuracy"]["value"] = "corroborated"
+    lines = score([report, changed])
+    assert "    list_repeated/m2.accuracy: 'uncontradicted' ×1, 'corroborated' ×1" in lines

@@ -231,6 +231,16 @@ def _merge_spans(
     return spans, steps_seen
 
 
+def entry_ident(memory: dict) -> str:
+    """One delivered entry's cross-operation item identity: (namespace, item),
+    or the canonical entry when no item identity holds across operations.
+    The two-field item key cannot collide with canonical_entry's three/five-
+    field version key; stable items still track revisions."""
+    item = grouping_item_key(memory)
+    return (json.dumps([namespace_of(memory), item], ensure_ascii=False)
+            if item is not None else canonical_entry(memory))
+
+
 def _stamp_novelty(
     spans: list[InjectionSpan], steps_seen: list[list[int]]
 ) -> list[list[str]]:
@@ -247,15 +257,11 @@ def _stamp_novelty(
     `changed_keys` compares against the last RECORDED earlier value — a
     None side records no value, so it is unrecorded, never a change, and a
     value-less re-delivery never erases the last value an earlier span
-    actually recorded. One verified full exposure (verbatim or
-    presentation-normalized) makes the "already seen in full" cue sound
-    for every later span carrying the identity (`previous_partial_keys`
-    qualifies the rest). Returns per-span per-entry identities
+    actually recorded. Returns per-span per-entry identities
     for the window pass — one window per delivered entry, so
     identities sharing a display key keep their own bounds."""
     prev: dict[str, str] = {}
     seen: dict[str, object] = {}
-    seen_full: set[str] = set()
     entry_idents: list[list[str]] = []
     for span, steps in zip(spans, steps_seen):
         if steps:
@@ -269,13 +275,9 @@ def _stamp_novelty(
         vals: dict[str, object] = {}
         idents: list[str] = []
         for m in span.memories:
-            item = grouping_item_key(m)
-            # The two-field item key cannot collide with canonical_entry's
-            # three/five-field version key. Stable items still track revisions.
-            ident = (json.dumps([namespace_of(m), item], ensure_ascii=False)
-                     if item is not None else canonical_entry(m))
+            ident = entry_ident(m)
             idents.append(ident)
-            label = m.get("key") or item
+            label = m.get("key") or grouping_item_key(m)
             if label:
                 cur.setdefault(ident, label)
                 # last recorded value in this delivery speaks for the span
@@ -288,9 +290,6 @@ def _stamp_novelty(
         span.removed_keys = list(dict.fromkeys(prev[i] for i in prev if i not in cur))
         redelivered = [i for i in cur if i in seen]
         span.previous_keys = list(dict.fromkeys(cur[i] for i in redelivered))
-        span.previous_partial_keys = list(
-            dict.fromkeys(cur[i] for i in redelivered if i not in seen_full)
-        )
         span.changed_keys = list(
             dict.fromkeys(
                 cur[i]
@@ -303,11 +302,6 @@ def _stamp_novelty(
         for ident, v in vals.items():
             if ident not in seen or v is not None:
                 seen[ident] = v
-        for ident, (_m, exp) in zip(idents, span.iter_exposed()):
-            if exp is not None and (
-                exp.get("state") in ("full", "full_normalized")
-            ):
-                seen_full.add(ident)
         prev = cur
     return entry_idents
 

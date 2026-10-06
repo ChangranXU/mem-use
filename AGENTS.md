@@ -311,8 +311,9 @@ as a competing source. This allocates established influence; it does not
 create influence or transfer actions already shaped before the full read.
 A retrieval returning no recorded delivery,
 or reading repository code at a memory-supplied distinctive path, is
-acted_on. `referenced` records mention; `none` records no established
-influence after complete window inspection. A course change is `acted_on`,
+acted_on. `referenced` records a mention singling out that entry (a remark on
+the whole result list references none of several entries); `none` records
+no established influence after complete window inspection. A course change is `acted_on`,
 described in the note. Selection and acted-on claims require in-window action
 anchors. Only acted_on keeps a non-null effect; assembly coerces any other
 pairing to null and counts it under judge compliance.
@@ -333,6 +334,11 @@ under `<output>/<run-stamp>/evidence/` (`injudge/evidence.py`: `span.md`,
 agent in `agent/runner.ts` receives `span.md` and compact file navigation in
 its opening; detailed episode evidence is read through tools scoped
 to that folder (absolute paths, `..`, and out-of-root symlinks refused).
+`span.md` states each entry's earlier deliveries in the episode and, from the
+consumer's recorded input view, whether each is still visible, arrived in that
+same input, or is gone, and whether it showed all of the entry's text. Only
+the entry's proven placements still in that input count; a surviving slot
+does not preserve entries from another retracted slot.
 Request-pointer placement proofs are checked against the bound call's recorded
 request and JSON-value digest, then matched uniquely to the consumer's visible
 host occurrence; wire indexes never stand in for recorder message slots.
@@ -562,6 +568,8 @@ to its run.
   and an anchor or structured evidence step outside `read_steps` takes the
   repair. Tool-result metadata records the actual returned line range and
   truncation; a partial read is not proof that the whole step was inspected.
+  A limit-bounded read ending before the file's last non-blank line says how
+  many lines remain and where to continue.
 - `aggregates.overall` counts the regimes: `input_paths`, `gold_scored`,
   `forced_answers`.
 - The run also writes `<output>/<run-stamp>/evidence/<span-dir>/` — the
