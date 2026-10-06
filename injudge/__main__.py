@@ -70,6 +70,7 @@ from injudge.gold import (
 )
 from injudge.judge import GoldInput, _mask_key, auto_verdict_empty, auto_verdict_no_subsequent_turn, blank_verdict
 from injudge.model import EpisodeInput, InjectionSpan
+from injudge.prompts import implementation_digest
 from injudge.report import (
     build_artifact,
     build_summary,
@@ -778,6 +779,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise SystemExit(f"error: --episode {wanted!r} matches no prepared episode")
             selected |= hits
 
+    provenance = implementation_digest()
     # run isolation: every artifact of this run lands in its own folder
     # under the output container, so another run — earlier, later, or
     # concurrently in the same container — is never overwritten or mixed in
@@ -833,6 +835,7 @@ def main(argv: list[str] | None = None) -> int:
             # report is replayable evidence only if its configuration is
             # recoverable from it (see _run_manifest)
             "config": _run_manifest(cfg, judge_parallel),
+            "provenance": provenance,
         }
 
     progress = _Progress(len(trajs), enabled=not args.dry_run)

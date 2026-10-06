@@ -58,7 +58,7 @@ from injudge.judge import (
     blank_verdict,
 )
 from injudge.model import EpisodeInput, InjectionSpan
-from injudge.prompts import load_prompt
+from injudge.prompts import content_digest, load_prompt
 
 # The checkout's TS half: the pi agent runner the judge spawns per span.
 _AGENT_DIR = Path(__file__).resolve().parents[1] / "agent"
@@ -85,9 +85,11 @@ def _opening_message(span_id: str, files: dict[str, str]) -> str:
     index = json.loads(files["manifest.json"])
     navigation = [f"{entry['path']} ({entry['chars']} chars)" for entry in index["files"]
                   if entry.get("kind") != "step"]
-    step_numbers = [entry["step"] for entry in index["files"] if entry.get("kind") == "step"]
-    navigation.append(f"steps/: {len(step_numbers)} files, global steps "
-                      f"{step_numbers[0] if step_numbers else '?'}–{step_numbers[-1] if step_numbers else '?'}")
+    step_files = [entry["path"] for entry in index["files"] if entry.get("kind") == "step"]
+    # name real files: the zero-padded names are not guessable from step numbers
+    navigation.append(f"steps/: {len(step_files)} files, "
+                      f"{step_files[0] if step_files else '?'} … {step_files[-1] if step_files else '?'}"
+                      " (one per global step)")
     return (
         f"## span.md\n{files['span.md']}"
         + "\n\n## Evidence navigation\n" + "\n".join(navigation)
@@ -418,36 +420,89 @@ def _invoke_runner(
         return result
 
 
-_STEP_FILE = re.compile(r"steps/step_(\d{1,9})\.md")
+def _read_steps(messages: list, files: dict[str, str]) -> list[int]:
+    """Certify complete step text, including reads paged across calls.
 
-
-def _read_steps(messages: list) -> list[int]:
-    """Global steps whose files a successful, non-empty read left in the
-    retained conversation (rolled-back rounds are gone from it). The runner
-    normalizes `details.path`; anything else shaped differently reads as no
-    evidence, never a crash."""
-    steps: set[int] = set()
+    Only text actually returned and retained counts. Line-range metadata
+    alone would certify a header or a truncated result as an entire step.
+    A complete copy in baseline.md is equivalent to the original step file.
+    """
+    lines = {path: text.split("\n") for path, text in files.items()}
+    covered: dict[str, dict[int, list[tuple[int, int]]]] = {}
     for m in messages:
         if not isinstance(m, dict) or m.get("role") != "toolResult" or m.get("isError"):
             continue
         details = m.get("details")
         if m.get("toolName") != "read_evidence" or not isinstance(details, dict):
             continue
-        path, lines = details.get("path"), details.get("lines_read")
-        match = _STEP_FILE.fullmatch(path) if isinstance(path, str) else None
-        if match and isinstance(lines, int) and not isinstance(lines, bool) and lines > 0:
-            steps.add(int(match[1]))
-    return sorted(steps)
+        path = details.get("path")
+        if not isinstance(path, str) or path not in lines:
+            continue
+        content = m.get("content")
+        for block in content if isinstance(content, list) else []:
+            if not isinstance(block, dict) or block.get("type") != "text" or not isinstance(block.get("text"), str):
+                continue
+            for line in block["text"].split("\n"):
+                match = re.fullmatch(r"([0-9]{1,9})(?:@([0-9]{1,9}))?: (.*)", line)
+                if match is None:
+                    continue
+                number = int(match[1])
+                start = int(match[2]) - 1 if match[2] else 0
+                fragment = match[3]
+                if (1 <= number <= len(lines[path]) and start >= 0 and fragment
+                        and lines[path][number - 1].startswith(fragment, start)):
+                    covered.setdefault(path, {}).setdefault(number, []).append((start, start + len(fragment)))
+    complete: dict[str, set[int]] = {}
+    for path, rows in covered.items():
+        for number, ranges in rows.items():
+            end = 0
+            for start, stop in sorted(ranges):
+                if start > end:
+                    break
+                end = max(end, stop)
+            if end == len(lines[path][number - 1]):
+                complete.setdefault(path, set()).add(number)
+    index = json.loads(files["manifest.json"])
+    read = []
+    for entry in index["step_sources"]:
+        for source in entry["sources"]:
+            path = source["path"]
+            needed = {i for i in range(source["start"], source["end"] + 1)
+                      if lines[path][i - 1].strip()}
+            if needed and needed <= complete.get(path, set()):
+                read.append(entry["step"])
+                break
+    return sorted(read)
+
+
+def _coverage_error(obj: dict, span: InjectionSpan, eligible: set[int], read: set[int]) -> str | None:
+    """Absence of influence needs the whole window, not a search miss.
+
+    Unknown attribution remains available when the budget cannot cover the
+    window. Positive/selection claims still require their cited step bodies.
+    """
+    if span.step_first not in read:
+        return f"first consuming step {span.step_first} was not read completely; read its step file"
+    for entry in obj["memories"]:
+        if entry["influence"]["value"] not in ("none", "referenced", "selected"):
+            continue
+        mid = entry["id"]
+        start = span.memory_window_starts.get(mid, span.step_first)
+        end = span.memory_windows.get(mid)
+        missing = sorted(s for s in eligible if s >= start and (end is None or s <= end) and s not in read)
+        if missing:
+            return (f"{mid} claims no acted-on influence without complete window coverage; "
+                    f"read step(s) {missing}, or use influence null if attribution remains unassessed")
+    return None
 
 
 def _unread_anchor_error(obj: dict, read: set[int]) -> str | None:
-    """A cited anchor is a claim about a step's content; one that was never
-    read in the retained conversation rests on a preview or a guess."""
+    """Citations require the complete step, from any indexed evidence source."""
     for entry in obj["memories"]:
         unread = sorted({a for a in entry["anchors"] if a not in read})
         if unread:
             return (
-                f"cites {entry['id']} anchor step(s) {unread} whose step files were not "
+                f"cites {entry['id']} anchor step(s) {unread} whose complete text was not "
                 "read in this conversation (read every cited step; request the missing "
                 "files with needs_evidence)"
             )
@@ -458,7 +513,7 @@ def _unread_anchor_error(obj: dict, read: set[int]) -> str | None:
                          and not isinstance(step, bool) and step not in read}) if isinstance(steps, list) else []
         if unread:
             return (
-                f"cites evidence step(s) {unread} whose step files were not read "
+                f"cites evidence step(s) {unread} whose complete text was not read "
                 "in this conversation (request the missing files with needs_evidence)"
             )
     return None
@@ -565,10 +620,11 @@ def judge_span(
     opening = _opening_message(span.id, files)
     last_step = steps[-1].step if steps else None
     history: list | None = None
-    health: dict = {"executed_llm_calls": 0, "executed_tool_calls": 0,
+    health: dict = {"evidence_sha256": content_digest(files),
+                    "system_prompt_sha256": content_digest({"system": system}),
+                    "executed_llm_calls": 0, "executed_tool_calls": 0,
                     "reported_usage": {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0},
                     "context_rollbacks": 0, "any_phase_forced": False}
-    investigation_failed = False
     last_text = ""
     last_error = "no answer"
     result: dict | None = None
@@ -619,11 +675,10 @@ def judge_span(
         health["retained_llm_calls"] = result.get("llm_calls", 0)
         health["retained_tool_calls"] = result.get("tool_calls", 0)
         health["retained_evidence"] = result.get("retained_evidence", 0)
-        read_steps = _read_steps(result["messages"])
+        read_steps = _read_steps(result["messages"], files)
         # which step files the retained conversation actually read: the
         # coverage a no-influence answer rests on, and the set anchors need
         health["read_steps"] = read_steps
-        investigation_failed = not read_steps
         if result.get("error"):
             masked = _mask_key(str(result["error"]), cfg.api_key)
             warnings.append(f"{span.id}: the judge agent run failed: {masked}")
@@ -663,10 +718,10 @@ def judge_span(
             obj, error = _strict_parse(text)
             if obj is not None:
                 error = _verdict_semantics(obj, span, last_step, {step.step for step in steps})
-                if error is None and investigation_failed:
-                    error = "required investigation evidence was not retained; inspect the episode again"
                 if error is None:
                     error = _unread_anchor_error(obj, set(read_steps))
+                if error is None:
+                    error = _coverage_error(obj, span, {step.step for step in steps}, set(read_steps))
                 if error is not None:
                     obj = None  # a semantic violation is as out-of-contract as a parse one
         if obj is not None:

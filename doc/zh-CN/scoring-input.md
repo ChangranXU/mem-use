@@ -20,6 +20,7 @@ icon: align-left
   span.md              # 只有目标区间及其来源
   episode.md           # 所属执行与导航
   task.md              # 任务及带来源位置的用户更新
+  baseline.md          # 暴露前记录，可引用的完整历史步骤
   context.json         # 可见输入视图与目标基线
   deliveries.md        # 该 episode 的每一次投递，含目标区间自身
   searches.json        # 搜索来源

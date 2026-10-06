@@ -6,7 +6,7 @@ icon: gavel
 # injudge
 
 {% hint style="info" %}
-injudge classifies assessable recall spans as **positive**, **negative**, **unresolved** (acted on, effect undetermined), or **neutral** from their footprint in later agent turns. Spans with no attributed agent step are reported separately as **unassessable**.
+injudge classifies assessable recall spans as **positive**, **negative**, **unresolved** (attribution or effect undetermined), or **neutral** from their footprint in later agent turns. Spans with no attributed agent step are reported separately as **unassessable**.
 {% endhint %}
 
 ```bash
@@ -28,8 +28,8 @@ Each run writes its own `<run-stamp>/` folder (`YYYYMMDD-HHMMSS-<hex>`) under `-
 
 | File | Contents |
 |---|---|
-| `injudge-report.json` | The runtime judging record (`injudge.report/v14`), written before paid work with pending spans marked `unjudged`, then checkpointed after each completed span, including parallel completions |
-| `summary.json` | The final statistics (`injudge.summary/v12`): counts, rates, per-memory usage |
+| `injudge-report.json` | The runtime judging record (`injudge.report/v15`), written before paid work with pending spans marked `unjudged`, then checkpointed after each completed span, including parallel completions |
+| `summary.json` | The final statistics (`injudge.summary/v13`): counts, rates, per-memory usage |
 | `memgraph-verdicts.html` | Only with `--html`: memgraph with recall nodes colored by verdict |
 | `evidence/` | One folder per span sent to the judge agent (error verdicts from a failed run included): target `span.md` plus only its parent's prepared episode files and optional attachments |
 | `agent-runs/` | One trajectory JSONL per span sent to the judge agent: the pi event-sourced recording of how each verdict was reached |
@@ -67,7 +67,7 @@ Each span goes through three stages, each documented on its own page:
 
 1. **Materialize the evidence.** The target span and its parent episode's recorded task, visible context, other deliveries, original global steps, and optional attachments go into one tool-scoped folder. → [Judge evidence](scoring-input.md)
 2. **Score the rubric.** One agent conversation searches the evidence and answers with five signals per delivered memory — `relevance`, `accuracy`, `novelty`, `influence`, `positive_effect` — and never a verdict. → [Rubric and verdict derivation](verdict-derivation.md)
-3. **Derive the verdict in code.** Usage labels first, then the span verdict: any misused memory makes the span negative; otherwise any used memory makes it positive; otherwise an acted-on memory of undetermined effect makes it unresolved; otherwise it is neutral. → [Rubric and verdict derivation](verdict-derivation.md)
+3. **Derive the verdict in code.** Usage labels first, then the span verdict: any misused memory makes the span negative; otherwise any used memory makes it positive; otherwise a memory with undetermined attribution or effect makes it unresolved; otherwise it is neutral. → [Rubric and verdict derivation](verdict-derivation.md)
 
 Budgets, forced answers, and the conversation's retry/failure behavior are in [Judge agent](judge-client.md).
 

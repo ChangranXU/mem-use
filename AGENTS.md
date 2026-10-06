@@ -7,7 +7,7 @@ mem-eval scores memory-system quality from schema-v9 gate trajectories
   self-contained HTML/JSON graph.
 - **injudge** scores each episode-scoped recall span's subsequent influence
   with an agentic LLM rubric (a pi agent searching one evidence folder per
-  span) and writes `injudge.report/v14`, which memgraph can overlay with
+  span) and writes `injudge.report/v15`, which memgraph can overlay with
   `--verdicts`.
 
 An injection is judged by its influence on later agent turns. The final
@@ -100,7 +100,7 @@ memgraph/parse_trajectory.py  # trajectory.jsonl → ops; shared step rule
 memgraph/episodes.py       # shared episode-scope rule (bridge boundaries) + graph episode rows
 memgraph/graph.py          # path discovery, cross-trajectory linking, validation
 memgraph/html.py           # self-contained HTML (template + embedded graph JSON)
-memgraph/verdicts.py       # merge injudge.report/v14 onto recall ops
+memgraph/verdicts.py       # merge injudge.report/v15 onto recall ops
 memgraph/__main__.py       # python3 -m memgraph
 injudge/__init__.py        # REPORT_SCHEMA / SUMMARY_SCHEMA (writer + memgraph reader)
 injudge/model.py           # AgentStep / ToolExec / InjectionSpan
@@ -113,7 +113,7 @@ injudge/agent.py           # .env → AgentConfig, runner subprocess, corrective
 injudge/gold.py            # golden-answer / correctness sidecars and CLI joins
 injudge/prompts.py         # loads prompts/ (never inline prompts in code)
 injudge/aggregate.py       # verdict counts/rates, per-memory usage roll-ups
-injudge/report.py          # injudge.report/v14 + injudge.summary/v12 + stdout
+injudge/report.py          # injudge.report/v15 + injudge.summary/v13 + stdout
 injudge/__main__.py        # python3 -m injudge
 agent/                     # TS judge agent: runner.ts (pi Agent + budgets),
                            # evidence-tools.ts (scoped read-only tools),
@@ -296,15 +296,24 @@ values) fails fast with a targeted `SystemExit` before any paid judge call.
 
 ## Judging
 
-The span verdict is derived in code from the rubric (any misused ⇒
-negative, else any used ⇒ positive, else any unclear ⇒ unresolved, else
-neutral). It is never asked of the LLM. `used` is acted-on influence that
-improved the work; `misused` is acted-on influence with `positive_effect`
-`no_effect` or `harmed`; `unclear` is acted-on influence whose effect is
-null — an established footprint of unknown direction, never neutral's "no
-influence established". Mere reference is never misuse. Selecting a
-delivered entry for a follow-up by its shown identifier (reading a listed
-candidate) is acted-on influence; its effect is what that follow-up led to.
+The span verdict is derived in code: any harmful use (`misused`) ⇒
+negative, else any `used` ⇒ positive, else any `unclear` ⇒ unresolved,
+else neutral. `used` is acted-on influence with `positive_effect: improved`;
+`unproductive` is acted-on influence with `no_effect` and is neutral;
+`misused` requires `harmed`. `unclear` covers unknown attribution (influence
+null) or acted-on influence with unknown effect. `selected` records
+retrieval of fuller memory content recorded as its own delivery, without
+inheriting that delivery's effect; content both carry is credited to the
+fuller delivery for downstream actions, never discounted on either side
+as a competing source. This allocates established influence; it does not
+create influence or transfer actions already shaped before the full read.
+A retrieval returning no recorded delivery,
+or reading repository code at a memory-supplied distinctive path, is
+acted_on. `referenced` records mention; `none` records no established
+influence after complete window inspection. A course change is `acted_on`,
+described in the note. Selection and acted-on claims require in-window action
+anchors. Only acted_on keeps a non-null effect; assembly coerces any other
+pairing to null and counts it under judge compliance.
 An explicit search using an entry's shown key is recorded as `memory_followups`
 only when its proven tool-result host links to an in-window action using that
 identifier and returning the same portable item in that specific placement.
@@ -317,7 +326,7 @@ uncertainty; rejection alone does not establish `no_effect`.
 The judge is an AGENT, not one prompt. Python prepares episodes before
 grouping spans, then materializes each span's target and parent episode evidence
 under `<output>/<run-stamp>/evidence/` (`injudge/evidence.py`: `span.md`,
-`episode.md`, `task.md`, `context.json`, `deliveries.md`, `searches.json`,
+`episode.md`, `task.md`, `baseline.md`, `context.json`, `deliveries.md`, `searches.json`,
 `manifest.json`, `steps/`, and optional `gold.md` / `outcome.json`). The pi
 agent in `agent/runner.ts` receives `span.md` and compact file navigation in
 its opening; detailed episode evidence is read through tools scoped
@@ -349,11 +358,14 @@ Easy to get wrong:
 - Python owns the contract: the runner reports the final assistant text,
   and `_strict_parse` + `_verdict_semantics` (injudge/judge.py) decide
   whether it is a verdict — exact id coverage, action anchors (acted-on/
-  decisive claims cite global step numbers in the parent episode and inside
+  selected claims cite global step numbers in the parent episode and inside
   that entry's footprint window), and the anchor/influence shape
   (`anchors` stay empty when influence is `none`); injudge/agent.py adds
   that every cited anchor and structured `evidence[].steps` citation names a
-  step file the retained conversation actually read. A violation takes the
+  step whose complete text the retained conversation read (paged reads or
+  an indexed complete copy in baseline.md count). Header-only reads do not
+  count; none/referenced/selected additionally require the complete footprint window.
+  Incomplete investigation must use influence null, not fabricate neutrality. A violation takes the
   single-call repair with no evidence tools, continuing job.history. Only
   an explicit `needs_evidence` repair reply reopens investigation, with a
   follow-up prompt over that same history. Each resumed investigation gets
@@ -362,7 +374,7 @@ Easy to get wrong:
   an invalid repair or exhaustion is a visible `error` with text kept (masked),
   never a silently partial verdict. Novelty, accuracy, influence, and
   effect are ORTHOGONAL signals — no cross-signal combination is a
-  contract violation. Only novelty and positive_effect accept null:
+  contract violation. Novelty, influence, and positive_effect accept null:
   unknown novelty is missing baseline evidence, not a forced tier or an
   influence verdict. Ignored relevant entries with null novelty carry
   `ignored_unknown_novelty`; `counts.novelty.null` records them and novelty
@@ -502,7 +514,7 @@ The HTML colors rewrite markers by each marker's own `on_memory_lane` flag,
 computed at parse time against the final lane set. Do not prune a field
 from one consumer only.
 
-**injudge** writes `injudge.report/v14` (`{tool, generated_at, trajectories,
+**injudge** writes `injudge.report/v15` (`{tool, generated_at, trajectories,
 operations, injections, aggregates, validation}`), checkpointed after every
 completed span (including parallel completions), with pending spans explicitly
 `unjudged`, so interruption within a multi-episode trajectory keeps completed
@@ -528,7 +540,9 @@ to its run.
   provenance, global step bounds, and their span ids. Operations carry parent
   `episode_execution_id` and `episode_last_step`; memgraph keeps these links.
 - `tool.config` is the resolved, secret-free judge-agent configuration
-  (URLs sanitized to `scheme://host[:port][/path]`).
+  (URLs sanitized to `scheme://host[:port][/path]`). `tool.provenance` hashes
+  the implementation and prompt files. Each judge input hashes the composed
+  system prompt and exact evidence files; no credential is part of these hashes.
 - Each operation the agent ran for carries an `input` record (error
   outcomes included):
   `{"path": "agent", "attempts", "llm_calls", "tool_calls", "transcript"}`
@@ -538,9 +552,9 @@ to its run.
   conversation's final answer came from a budget-exhausted forced round).
   Only mechanically counted empty/unattributable spans and unjudged spans
   omit it.
-  `read_steps` lists the global steps whose files a successful read left in
+  `read_steps` lists global steps whose complete text remains in
   the retained conversation (`retained_evidence` is the runner's read
-  count); reading only navigation files cannot validate a neutral answer,
+  count); reading headers or navigation cannot validate a judgment,
   and an anchor or structured evidence step outside `read_steps` takes the
   repair. Tool-result metadata records the actual returned line range and
   truncation; a partial read is not proof that the whole step was inspected.
@@ -560,7 +574,7 @@ to its run.
   (non-`[A-Za-z0-9._-]` replaced by `_`, capped at 80 chars) plus an
   8-char digest suffix — `evidence.span_dir_name`.
 
-The companion `summary.json` (`injudge.summary/v12`) is the run's final
+The companion `summary.json` (`injudge.summary/v13`) is the run's final
 statistics: counts/rates, rubric distributions, cost, confidence, judge
 compliance (the positive_effect↔influence correction rate), per-trajectory
 extraction reliability (`n_extractions` / `extraction_failures`), and slim

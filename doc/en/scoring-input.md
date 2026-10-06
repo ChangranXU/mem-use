@@ -20,7 +20,8 @@ Windows end at the next same-episode re-exposure of that entry (a delivery whose
   span.md              # only the target span and its provenance
   episode.md           # parent execution and navigation
   task.md              # task and user updates with source positions
-  context.json         # visible input views and target baseline
+  baseline.md          # pre-exposure record with citable complete prior steps
+  context.json         # detailed visible-input audit
   deliveries.md        # every episode delivery, the target's own included
   searches.json        # search provenance
   manifest.json        # detailed file index
@@ -47,7 +48,7 @@ The opening names the manifest as the index of every file, and directs the judge
 
 ## What the agent can see
 
-The step stream is not every message in the original conversation. Queries may come from memory/side lanes, hidden annotation keys are metadata (an identifier the placement shows is content), and earlier-span labels alone do not reconstruct co-resident content. The scoring rules, not the opening, bound what an incomplete record can prove: a preview or search hit only locates evidence until the step file itself is read, and an execution without a recorded result proves only an attempt. The prompts require uncertainty (`null`) when missing evidence prevents a signal from being established. Later outcomes can substantiate an in-window action or decision but cannot create a new out-of-window action anchor.
+The step stream is not every message in the original conversation. Queries may come from memory/side lanes, hidden annotation keys are metadata (an identifier the placement shows is content), and earlier-span labels alone do not reconstruct co-resident content. The scoring rules, not the opening, bound what an incomplete record can prove: a preview or search hit only locates evidence until the complete step is read from its file or an indexed baseline.md copy, and an execution without a recorded result proves only an attempt. The prompts require uncertainty (`null`) when missing evidence prevents a signal from being established. Later outcomes can substantiate an in-window action or decision but cannot create a new out-of-window action anchor.
 
 The agent reads this folder selectively — see [Judge agent](judge-client.md) for the budgets that bound the conversation, the forced final answers, and the corrective retry on an invalid answer.
 

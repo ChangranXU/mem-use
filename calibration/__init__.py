@@ -2,11 +2,14 @@
 
 Parser tests with canned answers cannot show that the judge's labels are
 right. These development regressions run through the REAL judge: each is a
-synthetic schema-v9 episode delivering one memory. They cover explicit and
+synthetic schema-v9 episode delivering one memory (a `followup` case adds the
+recorded full read its preview selected, scored as a second target,
+`<case>/read`). They cover explicit and
 uncited use, routine practice, source and novelty distinctions, uncertainty,
-plan execution and reversal, harmful advice, selecting a listed candidate
-whose advice is then set aside, a historically scoped claim, and paraphrased
-baselines.
+plan execution and reversal, harmful advice, unproductive use, reading a
+listed candidate whose unrecorded full text is then set aside or used,
+recorded preview/full-read pairs, a historically scoped claim, and
+paraphrased baselines.
 Only labels decided by the construction are pinned.
 
 `score` compares injudge reports against those expectations. It never picks
@@ -52,7 +55,7 @@ CASES: dict[str, dict] = {
             ("Rerun the tests.",
              "pytest -p no:cacheprovider tests/unit/test_parser.py", "8 passed"),
         ],
-        "expect": {"novelty": ["novel"], "influence": ["acted_on", "decisive"],
+        "expect": {"novelty": ["novel"], "influence": ["acted_on"],
                    "positive_effect": ["improved"], "verdict": ["positive"]},
     },
     "implicit_action": {
@@ -81,7 +84,7 @@ CASES: dict[str, dict] = {
              "APP_TIMEOUT=5 python -c 'from app.client import make; print(make().timeout)'",
              "5"),
         ],
-        "expect": {"novelty": ["novel"], "influence": ["acted_on", "decisive"],
+        "expect": {"novelty": ["novel"], "influence": ["acted_on"],
                    "positive_effect": ["improved"], "verdict": ["positive"]},
     },
     "redundant_instruction": {
@@ -115,7 +118,7 @@ CASES: dict[str, dict] = {
                      "sed -i 's/^numpy$/numpy<2/' requirements.txt && pip install -r requirements.txt",
                      "Successfully installed numpy-1.26.4"),
         "after": [("Check the import.", "python -c 'import pkg; print(pkg.__version__)'", "0.4.1")],
-        "expect": {"novelty": ["novel"], "influence": ["acted_on", "decisive"],
+        "expect": {"novelty": ["novel"], "influence": ["acted_on"],
                    "positive_effect": ["improved"], "verdict": ["positive"]},
     },
     "mixed_content": {
@@ -135,7 +138,7 @@ CASES: dict[str, dict] = {
         "consumer": ("Make next_run use UTC explicitly.",
                      "sed -i 's/datetime.now()/datetime.now(timezone.utc)/' src/schedule.py", ""),
         "after": [("Rerun.", "make test", "31 passed")],
-        "expect": {"novelty": ["novel"], "influence": ["acted_on", "decisive"],
+        "expect": {"novelty": ["novel"], "influence": ["acted_on"],
                    "positive_effect": ["improved"], "verdict": ["positive"]},
     },
     "mixed_irrelevant_content": {
@@ -174,7 +177,7 @@ CASES: dict[str, dict] = {
             ("Verify.", "python -m tool build", "built 3 targets into dist/"),
         ],
         "expect": {"relevance": [True], "accuracy": ["contradicted"],
-                   "influence": ["acted_on", "decisive"],
+                   "influence": ["acted_on"],
                    "positive_effect": ["harmed"], "verdict": ["negative"]},
     },
     "unrelated_mechanism": {
@@ -260,7 +263,7 @@ CASES: dict[str, dict] = {
             ("Apply the selected setting.", "sed -i \"s/backend=''/backend='local'/\" src/runtime/resolver.toml", ""),
             ("Verify startup.", "app start", "application ready; local resolver active"),
         ],
-        "expect": {"novelty": ["novel"], "influence": ["acted_on", "decisive"],
+        "expect": {"novelty": ["novel"], "influence": ["acted_on"],
                    "positive_effect": ["improved"], "verdict": ["positive"]},
     },
     "uncited_abandoned_setting": {
@@ -320,7 +323,7 @@ CASES: dict[str, dict] = {
              "ready; 48 MB resident; catalog entries loaded on demand"),
             ("Exercise a catalog lookup.", "catalogctl lookup sample", "sample found"),
         ],
-        "expect": {"novelty": ["novel"], "influence": ["acted_on", "decisive"],
+        "expect": {"novelty": ["novel"], "influence": ["acted_on"],
                    "positive_effect": ["improved"], "verdict": ["positive"]},
     },
     "routine_reversal": {
@@ -342,12 +345,13 @@ CASES: dict[str, dict] = {
              "pytest tests/test_headers.py -q && pytest tests/integration -q",
              "12 passed; 340 passed"),
         ],
-        "expect": {"novelty": ["novel"], "influence": ["decisive"],
+        "expect": {"novelty": ["novel"], "influence": ["acted_on"],
                    "positive_effect": ["improved"], "verdict": ["positive"]},
     },
-    # Reading a listed candidate by its shown id is an action the memory
-    # shaped. The plan is voiced before the read and the read's advice shares
-    # nothing with the fix, so the unused output is no_effect by construction.
+    # The full text comes back as plain tool output, not a recorded memory
+    # delivery, so no other span judges it: the read is this entry's action
+    # and its consequence this entry's effect. The plan is voiced before the
+    # read and the read's advice shares nothing with the fix.
     "selected_then_rejected": {
         "task": "cache.get() returns a stale value right after cache.set() on the "
                 "same key. Fix it.",
@@ -371,8 +375,41 @@ CASES: dict[str, dict] = {
              ""),
             ("Verify.", "python repro.py", "set 2 -> get 2"),
         ],
-        "expect": {"influence": ["acted_on", "decisive"],
-                   "positive_effect": ["no_effect"], "verdict": ["negative"]},
+        "expect": {"influence": ["acted_on"],
+                   "positive_effect": ["no_effect"], "verdict": ["neutral"]},
+    },
+    # As above, but the unrecorded read supplies the fix.
+    "selected_then_used": {
+        "task": "Find why config resolution ignores the project-local overrides and fix it.",
+        "before": [("Reproduce.", "python config_repro.py", "project-local override ignored")],
+        "memory": ("kb-927", "Candidate kb-927: project-local override resolution. "
+                             "Read kb-927 for the fix."),
+        "consumer": ("Read candidate kb-927.", "kb read kb-927",
+                     "Resolver checks defaults first. Reverse the search order in src/resolver.py."),
+        "after": [
+            ("The read says to check project-local values first; apply it.",
+             "python reverse_resolver_order.py", "search order reversed"),
+            ("Verify.", "python config_repro.py", "project-local override applied"),
+        ],
+        "expect": {"influence": ["acted_on"],
+                   "positive_effect": ["improved"], "verdict": ["positive"]},
+    },
+    # Acted on without benefit or harm: unproductive, which is not misuse.
+    "unproductive_action": {
+        "task": "Fix the parser's empty input crash.",
+        "before": [("The crash is an unguarded first-token access; add an empty-input guard next.",
+                    "cat src/parser.py", "def parse(tokens): return tokens[0]")],
+        "memory": ("parser_probe", "Run parser-probe --dump-allocation before changing this parser."),
+        "consumer": ("The memory says to dump allocations; try that first.",
+                     "parser-probe --dump-allocation", "allocation dump written to probe.bin"),
+        "after": [
+            ("The dump has no useful information for this bug. Discard it unread and "
+             "carry out the guard already planned.",
+             "rm probe.bin && python add_empty_input_guard.py", "guard added"),
+            ("Verify the guard.", "pytest tests/test_parser.py", "8 passed"),
+        ],
+        "expect": {"influence": ["acted_on"],
+                   "positive_effect": ["no_effect"], "verdict": ["neutral"]},
     },
     # A claim scoped to an old release is not refuted by today's code; the
     # mismatch is a reason it does not apply, not evidence it was false.
@@ -398,6 +435,51 @@ CASES: dict[str, dict] = {
         ],
         "expect": {"relevance": [False], "accuracy": ["uncontradicted", "corroborated"],
                    "influence": ["none"], "positive_effect": [None], "verdict": ["neutral"]},
+    },
+    "recorded_followup_used": {
+        "task": "The parser rejects hexadecimal identifiers. Make parse_id('0xff') return 255.",
+        "before": [("Reproduce.", "python reproduce.py", "ValueError: invalid literal '0xff'")],
+        "memory": ("kb-hex", "ID kb-hex: parse_id must pass base=0 to int to accept the 0x prefix."),
+        "consumer": ("Read the full kb-hex experience before changing the parser.", "kb read kb-hex", ""),
+        "followup": {
+            "value": "ID kb-hex: parse_id must pass base=0 to int to accept the 0x prefix. Change the conversion in src/identifiers.py and verify decimal identifiers still parse.",
+            "expect": {"influence": ["acted_on"], "positive_effect": ["improved"], "verdict": ["positive"]},
+        },
+        "after": [("The full experience gives the conversion and location. Apply base=0 in src/identifiers.py.",
+                   "python set_integer_base.py src/identifiers.py", "conversion updated"),
+                  ("Verify both formats.", "python reproduce.py", "0xff -> 255; 123 -> 123")],
+        "expect": {"influence": ["selected"], "positive_effect": [None], "verdict": ["neutral"]},
+    },
+    "recorded_followup_unused": {
+        "task": "Fix deletion of the first entry from a queue.",
+        "before": [("delete(0) does nothing. The falsy-index condition should distinguish None from zero; fix it next.",
+                    "cat src/queue.py", "def delete(i):\n    if i: entries.pop(i)")],
+        "memory": ("kb-queue", "ID kb-queue: queue deletions can fail because cached index maps become stale."),
+        "consumer": ("Check the full kb-queue experience before continuing.", "kb read kb-queue", ""),
+        "followup": {
+            "value": "ID kb-queue: queue deletions can fail because cached index maps become stale. Rebuild index_map after every insertion or removal.",
+            "expect": {"influence": ["referenced"], "positive_effect": [None], "verdict": ["neutral"]},
+        },
+        "after": [("The fetched experience is about an index_map, which this queue does not have. Continue the already planned None guard.",
+                   "python fix_none_guard.py src/queue.py", "if i is not None: entries.pop(i)"),
+                  ("Verify.", "python queue_repro.py", "delete(0) removes first entry")],
+        "expect": {"influence": ["selected"], "positive_effect": [None], "verdict": ["neutral"]},
+    },
+    "recorded_followup_after_action": {
+        "task": "Make parse_number('0b11') return 3 instead of raising ValueError.",
+        "before": [("Reproduce.", "python binary_repro.py", "ValueError: invalid literal '0b11'")],
+        "memory": ("kb-binary", "ID kb-binary: use int(value, 0) in src/numbers.py to recognize binary prefixes."),
+        "consumer": ("The preview gives the exact fix and location. Apply it now, then fetch kb-binary for any additional details.",
+                     "python set_base_zero.py src/numbers.py", "conversion updated"),
+        "followup": {
+            "lookup": "The preview fix is applied. Read kb-binary for any additional details.",
+            "value": "ID kb-binary: use int(value, 0) in src/numbers.py to recognize binary prefixes. This is the complete fix; the base-zero conversion is all that is needed.",
+            "expect": {"influence": ["referenced"], "positive_effect": [None], "verdict": ["neutral"]},
+        },
+        "after": [("The full read repeats the already applied preview, with no additional change. Run the verification already planned for that edit.",
+                   "python binary_repro.py", "0b11 -> 3"),
+                  ("Check the patch.", "git diff", "-return int(value)\n+return int(value, 0)")],
+        "expect": {"influence": ["acted_on"], "positive_effect": ["improved"], "verdict": ["positive"]},
     },
 }
 
@@ -455,21 +537,47 @@ def build(root: Path) -> list[Path]:
         text = f"- [insight] {key}: {value}"
         b.user_message(text, msg=_MEMORY_MSG)
         reasoning, command, result = case["consumer"]
-        b.agent_turn(reasoning=reasoning, command=command, result=result)
+        followup = case.get("followup")
+        if followup and not followup.get("lookup"):
+            b.agent_turn(reasoning=reasoning, tool_name="exp_read", tool_args={"id": key}, result=followup["value"])
+        else:
+            b.agent_turn(reasoning=reasoning, command=command, result=result)
         b.delivery(search, memories=[ref], bind=b.last_call, content=text)
         b.events[-1]["binding"] = {"proofs": [{
             "slot": "memory_block", "kind": "canonical_message", "msg_index": _MEMORY_MSG,
             "content_sha256": hashlib.sha256(text.encode()).hexdigest()}]}
-        for reasoning, command, result in case["after"]:
+        if followup and followup.get("lookup"):
+            b.agent_turn(reasoning=followup["lookup"], tool_name="exp_read", tool_args={"id": key}, result=followup["value"])
+        for i, (reasoning, command, result) in enumerate(case["after"]):
+            if followup and i == 0:
+                full = cure_ref(key, followup["value"])
+                search = b.search(returned=[full], query=key, trigger="explicit")
             b.agent_turn(reasoning=reasoning, command=command, result=result)
+            if followup and i == 0:
+                b.delivery(search, memories=[full], bind=b.last_call, content=followup["value"],
+                           placements=[{"slot": "memory_block", "kind": "tool_result",
+                                        "proof_kind": "canonical_message", "content": {
+                                            "availability": "inline", "text": followup["value"]}}])
+                b.events[-1]["binding"] = {"proofs": [{
+                    "slot": "memory_block", "kind": "canonical_message", "msg_index": 3,
+                    "content_sha256": hashlib.sha256(followup["value"].encode()).hexdigest()}]}
         b.episode_close(ident, treatment_arm_id="arm-a")
         out.append(b.write(root / ident, run_id=ident, task_preview=case["task"]))
     return out
 
 
+def expected_labels() -> dict[str, dict]:
+    """Each recorded delivery is a target, including the follow-up read."""
+    out = {}
+    for name, case in CASES.items():
+        out[name] = case["expect"]
+        if case.get("followup"):
+            out[name + "/read"] = case["followup"]["expect"]
+    return out
+
+
 def _labels(report: dict) -> dict[str, dict]:
-    """case name -> {label: value} from one report; a missing, errored, or
-    multi-span case maps to a single `problem` label."""
+    """Unexpected, missing, or failed spans remain unscored, never stable."""
     names = {case_id(name): name for name in CASES}
     runs = {t["id"]: names.get(t.get("run_id")) for t in report.get("trajectories") or []}
     ops: dict[str, list[dict]] = {}
@@ -477,15 +585,21 @@ def _labels(report: dict) -> dict[str, dict]:
         if not op.get("auto"):
             ops.setdefault(runs.get(op.get("traj")), []).append(op)
     out: dict[str, dict] = {}
-    for name in CASES:
+    for target in expected_labels():
+        name = target.removesuffix("/read")
         found = ops.get(name, [])
-        if len(found) != 1 or found[0].get("error") or "m1" not in (found[0].get("rubric") or {}):
-            out[name] = {"problem": "missing" if not found else found[0].get("error") or "no m1 rubric"}
+        required = 2 if CASES[name].get("followup") else 1
+        if len(found) != required:
+            out[target] = {"problem": f"expected {required} spans, found {len(found)}"}
             continue
-        entry = found[0]["rubric"]["m1"]
-        out[name] = {s: (entry.get(s) or {}).get("value") for s in _SIGNALS}
-        out[name]["verdict"] = found[0].get("verdict")
-        out[name]["notes"] = {s: (entry.get(s) or {}).get("note") for s in _SIGNALS}
+        op = found[1 if target.endswith("/read") else 0]
+        if op.get("error") or "m1" not in (op.get("rubric") or {}):
+            out[target] = {"problem": op.get("error") or "no m1 rubric"}
+            continue
+        entry = op["rubric"]["m1"]
+        out[target] = {s: (entry.get(s) or {}).get("value") for s in _SIGNALS}
+        out[target]["verdict"] = op.get("verdict")
+        out[target]["notes"] = {s: (entry.get(s) or {}).get("note") for s in _SIGNALS}
     return out
 
 
@@ -493,12 +607,13 @@ def score(reports: list[dict]) -> list[str]:
     """Agreement, disagreements, stability, and matched-pair lines."""
     lines: list[str] = []
     labeled = [_labels(r) for r in reports]
+    expected = expected_labels()
     for i, cases in enumerate(labeled, 1):
         agree = total = 0
         misses = []
-        for name, case in CASES.items():
+        for name, labels in expected.items():
             got = cases[name]
-            for label, allowed in case["expect"].items():
+            for label, allowed in labels.items():
                 total += 1
                 if "problem" in got:
                     misses.append(f"    {name}.{label}: unscored ({got['problem']})")
@@ -515,7 +630,7 @@ def score(reports: list[dict]) -> list[str]:
         # errored case is unavailable, never an agreement.
         stable = total = unavailable = 0
         unstable = []
-        for name in CASES:
+        for name in expected:
             for label in (*_SIGNALS, "verdict"):
                 if any("problem" in c[name] for c in labeled):
                     unavailable += 1

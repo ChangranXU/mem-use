@@ -105,6 +105,26 @@ test("a truncated line number is not returned evidence", async () => {
 	}
 });
 
+test("character pagination can read every character of an oversized Unicode line", async () => {
+	const root = makeRoot();
+	try {
+		const text = "🧠".repeat(110_000) + " ACTUAL ACTION";
+		fs.writeFileSync(path.join(root, "steps", "step_000001.md"), text + "\nresult: passed");
+		const read = createEvidenceTools(root).find((t) => t.name === "read_evidence")!;
+		const first = await read.execute("first", { path: "steps/step_000001.md", limit: 1 });
+		const body = first.content[0].type === "text" ? first.content[0].text : "";
+		const next = /continue with offset=(\d+), column=(\d+)/.exec(body)!;
+		assert.ok(next);
+		const second = await read.execute("second", { path: "steps/step_000001.md", offset: +next[1], column: +next[2] });
+		const tail = second.content[0].type === "text" ? second.content[0].text : "";
+		assert.equal(second.details.truncated, false);
+		assert.equal(body.split("\n")[0].replace(/^1: /, "") + tail.split("\n")[0].replace(/^1@\d+: /, ""), text);
+		assert.match(tail, /2: result: passed/);
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("search_evidence shows the match, not just the start of a long reasoning line", async () => {
 	const root = makeRoot();
 	// The recorded KMeans step 4 mentions random_state after column 300.

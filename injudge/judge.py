@@ -11,15 +11,14 @@ derived in code, never asked of the LLM.
 
 The verdict rests on subsequent influence, never on the final task result:
 
-- any memory `misused` (acted-on influence with positive_effect no_effect
-  or harmed) ⇒ span **negative** ("used but didn't improve" — context and
-  attention spent for nothing; mere reference never counts as misuse);
+- any memory `misused` (acted-on influence with positive_effect harmed)
+  ⇒ span **negative**; unproductive use is not harm;
 - else any memory `used` (acted-on influence that improved the work) ⇒
   span **positive**;
-- else any memory `unclear` (acted-on influence whose effect the evidence
-  could not determine) ⇒ span **unresolved** — an established footprint
-  of unknown direction, never folded into neutral;
-- else ⇒ **neutral** (no established influence).
+- else any memory `unclear` (attribution or effect undetermined)
+  ⇒ span **unresolved**;
+- else ⇒ **neutral** (no established benefit or harm; selection, reference,
+  unproductive use, or no established influence).
 
 Parsing is strict, and the contract keys each rubric entry by the
 SPAN-LOCAL memory id (m1, m2, … per delivered entry — display keys are
@@ -62,10 +61,10 @@ RUBRIC_SIGNALS = _SIGNALS  # public alias for report/aggregate rendering
 
 _ACCURACY = ("corroborated", "uncontradicted", "contradicted")
 _NOVELTY = ("novel", "confirming", "redundant")
-_INFLUENCE = ("none", "referenced", "acted_on", "decisive")
+_INFLUENCE = ("none", "referenced", "selected", "acted_on")
 _POS_EFFECT = ("improved", "no_effect", "harmed")
-_NULLABLE_SIGNALS = ("novelty", "positive_effect")
-_ACTED = ("acted_on", "decisive")  # influence levels where positive_effect applies
+_NULLABLE_SIGNALS = ("novelty", "influence", "positive_effect")
+_ACTED = ("acted_on",)  # selecting a follow-up is recorded separately from its effect
 
 
 def _quoted_or(values: tuple[str, ...]) -> str:
@@ -89,25 +88,8 @@ def _substitute_enums(text: str) -> str:
     return text
 
 
-def _fill_signals(text: str, regime: str) -> str:
-    """Fill the five @signal_*@ slots from the signal files: relevance and
-    positive_effect have per-regime variants (the gold regime judges them
-    against the golden answer), the rest are shared by both regimes
-    verbatim — a forked copy that could drift is not allowed."""
-    for slot in _SIGNALS:
-        variant = f"_{regime}" if slot in ("relevance", "positive_effect") else ""
-        text = text.replace(f"@signal_{slot}@", load_prompt(f"injudge/signals/{slot}{variant}"))
-    return text
-
-
 def _scoring_prompt(regime: str) -> str:
-    """Assemble a scoring system prompt from the prompt files: ONE shared
-    frame filled with the shared input description and signal definitions.
-    The two regimes — "plain" and "gold" — differ only in the frame's two
-    regime slots (the gold-answer note and the judged-from clause), the
-    relevance / positive_effect guidance (judged against the golden-answer
-    text in the gold regime), and one extra binding rule — the frame itself
-    exists once, so the copies can never drift."""
+    """Both regimes share signal definitions; gold adds reference guidance."""
     gold = regime == "gold"
     text = load_prompt("injudge/scoring/system")
     rules = load_prompt("injudge/scoring/rules")
@@ -123,7 +105,9 @@ def _scoring_prompt(regime: str) -> str:
     text = text.replace("@echo_example@", load_prompt("injudge/scoring/echo_example"))
     text = text.replace("@answer_contract@", load_prompt("injudge/scoring/answer_contract"))
     text = text.replace("@input_description@", load_prompt("injudge/scoring/input"))
-    return _fill_signals(text, regime)
+    for signal in _SIGNALS:
+        text = text.replace(f"@signal_{signal}@", load_prompt(f"injudge/signals/{signal}"))
+    return text
 
 
 # The judge system prompts, one per rubric regime. GOLD_SYSTEM_PROMPT is used
@@ -633,7 +617,7 @@ def _verdict_semantics(
     coverage (the answer carries EXACTLY one entry per delivered memory's
     span-local id — a missing entry is an unanswered judgment, an unknown
     one is noise, and neither may stand), action anchors (an acted-on or
-    decisive influence claim cites its footprint steps, inside the
+    selected influence claim cites its footprint steps, inside the
     entry's own footprint window and never past the end of the step stream
     — `last_step`, the stream's final step number; a step past it is a
     hallucination, not evidence; a reference that names no step is not
@@ -695,7 +679,7 @@ def _verdict_semantics(
                 f"footprint window (starts at step {start}, ends at {bound})"
             )
         influence = entry["influence"]["value"]
-        if influence in _ACTED and not anchors:
+        if influence in (*_ACTED, "selected") and not anchors:
             return (
                 f"claims {entry_id} influence {influence!r} "
                 "without action anchors (the agent steps where the footprint appears)"
@@ -712,17 +696,21 @@ def _verdict_semantics(
 
 
 def _derive_usage(signals: dict) -> str:
-    """used / misused / noted / ignored / unclear from a memory's rubric."""
+    """Separate useful, unproductive, harmful, and selection-only actions."""
     inf = signals["influence"]["value"]
     pe = signals["positive_effect"]["value"]
     if inf in _ACTED:
         if pe == "improved":
             return "used"
-        if pe in ("no_effect", "harmed"):
+        if pe == "no_effect":
+            return "unproductive"
+        if pe == "harmed":
             return "misused"
         return "unclear"  # acted-on influence without a positive_effect judgment
     if inf == "referenced":
         return "noted"
+    if inf == "selected":
+        return "selected"
     if inf == "none":
         return "ignored"
     return "unclear"  # influence itself unknown
@@ -746,8 +734,8 @@ def _footprint_reason(signals: dict) -> str:
 
 def derive_verdict(memory_usage: dict) -> str:
     """Span verdict from derived per-memory usage: misuse dominates, then
-    use; an acted-on entry of undetermined effect keeps the span out of
-    neutral, which claims no established influence."""
+    use; unknown attribution or effect keeps the span unresolved. Selection,
+    reference and unproductive use are neutral, with their usage preserved."""
     usages = [e.get("usage") for e in memory_usage.values()]
     if "misused" in usages:
         return "negative"

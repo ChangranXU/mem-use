@@ -2,16 +2,12 @@
 
 Grouped by tool and purpose (new prompts get their own folder group):
 
-- `prompts/injudge/signals/` — the five rubric signal definitions, one file
-  per signal; relevance and positive_effect have `_plain` / `_gold` variants
-  (the gold regime judges those two against the golden answer), the rest are
-  shared by both regimes verbatim — a forked copy that could drift is not
-  allowed.
+- `prompts/injudge/signals/` — five shared signal definitions. Plain and
+  gold runs use the same categories; the scoring frame adds gold guidance.
 - `prompts/injudge/scoring/` — the scoring frame, shared input description,
   delivered-memory and gold attachment labels, binding rules, worked echo
   example, answer contract, shared signal-specific uncertainty policy, and
-  corrective-retry note. The gold frame fills
-  relevance and effect from its regime-specific signal files.
+  corrective-retry note. The gold frame adds the optional reference-solution guidance.
 - `prompts/injudge/agent/` — the evidence-search workflow in the opening
   message, the targeted evidence-resumption follow-up, and the forced
   final-answer instruction used by both budgets.
@@ -24,10 +20,35 @@ can never drift apart.
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 # prompts/ lives at the checkout root, next to the injudge/ package
 _PROMPTS = Path(__file__).resolve().parents[1] / "prompts"
+
+
+def content_digest(files: dict[str, str]) -> str:
+    """Name exact inputs, including their paths, without saving credentials."""
+    digest = hashlib.sha256()
+    for path, text in sorted(files.items()):
+        for value in (path, text):
+            encoded = value.encode("utf-8", "surrogatepass")
+            digest.update(str(len(encoded)).encode() + b":" + encoded)
+    return digest.hexdigest()
+
+
+def implementation_digest() -> dict[str, str]:
+    """Working-copy hashes include uncommitted changes; no Git or .env read."""
+    root = _PROMPTS.parent
+    code = [p for package in ("injudge", "memgraph") for p in (root / package).glob("*.py")]
+    code += [p for p in (root / "agent").glob("*.ts") if not p.name.endswith(".test.ts")]
+    code += [root / "util.py", root / "agent/package-lock.json"]
+    return {
+        "implementation_sha256": content_digest({str(p.relative_to(root)): p.read_text(encoding="utf-8")
+                                                  for p in code if p.is_file()}),
+        "prompts_sha256": content_digest({str(p.relative_to(root)): p.read_text(encoding="utf-8")
+                                         for p in _PROMPTS.rglob("*.md")}),
+    }
 
 
 def load_prompt(name: str) -> str:

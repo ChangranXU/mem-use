@@ -1,170 +1,142 @@
 ---
-description: "The five-signal rubric the LLM scores, and how injudge derives usage labels and span verdicts from it in code."
+description: "Five independent signals, evidence coverage, and deterministic usage and verdict derivation."
 icon: code-branch
 ---
 
 # Rubric and Verdict Derivation
 
-{% hint style="info" %}
-The LLM scores five signals per delivered memory. It never chooses a span verdict. injudge derives usage labels, footprint reasons, and the span verdict in code (`injudge/judge.py`).
-{% endhint %}
+The judge scores each exposed entry under its span-local id (`m1`, `m2`, …).
+Display keys are labels, not joins. Python validates the answer and derives
+usage and span verdicts. Task success never decides a memory verdict.
 
-How those labels are counted into rates and tallies is in [Artifacts](artifacts.md#how-the-numbers-are-derived).
+## Signals
 
-```mermaid
-flowchart TD
-    llm["LLM: five signals per delivered memory"]
-    pair["Pairing correction: positive_effect only with acted-on influence"]
-    usage["_derive_usage → used / misused / noted / ignored / unclear"]
-    reason["_footprint_reason, ignored memories only"]
-    verdict["derive_verdict: any misused → negative, else any used → positive, else any unclear → unresolved, else neutral"]
-    agg["Aggregates: rates, rubric projections, cost, memory_usage"]
-    llm --> pair --> usage
-    usage -->|ignored| reason
-    usage --> verdict --> agg
-```
-
-## Rubric Signals
-
-Each delivered ENTRY is scored independently under its span-local id (`m1`, `m2`, … in delivery order): two entries may share a display key — distinct stored memories, or two versions in one delivery — and they are never collapsed into one judgment. Notes cite step numbers from the stream; the span-level `evidence[]` entries carry steps and seqs. Where the recording shows it, each entry also carries an **exposure marker** stating what of its value the placement actually showed the agent; the judge scores that exposure, never an unseen suffix.
-
-| Signal | Type | Question |
-|---|---|---|
-| `relevance` | bool | Is the memory topically related to the recorded task and current subgoal? Judge it from the recorded episode task (gold.md, under the gold regime, is one valid solution), the visible pre-delivery context, and the step files. Relevance is independent of accuracy, novelty, and use: a diagnosis or remedy for the current failure remains relevant when disproved; redundant or unused memory can also be relevant, and a transferable technique or useful subgoal that applies here counts even when it names another library or bug, while another bug's own mechanism or artifacts does not — nor does merely naming the same file, class, or function. |
-| `accuracy` | enum | `corroborated` (observable evidence it is right) / `uncontradicted` (no evidence either way) / `contradicted` (observable evidence it is wrong), each within the claim's own scope (its repository, release, bug, or situation). Current code that differs from a historical claim does not by itself refute it; assess applicability to the current problem separately under relevance. |
-| `novelty` | enum or null | `novel` (the pre-delivery baseline supports new substance) / `confirming` (settles an open doubt) / `redundant` (already established) / `null` (visibility cannot be established). The baseline includes recorded task/user input and earlier available steps but excludes the target placement and later updates. An earlier delivery alone does not prove continued visibility after a rewrite. Substance, not wording, decides: a mixed memory is `redundant` only when every material claim was already established, and the note names the known and the new claims. |
-| `influence` | enum | `none` / `referenced` (mentioned only) / `acted_on` (an eligible action uses the exposed memory rather than an already available source) / `decisive` (it demonstrably changes the plan). The footprint starts at the target span's first step and ends at that entry's next same-episode re-exposure (a delivery showing everything it showed) or the episode's last eligible global step. Selecting the entry for a follow-up by its shown identifier — reading a listed candidate — is `acted_on`; its effect is what the follow-up led to: `improved` when later steps build on the read, including using newly learned information or settling a prior doubt; claimed saved work needs a previously voiced option or explicit credit, not merely a narrowing first stated afterward; `no_effect` when its output went unused and the agent carried on as before; `null` when the consequence cannot be separated from the agent's own progress. Rejecting the advice is never harm by itself. Task/system text, earlier reasoning, and unrelated tool results are independent sources; a search query and a hidden annotation key are retrieval metadata (an identifier the placement shows is content), and gold is evaluator-only. Echoing a direction already established before delivery is not changed action, although a reminder that restores a dropped direction or supplies missing detail can still change an action. A prior direction needs a pre-delivery source: a plan first stated at or after the span's first step cannot show it predated exposure. Notes name the delivery step and the source behind each action; overlap with both memory and task is reported as ambiguous attribution, and unsupported use is "influence not established", never a claim of no effect. A source is credited only with elements it actually contains, and an uncited action matching only routine practice (focused tests, minimal fixes) is `influence = none`, not memory use. `acted_on`/`decisive` require original global step **anchors** inside both the episode and entry window. |
-| `positive_effect` | enum or null | `improved` / `no_effect` / `harmed`, judged by observable downstream events inside the memory's window (`improved`: a downstream event ties the benefit to the memory-shaped action; `no_effect`: the action produced no observable downstream change; `harmed`: a wrong location, false lead, lost work or state). Non-null only when influence is `acted_on` or `decisive`. Accuracy never decides this signal: a memory carrying a false claim can still have set off the diagnostic that found the fix. |
-
-{% hint style="warning" %}
-`positive_effect = no_effect` counts against the memory system: context and attention were spent without improving the work. A skip inferred only from an action's absence is `influence = none`; absence alone is not evidence.
-{% endhint %}
-
-The verdict rule is deliberately asymmetric: ignored garbage is **neutral** (no influence established), acted-on influence of undetermined effect is **unresolved**, and only acted-on influence with no effect — or harm — is **negative**. A zero negative rate therefore never reads as "harmless" on its own: reporting always binds it to the share without demonstrated benefit, itself a span-level proxy that names its unresolved part (a positive span's ignored memories count as benefit-bearing), and states the caveat on every reported share (see [Artifacts](artifacts.md#verdict-rates)). Spans whose deliveries cannot be attributed to an agent step (no classified agent turn, or a missing/unclassified consumer) are rule-judged without an LLM call and reported as **unassessable** — observation missingness, not a measured null — outside every directional denominator.
-
-Novelty rates describe new substance relative to the recorded pre-delivery
-baseline, not knowledge new to the agent: even common practice can be
-`novel` while its uncited use stays unattributable. A missing or incomplete
-baseline still calls for `null`, not automatic novelty. Novelty takes in
-every material claim, even one irrelevant to the task, so relevance cannot
-turn previously unavailable substance into redundancy. If the evidence
-establishes a memory-shaped reversal of an earlier habit or plan, common
-advice can be `decisive` without an explicit citation.
-
-The final task result, when discernible, corroborates the judgment but cannot decide a signal.
-
-## Division of Labor
-
-| Produced by the LLM | Derived in code |
+| Signal | Values and meaning |
 |---|---|
-| Per-memory `relevance`, `accuracy`, `novelty`, `influence`, `positive_effect` (value + note) | Per-memory `usage` (`used` / `misused` / `noted` / `ignored` / `unclear`) |
-| Span-level `analysis`, `evidence[]`, `confidence` | Per-ignored-memory `reason` (`irrelevant` / `redundant` / `confirming_ignored` / `ignored_novel` / `ignored_unknown_novelty`) |
-| | Span `verdict` (`positive` / `negative` / `unresolved` / `neutral`) |
-| | Delivery cost, policy metrics, and all `summary.json` rates |
+| `relevance` | `true` / `false`: the exposed claim applies to the task or subgoal at delivery. A proposed remedy can be relevant even when wrong. Shared names alone do not establish relevance. |
+| `accuracy` | `corroborated` / `uncontradicted` / `contradicted`, within the claim's own repository/version/situation. Uncontradicted means neither confirmed nor refuted. |
+| `novelty` | `novel` / `confirming` / `redundant` / `null`, relative to the recorded pre-exposure input. Confirming settles a voiced doubt; redundant requires already-established substance. Expected task outputs do not automatically supply the solution mechanism. Mixed entries are redundant only when every material claim was established. |
+| `influence` | `none` / `referenced` / `selected` / `acted_on` / `null`, defined below. |
+| `positive_effect` | `improved` / `no_effect` / `harmed` / `null`. Non-null only for `acted_on`; judge observed consequences of the anchored action. Unknown direction remains null. |
 
-`accuracy` is reported (`inaccurate_keys`) and does not enter the verdict path. `relevance` and `novelty` enter the verdict path only as the reason an ignored memory left no footprint.
+Novelty, correctness, influence and effect are independent. A redundant reminder
+can shape an action; an inaccurate claim can trigger a useful diagnostic. A
+passing local check proves only the behavior it checks. Local improvement can
+coexist with task failure, and an execution without a recorded result proves
+only an attempt.
 
-## Assembly
+Gold is one reference solution, not the only valid approach. The same signal
+definitions apply with or without gold; the gold regime adds one rule: gold
+informs relevance and effect, verification, environment repair, or an avoided
+dead end can matter even when the gold patch omits them, and matching the patch
+does not prove the memory caused the action. Outcome attachments corroborate
+but do not determine a signal.
 
-Two layers of semantic checking apply, both in code:
+## Influence and action scope
 
-**Inside the attempt loop** (`_verdict_semantics`, called by `judge_span` on every final answer after `_strict_parse`) — these checks are span-relative, and no static schema can enumerate a per-span id set or per-entry footprint windows, so a violation takes the bounded corrective retry; exhaustion is an `error` verdict, never a silently partial one:
+- `none`: after inspecting the complete window, no reference or attributable
+  action was established. This does not prove zero effect.
+- `referenced`: mentioned, with no changed action established after inspecting
+  the complete window.
+- `selected`: the shown identifier or preview caused retrieval of fuller
+  memory content that was recorded as its own memory delivery, without other
+  demonstrated content use. Anchor the selection action, not the
+  result-delivery step. Its effect is null: the returned content is assessed
+  on that delivery. A retrieval whose result is not a recorded delivery, or
+  reading repository code at a distinctive path supplied by memory, is
+  acted_on: no other span judges what it returned, so its consequence is this
+  entry's effect.
+- `acted_on`: distinctive exposed content, explicit credit, or a demonstrated
+  memory-shaped change of direction influenced an action. A decision needs
+  subsequent execution. Routine practice or wording overlap alone is not use.
+- `null`: attribution is ambiguous between sources or investigation is
+  incomplete. Name the competing sources or missing evidence. Effect is null.
 
-1. **Exact id coverage.** The answer carries exactly one entry per delivered entry's span-local id — a missing entry is an unanswered judgment, an unknown one is noise, and neither stands.
-2. **Action anchors.** An `acted_on`/`decisive` claim cites at least one original global step in the parent episode, inside that entry's footprint window (from the span's first step to its next same-episode re-exposure − 1, or the episode's last eligible step). A later delivery of the same memory with different or narrower verified text (a preview after a full read, or the reverse) does not end the window; `span.md` lists its step, and each delivery is credited only for its own text. The window can be empty: when a re-delivery precedes any eligible step, `span.md` names no eligible action steps for that entry, and every `acted_on`/`decisive` anchor is rejected. An anchor outside the episode or before the span is rejected: earlier evidence may support a novelty or accuracy **note**, never an influence anchor. `anchors` stay empty when influence is `none`. Deliveries reaching one consuming turn are all eligible there; only a same-step copy adding no verified text opens after the shared step. Every anchor must also name a step file the retained conversation actually read (`judge_span`); a nonzero read count alone does not ground a claim about another step.
-3. **Orthogonal signals.** Novelty, accuracy, influence, and effect are judged independently: no cross-signal combination is a contract violation. A reminder (`redundant` + `acted_on`), a partially false memory that triggered the fix (`contradicted` + `improved`), and a genuinely shared footprint (two entries carrying the same substance, credited with a "shared" note) are all reportable states the rubric must not suppress.
+The redundant `decisive` tier was removed in v15. Describe a course change in
+an `acted_on` note. A preview can directly shape an edit without being opened;
+selection does not suppress that credit, but the separate action needs its own
+anchor. Content a preview shares with the recorded fuller delivery it selected
+is credited to that fuller delivery: the preview stays `selected` unless it
+shaped an action before that delivery arrived or with content the fuller
+delivery lacks, and the fuller delivery's judge does not treat the selecting
+preview as a competing source. Otherwise each span would defer to the other
+and the memory would receive no credit at all. This allocates influence that
+is first established against the task, code, and prior reasoning; it neither
+creates influence nor moves an action shaped before the full read arrived. A single step can contain selection and another action, so follow-up step
+numbers alone do not decide the label. Assembly coerces a non-null effect to
+null for any influence other than acted_on and counts it as a pairing
+correction (judge compliance); a separately claimed content use must be
+labeled acted_on with its own anchor.
 
-The judge may anchor an in-window decision when later execution substantiates
-it; an unexecuted plan earns no action credit. Source claims must distinguish
-quoted task requirements from common practice and discoveries after exposure.
-Expressed uncertainty takes priority for `confirming` even when supporting facts
-were already visible. These judgments remain the agent's responsibility; the
-validator checks anchor membership and shape, not the truth of the notes.
+The first consuming step already had the memory in its input. Only earlier
+steps or pre-exposure input can establish a prior plan. Per-entry windows bound
+action anchors; later results within the parent episode can establish an
+anchored action's consequence without becoming out-of-window action anchors.
+Different or narrower later exposures may share a window; identical re-exposure
+bounds the earlier window by convention, not proof that its influence vanished.
 
-**At assembly** (`_assemble_verdict`), on the validated object:
+Selection and content use are separate stages. Their counts are diagnostics,
+not additive independent gains. `memory_followups` retains the deterministic
+selection links, and `rubric.shared_anchors` surfaces same-item, same-step credit
+across spans. The latter is a review aid, not a causal deduplication algorithm.
 
-4. **Pairing.** `positive_effect` applies only when `influence` is `acted_on` or `decisive`. A null effect in that case is the rubric's sanctioned uncertainty route (the direction could not be determined on the evidence): usage derives `unclear` and the occurrence is logged, but it is not a pairing correction. An effect set while influence is `none` or `referenced` is coerced to `null` (warned, counted as a pairing correction).
-5. **Usage, reason, verdict.** `_derive_usage` labels each entry; `_footprint_reason` runs only for `ignored`; `derive_verdict` reads the usage labels. Confidence is clamped to `[0, 1]`.
+## Evidence and output validation
 
-A span that delivers no memories at all is not an error: the CLI routes it to `auto_verdict_empty` before any judge call — rule-judged `neutral` with `auto: "empty_delivery"`, no validation note, and a separate **empty** tally outside every rate denominator and the benefit share. The empty-delivery warning `_assemble_verdict` appends covers only a direct caller.
+Validation requires exact entry-id coverage, valid signal values, and in-window
+anchors. `selected` and `acted_on` require anchors; `none` requires an empty
+anchor list. All cited anchors and structured `evidence[].steps` must have their
+complete step text retained in the judge conversation.
 
-Display-only fields (`analysis`, evidence claims) are copied and credential-masked. A malformed evidence list is dropped with a warning; it does not fail the span.
+Read tracking verifies actual numbered tool-result text against the evidence
+files. Paged reads combine; a truncated line, header-only read, search hit, error
+result or rolled-back read does not certify a complete step. Complete prior-step
+copies indexed in `baseline.md` count just like the original step files. A
+pre-exposure copy omitting a later tool result does not certify that full step.
 
-After assembly, advisory prose checks add validation warnings without
-changing labels, rewriting text, or triggering retries. They flag
-`independent`, `independently`, `unassisted`, `unaided`, or
-exclusive-source wording such as `from code alone` in a `none` entry's
-notes (or in the span analysis when any entry is `none`), and analysis
-longer than 60 whitespace-delimited words. Task-source checks apply only
-to influence notes, novelty notes, and analysis: they flag locally
-task-attributed quotations absent from `task.md` after whitespace,
-backtick, and case normalization, and recognizable task-requirement
-claims without a matching quotation containing at least one fragment of
-three or more words. Neither separate short quotes nor ellipsis-separated
-fragments can pool words to satisfy that minimum; ellipsis quotes (`...`
-or `…`) match only when every nonempty fragment occurs in task order, and
-a qualifying quote prevents the unquoted warning even if its citation
-prefix is unrecognized. Relevance notes may describe the task without
-attributing an action to it and are excluded from the task-source checks;
-the independence check still covers them. These are lexical review cues,
-not a measure of coverage.
+Every answer requires the complete first consuming step. `none`, `referenced`, and `selected`
+additionally require every eligible step in that entry's window. If attribution
+remains unassessed, use influence null; do not invent neutrality to finish a
+budget-limited investigation.
 
-## Usage Labels
+A violation takes one tool-free repair over the same history. Only a
+`needs_evidence` reply reopens tools. Invalid repair or exhaustion is `error`,
+never neutral. Prose-source warnings are advisory and do not rewrite labels.
 
-`_derive_usage` reads `influence` and `positive_effect` after pairing:
+## Usage and span verdicts
 
-| `influence` | `positive_effect` | `usage` | Meaning |
-|---|---|---|---|
-| `acted_on` or `decisive` | `improved` | `used` | The memory shaped later behavior and improved the work. |
-| `acted_on` or `decisive` | `no_effect` or `harmed` | `misused` | The memory shaped later behavior without improving it, or led the agent astray. |
-| `acted_on` or `decisive` | `null` | `unclear` | Acted-on influence without an effect judgment. |
-| `referenced` | (ignored; typically `null`) | `noted` | Mentioned only. Actions did not change because of it. |
-| `none` | (ignored; typically `null`) | `ignored` | No observable footprint. |
-| `null` / unknown | any | `unclear` | Influence itself unknown. |
-
-The evidence string on a usage entry is the first non-empty note among `positive_effect`, `influence`, and `novelty`.
-
-## Footprint Reasons
-
-`_footprint_reason` runs only for `ignored` memories. Unknown novelty is kept separate from `ignored_novel`: missing baseline evidence cannot establish a novelty tier. Only `novelty` and `positive_effect` allow null; all other signals keep their existing bool/enum contract. Unknown novelty never decides influence, usage, or the span verdict.
-
-| `relevance` | `novelty` | `reason` |
+| Influence | Effect | Derived usage |
 |---|---|---|
-| `false` | any | `irrelevant` |
-| `true` | `redundant` | `redundant` |
-| `true` | `confirming` | `confirming_ignored` — settled an open suspicion, never credited |
-| `true` | `novel` | `ignored_novel` |
-| `true` | `null` | `ignored_unknown_novelty` |
+| `acted_on` | `improved` | `used` |
+| `acted_on` | `no_effect` | `unproductive` |
+| `acted_on` | `harmed` | `misused` |
+| `acted_on` | `null` | `unclear` |
+| `selected` | `null` | `selected` |
+| `referenced` | `null` | `noted` |
+| `none` | `null` | `ignored` |
+| `null` | `null` | `unclear` |
 
-These reasons populate `rubric.no_footprint_reasons`. They do not change the span verdict: an ignored memory is already outside `used` / `misused`.
+Unproductive use requires evidence that the action produced no useful consequence;
+it is not harm. A rejected investigation may still resolve uncertainty and help.
+Costs are recorded separately. `misused` is reserved for harmful acted-on influence.
 
-## Span Verdict
+The conservative span triage rule is: any `misused` → negative; otherwise any
+`used` → positive; otherwise any `unclear` → unresolved; otherwise neutral.
+Neutral therefore includes selection, reference, unproductive use, and no
+established influence. A mixed beneficial/harmful bundle is negative for triage;
+its individual labels remain visible. These signs do not estimate net utility.
 
-`derive_verdict` reads the derived usage labels. Harm dominates:
+Ignored-entry reasons remain `irrelevant`, `redundant`, `confirming_ignored`,
+`ignored_novel`, or `ignored_unknown_novelty`. They explain absence of a footprint
+and do not determine the span sign.
 
-1. Any memory `misused` → **negative**.
-2. Else any memory `used` → **positive**.
-3. Else any memory `unclear` → **unresolved**.
-4. Else → **neutral**.
+## Missing and failed observations
 
-`noted`, `ignored`, and `unclear` never produce negative on their own. Mere reference is therefore never a negative span, and an established footprint of unknown direction is never neutral's "no influence established".
+Empty deliveries and unattributed consumers are mechanically counted without
+paid calls. They are `empty` and `unassessable` in aggregates, outside directional
+denominators. Unselected episodes/limited spans are `unjudged`; judge failures are
+`error`. Influence null is counted explicitly and excluded from the assessed
+influence-rate denominator, as novelty null is for novelty.
 
-### Worked Examples
-
-Each row is one span. Memories not listed are absent.
-
-| Memories | Derived usage | Span verdict | Why |
-|---|---|---|---|
-| A: `decisive` + `improved`; B: `acted_on` + `harmed` | A `used`, B `misused` | **negative** | Harm dominates help. |
-| A: `acted_on` + `null` | A `unclear` | **unresolved** | Acted-on influence whose direction could not be determined; not counted as used or misused, and not neutral. |
-| No subsequent agent turn (`auto`) | placeholder `unclear` | **neutral** | Rule-judged; no LLM call. See below. |
-
-## Rule-Judged and Failed Spans
-
-| Case | `verdict` | Judge call | Rubric / usage in aggregates |
-|---|---|---|---|
-| No attributed agent step | `neutral`, `auto: no_subsequent_turn` | none | Placeholder null rubric and `unclear` usage. Excluded from rubric rates, usage tallies, and confidence. Tallies as **unassessable** in aggregates — out of every directional rate and the benefit share. |
-| `--limit` cutoff, outside `--episode`, or `--dry-run` | `unjudged` | none | Count only. Not a rate denominator. |
-| Coverage/anchor violation after exhausted attempts, contract failure | `error` | attempted | Count only. Raw text kept masked, capped at 2000 chars. Not coerced to neutral. |
-
-How these labels become the rates, costs, and tallies in `summary.json` is documented in [Artifacts](artifacts.md#how-the-numbers-are-derived).
+Report v15 and summary v13 deliberately change the categories and the meaning of
+complete `read_steps`; older reports are not silently reinterpreted. See
+[Artifacts](artifacts.md) and [Judge evidence](scoring-input.md).

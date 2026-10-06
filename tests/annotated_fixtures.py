@@ -182,23 +182,26 @@ class AnnotatedBuilder:
         self.events.append(event)
         return self
 
-    def agent_turn(self, with_task=False, reasoning="thinking", command="ls", result="ok"):
-        """One main-lane turn with one bash tool call; its call ref lands in
-        `self.last_call` (deliveries bind to it)."""
+    def agent_turn(self, with_task=False, reasoning="thinking", command="ls", result="ok",
+                   tool_name="bash", tool_args=None):
+        """One main-lane turn with one tool call (bash unless `tool_name`
+        says otherwise); its call ref lands in `self.last_call` (deliveries
+        bind to it)."""
         if with_task:
             self._emit("message_end", proxy_source=self.main, role="user", msg=1, content=TASK)
         self.turn += 1
         call_id = f"{self.turn:06d}-x"
+        args = tool_args if tool_args is not None else {"command": command}
         self._emit("turn_start", turn=self.turn, call_id=call_id, proxy_source=self.main)
         self._emit("message_end", proxy_source=self.main, role="assistant", msg=2,
                    turn=self.turn, content="", reasoning_content=reasoning,
-                   tool_calls=[{"id": call_id, "name": "bash", "args": {"command": command}}],
+                   tool_calls=[{"id": call_id, "name": tool_name, "args": args}],
                    finish_reason="tool_calls")
         self._emit("tool_execution_start", proxy_source=self.main, turn=self.turn,
-                   tool_call_id=call_id, name="bash", args={"command": command})
+                   tool_call_id=call_id, name=tool_name, args=args)
         if result is not None:
             self._emit("tool_execution_end", proxy_source=self.main, turn=self.turn, msg=3,
-                       tool_call_id=call_id, name="bash", status="completed", result=result)
+                       tool_call_id=call_id, name=tool_name, status="completed", result=result)
         self._emit("turn_end", turn=self.turn, status="completed", proxy_source=self.main)
         self.last_call = {"call_sequence": self.turn, "call_id": call_id,
                           "role_call_index": self.turn}
@@ -308,16 +311,18 @@ class AnnotatedBuilder:
         return header["operation_id"]
 
     def search(self, returned=(), query="the task query", with_end=True,
-               matched_count=None, lane=LANE):
+               matched_count=None, lane=LANE, trigger=None):
         """One per-lane search operation; returns its operation_id for
         deliveries. `matched_count` is the protocol's {value, precision}
         field (None = not recorded); `lane` is the read lane the search
-        records under (schema v9's lane_id)."""
+        records under (schema v9's lane_id); `trigger` (e.g. "explicit")
+        is recorded when given."""
         header = self._op_header()
         self.annotation(
             "memory_search_start",
             {**header, "lane_id": lane,
-             "query": {"availability": "inline", "text": query}},
+             "query": {"availability": "inline", "text": query},
+             **({"trigger": trigger} if trigger else {})},
             lane=self.mem,
         )
         if with_end:

@@ -19,7 +19,7 @@ import re
 import shutil
 from pathlib import Path
 
-from util import atomic_write
+from util import atomic_write, utf8_safe
 from injudge.judge import MEMORIES_NOTE, _render_span_header, _cmd_of
 from injudge import EPISODE_INPUT_SCHEMA
 from injudge.episodes import project_occurrence
@@ -120,7 +120,7 @@ def _episode_step_text(episode: EpisodeInput, step: AgentStep, before_index: int
     return prefix + "\n".join(lines)
 
 
-def span_baseline(episode: EpisodeInput, span: InjectionSpan) -> tuple[dict, str]:
+def span_baseline(episode: EpisodeInput, span: InjectionSpan, files: dict[str, str]) -> tuple[dict, str, dict[int, dict]]:
     delivery = next((item for item in episode.deliveries if item["op_id"] in span.op_ids), None)
     source_index = (delivery or {}).get("source", {}).get("event_index")
     consumer = (delivery or {}).get("consumer") or {}
@@ -134,21 +134,44 @@ def span_baseline(episode: EpisodeInput, span: InjectionSpan) -> tuple[dict, str
                    and isinstance(source_index, int)
                    and episode._step_sources.get(step.turn) is not None
                    and episode._step_sources[step.turn].event_index < source_index]
-    baseline = "\n".join([*(str(item["content"]) for item in independent),
-                           *(_episode_step_text(episode, step, source_index) for step in prior_steps)])
+    parts = [str(item["content"]) for item in independent]
+    # Index only the step copies rendered here, not matching strings that
+    # happen to occur in a task or tool result. The heading adds two lines.
+    line = 3 + sum(part.count("\n") + 1 for part in parts)
+    copies: dict[int, dict] = {}
+    for step in prior_steps:
+        text = _episode_step_text(episode, step, source_index)
+        if text == files[f"steps/step_{step.step:06d}.md"]:
+            copies[step.step] = {"path": "baseline.md", "start": line,
+                                 "end": line + text.count("\n")}
+        parts.append(text)
+        line += text.count("\n") + 1
+    baseline = "\n".join(parts)
     return ({"target_delivery_source": (delivery or {}).get("source"),
              "consumer": consumer, "visible_occurrences": visible,
              "independent_occurrence_ids": [item["occurrence_id"] for item in independent],
              "prior_step_numbers": [step.step for step in prior_steps],
-             "visibility_gaps": view.gaps if view else ["consumer input view unavailable"]}, baseline)
+             "visibility_gaps": view.gaps if view else ["consumer input view unavailable"]}, baseline, copies)
 
 
 def build_span_evidence(span: InjectionSpan, episode: EpisodeInput) -> tuple[dict[str, str], str]:
     files = build_episode_evidence(episode)
-    baseline, baseline_text = span_baseline(episode, span)
+    baseline, baseline_text, copies = span_baseline(episode, span, files)
     context = json.loads(files["context.json"])
     context["target_baseline"] = baseline
     files["context.json"] = json.dumps(context, ensure_ascii=False, indent=2) + "\n"
+    # A readable baseline is also a canonical citation source. Index only
+    # complete copies of step files: a pre-exposure cut must never certify
+    # a tool result that became available after the delivery.
+    files["baseline.md"] = "# Pre-exposure record\n\n" + baseline_text + "\n"
+    step_sources = []
+    for step in episode.steps:
+        path = f"steps/step_{step.step:06d}.md"
+        lines = files[path].split("\n")
+        sources = [{"path": path, "start": 1, "end": len(lines)}]
+        if step.step in copies:
+            sources.append(copies[step.step])
+        step_sources.append({"step": step.step, "sources": sources})
     header = _render_span_header(span, MEMORIES_NOTE)
     delivery_refs = [item for item in episode.deliveries if item["op_id"] in span.op_ids]
     files["span.md"] = (f"# Target span in parent episode {episode.execution_id}\n\n"
@@ -156,10 +179,15 @@ def build_span_evidence(span: InjectionSpan, episode: EpisodeInput) -> tuple[dic
                         + header + "\n\n" + _SPAN_CONTEXT + "\n")
     manifest = json.loads(files["manifest.json"])
     manifest["span_id"] = span.id
+    manifest["step_sources"] = step_sources
     manifest["footprint_from_step"] = span.step_first
     manifest["files"].insert(0, {"path": "span.md", "kind": "target", "chars": len(files["span.md"])})
+    manifest["files"].insert(1, {"path": "baseline.md", "kind": "baseline", "chars": len(files["baseline.md"])})
+    # atomic_write escapes lone JSON surrogates. Coverage and hashes must
+    # describe those actual saved bytes, not an unwritable in-memory spelling.
+    files = {path: utf8_safe(text).decode("utf-8") for path, text in files.items()}
     manifest["files"] = [{**entry, "chars": len(files[entry["path"]])} for entry in manifest["files"]]
-    files["manifest.json"] = json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
+    files["manifest.json"] = utf8_safe(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").decode("utf-8")
     return files, baseline_text
 
 

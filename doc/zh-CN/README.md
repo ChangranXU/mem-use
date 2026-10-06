@@ -20,7 +20,7 @@ icon: book-open
 | 工具 | 用途 |
 |---|---|
 | **memgraph** | 把每次记忆操作及其关系渲染成自包含的 HTML 图（可选 JSON 产物）。 |
-| **injudge** | 按五信号评分规则为 episode 内的召回区间打分，写出 `injudge.report/v14` 产物；用 `--verdicts` 可将其叠加回图上。 |
+| **injudge** | 按五信号评分规则为 episode 内的召回区间打分，写出 `injudge.report/v15` 产物；用 `--verdicts` 可将其叠加回图上。 |
 
 贯穿两个工具的一条原则：召回注入以其对 agent 的**后续影响**来评判。最终任务结果可以佐证判断，但绝不决定判断。
 
@@ -57,7 +57,7 @@ memgraph 展示每条记忆由哪个 `(轨迹, 步骤)` 创建、随后被哪个
 {% step %}
 ### 评审
 
-injudge 把处理方式相同的重复注入归并为**区间（span）**，由 LLM 为每条投递记忆打分。没有可归属 agent 步骤的区间不经 LLM，按规则判定并计为 **unassessable**。区间判定再由代码推导。损害优先：任一误用即为 negative；否则任一采纳即为 positive；否则任一已采取行动但效果未定即为 unresolved；否则为 neutral。
+injudge 把处理方式相同的重复注入归并为**区间（span）**，由 LLM 为每条投递记忆打分。没有可归属 agent 步骤的区间不经 LLM，按规则判定并计为 **unassessable**。区间判定再由代码推导。损害优先：任一有害使用即为 negative；否则任一采纳即为 positive；否则任一归因或效果未定即为 unresolved；否则为 neutral。
 {% endstep %}
 
 {% step %}

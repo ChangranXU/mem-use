@@ -24,6 +24,7 @@ def _answer():
     answer["memories"][0]["influence"] = {"value": "none", "note": "no action"}
     answer["memories"][0]["positive_effect"] = {"value": None, "note": "no action"}
     answer["memories"][0]["anchors"] = []
+    answer["evidence"] = []
     return json.dumps(answer)
 
 

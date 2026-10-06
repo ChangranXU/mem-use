@@ -50,14 +50,16 @@ then materializes every judged span's evidence — the target document plus its
 parent episode's task, context, deliveries, and original steps — into an
 isolated folder a pi agent explores with read-only tools. The agent scores
 each delivered memory on five signals; Python derives the span verdict: any
-misused memory → **negative**, else any used → **positive**, else any acted on
-with undetermined effect → **unresolved**, else **neutral**.
+harmful use → **negative**, else any useful use → **positive**, else uncertain
+attribution or effect → **unresolved**, else **neutral**. Selection-only reads
+and unproductive use are recorded separately and do not imply harm.
 A span with no attributed agent step is counted **unassessable** without a
 judge call.
 
 Judged evidence never exceeds what the recorded placement exposed, and
 acted-on influence must cite an action step inside that memory's footprint
-window. Two budgets bound each conversation — max steps and the context
+window. Complete retained step text grounds every citation; no-influence
+claims require the full window. Two budgets bound each conversation — max steps and the context
 window — both ending in a forced final answer rather than a mid-run failure.
 
 The full pipeline is in the [English book](doc/en/README.md); the signals,

@@ -1287,8 +1287,8 @@ GOOD = json.dumps({
             "anchors": [],
         },
     ],
-    "analysis": "m1 (key_a) guided the search at step 3; m2 (key_b) was ignored.",
-    "evidence": [{"claim": "grep for the file", "steps": [3], "seqs": [44]}],
+    "analysis": "m1 (key_a) guided the search at step 2; m2 (key_b) was ignored.",
+    "evidence": [{"claim": "grep for the file", "steps": [2], "seqs": [44]}],
     "confidence": 0.8,
 })
 
@@ -1310,7 +1310,7 @@ def test_parse_verdict_clean():
     assert v["rubric"]["m1"]["anchors"] == [2]
     assert v["rubric"]["m2"]["positive_effect"]["value"] is None
     assert v["analysis"]
-    assert v["evidence"] == [{"claim": "grep for the file", "steps": [3], "seqs": [44]}]
+    assert v["evidence"] == [{"claim": "grep for the file", "steps": [2], "seqs": [44]}]
     assert warnings == []
 
 
@@ -1542,21 +1542,21 @@ def test_clamped_confidence_warning_is_bounded():
 def test_derived_verdict_matrix():
     def payload(inf_a, pe_a, inf_b="none", pe_b=None):
         return json.dumps({"memories": [{"id": "m1", **_signals(inf=inf_a, pe=pe_a),
-                                         "anchors": [1] if inf_a in ("acted_on", "decisive") else []},
+                                         "anchors": [1] if inf_a in ("acted_on", "selected") else []},
                                         {"id": "m2", **_signals(inf=inf_b, pe=pe_b),
                                          "anchors": []}],
                            "confidence": 0.9})
 
     cases = [
         (("acted_on", "improved", "none", None), "positive"),      # a used
-        (("acted_on", "no_effect", "none", None), "negative"),     # used but didn't improve
+        (("acted_on", "no_effect", "none", None), "neutral"),     # used but didn't improve
         (("acted_on", "harmed", "none", None), "negative"),        # active harm
         (("referenced", None, "none", None), "neutral"),           # mere reference never negative
-        (("decisive", "improved", "acted_on", "harmed"), "negative"),  # harm dominates help
+        (("acted_on", "improved", "acted_on", "harmed"), "negative"),  # harm dominates help
         (("none", None, "none", None), "neutral"),                 # everything ignored
         (("acted_on", None, "none", None), "unresolved"),          # influence w/o pe ⇒ unclear
         (("acted_on", None, "acted_on", "improved"), "positive"),  # use outranks uncertainty
-        (("acted_on", None, "acted_on", "no_effect"), "negative"),  # so does misuse
+        (("acted_on", None, "acted_on", "no_effect"), "unresolved"),  # unproductive is not harm
     ]
     for args, want in cases:
         warnings = []
@@ -1883,8 +1883,8 @@ def test_summary_keeps_comparisons_ahead_of_drilldown(tmp_path):
     assert list(summary) == ["overall", "trajectories", "details", "generated_at", "tool"]
     assert list(summary["overall"])[0] == "headline"
     assert summary["tool"] == {
-        "name": "injudge", "schema": "injudge.summary/v12",
-        "source_report_schema": "injudge.report/v14",
+        "name": "injudge", "schema": "injudge.summary/v13",
+        "source_report_schema": "injudge.report/v15",
         "judge_model": "judge", "config": {"max_steps": 4},
     }
     assert summary["generated_at"] == artifact["generated_at"]
@@ -1942,7 +1942,7 @@ def test_cli_writes_results_first_summary(monkeypatch, tmp_path):
     summary = json.loads(text)
     report = json.loads((run_dir / "injudge-report.json").read_text())
     assert text.startswith('{\n  "overall": {\n') and text.endswith("\n")
-    assert summary["tool"]["schema"] == "injudge.summary/v12"
+    assert summary["tool"]["schema"] == "injudge.summary/v13"
     assert summary["tool"]["source_report_schema"] == report["tool"]["schema"]
     assert "test-key-only" not in text
     (row,) = summary["trajectories"]
@@ -2062,7 +2062,7 @@ def test_cli_runs_share_the_container_without_clobbering(monkeypatch, tmp_path):
     assert len(run_dirs) == 2  # distinct stamps even for same-second runs
     for run_dir in run_dirs:
         report = json.loads((run_dir / "injudge-report.json").read_text())
-        assert report["tool"]["schema"] == "injudge.report/v14"
+        assert report["tool"]["schema"] == "injudge.report/v15"
         assert (run_dir / "summary.json").is_file()
         (span_evidence,) = (run_dir / "evidence").iterdir()
         assert (span_evidence / "manifest.json").is_file()
@@ -2263,7 +2263,7 @@ def test_aggregate_usage_rollup_excludes_auto_neutral_spans():
     assert agg["rates"]["neutral"] == 1.0  # the one assessable judged span
     (roll,) = agg["memory_usage"]
     assert roll["tallies"] == {"used": 0, "noted": 0, "ignored": 1,
-                               "misused": 0, "unclear": 0}
+                               "misused": 0, "unclear": 0, "selected": 0, "unproductive": 0}
     assert roll["spans"] == ["T1:S2"]
 
 
@@ -2283,7 +2283,7 @@ def test_aggregate_usage_rollup_excludes_error_and_unjudged_spans():
     assert agg["error"] == 1 and agg["unjudged"] == 1
     (roll,) = agg["memory_usage"]
     assert roll["tallies"] == {"used": 0, "noted": 0, "ignored": 1,
-                               "misused": 0, "unclear": 0}
+                               "misused": 0, "unclear": 0, "selected": 0, "unproductive": 0}
     assert roll["spans"] == ["T1:S3"]
 
 
@@ -3089,7 +3089,27 @@ def test_cli_timeout_override_must_be_finite(monkeypatch, timeout):
 def _reads(*steps):
     """Retained successful step-file reads, shaped like the runner's toolResult messages."""
     return [{"role": "toolResult", "toolName": "read_evidence", "isError": False,
+             "_fixture_read": True,
              "details": {"path": f"steps/step_{s:06d}.md", "lines_read": 3}} for s in steps]
+
+
+def _fill_reads(result, evidence_dir):
+    """Give canned successful reads the actual numbered evidence text."""
+    import copy
+    result = copy.deepcopy(result)
+    messages = []
+    for message in result["messages"]:
+        if message.pop("_fixture_read", False):
+            path = evidence_dir / message["details"]["path"]
+            if not path.exists():
+                continue
+            lines = path.read_text().split("\n")
+            message["content"] = [{"type": "text", "text": "\n".join(
+                f"{i}: {line}" for i, line in enumerate(lines, 1))}]
+            message["details"].update(lines_read=len(lines), line_start=1, line_end=len(lines), truncated=False)
+        messages.append(message)
+    result["messages"] = messages
+    return result
 
 
 def _result(answer, *, error=None, forced=False, llm_calls=3, tool_calls=4,
@@ -3174,6 +3194,8 @@ def stub_runner(monkeypatch, results):
         if not results:
             raise AssertionError("the stubbed runner was invoked too often")
         out = results.pop(0)
+        if isinstance(out, dict):
+            out = _fill_reads(out, evidence_dir)
         trajectory_path.parent.mkdir(parents=True, exist_ok=True)
         # only the NEW messages fire message_end — seeded history does not
         new_messages = (
@@ -3280,7 +3302,7 @@ def test_agent_corrective_retry_continues_the_conversation(monkeypatch, tmp_path
     assert verdict["input"]["attempts"] == 2
     violation = "not valid JSON" if failure == "format" else "covers ids"
     assert violation in calls[1]["message"]
-    assert calls[1]["history"] == _result(answer)["messages"]
+    assert calls[1]["history"] == _fill_reads(_result(answer), calls[0]["evidence_dir"])["messages"]
     assert calls[0]["history"] is None
     assert [call["repair"] for call in calls] == [False, True]
 
@@ -3302,7 +3324,7 @@ def test_agent_anchor_must_name_a_step_the_conversation_read(monkeypatch, tmp_pa
     verdict = judge_span(span, steps, _agent_cfg(), [], None,
                          evidence_root=tmp_path, transcripts_root=tmp_path / "runs2")
     assert verdict["verdict"] == "positive" and len(calls) == 1
-    assert verdict["input"]["read_steps"] == [1, 2, 3]
+    assert verdict["input"]["read_steps"] == [1, 2]
 
 
 def test_agent_evidence_citations_require_retained_step_reads(monkeypatch, tmp_path):
@@ -3537,7 +3559,7 @@ def test_evidence_replaces_a_prior_run(tmp_path):
     assert "new task" in (tmp_path / "task.md").read_text()
     assert "old task" not in (tmp_path / "task.md").read_text()
     assert sorted(p.name for p in tmp_path.iterdir()) == [
-        "context.json", "deliveries.md", "episode.md", "manifest.json",
+        "baseline.md", "context.json", "deliveries.md", "episode.md", "manifest.json",
         "searches.json", "span.md", "steps", "task.md"]
 
 
@@ -3577,7 +3599,7 @@ def test_config_validates_the_budget_knobs(monkeypatch):
     ("none", None, "ignored", "neutral"),
     ("referenced", None, "noted", "neutral"),
     ("acted_on", "improved", "used", "positive"),
-    ("decisive", "harmed", "misused", "negative"),
+    ("acted_on", "harmed", "misused", "negative"),
     ("acted_on", None, "unclear", "unresolved"),
 ])
 def test_agent_unknown_novelty_preserves_independent_signals(
@@ -3587,7 +3609,7 @@ def test_agent_unknown_novelty_preserves_independent_signals(
     entry = payload["memories"][0]
     entry.update(_signals(nov=None, inf=influence, pe=effect))
     entry["novelty"]["note"] = "The recording omits the initial knowledge baseline."
-    entry["anchors"] = [2] if influence in ("acted_on", "decisive") else []
+    entry["anchors"] = [2] if influence in ("acted_on", "selected") else []
     calls = stub_runner(monkeypatch, [_result(json.dumps(payload))])
     span, steps = _judge_input_fixture()
     result = judge_span(span, steps, _agent_cfg(), [], evidence_root=tmp_path / "evidence",
@@ -3603,14 +3625,14 @@ def test_agent_unknown_novelty_preserves_independent_signals(
     path = tmp_path / "report.json"
     path.write_text(json.dumps(artifact))
     saved = json.loads(path.read_text())
-    assert saved["tool"]["schema"] == "injudge.report/v14"
+    assert saved["tool"]["schema"] == "injudge.report/v15"
     assert saved["operations"][0]["rubric"]["m1"]["novelty"]["value"] is None
     rub = saved["aggregates"]["overall"]["rubric"]
     assert rub["deliveries"] == 2
     assert rub["counts"]["novelty"] == {"null": 1, "novel": 1}
     assert rub["rates"]["novelty"] == 1.0  # unknown does not dilute the rate
     summary = build_summary(saved)
-    assert summary["tool"]["schema"] == "injudge.summary/v12"
+    assert summary["tool"]["schema"] == "injudge.summary/v13"
     assert summary["details"]["overall"]["rubric"]["counts"]["novelty"] == rub["counts"]["novelty"]
     if usage == "ignored":
         assert rub["no_footprint_reasons"] == {"ignored_unknown_novelty": 1, "irrelevant": 1}
@@ -3624,7 +3646,7 @@ def test_unknown_novelty_is_visible_when_no_entry_has_an_assessed_tier():
     assert "novelty: undetermined 1/1" in _rubric_line(rub)
 
 
-@pytest.mark.parametrize("signal", ["relevance", "accuracy", "influence"])
+@pytest.mark.parametrize("signal", ["relevance", "accuracy"])
 def test_repair_does_not_reinvite_a_forbidden_null(monkeypatch, tmp_path, signal):
     from injudge.agent import _FORCED
     from injudge.prompts import load_prompt

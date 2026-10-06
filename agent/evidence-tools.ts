@@ -69,6 +69,9 @@ const readSchema = Type.Object({
 	limit: Type.Optional(
 		Type.Integer({ minimum: 1, description: "Maximum number of lines to return" }),
 	),
+	column: Type.Optional(
+		Type.Integer({ minimum: 1, description: "First Unicode character in the offset line (1-based); use the continuation position from a truncated read" }),
+	),
 });
 
 const searchSchema = Type.Object({
@@ -99,22 +102,35 @@ export function createEvidenceTools(root: string): AgentTool<any>[] {
 				};
 			}
 			const selected = params.limit ? lines.slice(from, from + params.limit) : lines.slice(from);
-			let body = selected.map((line, i) => `${from + i + 1}: ${line}`).join("\n");
-			let note = "";
-			const truncated = body.length > READ_CHAR_CAP;
-			if (truncated) {
-				body = body.slice(0, READ_CHAR_CAP);
-				note = `\n(... cut at ${READ_CHAR_CAP} chars; call again with an offset/limit to read the rest)`;
+			const returned: string[] = [];
+			let used = 0, note = "";
+			for (let i = 0; i < selected.length; i++) {
+				const line = from + i + 1, column = i === 0 ? (params.column ?? 1) : 1;
+				const text = column === 1 ? selected[i] : Array.from(selected[i]).slice(column - 1).join("");
+				const prefix = column === 1 ? `${line}: ` : `${line}@${column}: `;
+				const room = READ_CHAR_CAP - used - prefix.length - (returned.length ? 1 : 0);
+				if (room <= 0) {
+					note = `\n(... character cap; continue with offset=${line}, column=${column})`;
+					break;
+				}
+				let chunk = text.slice(0, room);
+				// Never split a surrogate pair: continuation columns count Unicode
+				// characters, matching Python's evidence-coverage coordinates.
+				if (chunk.length < text.length && /[\uD800-\uDBFF]$/.test(chunk)) chunk = chunk.slice(0, -1);
+				returned.push(prefix + chunk);
+				used += prefix.length + chunk.length + (returned.length > 1 ? 1 : 0);
+				if (chunk.length < text.length) {
+					note = `\n(... character cap; continue with offset=${line}, column=${column + Array.from(chunk).length})`;
+					break;
+				}
 			}
-			// A cut inside the next line's number exposes no content on that
-			// line; do not count the dangling prefix as evidence or coverage.
-			const returned = body.split("\n").filter((line) => /^\d+: /.test(line));
+			const truncated = !!note;
 			return {
-				content: [{ type: "text", text: body + note }],
+				content: [{ type: "text", text: returned.join("\n") + note }],
 				// Coverage describes only text returned, never the selected tail
 				// removed by the character cap. The final line may be partial.
 				details: { path: relative,
-					lines_read: returned.filter((line) => line.replace(/^\d+: /, "").trim()).length,
+					lines_read: returned.filter((line) => line.replace(/^\d+(?:@\d+)?: /, "").trim()).length,
 					line_start: from + 1, line_end: from + returned.length, truncated },
 			};
 		},

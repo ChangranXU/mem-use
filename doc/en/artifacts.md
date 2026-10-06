@@ -1,5 +1,5 @@
 ---
-description: "injudge.report/v14, injudge.summary/v12, every field, and how every rate is counted."
+description: "injudge.report/v15, injudge.summary/v13, every field, and how every rate is counted."
 icon: box-archive
 ---
 
@@ -11,8 +11,8 @@ injudge writes all artifacts of a run to that run's own `<run-stamp>/` folder un
 
 | File | Schema | Role |
 |---|---|---|
-| `injudge-report.json` | `injudge.report/v14` | Runtime judging record. Checkpointed after each completed span, with pending spans marked `unjudged`, so interruption within a multi-episode trajectory keeps completed work. Feed it to memgraph with `--verdicts`. |
-| `summary.json` | `injudge.summary/v12` | Final statistics set: counts, rates, and a narrative-free span index. |
+| `injudge-report.json` | `injudge.report/v15` | Runtime judging record. Checkpointed after each completed span, with pending spans marked `unjudged`, so interruption within a multi-episode trajectory keeps completed work. Feed it to memgraph with `--verdicts`. |
+| `summary.json` | `injudge.summary/v13` | Final statistics set: counts, rates, and a narrative-free span index. |
 | `memgraph-verdicts.html` | — | Only with `--html` (off by default): memgraph with recall nodes colored by span verdict. |
 | `evidence/<span-dir>/` | — | One folder per span the judge agent ran for: the exact files available to it. |
 | `agent-runs/<span-dir>.jsonl` | — | One trajectory per span sent to the judge agent: the pi event-sourced recording of the judging conversation (see [Judge agent](judge-client.md#trajectory-recording)). |
@@ -57,7 +57,7 @@ their complete messages remain in `injudge-report.json`, and with `--html` in
 the rendered graph. Empty deliveries and unobserved consumers are counted in
 separate classes (`empty`, `unassessable`), outside every directional denominator.
 `memgraph --verdicts` accepts a report only when its `tool.schema` is
-`injudge.report/v14`; it is the one artifact version checked at read time.
+`injudge.report/v15`; it is the one artifact version checked at read time.
 
 When several identities share one display key, summary `key` fields (triage lists and `memory_usage`) carry a `key#<item-or-namespace>` suffix — an 8-character prefix, or the full base when prefixes collide — so two memories never conflate. The report always keeps the full identity.
 
@@ -82,7 +82,7 @@ The mapping from rubric signals to usage labels and span verdicts is in [Rubric 
 
 | Population | Members |
 |---|---|
-| Judged spans | `positive` + `negative` + `unresolved` + `neutral`. Denominator for verdict rates. `unresolved` is acted-on influence whose effect the judge could not determine — an established footprint of unknown direction, kept apart from neutral's "no influence established". |
+| Judged spans | `positive` + `negative` + `unresolved` + `neutral`. Denominator for verdict rates. `unresolved` means attribution or effect could not be determined. Neutral includes selection, reference, unproductive use, and no established influence. |
 | `empty` | No entries were delivered (`auto: empty_delivery`). No judge call; counts and delivery cost stay outside directional rates and the benefit share. |
 | `unassessable` | Rule-judged auto-neutral spans (no delivery has an attributed agent step — no downstream footprint can be grounded). Count only, with their delivery cost in their own token bucket: observation missingness is not a measured null, so they sit in no directional denominator and outside the benefit share. When a judged population makes `headline` available, `unassessable_spans` / `unassessable_tokens` name them there. |
 | LLM-judged spans | Judged spans with no `auto` marker. Population for rubric rates, usage tallies, and confidence. |
@@ -110,14 +110,14 @@ The population is judge-scored deliveries (`span × delivered entry`, keyed by t
 | `relevance` | `true` | `true` + `false` | relevant share |
 | `accuracy_corroborated` / `accuracy_uncontradicted` / `accuracy_contradicted` | each value | all three accuracy-judged deliveries | the three-way split — never one "accurate" rate: `uncontradicted` asserts nothing, so folding it in would report ≈1.0 on a mostly unverifiable run |
 | `novelty` | `novel` + `confirming` | those + `redundant` | not-redundant share |
-| `influence` | `referenced` + `acted_on` + `decisive` | those + `none` | any-footprint share |
+| `influence` | `referenced` + `selected` + `acted_on` | those + `none` | any-footprint share |
 | `positive_effect` | `improved` | `improved` + `no_effect` + `harmed` | improved share among deliveries that have an effect |
 
 `positive_effect` is rated only over deliveries that have an effect judgment — the signal is null unless influence is acted-on. Unknown novelty (`null`) is counted in `rubric.counts.novelty.null` and stays out of the novelty-rate denominator; an all-unknown novelty population has a null novelty rate. Relevant ignored entries with null novelty use `ignored_unknown_novelty`. The signal enums in `rubric.counts` are those in the [rubric table](verdict-derivation.md#rubric-signals).
 
 ### Triage Lists
 
-`inaccurate_keys` collects identities whose `accuracy` was `contradicted`; `irrelevant_keys` collects identities whose `relevance` was `false`. Each entry carries the span ids that produced it. `shared_anchors` lists, per identity, any action step that two or more spans credited as `acted_on`/`decisive` (`{traj, step, spans}`): deliveries of one memory with different text can share a window, each judgment stands, and the shared step is one action, not two benefits. Every delivered entry maps to exactly one `(namespace, item)` identity of its own delivery, so a key delivered under several identities tallies under each of them. An entry with no recorded identity (no `item_id`, no key — e.g. a redacted anonymous ref) has no pair to join on: it tallies span-scoped (its `item_id` records the operation and span-local id), so two spans' identity-less entries never merge.
+`inaccurate_keys` collects identities whose `accuracy` was `contradicted`; `irrelevant_keys` collects identities whose `relevance` was `false`. Each entry carries the span ids that produced it. `shared_anchors` lists, per identity, any action step that two or more spans credited as `acted_on` (`{traj, step, spans}`): deliveries of one memory with different text can share a window, each judgment stands, and the shared step is one action, not two benefits. Every delivered entry maps to exactly one `(namespace, item)` identity of its own delivery, so a key delivered under several identities tallies under each of them. An entry with no recorded identity (no `item_id`, no key — e.g. a redacted anonymous ref) has no pair to join on: it tallies span-scoped (its `item_id` records the operation and span-local id), so two spans' identity-less entries never merge.
 
 ### Per-Memory Usage
 
@@ -168,7 +168,7 @@ These fields live under `overall` and in every trajectory comparison row:
 | `counts.n_spans` | Injection spans — the judged unit |
 | `counts.n_episodes` | Episode groups the trajectory's spans were scoped to; overall sums them |
 | `counts.restated_injections` | `n_injections − n_spans` |
-| `verdicts.counts.positive` / `negative` / `unresolved` / `neutral` | Span verdicts: beneficial acted-on influence / non-beneficial acted-on influence / acted-on influence of undetermined effect / no influence established. Mere reference is never negative. |
+| `verdicts.counts.positive` / `negative` / `unresolved` / `neutral` | Span verdicts: beneficial use / harmful use / undetermined attribution or effect / no established benefit or harm. Selection and unproductive use are neutral. |
 | `verdicts.counts.error` / `unjudged` / `unassessable` | Judge failures / skipped by `--limit` or outside `--episode` / no attributed agent step; these remain visible but are excluded from directional rates. |
 | `verdicts.counts.empty` | Nothing delivered; counted only, outside every directional denominator and the benefit share |
 | `verdicts.rates` | Positive/negative/unresolved/neutral shares over judged spans; omitted when none were judged |
@@ -223,8 +223,23 @@ These blocks live under `details.overall` and `details.trajectories.<id>`:
 
 ## Report-Only Fields
 
-`injudge-report.json` additionally carries, per operation: `kind` (`recall_injection_span`), `traj`, `seq`, `n_injections`, `steps` (omitted when no delivery has an attributed step), `payload_summary`, and `delivery_cost` (`deliveries`, `content_chars_total`, `approx_tokens_total`); `episode_execution_id` and `episode_last_step`; `memories` (full recorded refs stamped with span-local ids); `memory_exposure` — a **positional** list parallel to `memories` (index `i` describes `memories[i]`), each entry `{state, exposed_chars, value_chars}` with state `full`, `full_normalized`, `clipped`, or `unknown`, unverified canonical values withheld from judge evidence; and `memory_windows` (per-entry global end steps, capped at the episode's last eligible step or the next same-episode delivery), with `memory_window_starts` recording same-step collision exceptions (a same-step copy adding no verified text opens after the shared step), `memory_variant_steps` the in-window steps where the same memory was delivered with different or narrower text (which leaves the window open), and `memory_followups` the proven explicit selections `{step, delivery_step, tool_call_id, operation_id}` (actual action and result-delivery steps recorded separately). Unlike `memory_exposure`, `rubric`, `memory_usage`, and `memory_windows` are keyed by span-local ids. The operation also retains rubric notes and action `anchors`, `analysis`, `evidence`, `step_gaps`, `new_keys` / `removed_keys` / `previous_keys` / `changed_keys`, `auto`, `error`, `judge_raw`, and `pe_pairing_corrections` when present. Spans the judge agent ran for — its own error outcomes included — carry `input`: `path: agent`, attempts, retained `llm_calls` / `tool_calls` and successful step-file reads (`retained_evidence`, plus `read_steps`: the global steps whose files were read — every cited anchor and structured evidence step must be one of them), executed call counts, reported usage including rolled-back calls, context rollbacks, `any_phase_forced`, and the transcript path relative to the run folder; a span rejected before the agent ran (an unsafe or incomplete episode boundary, or a parent episode with no recorded task) takes an error verdict with no `input`, no evidence folder, and no transcript. `gold` and final-answer `forced` appear when applicable. Trajectory rows carry `id`, `run_id`, `path`, `instance_id`, `model`, `adapter`, `n_steps`, `n_injections`, `n_spans`, their `episodes` rows, and the trajectory's `policy`; episode rows record boundary, task, attachment, and evidence provenance without an episode verdict.
+`injudge-report.json` additionally carries, per operation: `kind` (`recall_injection_span`), `traj`, `seq`, `n_injections`, `steps` (omitted when no delivery has an attributed step), `payload_summary`, and `delivery_cost` (`deliveries`, `content_chars_total`, `approx_tokens_total`); `episode_execution_id` and `episode_last_step`; `memories` (full recorded refs stamped with span-local ids); `memory_exposure` — a **positional** list parallel to `memories` (index `i` describes `memories[i]`), each entry `{state, exposed_chars, value_chars}` with state `full`, `full_normalized`, `clipped`, or `unknown`, unverified canonical values withheld from judge evidence; and `memory_windows` (per-entry global end steps, capped at the episode's last eligible step or the next same-episode delivery), with `memory_window_starts` recording same-step collision exceptions (a same-step copy adding no verified text opens after the shared step), `memory_variant_steps` the in-window steps where the same memory was delivered with different or narrower text (which leaves the window open), and `memory_followups` the proven explicit selections `{step, delivery_step, tool_call_id, operation_id}` (actual action and result-delivery steps recorded separately). Unlike `memory_exposure`, `rubric`, `memory_usage`, and `memory_windows` are keyed by span-local ids. The operation also retains rubric notes and action `anchors`, `analysis`, `evidence`, `step_gaps`, `new_keys` / `removed_keys` / `previous_keys` / `changed_keys`, `auto`, `error`, `judge_raw`, and `pe_pairing_corrections` when present. Spans the judge agent ran for — its own error outcomes included — carry `input`: `path: agent`, attempts, retained `llm_calls` / `tool_calls` and successful step-file reads (`retained_evidence`, plus `read_steps`: global steps whose complete text was retained, including indexed baseline copies — every cited anchor and structured evidence step must be one of them), executed call counts, reported usage including rolled-back calls, context rollbacks, `any_phase_forced`, and the transcript path relative to the run folder; a span rejected before the agent ran (an unsafe or incomplete episode boundary, or a parent episode with no recorded task) takes an error verdict with no `input`, no evidence folder, and no transcript. `gold` and final-answer `forced` appear when applicable. Trajectory rows carry `id`, `run_id`, `path`, `instance_id`, `model`, `adapter`, `n_steps`, `n_injections`, `n_spans`, their `episodes` rows, and the trajectory's `policy`; episode rows record boundary, task, attachment, and evidence provenance without an episode verdict.
 
 The report's `tool` block names the tool (`name: "injudge"`) and its `schema`, and carries the resolved, secret-free judge-agent configuration (`config`, URLs sanitized to `scheme://host[:port][/path]`) with `judge_model`.
 
 The `injections` array lists every raw delivery with its span, its `episode_execution_id` when the span has one, `role` (`first` or `restated`), `verdict`, `content_chars`, and its `op_id` / `seq` / `step`.
+
+## Version 15 provenance and interpretation
+
+`tool.provenance` carries `implementation_sha256` and `prompts_sha256`; each executed
+span input carries `evidence_sha256` and `system_prompt_sha256`. These identify
+the exact judged inputs and working-copy implementation without credentials.
+They do not establish the source date or cleanliness of a preloaded memory corpus.
+
+Unknown influence is counted in `rubric.counts.influence.null` and excluded from
+the assessed influence-rate denominator. `selected` has no effect score and never
+inherits a follow-up read's benefit; `no_effect` maps to neutral `unproductive`,
+while `misused` requires `harmed`. The span token-share proxy and all sign counts
+remain diagnostics, not additive system gain. Separate exact-task solution reuse
+from transfer before making generalization claims; do not infer provenance from
+text overlap or dates alone.

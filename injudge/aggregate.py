@@ -3,9 +3,8 @@
 The counting rules:
 
 - rates are over judged spans only: denominator = positive + negative +
-  neutral + unresolved (acted-on influence whose effect the judge could
-  not determine — an established footprint of unknown direction, kept apart
-  from neutral's "no established influence"). `error` (judge failures),
+  neutral + unresolved (attribution or effect undetermined). Selection and
+  unproductive use are neutral; only harmful acted-on influence is negative. `error` (judge failures),
   `unjudged` (--limit/--episode truncation), and `unassessable`
   (rule-judged no-subsequent-turn spans) are counts, never denominators;
   restated re-injections never appear in rates at all (they roll up into
@@ -70,7 +69,7 @@ from injudge.steps import _mixed_sum, _token_share
 from memgraph.annotations import is_int, item_ident
 
 _VERDICTS = ("positive", "negative", "neutral", "unresolved")
-_USAGES = ("used", "noted", "ignored", "misused", "unclear")
+_USAGES = ("used", "unproductive", "misused", "selected", "noted", "ignored", "unclear")
 _BUCKETS = ("[0,0.5)", "[0.5,0.8)", "[0.8,1.0]")
 # the verdict classes every count/cost rollup tallies (error, unjudged, and
 # unassessable — the rule-judged no-subsequent-turn spans — are counts,
@@ -94,9 +93,9 @@ def counted_verdict(op: dict) -> str:
 BENEFIT_SHARE_CAVEAT = (
     "share_without_demonstrated_benefit is an estimated span-level proxy, "
     "not waste, harm, or net gain: it counts judged-class injected tokens in "
-    "spans with no demonstrated benefit — negative (acted on without benefit), "
-    "neutral (no influence established, not a measured absence of effect), "
-    "and unresolved (influence established, effect undetermined; named "
+    "spans with no demonstrated benefit — negative (acted on with harm), "
+    "neutral (selection, reference, unproductive use, or no established influence), "
+    "and unresolved (attribution or effect undetermined; named "
     "separately as unresolved_tokens); a positive span's ignored memories "
     "count as benefit-bearing and a mixed bundle is charged wholly to its "
     "verdict"
@@ -241,7 +240,7 @@ def _rubric_rollup(operations: list[dict]) -> dict:
             "novelty": rate("novelty", ("novel", "confirming"), ("redundant",)),
             **accuracy_rates,
             "influence": rate(
-                "influence", ("referenced", "acted_on", "decisive"), ("none",)
+                "influence", ("referenced", "selected", "acted_on"), ("none",)
             ),
             "positive_effect": rate(
                 "positive_effect", ("improved",), ("no_effect", "harmed")

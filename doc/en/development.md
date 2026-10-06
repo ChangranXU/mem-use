@@ -37,8 +37,17 @@ The suite does not use the network. Python tests stub paid judge calls with cann
 Canned answers test the contract, not judgment quality. `calibration/` contains
 controlled development regressions for explicit and uncited use, routine
 practice, source and novelty distinctions, uncertainty, plan execution and
-reversal, harmful advice, and paraphrased baselines. Each case pins only the
-labels its construction establishes.
+reversal, harmful and unproductive actions, reading a listed candidate whose
+unrecorded full text is used or set aside, recorded preview/full-read pairs,
+and paraphrased baselines. Each case pins only the labels its construction
+establishes.
+
+Recorded follow-up cases contain a preview and a separately bound full read.
+Calibration scores both targets (`case` and `case/read`), preserving each
+verdict and marking missing or errored targets unavailable. The controls
+cover useful reads, unused reads, and preview actions predating the read.
+Credit ownership is an accounting convention after influence is established;
+it cannot override earlier actions or manufacture influence from matching text.
 
 ```bash
 uv run -m calibration build calibration-cases/

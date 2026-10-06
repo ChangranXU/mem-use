@@ -1,5 +1,5 @@
-"""Report assembly: the `injudge.report/v13` JSON artifact, the statistics-only
-`injudge.summary/v11` distillation, and the stdout summary.
+"""Report assembly: the `injudge.report/v15` JSON artifact, the statistics-only
+`injudge.summary/v13` distillation, and the stdout summary.
 
 The runtime artifact's output contract: per operation
 {operation_id, kind, seq, payload_summary, verdict, confidence, evidence[]}
@@ -264,8 +264,8 @@ def _headline_line(headline: dict, rates: dict) -> str | None:
     txt = (
         f"headline: {headline['judged_spans']} judged spans — "
         f"positive {rates['positive']:.0%}, negative {rates['negative']:.0%}, "
-        f"unresolved (acted on, effect undetermined) {rates['unresolved']:.0%}, "
-        f"neutral (no influence established) {rates['neutral']:.0%}"
+        f"unresolved (attribution or effect undetermined) {rates['unresolved']:.0%}, "
+        f"neutral (no established benefit or harm) {rates['neutral']:.0%}"
     )
     if headline.get("unassessable_spans"):
         # assessability is a headline property: these spans held no
