@@ -1,6 +1,6 @@
 """Fixture tests for memgraph: parsing, step attribution, linking, verdicts.
 
-Fixtures are schema-v9 annotated trajectories (see
+Fixtures are schema-v10 annotated trajectories (see
 tests/annotated_fixtures.py): memory actions come from memory_* events,
 never from prompt text or label conventions.
 """
@@ -778,7 +778,7 @@ def test_same_key_in_different_namespaces_is_two_memories(tmp_path):
 
 def test_same_key_two_items_in_one_store_are_two_memories(tmp_path):
     """Memory identity is (namespace, item): one store holding two items
-    under the same display key (nothing in schema v9 makes a display key
+    under the same display key (nothing in schema v10 makes a display key
     item-unique — the CURE store keys rows by id and can hold the same key
     at another scope or memory_type) must not merge them: their portable
     item_ids are distinct, so creation/recall edges must never cross."""

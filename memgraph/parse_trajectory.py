@@ -1,6 +1,6 @@
 """Parse one gate `trajectory.jsonl` into memory operations.
 
-Runs recorded through the traj-recorder (schema v9) carry explicit `memory_*`
+Runs recorded through the traj-recorder (schema v10) carry explicit `memory_*`
 annotation events — the memory system's logical actions, recorded at the
 boundary by the system itself (see extension/traj-recorder "Annotating memory
 actions" and `memgraph/annotations.py`). This parser consumes exactly
@@ -378,7 +378,7 @@ def _delivery_step(
 def list_field(holder: dict[str, Any], key: str) -> list[Any]:
     """A list field of a recorded payload; [] when absent or a corrupt
     non-list — a truthy scalar on a hand-edited artifact must degrade, never
-    crash the parse (the never-raises rule). The schema-v9 payload list
+    crash the parse (the never-raises rule). The schema-v10 payload list
     fields the tools iterate (memories / before / after / produced /
     retired / returned / error_codes / searches / placements) get their
     non-list corruption reported in
@@ -783,7 +783,7 @@ def _recall_op_from_delivery(
             default=exposure_state(memory.get("value"), None),
         ))
     # The reads that produced the delivery, one {lane_id, operation_id}
-    # entry per read lane in profile order (schema v9's `searches`): the
+    # entry per read lane in profile order (schema v10's `searches`): the
     # per-entry query resolution and match count follow the same rules the
     # single-search shape had, aggregated over the linked searches.
     entries = list_field(payload, "searches")
@@ -907,16 +907,13 @@ def parse_trajectory(
             else:
                 warnings.append(f"{run_json}: run.json is not a JSON object; using directory name")
         if meta is not None:
-            # v9-only reader: an older recorder's run parses wrongly (its
-            # deliveries carry no `searches`/`placements`), so the version
-            # gap is named up front — a warning, never a crash (corrupt
-            # input is tolerated; the run continues with degraded ops)
+            # Only the current recorder contract is supported. A mismatched
+            # artifact is diagnosed without adding a legacy parser.
             schema = meta.get("schema_version")
-            if schema is not None and schema != 9:
+            if schema is not None and schema != 10:
                 warnings.append(
-                    f"{run_json}: run.json schema_version {schema!r} is not 9; "
-                    "these tools read schema-v9 annotations only — an older "
-                    "recorder's traces will misparse"
+                    f"{run_json}: run.json schema_version {schema!r} is not 10; "
+                    "these tools support schema-v10 annotations only"
                 )
             # only a non-empty string names a run (the verdict join and the
             # HTML's run-id parsing both assume one); a corrupt value keeps
@@ -1042,7 +1039,7 @@ def parse_trajectory(
             traj.instance_id = instance_id
         # the exact task the memory system scoped against — the relevance
         # rubric is judged on it. A locator-recorded task is carried too
-        # (schema v9 allows any ContentRef): a trajectory_message locator
+        # (schema v10 allows any ContentRef): a trajectory_message locator
         # resolves against this event stream; the kinds pointing outside
         # trajectory.jsonl resolve to None, with a note — never silent.
         # Redacted/unavailable content stays None by design.

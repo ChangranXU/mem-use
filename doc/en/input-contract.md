@@ -6,8 +6,12 @@ icon: file-lines
 # Input Contract
 
 {% hint style="info" %}
-Both tools read **schema-v9 gate trajectories**. Memory actions come exclusively from the recorder's `memory_*` annotation events — prompt text, role names, and label conventions are never parsed. The recorder's `bridge_*` lifecycle events do not create memory operations. A successful bridge delete without a `memory_*` retirement from its same-session, same-operation generation produces a warning, since bridge-native revision IDs cannot substitute for portable MemoryRefs. Other bridge events are skipped; a `run.json` recording a `schema_version` other than 9 produces a version warning.
+Both tools read **schema-v10 gate trajectories**. Memory actions come exclusively from the recorder's `memory_*` annotation events — prompt text, role names, and label conventions are never parsed. The recorder's `bridge_*` lifecycle events do not create memory operations. A successful bridge delete without a `memory_*` retirement from its same-session, same-operation generation produces a warning, since bridge-native revision IDs cannot substitute for portable MemoryRefs. Other bridge events are skipped; a `run.json` recording a `schema_version` other than 10 produces a version warning.
 {% endhint %}
+
+Preserve archived trajectories and their original verification logs. A version
+warning does not invalidate that historical verification; re-verification requires
+the matching recorder revision. Do not relabel old artifacts as schema 10.
 
 `injudge --prepare-only` is the offline episode preparation path. Episode scope
 comes from a `bridge_episode_open` / `bridge_episode_close` pair, or — when
@@ -17,6 +21,12 @@ MemoryRefs remain annotation-only. The preparation artifact records unresolved
 boundaries and assignment gaps.
 
 A trajectory without annotations is valid input: the run yields zero memory operations plus a validation note, not an error.
+
+Schema 10's `memory_source_set` events preserve bridge source history for audits.
+They are not memory operations or agent-visible deliveries. memgraph and injudge
+continue to use the recorded `memory_*` actions, portable MemoryRefs, and placement
+evidence; source snapshots do not change identity, cost, exposure, or scoring.
+Use traj-recorder's verifier to check snapshot hashes, scope, and references.
 
 ## Annotation Events
 

@@ -1,6 +1,6 @@
-"""Shared synthetic-fixture builder for schema-v9 annotated trajectories.
+"""Shared synthetic-fixture builder for schema-v10 annotated trajectories.
 
-Fixtures mirror the annotation protocol emitted by traj-recorder schema v9
+Fixtures mirror the annotation protocol emitted by traj-recorder schema v10
 (see extension/traj-recorder "Annotating memory actions"): a
 memory_session, role bindings, generation operations (start / change /
 end), per-lane search operations, and bound deliveries (per-lane `searches`
@@ -21,7 +21,7 @@ LANE = "default"  # the single read lane the fixture's searches record under
 
 
 def ev(seq, type, **kw):
-    return {"seq": seq, "schema_version": 9, "type": type, **kw}
+    return {"seq": seq, "schema_version": 10, "type": type, **kw}
 
 
 def _placement_line(ref) -> str | None:
@@ -77,7 +77,7 @@ def cure_ref(key, value="v", memory_type="insight", confidence=0.9,
 
 
 class AnnotatedBuilder:
-    """Assembles a synthetic annotated (schema v9) trajectory.jsonl."""
+    """Assembles a synthetic annotated (schema v10) trajectory.jsonl."""
 
     def __init__(self, main=MAIN, mem=MEM, adapter=None, task_ref=None,
                  instance_id="pydata__xarray-2905"):
@@ -315,7 +315,7 @@ class AnnotatedBuilder:
         """One per-lane search operation; returns its operation_id for
         deliveries. `matched_count` is the protocol's {value, precision}
         field (None = not recorded); `lane` is the read lane the search
-        records under (schema v9's lane_id); `trigger` (e.g. "explicit")
+        records under (schema v10's lane_id); `trigger` (e.g. "explicit")
         is recorded when given."""
         header = self._op_header()
         self.annotation(
@@ -421,7 +421,7 @@ class AnnotatedBuilder:
             "\n".join(json.dumps(e) for e in self.events) + "\n", encoding="utf-8"
         )
         (directory / "run.json").write_text(json.dumps(
-            {"schema_version": 9, "run_id": run_id, "model_name": "test-model",
+            {"schema_version": 10, "run_id": run_id, "model_name": "test-model",
              "started_at": "2026-01-01T00:00:00Z", "status": "stopped",
              "task": task_preview}
         ), encoding="utf-8")

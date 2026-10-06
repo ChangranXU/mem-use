@@ -2,7 +2,7 @@
 
 The paid evaluator groups recall spans inside prepared episodes. Preparation is a
 read-only normalization layer: bridge lifecycle events provide only
-episode scope, while memory operations still come from the schema-v9
+episode scope, while memory operations still come from the schema-v10
 ``memory_*`` annotations parsed by memgraph.  All joins use parsed event
 positions first and recorded identifiers only as corroborating metadata, so a
 hand-edited seq cannot move a delivery into another episode.

@@ -1,6 +1,6 @@
-"""Fixture tests for schema-v9 annotation-driven parsing (memgraph + injudge).
+"""Fixture tests for schema-v10 annotation-driven parsing (memgraph + injudge).
 
-Fixtures mirror the annotation protocol emitted by traj-recorder schema v9
+Fixtures mirror the annotation protocol emitted by traj-recorder schema v10
 (see extension/traj-recorder "Annotating memory actions"): a
 memory_session, role bindings, generation operations (start / change / end),
 per-lane search operations, and bound deliveries. Memory actions come from the
@@ -256,7 +256,7 @@ def test_search_matched_count_absent_falls_back_to_returned(tmp_path):
 
 
 def test_multi_lane_delivery_aggregates_searches(tmp_path):
-    """Schema v9's delivery names one search per read lane: the recall op
+    """Schema v10's delivery names one search per read lane: the recall op
     carries every {lane_id, operation_id} link in profile order, one query
     per linked search, and the matched totals summed across lanes."""
     b = AnnotatedBuilder().agent_turn(with_task=True)
@@ -673,7 +673,7 @@ def test_failed_bridge_forget_does_not_claim_a_missing_retirement(tmp_path):
 
 
 def test_non_list_retired_is_a_problem():
-    """memory_generate_end's retired list (schema v9) is an iterated payload
+    """memory_generate_end's retired list (schema v10) is an iterated payload
     field: a corrupt non-list is reported like produced/error_codes."""
     idx = build_annotation_index([
         *_structural_events(),
@@ -691,7 +691,7 @@ def test_non_list_retired_is_a_problem():
 
 
 def test_non_v9_run_json_schema_version_is_warned(tmp_path):
-    """The tools read schema-v9 annotations only: an older recorder's run
+    """The tools read schema-v10 annotations only: an older recorder's run
     says so in run.json, and the version gap is named up front — a warning,
     never a crash (the run continues with degraded ops)."""
     b = AnnotatedBuilder().agent_turn(with_task=True)
@@ -702,11 +702,11 @@ def test_non_v9_run_json_schema_version_is_warned(tmp_path):
     (d / "run.json").write_text(json.dumps(meta), encoding="utf-8")
     warnings: list[str] = []
     parse_trajectory(d, warnings)
-    assert any("schema_version 6 is not 9" in w for w in warnings)
+    assert any("schema_version 6 is not 10" in w for w in warnings)
 
 
 def test_task_trajectory_message_locator_resolves_from_events(tmp_path):
-    """A locator-recorded task is carried too (schema v9 allows any
+    """A locator-recorded task is carried too (schema v10 allows any
     ContentRef): a trajectory_message locator resolves against the same
     event stream through the role bindings — the judge keeps its ground
     truth. msg_index 1 is the main lane's first user message."""
@@ -1440,7 +1440,7 @@ def test_annotation_structural_problems_surface_as_warnings(tmp_path):
 
 
 def test_delivery_missing_search_link_is_not_reported_as_unknown(tmp_path):
-    """Schema v9 requires the delivery→search links, so an absent one is a
+    """Schema v10 requires the delivery→search links, so an absent one is a
     problem — but missing is not unknown: the warning must say which."""
     b = AnnotatedBuilder()
     b.agent_turn(with_task=True)
@@ -1485,7 +1485,7 @@ def _reader_events(*payloads):
 
 
 def test_delivery_missing_or_duplicate_id_is_a_problem_not_confusion():
-    # id-less deliveries violate schema v9: each is dropped with its own
+    # id-less deliveries violate schema v10: each is dropped with its own
     # problem — never silently deduped against each other
     idx = build_annotation_index(_reader_events({"status": "placed"}, {"status": "placed"}))
     assert idx.deliveries == []

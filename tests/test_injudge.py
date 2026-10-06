@@ -1,6 +1,6 @@
 """Fixture tests for injudge: step stream, spans, evidence, verdicts.
 
-Fixtures are schema-v9 annotated trajectories (tests/annotated_fixtures.py):
+Fixtures are schema-v10 annotated trajectories (tests/annotated_fixtures.py):
 memory actions are memory_* events, and the step stream consumes the ordinary
 turn/message/tool events. The step-stream quirks verified against real runs
 still apply: origin-history re-records after MAIN-lane rewrites, turn-less

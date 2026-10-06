@@ -2,7 +2,7 @@
 
 Parser tests with canned answers cannot show that the judge's labels are
 right. These development regressions run through the REAL judge: each is a
-synthetic schema-v9 episode delivering one memory (a `followup` case adds the
+synthetic schema-v10 episode delivering one memory (a `followup` case adds the
 recorded full read its preview selected, scored as a second target,
 `<case>/read`). They cover explicit and
 uncited use, routine practice, source and novelty distinctions, uncertainty,

@@ -198,7 +198,7 @@ def _merge_spans(
             if op.step is not None:
                 steps_seen[target].append(op.step)
             # per-delivery queries are already per-search (one query per read
-            # lane, schema v9): each distinct one rides the span
+            # lane, schema v10): each distinct one rides the span
             for query in op.queries:
                 if query and query not in span.queries:
                     span.queries.append(query)

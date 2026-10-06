@@ -1,6 +1,6 @@
 # mem-eval
 
-mem-eval scores memory-system quality from schema-v9 gate trajectories
+mem-eval scores memory-system quality from schema-v10 gate trajectories
 (extension/traj-recorder). Two read-only tools share one parsing core:
 
 - **memgraph** renders every memory operation and its relationships as a
@@ -94,7 +94,7 @@ CLAUDE.md                  # @AGENTS.md import only — no second contract
 util.py                    # atomic_write, tmp_sibling, utf8_safe, check_writable,
                            # print_safe, print_validation
 memgraph/__init__.py       # package docstring (module map; no re-exports)
-memgraph/annotations.py    # schema-v9 annotation index + MemoryRef mapping
+memgraph/annotations.py    # schema-v10 annotation index + MemoryRef mapping
 memgraph/model.py          # Trajectory / MemoryOp / MemoryUnit / Edge
 memgraph/parse_trajectory.py  # trajectory.jsonl → ops; shared step rule
 memgraph/episodes.py       # shared episode-scope rule (bridge boundaries) + graph episode rows
@@ -128,7 +128,7 @@ calibration/__main__.py    # python3 -m calibration build | score
 doc/                       # GitBook: LANGS.md + en/ + zh-CN/, each with SUMMARY.md
 doc/README.md              # the book's landing page
 tests/conftest.py          # checkout root on sys.path
-tests/annotated_fixtures.py  # schema-v9 synthetic-trajectory builder
+tests/annotated_fixtures.py  # schema-v10 synthetic-trajectory builder
 tests/test_*.py            # pytest suite
 ```
 
@@ -142,10 +142,12 @@ zero memory operations plus a validation note. The recorder's `bridge_*`
 lifecycle family does not supply portable memory operations. A successful
 bridge delete missing its same-session, same-operation memory retirement
 is warned about; never reconstruct MemoryRefs from bridge-native ids.
-Other bridge events are skipped. Non-v9 runs get a run.json version warning,
+Other bridge events are skipped. `memory_source_set` definitions are audit
+provenance, not operations or delivered evidence; the recorder verifies their
+hashes and links. Do not expand them into judge evidence. Non-v10 runs get a run.json version warning,
 not a compatibility parser.
 
-Schema v9's lane-aware shape: searches record a `lane_id`; a delivery
+Schema v10's lane-aware shape: searches record a `lane_id`; a delivery
 names one `searches` entry per read lane (profile order) and one
 `placements` entry per rendered slot. Its presentation preserves ordered
 slot names, kinds, and resolved texts (content digests when unresolved),
@@ -416,14 +418,14 @@ Easy to get wrong:
 3. `pathlib` instead of `os.path`. Artifacts go through `atomic_write`.
 4. Data containers are plain dataclasses with `to_dict()`. Parameterize
    generics (`set[str | None]`, not bare `set`).
-5. Module docstrings and comments explain *why* — protocol rules, schema-v9
+5. Module docstrings and comments explain *why* — protocol rules, schema-v10
    semantics, what the recorder guarantees — not what the code does.
 6. Concise, short, minimal code. No features, abstractions, or knobs beyond
    the request.
 
 ## Tests
 
-Fixtures are synthetic schema-v9 trajectories from
+Fixtures are synthetic schema-v10 trajectories from
 `tests/annotated_fixtures.py` (`AnnotatedBuilder`). No network, no node:
 stub the agent runner by monkeypatching `injudge.agent._invoke_runner`
 with canned results (the corrective loop, input records, and evidence
@@ -489,7 +491,7 @@ the memgraph reader cannot desync.
 
 **memgraph** (`--json`; also embedded verbatim in the HTML) is `{tool,
 trajectories, ops, memories, edges, validation}`. Recall ops carry `searches`
-(the delivery's per-lane `{lane_id, operation_id}` links, schema v9) and
+(the delivery's per-lane `{lane_id, operation_id}` links, schema v10) and
 `queries` (each linked search's resolved query) — never a single
 search-operation id or query. Recall ops also carry `placement_kinds` and
 their searches' `trigger` (`explicit` = agent-directed). An op's `cost` is

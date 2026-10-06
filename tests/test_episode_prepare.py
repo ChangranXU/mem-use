@@ -450,7 +450,7 @@ def test_conflicting_repeated_boundary_identity_requires_review(tmp_path):
 
 def test_session_task_and_search_locators_use_current_role_bindings(tmp_path):
     import hashlib
-    text = "Recorded task addressed by a schema-v9 locator"
+    text = "Recorded task addressed by a schema-v10 locator"
     ref = {"availability": "trajectory_message", "sha256": hashlib.sha256(text.encode()).hexdigest(),
            "locator": {"logical_role": "main", "msg_index": 1}}
     builder = AnnotatedBuilder(task_ref=ref, instance_id="benchmark-1")

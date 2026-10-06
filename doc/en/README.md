@@ -9,7 +9,7 @@ icon: book-open
 **What is mem-eval?** A read-only analysis toolkit that measures how well an agent's memory system works — visualizing every memory operation and scoring every recall injection with an LLM rubric.
 {% endhint %}
 
-**mem-eval** takes what the gate's traj-recorder produced — schema-v9 `trajectory.jsonl` files where every memory action is recorded as an explicit `memory_*` annotation event — and turns it into actionable quality metrics.
+**mem-eval** takes what the gate's traj-recorder produced — schema-v10 `trajectory.jsonl` files where every memory action is recorded as an explicit `memory_*` annotation event — and turns it into actionable quality metrics.
 
 Memory actions are never inferred from prompt text, role names, or label conventions. A trajectory without annotations is valid input and yields zero memory operations.
 

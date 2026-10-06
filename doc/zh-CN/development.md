@@ -15,7 +15,7 @@ uv run pytest tests/test_injudge.py -q # 单个文件
 ```
 
 {% hint style="info" %}
-测试套件不走网络。Python 测试用预制结果替换付费评审调用。TypeScript 运行器与证据工具在 `node --test` 下运行（缺 node 或尚未安装 agent 包时跳过）。夹具由 `tests/annotated_fixtures.py` 合成 schema-v9 轨迹。
+测试套件不走网络。Python 测试用预制结果替换付费评审调用。TypeScript 运行器与证据工具在 `node --test` 下运行（缺 node 或尚未安装 agent 包时跳过）。夹具由 `tests/annotated_fixtures.py` 合成 schema-v10 轨迹。
 {% endhint %}
 
 ## 项目结构
@@ -29,7 +29,7 @@ uv run pytest tests/test_injudge.py -q # 单个文件
 | `agent/` | TypeScript 评审智能体：带预算与强制作答的 pi 运行器（`runner.ts`）、只读证据工具（`evidence-tools.ts`）、事件流记录（`trajectory.ts`）、作业/结果协议（`protocol.ts`） |
 | `prompts/` | 所有 LLM 提示词文件，按工具与用途分目录（经 `injudge/prompts.py` 加载） |
 | `calibration/` | 受控的评审校准用例与报告打分（`python3 -m calibration`） |
-| `tests/` | pytest 测试套件与共享的 schema-v9 合成轨迹构造器 |
+| `tests/` | pytest 测试套件与共享的 schema-v10 合成轨迹构造器 |
 | `doc/` | 本书（GitBook 布局：`LANGS.md` + `en/` + `zh-CN/`） |
 
 ## 评审校准

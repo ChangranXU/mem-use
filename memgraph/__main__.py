@@ -23,7 +23,7 @@ def main(argv: list[str] | None = None) -> int:
             "Visualize relationships between memory-related actions in gate "
             "trajectories: which (trajectory, step) created each memory and "
             "which (trajectory, step) later recalled it. Memory actions come "
-            "from the schema-v9 memory annotations recorded in the trajectory "
+            "from the schema-v10 memory annotations recorded in the trajectory "
             "(memory_role_bind / memory_generate_* / memory_change / "
             "memory_search_* / memory_delivery)."
         ),

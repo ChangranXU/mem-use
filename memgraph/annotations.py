@@ -1,6 +1,6 @@
-"""Schema-v9 memory-annotation reader: explicit memory actions, no guessing.
+"""Schema-v10 memory-annotation reader: explicit memory actions, no guessing.
 
-The traj-recorder gate (schema v9) records the memory system's *logical*
+The traj-recorder gate (schema v10) records the memory system's *logical*
 actions as first-class `memory_*` events in the same `trajectory.jsonl`
 (see extension/traj-recorder README "Annotating memory actions"):
 
@@ -1002,7 +1002,7 @@ def item_key(memory: Any) -> str | None:
     own version-level identity tuple changes per version, so it cannot group
     a lifecycle), else the entry's display key as the best available
     fallback. An adapter projecting only a human-readable key may let one
-    store hold several items under it (nothing in schema v9 makes a display
+    store hold several items under it (nothing in schema v10 makes a display
     key item-unique), so grouping on the display key alone would merge
     distinct memories; grouping on the version tuple would split one memory
     per version. Within-operation candidate dedupe keeps local ids; every

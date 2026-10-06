@@ -15,7 +15,7 @@ uv run pytest tests/test_injudge.py -q # single file
 ```
 
 {% hint style="info" %}
-The suite does not use the network. Python tests stub paid judge calls with canned results. The TypeScript runner and evidence tools run under `node --test` (skipped when node or the installed agent packages are missing). Fixtures are synthetic schema-v9 trajectories built by `tests/annotated_fixtures.py`.
+The suite does not use the network. Python tests stub paid judge calls with canned results. The TypeScript runner and evidence tools run under `node --test` (skipped when node or the installed agent packages are missing). Fixtures are synthetic schema-v10 trajectories built by `tests/annotated_fixtures.py`.
 {% endhint %}
 
 ## Project Layout
@@ -29,7 +29,7 @@ The suite does not use the network. Python tests stub paid judge calls with cann
 | `agent/` | TypeScript judge agent: pi runner with budgets and forced answers (`runner.ts`), read-only evidence tools (`evidence-tools.ts`), event-sourced recording (`trajectory.ts`), job/result protocol (`protocol.ts`) |
 | `prompts/` | Every LLM prompt as a file, grouped by tool and purpose (loaded via `injudge/prompts.py`) |
 | `calibration/` | Controlled judge-calibration cases and report scoring (`python3 -m calibration`) |
-| `tests/` | pytest suite and shared schema-v9 fixture builder |
+| `tests/` | pytest suite and shared schema-v10 fixture builder |
 | `doc/` | This book (GitBook layout: `LANGS.md` + `en/` + `zh-CN/`) |
 
 ## Judge Calibration

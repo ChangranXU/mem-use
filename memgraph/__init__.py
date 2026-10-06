@@ -5,7 +5,7 @@ across trajectories: which (trajectory, step) created each memory, and which
 (trajectory, step) later recalled it, with each op placed in its recorded
 episode (`memgraph/episodes.py`).
 
-Memory actions come from the schema-v9 `memory_*` annotation events recorded
+Memory actions come from the schema-v10 `memory_*` annotation events recorded
 by the traj-recorder gate: lanes from `memory_role_bind`, extractions from
 generation operations, recalls from `memory_delivery` — explicit signals,
 never label conventions, prompt prefixes, or payload guessing (see

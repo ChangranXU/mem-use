@@ -3,7 +3,7 @@
 English | [简体中文](README.zh-CN.md)
 
 Evaluate memory-system quality from recorded agent trajectories. Two
-read-only tools consume schema-v9 gate trajectories (extension/traj-recorder):
+read-only tools consume schema-v10 gate trajectories (extension/traj-recorder):
 
 - **memgraph** — renders every memory operation and its relationships as a
   self-contained HTML graph you can open offline.

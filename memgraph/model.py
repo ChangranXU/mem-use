@@ -145,7 +145,7 @@ class MemoryOp:
     # recall payload
     memories: list[dict] = field(default_factory=list)
     # the delivery's per-lane read links as recorded ({lane_id,
-    # operation_id}, profile order — schema v9's `searches`)
+    # operation_id}, profile order — schema v10's `searches`)
     searches: list[dict] = field(default_factory=list)
     # each linked search's resolved query text, in link order
     queries: list[str] = field(default_factory=list)

@@ -6,8 +6,10 @@ icon: file-lines
 # 输入约定
 
 {% hint style="info" %}
-两个工具都读取 **schema-v9 gate 轨迹**。记忆动作完全来自录制器的 `memory_*` 注解事件——绝不解析提示词、角色名或标签约定。录制器的 `bridge_*` 生命周期事件不产生记忆操作。成功的 bridge 删除若缺少来自同一会话、同一生成操作的 `memory_*` 退役记录，会给出警告；bridge 原生版本 ID 不能替代可移植 MemoryRef。其余 bridge 事件被跳过；`run.json` 记录的 `schema_version` 不是 9 时会给出版本警告，不提供兼容解析器。
+两个工具都读取 **schema-v10 gate 轨迹**。记忆动作完全来自录制器的 `memory_*` 注解事件——绝不解析提示词、角色名或标签约定。录制器的 `bridge_*` 生命周期事件不产生记忆操作。成功的 bridge 删除若缺少来自同一会话、同一生成操作的 `memory_*` 退役记录，会给出警告；bridge 原生版本 ID 不能替代可移植 MemoryRef。其余 bridge 事件被跳过；`run.json` 记录的 `schema_version` 不是 10 时会给出版本警告，不提供兼容解析器。
 {% endhint %}
+
+保留归档轨迹及其原始验证日志。版本警告不会使历史验证失效；重新验证应使用匹配的录制器版本。不要将旧产物的版本号改为 schema 10。
 
 `injudge --prepare-only` 是离线 episode 准备路径。Episode 范围来自
 `bridge_episode_open` / `bridge_episode_close` 配对，没有记录时则来自明确
@@ -16,6 +18,8 @@ icon: file-lines
 未解决的范围边界与归属缺口。
 
 没有注解的轨迹是合法输入：运行得到零个记忆操作，外加一条 validation 说明，而不是报错。
+
+Schema 10 的 `memory_source_set` 保存用于审计的 bridge 来源历史，不是记忆操作或模型可见的交付内容。memgraph 和 injudge 仍使用记忆操作、MemoryRef 和放置证据；来源快照不改变身份、成本、曝光或评分。快照的哈希、作用域与引用由 traj-recorder 的验证工具检查。
 
 ## 注解事件
 

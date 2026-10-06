@@ -1,4 +1,4 @@
-"""Episode-scoped span integration against recorded schema-v9 operations."""
+"""Episode-scoped span integration against recorded schema-v10 operations."""
 
 from __future__ import annotations
 
