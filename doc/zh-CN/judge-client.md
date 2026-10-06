@@ -66,7 +66,7 @@ API key 只通过 `JUDGE_API_KEY` 环境变量从 Python 传给运行器——�
 打码也会处理 JSON 字符串转义，包括轨迹记录内嵌的答案 JSON，避免转义后的凭证留在保存的输出中。
 过深的字符串包装整体打码。UTF-8 写入中断仍会执行打码；若无法保存打码后的轨迹，则删除原始文件，并将区间记录为带有 input 诊断的错误。
 
-成功读取的元数据包括 `line_start`、`line_end` 和 `truncated`，仅统计字符上限内实际返回的文本。分页读取可以合并；`read_steps` 证明完整步骤文本已返回，标题、截断行、搜索命中和回滚读取不算。每份答案必须读完首次消费步骤，none/referenced/selected 还须完整检查条目窗口，否则用 influence null。完整读取并不证明判定本身正确。
+成功读取的元数据包括 `line_start`、`line_end` 和 `truncated`，仅统计字符上限内实际返回的文本。分页读取可以合并；`read_steps` 证明完整步骤文本已返回，标题、截断行、搜索命中和回滚读取不算。每份答案必须读完首次消费步骤，none/referenced/selected 及 improved/no_effect 效果还须完整检查条目窗口，否则用 influence 或 positive_effect null。完整读取并不证明判定本身正确。
 
 读取达到字符上限时返回可继续读取的 offset 和 column。column 是首行内从 1
 开始的 Unicode 字符位置，续段显示为 line@column: text。单个超长行也可以

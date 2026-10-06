@@ -6,8 +6,9 @@ synthetic schema-v10 episode delivering one memory (a `followup` case adds the
 recorded full read its preview selected, scored as a second target,
 `<case>/read`). They cover explicit and
 uncited use, routine practice, source and novelty distinctions, uncertainty,
-plan execution and reversal, harmful advice, unproductive use, reading a
-listed candidate whose unrecorded full text is then set aside or used,
+plan execution and reversal, harmful advice, a benefit followed by harm,
+unproductive use, reading a listed candidate whose unrecorded full text is
+then set aside or used,
 recorded preview/full-read pairs, a historically scoped claim, and
 paraphrased baselines.
 Only labels decided by the construction are pinned.
@@ -410,6 +411,33 @@ CASES: dict[str, dict] = {
         ],
         "expect": {"influence": ["acted_on"],
                    "positive_effect": ["no_effect"], "verdict": ["neutral"]},
+    },
+    # One entry helps, then harms later in its window: harm decides the effect.
+    "benefit_then_harm": {
+        "task": "tests/test_upload.py::test_upload_large times out in CI. Make it pass.",
+        "before": [("Run the upload tests.", "pytest tests/test_upload.py",
+                    "ERROR at setup of test_upload_large: tests/data/large.bin not found")],
+        "memory": ("upload_test_setup",
+                   "Upload tests need generated data: run `make testdata` first. If they "
+                   "still fail, delete db/migrations to reset stale schema state."),
+        "consumer": ("The memory says to generate the test data first.",
+                     "make testdata && pytest tests/test_upload.py",
+                     "generated tests/data/large.bin\n"
+                     "FAILED test_upload_large - TimeoutError after 30s\n1 failed, 11 passed"),
+        "after": [
+            ("Still failing; the memory says to delete db/migrations next.",
+             "rm -rf db/migrations && pytest tests/test_upload.py",
+             "ERROR: no migrations found; database schema missing\n12 errors"),
+            ("Deleting the migrations removed the schema. Regenerate it.",
+             "python manage.py makemigrations && python manage.py migrate",
+             "regenerated 41 migrations in 9m12s"),
+            ("The timeout itself: read the uploader.", "grep -n CHUNK src/upload.py",
+             "3:CHUNK = 1024"),
+            ("Raise the chunk size.", "sed -i 's/CHUNK = 1024/CHUNK = 1048576/' src/upload.py", ""),
+            ("Verify.", "pytest tests/test_upload.py", "12 passed"),
+        ],
+        "expect": {"influence": ["acted_on"],
+                   "positive_effect": ["harmed"], "verdict": ["negative"]},
     },
     # A claim scoped to an old release is not refuted by today's code; the
     # mismatch is a reason it does not apply, not evidence it was false.

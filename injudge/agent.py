@@ -478,21 +478,29 @@ def _read_steps(messages: list, files: dict[str, str]) -> list[int]:
 def _coverage_error(obj: dict, span: InjectionSpan, eligible: set[int], read: set[int]) -> str | None:
     """Absence of influence needs the whole window, not a search miss.
 
-    Unknown attribution remains available when the budget cannot cover the
-    window. Positive/selection claims still require their cited step bodies.
+    So does an improved or no_effect effect: a read anchor proves one action,
+    but a later harmful use of the same entry, unread, would decide the
+    effect. One harmful consequence already decides it. Unknown attribution
+    or effect remains available when the budget cannot cover the window.
     """
     if span.step_first not in read:
         return f"first consuming step {span.step_first} was not read completely; read its step file"
     for entry in obj["memories"]:
-        if entry["influence"]["value"] not in ("none", "referenced", "selected"):
+        influence = entry["influence"]["value"]
+        effect = entry["positive_effect"]["value"]
+        if influence in ("none", "referenced", "selected"):
+            claim, fallback = "no acted-on influence", "influence null if attribution"
+        elif influence == "acted_on" and effect in ("improved", "no_effect"):
+            claim, fallback = f"positive_effect {effect!r}", "positive_effect null if the effect"
+        else:
             continue
         mid = entry["id"]
         start = span.memory_window_starts.get(mid, span.step_first)
         end = span.memory_windows.get(mid)
         missing = sorted(s for s in eligible if s >= start and (end is None or s <= end) and s not in read)
         if missing:
-            return (f"{mid} claims no acted-on influence without complete window coverage; "
-                    f"read step(s) {missing}, or use influence null if attribution remains unassessed")
+            return (f"{mid} claims {claim} without complete window coverage; "
+                    f"read step(s) {missing}, or use {fallback} remains unassessed")
     return None
 
 
@@ -677,7 +685,7 @@ def judge_span(
         health["retained_evidence"] = result.get("retained_evidence", 0)
         read_steps = _read_steps(result["messages"], files)
         # which step files the retained conversation actually read: the
-        # coverage a no-influence answer rests on, and the set anchors need
+        # coverage an effect or no-influence answer rests on, and the set anchors need
         health["read_steps"] = read_steps
         if result.get("error"):
             masked = _mask_key(str(result["error"]), cfg.api_key)

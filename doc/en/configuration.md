@@ -36,7 +36,7 @@ Both budgets end in a **forced final answer** — the agent is told to stop call
 |---|---|---|
 | `MAX_STEPS` | `40` | Initial investigation’s LLM-call cap, forced final round included. Each resumed investigation gets `min(MAX_STEPS, 4)` calls; repair gets one. |
 | `CONTEXT_WINDOW` | `131072` | The judge model's context window in tokens. The watermark (context window minus `MAX_OUTPUT_TOKENS` and the forced message estimate) trips the forced answer before the context overflows. |
-| `MAX_OUTPUT_TOKENS` | `65536` | Max output tokens per LLM call. A cap, not a reservation: billing is on tokens actually generated. Together with the forced message estimate, must leave input room inside `CONTEXT_WINDOW`; invalid configurations fail before trajectory loading. `--judge-max-tokens` overrides. |
+| `MAX_OUTPUT_TOKENS` | `65536` | Max output tokens per LLM call. The context watermark reserves this space for output, leaving less room for input evidence; billing is on tokens actually generated. Together with the forced message estimate, must leave input room inside `CONTEXT_WINDOW`; invalid configurations fail before trajectory loading. `--judge-max-tokens` overrides. |
 
 A verdict cut mid-answer is not a failure class: the answer simply fails the contract parse and the corrective retry answers again, continuing the same conversation.
 

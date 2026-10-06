@@ -16,7 +16,7 @@ Python 验证答案并推导使用标签和区间结论。任务最终成功与�
 | `accuracy` | `corroborated` / `uncontradicted` / `contradicted`：在该主张所属仓库、版本和情境内，证据确认、未确认也未推翻、或推翻主张。 |
 | `novelty` | `novel` / `confirming` / `redundant` / `null`：相对于暴露前的记录。任务给出预期结果不等于已给出解法。多主张条目只有所有实质主张均已成立才是 redundant。 |
 | `influence` | `none` / `referenced` / `selected` / `acted_on` / `null`，见下文。 |
-| `positive_effect` | `improved` / `no_effect` / `harmed` / `null`，仅在 acted_on 时可非空。按锚定行动的可观察后果评分。 |
+| `positive_effect` | `improved` / `no_effect` / `harmed` / `null`，仅在 acted_on 时可非空。按锚定行动的可观察后果评分。条目塑造的任一行动造成危害即为 `harmed`，即使此前有收益。 |
 
 新颖性、准确性、影响和效果彼此独立。重复提醒可能改变行动，错误主张也可能
 促成有效诊断。局部测试通过只证明它检查的行为，局部改善可以与任务失败同时存在。
@@ -66,8 +66,11 @@ acted_on 并给出自己的锚点。
 搜索命中、失败工具结果或已回滚读取不能证明完整步骤。`baseline.md` 中索引过的完整
 历史步骤副本与原步骤文件等价；省略稍后工具结果的暴露前副本不能证明完整步骤。
 
-每份答案必须读完首次消费步骤；none/referenced/selected 还必须读完整个条目窗口。调查不足
-时用 influence null，不能为了结束预算受限的调查而制造中性结论。
+每份答案必须读完首次消费步骤；none/referenced/selected 以及 improved/no_effect 效果还必须
+读完整个条目窗口，因为之后的有害使用会决定效果。harmed 仍须读完首次消费步骤及所引步骤，
+但不要求读完剩余窗口。若 acted_on 已成立而效果调查不足，保留 acted_on，并用
+positive_effect null；归因尚未评估时用 influence null。不能为了结束预算受限的调查而制造
+中性或收益结论。
 
 违规后在相同历史上进行一次无工具修复，只有 `needs_evidence` 明确请求才重新调查。
 修复无效或预算耗尽为 error，不会悄悄变为 neutral。措辞检查只是提示，不改写标签。

@@ -6,7 +6,9 @@ import json
 import pytest
 
 from annotated_fixtures import AnnotatedBuilder, cure_ref
+from calibration import build, case_id
 from injudge.agent import _coverage_error, _read_steps
+from injudge.agent import judge_span as judge_episode_span
 from injudge.episodes import prepare_trajectory
 from injudge.evidence import build_span_evidence
 from injudge.judge import _strict_parse, _verdict_semantics, _assemble_verdict
@@ -111,6 +113,52 @@ def test_no_content_use_requires_window_coverage_but_unknown_does_not(influence)
     assert _coverage_error(obj, span, {1, 2, 3, 4, 5}, {2, 3, 4}) is None
     entry["influence"]["value"] = None
     assert _coverage_error(obj, span, {1, 2, 3, 4}, {2}) is None
+
+
+@pytest.mark.parametrize("effect,needs_window", [
+    ("improved", True), ("no_effect", True), ("harmed", False), (None, False)])
+def test_effect_claims_need_window_coverage_except_harm(effect, needs_window):
+    # A read anchor proves the action at step 2; an unread later harmful use
+    # of the same entry at step 3 or 4 would decide the effect.
+    span, _ = _judge_input_fixture()
+    span.step_first = 2
+    span.memory_windows = {"m1": 4}
+    obj = json.loads(GOOD)
+    obj["memories"] = [obj["memories"][0]]
+    obj["memories"][0]["positive_effect"]["value"] = effect
+    error = _coverage_error(obj, span, {1, 2, 3, 4}, {2})
+    if needs_window:
+        assert "[3, 4]" in error and "positive_effect null" in error
+    else:
+        assert error is None
+    assert _coverage_error(obj, span, {1, 2, 3, 4}, {2, 3, 4}) is None
+
+
+def test_early_benefit_with_unread_later_harm_is_not_accepted_as_positive(monkeypatch, tmp_path):
+    # In this calibration episode step 2 helps and step 3 harms. An answer
+    # that read only steps 1-2 used to pass as positive; the repair now keeps
+    # acted_on with an unknown effect. Canned answers test routing, not judgment.
+    build(tmp_path / "cases")
+    trajectories, ops, events, _ = load_trajectories([tmp_path / "cases" / case_id("benefit_then_harm")])
+    trajectory, = trajectories
+    episode, = prepare_trajectory(trajectory, events[trajectory.id], ops[trajectory.id]).episodes
+    span, = group_spans([op for op in ops[trajectory.id] if op.kind == "recall"], trajectory.id,
+                        last_step=episode.steps[-1].step, episode=episode)
+    files, _ = build_span_evidence(span, episode)
+    early_reads = [_read(files, f"steps/step_{step:06d}.md") for step in (1, 2)]
+    answer = json.loads(GOOD)
+    answer["memories"] = answer["memories"][:1]
+    repaired = copy.deepcopy(answer)
+    repaired["memories"][0]["positive_effect"]["value"] = None
+    calls = stub_runner(monkeypatch, [_result(json.dumps(answer), messages=early_reads),
+                                      _result(json.dumps(repaired), messages=early_reads)])
+    verdict = judge_episode_span(span, episode, _agent_cfg(), [],
+                                 evidence_root=tmp_path / "evidence", transcripts_root=tmp_path / "runs")
+    assert "positive_effect 'improved' without complete window coverage" in calls[1]["message"]
+    assert [call["repair"] for call in calls] == [False, True]
+    assert verdict["input"]["read_steps"] == [1, 2]
+    assert verdict["rubric"]["m1"]["influence"]["value"] == "acted_on"
+    assert verdict["verdict"] == "unresolved"
 
 
 def test_character_pages_certify_long_lines_only_when_every_character_was_read():

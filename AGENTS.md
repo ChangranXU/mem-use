@@ -366,8 +366,10 @@ Easy to get wrong:
   that every cited anchor and structured `evidence[].steps` citation names a
   step whose complete text the retained conversation read (paged reads or
   an indexed complete copy in baseline.md count). Header-only reads do not
-  count; none/referenced/selected additionally require the complete footprint window.
-  Incomplete investigation must use influence null, not fabricate neutrality. A violation takes the
+  count; none/referenced/selected, and an improved/no_effect effect, additionally
+  require the complete footprint window. Incomplete investigation must use
+  influence (or effect) null, not fabricate neutrality or benefit. Harm in any
+  of an entry's shaped actions makes its effect harmed. A violation takes the
   single-call repair with no evidence tools, continuing job.history. Only
   an explicit `needs_evidence` repair reply reopens investigation, with a
   follow-up prompt over that same history. Each resumed investigation gets

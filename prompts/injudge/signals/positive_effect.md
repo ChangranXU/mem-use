@@ -8,6 +8,9 @@
      unused, edit abandoned without useful information). This is not harm;
    - harmed: it led the agent astray (wrong location, false lead, lost work
      or state).
+   Across the actions this entry shaped inside its window, any observed harm
+   makes the effect harmed, even if another action helped; otherwise any
+   observed benefit makes it improved. Describe both when they coexist.
    Every value needs affirmative evidence: a warned failure that never
    happened is not a benefit, and saved effort needs announced intent or
    explicit credit. Accuracy does not decide this signal. When the direction

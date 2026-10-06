@@ -69,7 +69,7 @@ The API key travels from Python to the runner only through the `JUDGE_API_KEY` e
 Masking also follows JSON string escaping, including answer JSON embedded inside a transcript record, so escaped credentials cannot survive in saved output.
 Excessively nested string wrappers are masked as a whole. An interrupted UTF-8 write still gets masked; if saving the masked transcript fails, the raw file is removed and the span records an error with its input diagnostics.
 
-Successful read metadata includes `line_start`, `line_end`, and `truncated`, counting only text actually returned after the character cap. Paged reads combine. `read_steps` certifies complete step text, not just file access: header-only reads, truncated lines, search hits and rolled-back reads do not qualify. The first consuming step is required for every answer, and none/referenced/selected require the full entry window; incomplete attribution uses influence null. Complete coverage does not prove the judgment itself is correct.
+Successful read metadata includes `line_start`, `line_end`, and `truncated`, counting only text actually returned after the character cap. Paged reads combine. `read_steps` certifies complete step text, not just file access: header-only reads, truncated lines, search hits and rolled-back reads do not qualify. The first consuming step is required for every answer, and none/referenced/selected, like an improved/no_effect effect, require the full entry window; incomplete attribution or effect uses influence or positive_effect null. Complete coverage does not prove the judgment itself is correct.
 
 A character-capped read gives an exact continuation `offset` and `column`.
 `column` counts Unicode characters within the first requested line, starting

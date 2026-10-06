@@ -36,7 +36,7 @@ npm --prefix agent install    # TS 侧执行一次（需要 PATH 上有 node >= 
 |---|---|---|
 | `MAX_STEPS` | `40` | 首次调查的 LLM 调用上限（含最终作答轮）。每次恢复调查最多 `min(MAX_STEPS, 4)` 次调用；修复仅一次。 |
 | `CONTEXT_WINDOW` | `131072` | 评审模型的上下文窗口（token）。水位线（窗口减 `MAX_OUTPUT_TOKENS` 和强制作答消息的估算大小）在上下文溢出前触发强制作答。 |
-| `MAX_OUTPUT_TOKENS` | `65536` | 每次 LLM 调用的输出 token 上限。是上限不是预留：按实际生成计费。加上强制作答消息估算后，须在 `CONTEXT_WINDOW` 内为输入留出空间；无效配置在加载轨迹前拒绝。`--judge-max-tokens` 可覆盖。 |
+| `MAX_OUTPUT_TOKENS` | `65536` | 每次 LLM 调用的输出 token 上限。上下文水位线会为输出预留这部分空间，因此输入证据的可用空间相应减少；计费仍按实际生成量。加上强制作答消息估算后，须在 `CONTEXT_WINDOW` 内为输入留出空间；无效配置在加载轨迹前拒绝。`--judge-max-tokens` 可覆盖。 |
 
 中途被截断的判定不是失败类别：该答案只是无法通过契约解析，纠正重试会继续同一对话重新作答。
 

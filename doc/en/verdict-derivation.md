@@ -17,7 +17,7 @@ usage and span verdicts. Task success never decides a memory verdict.
 | `accuracy` | `corroborated` / `uncontradicted` / `contradicted`, within the claim's own repository/version/situation. Uncontradicted means neither confirmed nor refuted. |
 | `novelty` | `novel` / `confirming` / `redundant` / `null`, relative to the recorded pre-exposure input. Confirming settles a voiced doubt; redundant requires already-established substance. Expected task outputs do not automatically supply the solution mechanism. Mixed entries are redundant only when every material claim was established. |
 | `influence` | `none` / `referenced` / `selected` / `acted_on` / `null`, defined below. |
-| `positive_effect` | `improved` / `no_effect` / `harmed` / `null`. Non-null only for `acted_on`; judge observed consequences of the anchored action. Unknown direction remains null. |
+| `positive_effect` | `improved` / `no_effect` / `harmed` / `null`. Non-null only for `acted_on`; judge observed consequences of the anchored action. Any harm among the entry's actions makes it `harmed`, even after an earlier benefit. Unknown direction remains null. |
 
 Novelty, correctness, influence and effect are independent. A redundant reminder
 can shape an action; an inaccurate claim can trigger a useful diagnostic. A
@@ -94,9 +94,13 @@ copies indexed in `baseline.md` count just like the original step files. A
 pre-exposure copy omitting a later tool result does not certify that full step.
 
 Every answer requires the complete first consuming step. `none`, `referenced`, and `selected`
-additionally require every eligible step in that entry's window. If attribution
-remains unassessed, use influence null; do not invent neutrality to finish a
-budget-limited investigation.
+additionally require every eligible step in that entry's window, and so do the
+`improved` and `no_effect` effects: a later harmful use would decide the effect.
+`harmed` still requires the first consuming step and its cited steps, but not
+the remaining window. If acted-on influence is established but effect inspection
+is incomplete, keep `acted_on` and use `positive_effect: null`. Unassessed
+attribution uses influence null; do not invent neutrality or benefit to finish
+a budget-limited investigation.
 
 A violation takes one tool-free repair over the same history. Only a
 `needs_evidence` reply reopens tools. Invalid repair or exhaustion is `error`,

@@ -59,8 +59,9 @@ judge call.
 Judged evidence never exceeds what the recorded placement exposed, and
 acted-on influence must cite an action step inside that memory's footprint
 window. Complete retained step text grounds every citation; no-influence
-claims require the full window. Two budgets bound each conversation — max steps and the context
-window — both ending in a forced final answer rather than a mid-run failure.
+claims and improved/no_effect effects require the full window. Two budgets
+bound each conversation — max steps and the context window — both ending
+in a forced final answer rather than a mid-run failure.
 
 The full pipeline is in the [English book](doc/en/README.md); the signals,
 usage labels, and aggregate formulas are in

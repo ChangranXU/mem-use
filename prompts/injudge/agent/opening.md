@@ -9,10 +9,9 @@ Investigate the exposure boundary:
 2. Search the steps for distinctive delivered claims and explicit references;
    read matches in context and compare them with what the task and earlier
    steps already had.
-3. Before none, referenced, or selected, read every step in that entry's window completely.
-   A search miss is not evidence of no influence. Use influence null when
-   attribution is ambiguous or the inspection budget leaves a gap.
-   Read every step you cite completely, paging if necessary.
+3. Inspect each entry's window for later uses and contrary consequences.
+   A search miss is not evidence of no influence. Read every step you cite
+   completely, paging if necessary; apply the coverage rules below.
 
 Return ONE JSON object per the output contract, with concise notes and global
 step numbers as anchors.
