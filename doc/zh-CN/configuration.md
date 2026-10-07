@@ -70,7 +70,7 @@ npm --prefix agent install    # TS 侧执行一次（需要 PATH 上有 node >= 
 ### 离线准备
 
 使用 `--prepare-only` 可在不加载 `.env`、Node 或网络的情况下按 bridge
-episode 分区并写出 `injudge.episode-inputs/v1`：
+episode 分区并写出 `injudge.episode-inputs/v2`：
 
 ```bash
 uv run -m injudge <paths> --prepare-only -o output/

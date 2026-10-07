@@ -1,9 +1,11 @@
 ---
-description: "injudge.report/v15, injudge.summary/v13, every field, and how every rate is counted."
+description: "injudge.report/v16, injudge.summary/v14, every field, and how every rate is counted."
 icon: box-archive
 ---
 
 # Artifacts
+
+Report v16 and summary v14 change the effect semantics: memory-caused work that is discarded or corrected without a demonstrated contribution is harm. Do not combine their effect labels or rates with v15/v13 outputs. Earlier reports remain historical artifacts; the current memgraph reader accepts only v16.
 
 {% hint style="info" %}
 injudge writes all artifacts of a run to that run's own `<run-stamp>/` folder under the output container (`-o DIR`, default `output/`) — a run never overwrites another run's artifacts.
@@ -11,8 +13,8 @@ injudge writes all artifacts of a run to that run's own `<run-stamp>/` folder un
 
 | File | Schema | Role |
 |---|---|---|
-| `injudge-report.json` | `injudge.report/v15` | Runtime judging record. Checkpointed after each completed span, with pending spans marked `unjudged`, so interruption within a multi-episode trajectory keeps completed work. Feed it to memgraph with `--verdicts`. |
-| `summary.json` | `injudge.summary/v13` | Final statistics set: counts, rates, and a narrative-free span index. |
+| `injudge-report.json` | `injudge.report/v16` | Runtime judging record. Checkpointed after each completed span, with pending spans marked `unjudged`, so interruption within a multi-episode trajectory keeps completed work. Feed it to memgraph with `--verdicts`. |
+| `summary.json` | `injudge.summary/v14` | Final statistics set: counts, rates, and a narrative-free span index. |
 | `memgraph-verdicts.html` | — | Only with `--html` (off by default): memgraph with recall nodes colored by span verdict. |
 | `evidence/<span-dir>/` | — | One folder per span the judge agent ran for: the exact files available to it. |
 | `agent-runs/<span-dir>.jsonl` | — | One trajectory per span sent to the judge agent: the pi event-sourced recording of the judging conversation (see [Judge agent](judge-client.md#trajectory-recording)). |
@@ -21,13 +23,12 @@ An offline preparation run writes a different package under its own run folder:
 
 | File | Schema | Role |
 |---|---|---|
-| `episode-inputs.json` | `injudge.episode-inputs/v1` | Episode index, execution and benchmark identities, boundary provenance, readiness, attachment status, counts, audit projections, and unassigned diagnostics. It contains no verdicts; its `tool` block carries `mode: "prepare-only"`. |
-| `episodes/<safe-episode-id>-<8-char digest>/episode.md` | — | Compact episode header and fixed file navigation. |
+| `episode-inputs.json` | `injudge.episode-inputs/v2` | Episode index, execution and benchmark identities, boundary provenance, readiness, attachment status, counts, audit projections, and unassigned diagnostics. It contains no verdicts; its `tool` block carries `mode: "prepare-only"`. |
 | `episodes/<safe-episode-id>-<8-char digest>/task.md` | — | Recorded user task messages and updates with source provenance. |
-| `episodes/<safe-episode-id>-<8-char digest>/context.json` | — | Per-turn visible message occurrences and explicit replay gaps. |
+| `episodes/<safe-episode-id>-<8-char digest>/context.json` | — | Visibility index, one record per line: message occurrences (each naming the task or step file that holds its text, or carrying text found nowhere else), the messages visible at each turn, and explicit replay gaps. |
 | `episodes/<safe-episode-id>-<8-char digest>/deliveries.md` | — | Chronological delivery, search, placement, and exposure evidence, including empty deliveries. |
 | `episodes/<safe-episode-id>-<8-char digest>/searches.json` | — | The episode's recorded searches and their count. |
-| `episodes/<safe-episode-id>-<8-char digest>/manifest.json` | — | Index of the folder's files with their kind, source bounds, and the episode's step/search/delivery counts. |
+| `episodes/<safe-episode-id>-<8-char digest>/manifest.json` | — | Episode identity, preparation status and diagnostics, counts, and every file with its kind, size, and a one-line description (steps also carry source bounds). |
 | `episodes/<safe-episode-id>-<8-char digest>/steps/` | — | Original global steps and tool-result availability. |
 | `episodes/<safe-episode-id>-<8-char digest>/gold.md` / `outcome.json` | — | Attachments when recorded: the golden answer, and the outcome status and correctness with its join key. |
 
@@ -57,7 +58,7 @@ their complete messages remain in `injudge-report.json`, and with `--html` in
 the rendered graph. Empty deliveries and unobserved consumers are counted in
 separate classes (`empty`, `unassessable`), outside every directional denominator.
 `memgraph --verdicts` accepts a report only when its `tool.schema` is
-`injudge.report/v15`; it is the one artifact version checked at read time.
+`injudge.report/v16`; it is the one artifact version checked at read time.
 
 When several identities share one display key, summary `key` fields (triage lists and `memory_usage`) carry a `key#<item-or-namespace>` suffix — an 8-character prefix, or the full base when prefixes collide — so two memories never conflate. The report always keeps the full identity.
 
@@ -103,7 +104,7 @@ $$
 
 ### Rubric Rates
 
-The population is judge-scored deliveries (`span × delivered entry`, keyed by the entry's span-local id) on LLM-judged spans. An all-null coverage-gap row is skipped; null signal values never enter a denominator.
+The population is delivered entries (`span × delivered entry`, keyed by the entry's span-local id) in valid judge answers. Failed answers and mechanical skips are excluded; null signal values never enter a denominator.
 
 | Rate | Numerator | Denominator | Reads as |
 |---|---|---|---|
@@ -124,6 +125,8 @@ The population is judge-scored deliveries (`span × delivered entry`, keyed by t
 Tallies merge by `(namespace, item)` over LLM-judged spans only. A joint judgment on a multi-item delivery counts under each identity. `value_drift` is true when both the first and last *recorded* values exist and differ; a redacted (unrecorded) end is not drift.
 
 Operation-local display IDs are never roll-up identities. Their canonical content identity supplies a synthetic `content:<sha256>` item id; recorded refs stay intact. In memgraph, candidate, delivered, and deletion refs additionally carry `grouping_id` for the browser-to-registry join.
+
+Injection evidence can be traced back to stored items through `aggregates.overall.memory_usage` in the report: each `(namespace, item_id)` lists usage tallies and the contributing span IDs. Resolve each item's stamped entry ID in `operations[].memories`, then read that entry's `rubric` for relevance, accuracy, and action anchors and its position in `memory_exposure` for exposure. This measures observed utility in the sampled tasks, not intrinsic store quality. An ignored off-topic delivery suggests a retrieval mismatch; a relevant ignored delivery may be redundant or poorly presented. Neither justifies deleting the memory. Undelivered items are unassessed, clipped previews do not assess hidden content, and versions or shared action anchors need separate inspection before combining evidence.
 
 ### Delivery Cost and Policy
 
@@ -223,7 +226,7 @@ These blocks live under `details.overall` and `details.trajectories.<id>`:
 
 ## Report-Only Fields
 
-`injudge-report.json` additionally carries, per operation: `kind` (`recall_injection_span`), `traj`, `seq`, `n_injections`, `steps` (omitted when no delivery has an attributed step), `payload_summary`, and `delivery_cost` (`deliveries`, `content_chars_total`, `approx_tokens_total`); `episode_execution_id` and `episode_last_step`; `memories` (full recorded refs stamped with span-local ids); `memory_exposure` — a **positional** list parallel to `memories` (index `i` describes `memories[i]`), each entry `{state, exposed_chars, value_chars}` with state `full`, `full_normalized`, `clipped`, or `unknown`, unverified canonical values withheld from judge evidence; and `memory_windows` (per-entry global end steps, capped at the episode's last eligible step or the next same-episode delivery), with `memory_window_starts` recording same-step collision exceptions (a same-step copy adding no verified text opens after the shared step), `memory_variant_steps` the in-window steps where the same memory was delivered with different or narrower text (which leaves the window open), and `memory_followups` the proven explicit selections `{step, delivery_step, tool_call_id, operation_id}` (actual action and result-delivery steps recorded separately). Unlike `memory_exposure`, `rubric`, `memory_usage`, and `memory_windows` are keyed by span-local ids. The operation also retains rubric notes and action `anchors`, `analysis`, `evidence`, `step_gaps`, `new_keys` / `removed_keys` / `previous_keys` / `changed_keys`, `auto`, `error`, `judge_raw`, and `pe_pairing_corrections` when present. Spans the judge agent ran for — its own error outcomes included — carry `input`: `path: agent`, attempts, retained `llm_calls` / `tool_calls` and successful step-file reads (`retained_evidence`, plus `read_steps`: global steps whose complete text was retained, including indexed baseline copies — every cited anchor and structured evidence step must be one of them), executed call counts, reported usage including rolled-back calls, context rollbacks, `any_phase_forced`, and the transcript path relative to the run folder; a span rejected before the agent ran (an unsafe or incomplete episode boundary, or a parent episode with no recorded task) takes an error verdict with no `input`, no evidence folder, and no transcript. `gold` and final-answer `forced` appear when applicable. Trajectory rows carry `id`, `run_id`, `path`, `instance_id`, `model`, `adapter`, `n_steps`, `n_injections`, `n_spans`, their `episodes` rows, and the trajectory's `policy`; episode rows record boundary, task, attachment, and evidence provenance without an episode verdict.
+`injudge-report.json` additionally carries, per operation: `kind` (`recall_injection_span`), `traj`, `seq`, `n_injections`, `steps` (omitted when no delivery has an attributed step), `payload_summary`, and `delivery_cost` (`deliveries`, `content_chars_total`, `approx_tokens_total`); `episode_execution_id` and `episode_last_step`; `memories` (full recorded refs stamped with span-local ids); `memory_exposure` — a **positional** list parallel to `memories` (index `i` describes `memories[i]`), each entry `{state, exposed_chars, value_chars}` with state `full`, `full_normalized`, `clipped`, or `unknown`, unverified canonical values withheld from judge evidence; and `memory_windows` (per-entry global end steps, capped at the episode's last eligible step or the next same-episode delivery), with `memory_window_starts` recording same-step collision exceptions (a same-step copy adding no verified text opens after the shared step), `memory_variant_steps` the in-window steps where the same memory was delivered with different or narrower text (which leaves the window open), and `memory_followups` the proven explicit selections `{step, delivery_step, tool_call_id, operation_id}` (actual action and result-delivery steps recorded separately). Unlike `memory_exposure`, `rubric`, `memory_usage`, and `memory_windows` are keyed by span-local ids. The operation also retains rubric notes and action `anchors`, `analysis`, `evidence`, `step_gaps`, `new_keys` / `removed_keys` / `previous_keys` / `changed_keys`, `auto`, `error`, `judge_raw`, and `pe_pairing_corrections` when present. Spans the judge agent ran for — its own error outcomes included — carry `input`: `path: agent`, attempts, retained `llm_calls` / `tool_calls` and successful step-file reads (`retained_evidence`, plus `read_steps`: global steps whose complete text was retained from the step files — every cited anchor and structured evidence step must be one of them), executed call counts, reported usage including rolled-back calls, context rollbacks, `any_phase_forced`, and the transcript path relative to the run folder; a span rejected before the agent ran (an unsafe or incomplete episode boundary, or a parent episode with no recorded task) takes an error verdict with no `input`, no evidence folder, and no transcript. `gold` and final-answer `forced` appear when applicable. Trajectory rows carry `id`, `run_id`, `path`, `instance_id`, `model`, `adapter`, `n_steps`, `n_injections`, `n_spans`, their `episodes` rows, and the trajectory's `policy`; episode rows record boundary, task, attachment, and evidence provenance without an episode verdict.
 
 The report's `tool` block names the tool (`name: "injudge"`) and its `schema`, and carries the resolved, secret-free judge-agent configuration (`config`, URLs sanitized to `scheme://host[:port][/path]`) with `judge_model`.
 

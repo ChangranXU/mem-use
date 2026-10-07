@@ -7,8 +7,9 @@ import json
 
 import pytest
 
-from annotated_fixtures import AnnotatedBuilder, cure_ref
+from annotated_fixtures import TASK, AnnotatedBuilder, cure_ref
 from injudge.__main__ import main
+from injudge.agent import _opening_message
 from injudge.episodes import prepare_trajectory
 from injudge.evidence import build_span_evidence, span_dir_name
 from injudge.judge import _verdict_semantics
@@ -60,9 +61,8 @@ def test_three_spans_in_one_episode_have_independent_judges_and_graph_links(tmp_
     for op, call in zip(operations, calls):
         root = call["evidence_dir"]
         assert root.name == span_dir_name(op["operation_id"])
-        assert (root / "episode.md").is_file() and (root / "task.md").is_file()
-        assert (root / "context.json").is_file() and (root / "deliveries.md").is_file()
-        assert (root / "searches.json").is_file() and (root / "manifest.json").is_file()
+        assert {p.name for p in root.iterdir()} == {"span.md", "baseline.md", "task.md", "context.json",
+                                                     "deliveries.md", "searches.json", "manifest.json", "steps"}
         assert (root / "span.md").read_text().count("[m1]") == 1
         assert set(op["rubric"]) == {"m1"}
         assert (run_dir / op["input"]["transcript"]).is_file()
@@ -137,15 +137,167 @@ def test_later_episode_baseline_uses_global_steps_and_rejects_foreign_anchor(tmp
     recall = next(op for op in ops_by_traj[trajectory.id] if op.kind == "recall")
     (span,) = group_spans([recall], trajectory.id, episode_execution_id=episode.execution_id,
                           last_step=episode.steps[-1].step)
-    files, baseline = build_span_evidence(span, episode)
+    files = build_span_evidence(span, episode)
     assert span.step_first > 1 and span.memory_windows["m1"] == episode.steps[-1].step
-    assert "independent initial task" in baseline
+    assert "independent initial task" in files["task.md"]
+    assert "text in task.md" in files["baseline.md"]
     context = json.loads(files["context.json"])["target_baseline"]
-    assert context["prior_step_numbers"] == [episode.steps[0].step]
+    assert context["visible_occurrence_ids"]
     answer = json.loads(_answer())
     answer["memories"][0]["anchors"] = [episodes[0].steps[0].step]
     assert "outside its footprint window" in _verdict_semantics(answer, span, episode.steps[-1].step,
                                                                    {step.step for step in episode.steps})
+
+
+@pytest.mark.parametrize("same_treatment", [True, False])
+def test_late_annotation_does_not_move_the_exposure_baseline(tmp_path, same_treatment):
+    ref = cure_ref("hint", "Use the parser helper.")
+    builder = AnnotatedBuilder().episode_open().agent_turn(with_task=True)
+    builder.recall(ref)
+    delayed = builder.events.pop()  # the earlier consumer's annotation arrives last
+    builder.user_message("Post-exposure user update", msg=5)
+    text = None if same_treatment else "New framing: " + ref["content"]["text"]
+    builder.recall(ref, content=text)
+    builder.seq += 1
+    builder.events.append({**delayed, "seq": builder.seq})
+    builder.episode_close()
+    source = builder.write(tmp_path / "trajectory")
+    trajectories, ops, events, _ = load_trajectories([source])
+    trajectory = trajectories[0]
+    episode = prepare_trajectory(trajectory, events[trajectory.id], ops[trajectory.id]).episodes[0]
+    spans = group_spans([op for op in ops[trajectory.id] if op.kind == "recall"], trajectory.id,
+                        episode=episode, last_step=episode.steps[-1].step)
+    files = build_span_evidence(spans[0], episode)
+    context = json.loads(files["context.json"])["target_baseline"]
+    assert context["consumer"]["step"] == spans[0].step_first == 2
+    update = next(item for item in episode.message_occurrences
+                  if item.get("content") == "Post-exposure user update")
+    assert update["occurrence_id"] not in context["visible_occurrence_ids"]
+    assert "consumed from step 3" not in files["span.md"]
+    if same_treatment:
+        assert len(spans) == 1 and spans[0].n_injections == 2
+    else:
+        assert len(spans) == 2
+        later = build_span_evidence(spans[1], episode)
+        assert "D2.E1 consumed from step 2" in later["span.md"]
+
+
+def test_span_folder_stores_each_text_once_and_one_record_per_line(tmp_path):
+    output = "earlier diagnostic output unique to step one"
+    memory = "Distinct memory advice for the parser."
+    builder = AnnotatedBuilder().episode_open().agent_turn(with_task=True, result=output)
+    builder.recall(cure_ref("hint", memory)).agent_turn().episode_close()
+    source = builder.write(tmp_path / "trajectory")
+    trajectories, ops, events, _ = load_trajectories([source])
+    trajectory = trajectories[0]
+    episode = prepare_trajectory(trajectory, events[trajectory.id], ops[trajectory.id]).episodes[0]
+    span, = group_spans([op for op in ops[trajectory.id] if op.kind == "recall"], trajectory.id,
+                        episode=episode, last_step=episode.steps[-1].step)
+    files = build_span_evidence(span, episode)
+    homes = {TASK: "task.md", output: "steps/step_000001.md", memory: "span.md"}
+    for text, home in homes.items():
+        assert [path for path, body in files.items() if text in body] == [home]
+    baseline = files["baseline.md"]
+    assert "text in task.md" in baseline and "result in steps/step_000001.md" in baseline
+    assert "memory delivery D1 (text in span.md)" in baseline
+    for name in ("context.json", "searches.json", "manifest.json"):
+        records = [line.strip().rstrip(",") for line in files[name].splitlines() if line.startswith("    {")]
+        assert records and all(isinstance(json.loads(record), dict) for record in records)
+        json.loads(files[name])
+    opening = _opening_message(span.id, files)
+    assert "deliveries.md (" in opening and "every memory delivery in this episode" in opening
+
+
+def test_visible_system_text_is_stored_once_in_the_span_folder(tmp_path):
+    system = "Unique system instruction: preserve the public interface."
+    builder = AnnotatedBuilder().episode_open()
+    builder._emit("message_end", role="system", content=system, msg=0, proxy_source=builder.main)
+    builder.agent_turn(with_task=True).recall(cure_ref("hint", "Check parser input."))
+    builder.episode_close()
+    source = builder.write(tmp_path / "trajectory")
+    trajectories, ops, events, _ = load_trajectories([source])
+    trajectory = trajectories[0]
+    episode = prepare_trajectory(trajectory, events[trajectory.id], ops[trajectory.id]).episodes[0]
+    span, = group_spans([op for op in ops[trajectory.id] if op.kind == "recall"], trajectory.id)
+    files = build_span_evidence(span, episode)
+    assert system in files["baseline.md"]
+    assert [path for path, body in files.items() if system in body] == ["baseline.md"]
+    record = next(item for item in json.loads(files["context.json"])["message_occurrences"]
+                  if item["role"] == "system")
+    assert record["text_in"] == "baseline.md" and "content" not in record
+
+
+def test_visible_tool_result_keeps_its_occurrence_in_a_step_with_multiple_results(tmp_path):
+    def evidence(reverse):
+        builder = AnnotatedBuilder().episode_open().user_message(TASK)
+        builder.turn = 1
+        calls = ["B", "A"] if reverse else ["A", "B"]
+        builder._emit("turn_start", turn=1, call_id="main-one", proxy_source=builder.main)
+        builder._emit("message_end", turn=1, msg=2, role="assistant", proxy_source=builder.main,
+                      content="", tool_calls=[{"id": call, "name": "read", "args": {"path": "same.txt"}}
+                                              for call in calls])
+        for call in calls:
+            builder._emit("tool_execution_start", turn=1, tool_call_id=call, name="read",
+                          args={"path": "same.txt"}, proxy_source=builder.main)
+        for call, msg, text in [("A", 3, "BETA" if reverse else "ALPHA"),
+                                ("B", 5, "ALPHA" if reverse else "BETA")]:
+            builder._emit("tool_execution_end", turn=1, msg=msg, tool_call_id=call,
+                          name="read", status="completed", result=text, proxy_source=builder.main)
+        builder._emit("turn_end", turn=1, status="completed", proxy_source=builder.main)
+        builder._emit("message_retracted", msg=5, proxy_source=builder.main)
+        builder.recall(cure_ref("hint", "ALPHA")).episode_close()
+        source = builder.write(tmp_path / "trajectory")
+        trajectories, ops, events, _ = load_trajectories([source])
+        trajectory = trajectories[0]
+        episode = prepare_trajectory(trajectory, events[trajectory.id], ops[trajectory.id]).episodes[0]
+        span, = group_spans([op for op in ops[trajectory.id] if op.kind == "recall"], trajectory.id,
+                            episode=episode, last_step=episode.steps[-1].step)
+        visible, = [item for item in episode.message_occurrences if item["kind"] == "tool_result"]
+        return build_span_evidence(span, episode), visible
+
+    first, first_result = evidence(False)
+    second, second_result = evidence(True)
+    assert first_result["content"] == "ALPHA" and second_result["content"] == "BETA"
+    assert first != second
+    for files, visible in [(first, first_result), (second, second_result)]:
+        occurrence = visible["occurrence_id"]
+        assert f"[tool {occurrence}] result in steps/step_000001.md" in files["baseline.md"]
+        step = files["steps/step_000001.md"]
+        assert f"tool result [{occurrence}]\nresult (completed): {visible['content']}" in step
+
+
+@pytest.mark.parametrize("evicted", [False, True])
+def test_baseline_preserves_only_visible_tool_call_arguments(tmp_path, evicted):
+    builder = AnnotatedBuilder().episode_open().agent_turn(
+        with_task=True, command="repair_parser --timeout 37", result="")
+    if evicted:
+        builder.history_rewrite(kept=2, dropped=2)
+    builder.recall(cure_ref("hint", "Set the timeout to 37.")).episode_close()
+    source = builder.write(tmp_path / "trajectory")
+    trajectories, ops, events, _ = load_trajectories([source])
+    trajectory = trajectories[0]
+    episode = prepare_trajectory(trajectory, events[trajectory.id], ops[trajectory.id]).episodes[0]
+    span, = group_spans([op for op in ops[trajectory.id] if op.kind == "recall"], trajectory.id)
+    files = build_span_evidence(span, episode)
+    assert ("content and commands in steps/step_000001.md" in files["baseline.md"]) is not evicted
+    assert "repair_parser --timeout 37" in files["steps/step_000001.md"]
+
+
+def test_replayed_tool_result_does_not_borrow_another_occurrences_step_home(tmp_path):
+    builder = AnnotatedBuilder().episode_open().agent_turn(with_task=True, result="Repeated result")
+    result = next(event for event in builder.events if event["type"] == "tool_execution_end")
+    builder._emit("tool_execution_end", **{key: value for key, value in result.items()
+                                           if key not in ("type", "seq")})
+    builder.recall(cure_ref("hint", "Check the parser.")).episode_close()
+    source = builder.write(tmp_path / "trajectory")
+    trajectories, ops, events, _ = load_trajectories([source])
+    trajectory = trajectories[0]
+    episode = prepare_trajectory(trajectory, events[trajectory.id], ops[trajectory.id]).episodes[0]
+    span, = group_spans([op for op in ops[trajectory.id] if op.kind == "recall"], trajectory.id)
+    files = build_span_evidence(span, episode)
+    visible, = [item for item in episode.message_occurrences if item["kind"] == "tool_result"]
+    assert f"[tool {visible['occurrence_id']}]\nRepeated result" in files["baseline.md"]
+    assert f"tool result [{visible['occurrence_id']}]" not in files["steps/step_000001.md"]
 
 
 def test_failed_and_empty_spans_do_not_cancel_sibling_judgments(tmp_path, monkeypatch):
@@ -220,7 +372,7 @@ def test_appending_another_episode_does_not_change_span_evidence(tmp_path):
         ids = {delivery["op_id"] for delivery in episode.deliveries}
         (span,) = group_spans([op for op in operations[trajectory.id] if op.id in ids], trajectory.id,
                              episode_execution_id=episode.execution_id, last_step=episode.steps[-1].step)
-        files, _ = build_span_evidence(span, episode)
+        files = build_span_evidence(span, episode)
         return files, _opening_message(span.id, files)
 
     before = evidence(tmp_path / "before")
@@ -250,9 +402,11 @@ def test_placement_host_keeps_independent_task_or_system_text(tmp_path, slot, ro
     episode = prepare_trajectory(trajectory, events[trajectory.id], operations[trajectory.id]).episodes[0]
     recall = next(op for op in operations[trajectory.id] if op.kind == "recall")
     (span,) = group_spans([recall], trajectory.id, last_step=episode.steps[-1].step)
-    files, baseline = build_span_evidence(span, episode)
-    assert host in baseline and memory not in baseline
-    assert host in files["context.json"] and memory in files["deliveries.md"]
+    files = build_span_evidence(span, episode)
+    # Each text is stored once: task text in task.md, other text inline.
+    assert host in files["task.md" if role == "user" else "baseline.md"]
+    assert memory in files["span.md"] and "memory delivery D1 (text in span.md)" in files["baseline.md"]
+    assert not any(memory in files[name] for name in ("deliveries.md", "context.json", "baseline.md"))
 
 
 def test_tool_result_delivery_is_not_its_own_baseline(tmp_path):
@@ -279,11 +433,15 @@ def test_tool_result_delivery_is_not_its_own_baseline(tmp_path):
     episode = prepare_trajectory(trajectory, events[trajectory.id], operations[trajectory.id]).episodes[0]
     recall = next(op for op in operations[trajectory.id] if op.kind == "recall")
     (span,) = group_spans([recall], trajectory.id, last_step=episode.steps[-1].step)
-    files, baseline = build_span_evidence(span, episode)
-    assert other in baseline and "earlier reasoning" in baseline
-    assert memory not in baseline
+    files = build_span_evidence(span, episode)
+    assert "result in steps/step_000001.md" in files["baseline.md"]
+    assert other in files["steps/step_000001.md"]
+    assert "earlier reasoning" in files["steps/step_000001.md"]
+    result_source = episode.deliveries[0]["placements"][0]["source_resolution"]["occurrence_id"]
+    assert f"tool result [{result_source}]\nresult (completed): [memory delivery D1; see span.md]" in files["steps/step_000001.md"]
+    assert memory not in files["baseline.md"]
     assert memory not in files[f"steps/step_{episode.steps[0].step:06d}.md"]
-    assert memory in files["deliveries.md"]
+    assert memory in files["span.md"] and memory not in files["deliveries.md"]
 
 
 def test_repeated_resident_placement_preserves_task_and_system_context(tmp_path):
@@ -302,9 +460,9 @@ def test_repeated_resident_placement_preserves_task_and_system_context(tmp_path)
     trajectory = trajectories[0]
     episode = prepare_trajectory(trajectory, events[trajectory.id], operations[trajectory.id]).episodes[0]
     (span,) = group_spans([op for op in operations[trajectory.id] if op.kind == "recall"], trajectory.id)
-    files, baseline = build_span_evidence(span, episode)
-    assert task in files["task.md"] and task in baseline
-    assert memory not in files["task.md"] and memory not in baseline
+    files = build_span_evidence(span, episode)
+    assert task in files["task.md"] and "text in task.md" in files["baseline.md"]
+    assert memory not in files["task.md"] and memory not in files["baseline.md"]
     assert episode.preparation_status == "prepared"
     context = json.loads(files["context.json"])
     host = next(item for item in context["message_occurrences"] if item["role"] == "user")
@@ -322,8 +480,8 @@ def test_unresolved_placement_does_not_erase_independent_matching_text(tmp_path)
     trajectory = trajectories[0]
     episode = prepare_trajectory(trajectory, events[trajectory.id], operations[trajectory.id]).episodes[0]
     (span,) = group_spans([op for op in operations[trajectory.id] if op.kind == "recall"], trajectory.id)
-    files, baseline = build_span_evidence(span, episode)
-    assert memory in files["task.md"] and memory in baseline
+    files = build_span_evidence(span, episode)
+    assert memory in files["task.md"] and "text in task.md" in files["baseline.md"]
     assert memory in files["steps/step_000001.md"]
 
 
@@ -625,7 +783,7 @@ def _span_docs(tmp_path, builder):
     recalls = {op.id: op for op in ops_by_traj[trajectory.id] if op.kind == "recall"}
     spans = group_spans([recalls[item["op_id"]] for item in episode.deliveries], trajectory.id,
                         episode_execution_id=episode.execution_id, last_step=episode.steps[-1].step)
-    return [build_span_evidence(span, episode)[0]["span.md"] for span in spans]
+    return [build_span_evidence(span, episode)["span.md"] for span in spans]
 
 
 _KB_A = cure_ref("kb-a", "Cached index maps go stale after a removal; rebuild them.")

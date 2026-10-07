@@ -70,7 +70,7 @@ A verdict cut mid-answer is not a failure class: the answer simply fails the con
 ### Offline preparation
 
 Use `--prepare-only` to partition recordings into bridge-delimited episodes and
-write inspectable `injudge.episode-inputs/v1` evidence without loading `.env`,
+write inspectable `injudge.episode-inputs/v2` evidence without loading `.env`,
 Node, or contacting a judge:
 
 ```bash

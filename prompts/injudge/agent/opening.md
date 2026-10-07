@@ -4,8 +4,8 @@ indexes every file. Read task.md and baseline.md, and gold.md if listed.
 Use context.json only when the detailed visibility audit is needed.
 
 Investigate the exposure boundary:
-1. Read the complete first consuming step and the step before it. A complete
-   step copied into baseline.md need not be read again from steps/.
+1. Read the complete first consuming step and the step before it, if present
+   in this episode. baseline.md is visible input, not a complete step record.
 2. Search the steps for distinctive delivered claims and explicit references;
    read matches in context and compare them with what the task and earlier
    steps already had.

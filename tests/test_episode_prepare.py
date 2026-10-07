@@ -137,7 +137,7 @@ def test_input_prefix_preserves_task_and_marks_only_memory_text(tmp_path):
     assert memory not in files["task.md"]
     context = json.loads(files["context.json"])
     user = next(item for item in context["message_occurrences"] if item["role"] == "user")
-    assert task in user["content"] and memory not in user["content"]
+    assert user["text_in"] == "task.md" and "content" not in user
     assert user["memory_delivery_refs"] == ["D1"]
     # the stripped memory text is named as moved, never left reading as absent
     assert "deliveries.md (D1)" in user["memory_delivery_text"]
@@ -147,6 +147,36 @@ def test_input_prefix_preserves_task_and_marks_only_memory_text(tmp_path):
 def _prepare_args(tmp_path, builder):
     trajectory, operations, events, _warnings = _parse(tmp_path, builder)
     return trajectory, events, operations
+
+
+@pytest.mark.parametrize("proof_slots", [["other-slot"], ["input_prefix", "input_prefix"], [None]])
+def test_placement_requires_one_proof_for_its_named_slot(tmp_path, proof_slots):
+    builder = AnnotatedBuilder().episode_open()
+    ref = cure_ref("hint", "Use the parser helper.")
+    search = builder.search(returned=[ref])
+    text = ref["content"]["text"]
+    builder.user_message(text).agent_turn()
+    event = _proven_delivery(builder, search, ref, text, text)
+    proof = event["binding"]["proofs"][0]
+    event["binding"]["proofs"] = [{**proof, "slot": slot} for slot in proof_slots]
+    builder.episode_close()
+    episode = prepare_trajectory(*_prepare_args(tmp_path, builder)).episodes[0]
+    placement = episode.deliveries[0]["placements"][0]
+    assert placement["source_resolution"]["status"] == "unknown"
+    assert evidence_problem(episode) == "memory placement ownership is unresolved in the consumer input"
+
+
+def test_helper_session_task_cannot_become_an_agent_requirement(tmp_path):
+    builder = AnnotatedBuilder().episode_open().user_message("Fix the user parser.")
+    builder.annotation("memory_session", {
+        "trace_session_id": "helper-session", "session_kind": "other",
+        "task": {"availability": "inline", "text": "Extract a summary for the memory store."},
+    }, lane=builder.mem)
+    builder.agent_turn().recall(cure_ref("hint", "Use the parser helper.")).episode_close()
+    episode = prepare_trajectory(*_prepare_args(tmp_path, builder)).episodes[0]
+    files = build_episode_evidence(episode)
+    assert "Fix the user parser." in files["task.md"]
+    assert "Extract a summary" not in files["task.md"]
 
 
 def test_proof_cannot_bind_to_future_occurrence_in_reused_slot(tmp_path):
@@ -236,17 +266,16 @@ def test_request_pointer_excludes_target_from_baseline_and_preserves_task(tmp_pa
     trajectory, ops, events = parse_trajectory(source, [])
     episode = prepare_trajectory(trajectory, events, ops).episodes[0]
     (span,) = group_spans(ops, trajectory.id, last_step=episode.steps[-1].step)
-    files, baseline = build_span_evidence(span, episode)
+    files = build_span_evidence(span, episode)
     assert episode.preparation_status == "prepared" and evidence_problem(episode) is None
     assert episode.deliveries[0]["delivery_source_proofs"][0]["status"] == "resolved"
-    assert memory not in baseline and task in baseline
+    assert memory not in files["baseline.md"] and "text in task.md" in files["baseline.md"]
     assert memory not in files["task.md"] and task in files["task.md"]
-    assert memory in files["deliveries.md"] and memory in files["span.md"]
-    assert not any(memory in text for path, text in files.items() if path.startswith("steps/"))
-    baseline_view = json.loads(files["context.json"])["target_baseline"]
-    assert any(item.get("memory_delivery_refs") for item in baseline_view["visible_occurrences"])
+    assert memory in files["span.md"]
+    assert not any(memory in text for path, text in files.items() if path != "span.md")
+    assert "memory delivery D1 (text in span.md)" in files["baseline.md"]
     if shape.startswith("system"):
-        assert "Keep the task's existing interface." in baseline
+        assert "Keep the task's existing interface." in files["baseline.md"]
 
 
 def test_system_pointer_does_not_resolve_against_user_text(tmp_path):
@@ -305,11 +334,12 @@ def test_request_tool_id_disambiguates_identical_visible_results(tmp_path):
     trajectory, ops, events = parse_trajectory(source, [])
     episode = prepare_trajectory(trajectory, events, ops).episodes[0]
     (span,) = group_spans(ops, trajectory.id)
-    _files, baseline = build_span_evidence(span, episode)
+    files = build_span_evidence(span, episode)
     proof = episode.deliveries[0]["delivery_source_proofs"][0]
     assert proof["status"] == "resolved"
     assert proof["source"]["tool_call_id"] == tool["tool_call_id"]
-    assert memory in baseline  # the other tool's independent result survives
+    assert "result in steps/step_000001.md" in files["baseline.md"]
+    assert memory in files["steps/step_000001.md"]  # the other tool's independent result survives
 
 
 def test_replay_uses_message_slots_for_kept_prefix(tmp_path):
@@ -327,7 +357,11 @@ def test_corrupt_retraction_does_not_pop_last_message(tmp_path):
     builder._emit("message_retracted", proxy_source=builder.main, msg=True)
     builder.agent_turn().episode_close()
     episode = prepare_trajectory(*_prepare_args(tmp_path, builder)).episodes[0]
-    assert "keep this task" in build_episode_evidence(episode)["context.json"]
+    files = build_episode_evidence(episode)
+    context = json.loads(files["context.json"])
+    task = next(item for item in context["message_occurrences"] if item["role"] == "user")
+    assert task["text_in"] == "task.md" and "keep this task" in files["task.md"]
+    assert task["occurrence_id"] in context["views"][0]["visible"]
     assert episode.preparation_status == "needs_review"
 
 

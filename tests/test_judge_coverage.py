@@ -34,7 +34,7 @@ def _read(files, path, start=1, end=None):
 def test_header_only_cannot_ground_a_verdict(monkeypatch, tmp_path, neutral):
     span, steps = _judge_input_fixture()
     span.step_first = span.step_last = 2
-    files, _ = build_span_evidence(span, _test_episode(span, steps))
+    files = build_span_evidence(span, _test_episode(span, steps))
     answer = json.loads(GOOD)
     answer["evidence"] = []
     if neutral:
@@ -54,7 +54,7 @@ def test_header_only_cannot_ground_a_verdict(monkeypatch, tmp_path, neutral):
 
 def test_read_coverage_combines_pages_but_not_truncated_lines_or_search_hits():
     span, steps = _judge_input_fixture()
-    files, _ = build_span_evidence(span, _test_episode(span, steps))
+    files = build_span_evidence(span, _test_episode(span, steps))
     path = "steps/step_000002.md"
     first = _read(files, path, end=2)
     tail = _read(files, path, start=3)
@@ -71,8 +71,11 @@ def test_read_coverage_combines_pages_but_not_truncated_lines_or_search_hits():
                          "details": {"path": [], "lines_read": True}}], files) == []
 
 
-def test_complete_pre_exposure_step_copy_is_a_valid_citation(tmp_path):
-    builder = AnnotatedBuilder().episode_open().agent_turn(with_task=True)
+def test_baseline_does_not_restore_evicted_history_or_certify_steps(tmp_path):
+    builder = AnnotatedBuilder().episode_open().agent_turn(
+        with_task=True, reasoning="Historical plan", result="Evicted diagnostic")
+    builder.history_rewrite(kept=1, dropped=3)
+    builder.user_message("Current task").agent_turn(result="Current diagnostic")
     builder.recall(cure_ref("hint", "new mechanism")).agent_turn().episode_close()
     source = builder.write(tmp_path / "trajectory")
     trajectories, ops, events, _ = load_trajectories([source])
@@ -80,21 +83,14 @@ def test_complete_pre_exposure_step_copy_is_a_valid_citation(tmp_path):
     episode = prepare_trajectory(trajectory, events[trajectory.id], ops[trajectory.id]).episodes[0]
     recalls = [op for op in ops[trajectory.id] if op.kind == "recall"]
     span = group_spans(recalls, trajectory.id, episode=episode)[0]
-    files, _ = build_span_evidence(span, episode)
-    indexed = json.loads(files["manifest.json"])["step_sources"]
-    copied = [entry["step"] for entry in indexed
-              if any(source["path"] == "baseline.md" for source in entry["sources"])]
-    assert copied and all(step < span.step_first for step in copied)
-    assert _read_steps([_read(files, "baseline.md")], files) == copied
-    assert _read_steps([_read(files, "baseline.md", end=1)], files) == []
-    # The first consuming step is post-exposure and cannot be certified by
-    # merely reading the pre-exposure record.
-    assert span.step_first not in copied
-    # A late result excluded by the exposure cut must not be certified by
-    # the shorter historical copy.
-    episode.steps[0].tools[0].source_event_index = episode.deliveries[0]["source"]["event_index"] + 1
-    cut_files, _ = build_span_evidence(span, episode)
-    assert episode.steps[0].step not in _read_steps([_read(cut_files, "baseline.md")], cut_files)
+    files = build_span_evidence(span, episode)
+    assert "text in task.md" in files["baseline.md"]
+    assert "result in steps/step_000002.md" in files["baseline.md"]
+    assert "steps/step_000001.md" not in files["baseline.md"]
+    assert "Historical plan" in files["steps/step_000001.md"]
+    assert "Evicted diagnostic" in files["steps/step_000001.md"]
+    assert _read_steps([_read(files, "baseline.md")], files) == []
+    assert _read_steps([_read(files, "steps/step_000001.md")], files) == [1]
 
 
 @pytest.mark.parametrize("influence", ["none", "referenced", "selected"])
@@ -116,10 +112,10 @@ def test_no_content_use_requires_window_coverage_but_unknown_does_not(influence)
 
 
 @pytest.mark.parametrize("effect,needs_window", [
-    ("improved", True), ("no_effect", True), ("harmed", False), (None, False)])
-def test_effect_claims_need_window_coverage_except_harm(effect, needs_window):
-    # A read anchor proves the action at step 2; an unread later harmful use
-    # of the same entry at step 3 or 4 would decide the effect.
+    ("improved", True), ("no_effect", True), ("harmed", True), (None, False)])
+def test_known_effect_claims_need_window_coverage(effect, needs_window):
+    # A read anchor proves one action, but later use can change whether its
+    # work contributed, and later harm can decide an earlier benefit.
     span, _ = _judge_input_fixture()
     span.step_first = 2
     span.memory_windows = {"m1": 4}
@@ -144,7 +140,7 @@ def test_early_benefit_with_unread_later_harm_is_not_accepted_as_positive(monkey
     episode, = prepare_trajectory(trajectory, events[trajectory.id], ops[trajectory.id]).episodes
     span, = group_spans([op for op in ops[trajectory.id] if op.kind == "recall"], trajectory.id,
                         last_step=episode.steps[-1].step, episode=episode)
-    files, _ = build_span_evidence(span, episode)
+    files = build_span_evidence(span, episode)
     early_reads = [_read(files, f"steps/step_{step:06d}.md") for step in (1, 2)]
     answer = json.loads(GOOD)
     answer["memories"] = answer["memories"][:1]
@@ -161,10 +157,38 @@ def test_early_benefit_with_unread_later_harm_is_not_accepted_as_positive(monkey
     assert verdict["verdict"] == "unresolved"
 
 
+def test_apparent_waste_with_unread_later_use_is_not_accepted_as_harm(monkeypatch, tmp_path):
+    build(tmp_path / "cases")
+    trajectories, ops, events, _ = load_trajectories([
+        tmp_path / "cases" / case_id("diagnostic_rules_out_hypothesis")])
+    trajectory, = trajectories
+    episode, = prepare_trajectory(trajectory, events[trajectory.id], ops[trajectory.id]).episodes
+    span, = group_spans([op for op in ops[trajectory.id] if op.kind == "recall"], trajectory.id,
+                        last_step=episode.steps[-1].step, episode=episode)
+    files = build_span_evidence(span, episode)
+    assert "The probe rules out an empty list" in files["steps/step_000003.md"]
+    early_reads = [_read(files, f"steps/step_{step:06d}.md") for step in (1, 2)]
+    answer = json.loads(GOOD)
+    answer["memories"] = answer["memories"][:1]
+    answer["memories"][0]["positive_effect"] = {
+        "value": "harmed", "note": "The memory-caused probe added work with no contribution."}
+    repaired = copy.deepcopy(answer)
+    repaired["memories"][0]["positive_effect"]["value"] = None
+    calls = stub_runner(monkeypatch, [_result(json.dumps(answer), messages=early_reads),
+                                      _result(json.dumps(repaired), messages=early_reads)])
+    verdict = judge_episode_span(span, episode, _agent_cfg(), [],
+                                 evidence_root=tmp_path / "evidence", transcripts_root=tmp_path / "runs")
+    assert "positive_effect 'harmed' without complete window coverage" in calls[1]["message"]
+    assert [call["repair"] for call in calls] == [False, True]
+    assert verdict["input"]["read_steps"] == [1, 2]
+    assert verdict["rubric"]["m1"]["influence"]["value"] == "acted_on"
+    assert verdict["verdict"] == "unresolved"
+
+
 def test_character_pages_certify_long_lines_only_when_every_character_was_read():
     span, steps = _judge_input_fixture()
     steps[0].reasoning = "🧠" * 210_000
-    files, _ = build_span_evidence(span, _test_episode(span, steps))
+    files = build_span_evidence(span, _test_episode(span, steps))
     path = "steps/step_000001.md"
     lines = files[path].split("\n")
     chunks = []
@@ -190,7 +214,7 @@ def test_selection_cannot_inherit_the_followup_effect():
     assert _verdict_semantics(obj, span, 4) is None
     # A claimed benefit of the selection itself is coerced away and counted
     # as a pairing correction (judge compliance), never inherited.
-    result = _assemble_verdict(obj, json.dumps(obj), span, [], "")
+    result = _assemble_verdict(obj, span, [], "")
     assert result["rubric"]["m1"]["positive_effect"]["value"] is None
     assert result["pe_pairing_corrections"] == 1
     assert result["memory_usage"]["m1"]["usage"] == "selected"
@@ -217,7 +241,7 @@ def test_selection_unproductive_harm_and_uncertainty_stay_distinct(influence, ef
     entry["positive_effect"]["value"] = effect
     assert _strict_parse(json.dumps(obj))[1] is None
     assert _verdict_semantics(obj, span, 2) is None
-    result = _assemble_verdict(obj, json.dumps(obj), span, [], "")
+    result = _assemble_verdict(obj, span, [], "")
     assert result["verdict"] == verdict
     assert result["memory_usage"]["m1"]["usage"] == usage
     rollup = aggregate([operation_record(span, result, {})], 1)
@@ -233,7 +257,7 @@ def test_evidence_and_prompt_hashes_identify_exact_judge_inputs(monkeypatch, tmp
     span, steps = _judge_input_fixture()
     result = judge_span(span, steps, _agent_cfg(), [], evidence_root=tmp_path / "evidence",
                         transcripts_root=tmp_path / "runs")
-    files, _ = build_span_evidence(span, _test_episode(span, steps))
+    files = build_span_evidence(span, _test_episode(span, steps))
     assert result["input"]["evidence_sha256"] == content_digest(files)
     assert len(result["input"]["system_prompt_sha256"]) == 64
     assert content_digest({"a": "bc"}) != content_digest({"ab": "c"})
@@ -247,6 +271,6 @@ def test_escaped_surrogate_in_a_step_still_counts_as_complete_evidence(monkeypat
                         transcripts_root=tmp_path / "runs")
     assert result["verdict"] == "positive"
     assert result["input"]["read_steps"] == [1, 2]
-    files, _ = build_span_evidence(span, _test_episode(span, steps))
+    files = build_span_evidence(span, _test_episode(span, steps))
     assert "\\ud800" in files["steps/step_000001.md"]
     assert chr(0xD800) not in files["steps/step_000001.md"]

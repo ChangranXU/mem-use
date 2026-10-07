@@ -156,6 +156,9 @@ def build_graph(
         note("warn", w)
 
     registry: dict[tuple[str | None, str], MemoryUnit] = {}
+    # A pre-populated store makes every recalled memory unobserved; each
+    # record carries origin "not_observed", so validation reports one count.
+    unobserved = {"recalled": 0, "deleted": 0}
     current_refs: dict[tuple[str | None, str], dict] = {}
     edges: list[Edge] = []
     all_ops: list[MemoryOp] = []
@@ -272,11 +275,7 @@ def build_graph(
                     # loaded trajectories — register it (origin not observed)
                     # and link.
                     _register(registry, ident, ref, key, "not_observed")
-                    note(
-                        "info",
-                        f"{op.id}: deleted memory {key!r} has no observed creation in "
-                        "the loaded trajectories (origin not observed)",
-                    )
+                    unobserved["deleted"] += 1
                 # Retiring an older revision does not delete its replacement.
                 # Missing digest metadata cannot contradict the same native id;
                 # operation-local ids compare only through content across ops.
@@ -320,13 +319,14 @@ def build_graph(
             seen.add(ident)
             if ident not in registry:
                 _register(registry, ident, delivered, key, "not_observed")
-                note(
-                    "info",
-                    f"{op.id}: recalled memory {key!r} has no observed creation in the "
-                    "loaded trajectories (origin not observed)",
-                )
+                unobserved["recalled"] += 1
             registry[ident].recalls.append({"op": op.id, "traj": op.traj, "step": op.step})
             edges.append(Edge("recalls", op.id, ident[1], ident[0]))
+
+    for kind, n in unobserved.items():
+        if n:
+            note("info", f"{n} {kind} memories have no observed creation in the loaded "
+                 "trajectories (origin not observed)")
 
     for op in all_ops:
         if op.kind == "extract" and op.flagged:

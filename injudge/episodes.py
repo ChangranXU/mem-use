@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from injudge.model import AgentStep, ContextView, EpisodeInput, PreparationResult, SourceRef
-from injudge.steps import build_step_stream
+from injudge.steps import _tool_calls_of, build_step_stream
 from memgraph.annotations import AnnotationIndex, build_annotation_index, is_int, message_text, resolved_content_text
 from memgraph.episodes import Boundary, episode_for_index, episode_scopes
 from memgraph.model import MemoryOp, Trajectory
@@ -128,6 +128,8 @@ def _occurrence(event: dict[str, Any], index: int) -> dict[str, Any]:
         "msg": source.msg,
         "turn": source.turn,
         "content": _content_text(event),
+        **({"tool_calls": [call for call in _tool_calls_of(event) if isinstance(call, dict)]}
+           if role == "assistant" else {}),
         "source": source.to_dict(),
     }
 
@@ -483,17 +485,13 @@ def _delivery_projection(
     placements = []
     raw_placements = payload.get("placements") if isinstance(payload.get("placements"), list) else []
     proof_sources = _proof_sources(event, occurrences, view, directory)
-    proof_by_slot = {
-        proof.get("slot"): proof
-        for proof in proof_sources
-        if proof.get("slot") is not None
-    }
-    for i, placement in enumerate(op.placements):
+    for placement in op.placements:
         item = dict(placement)
-        item["source_resolution"] = (
-            proof_by_slot.get(placement.get("slot"))
-            or (proof_sources[i] if i < len(proof_sources) else {"status": "unknown"})
-        )
+        # Slot names, not list positions, bind proofs to placements. Missing
+        # or duplicate proofs cannot borrow another slot's proven host.
+        matches = [proof for proof in proof_sources
+                   if proof.get("slot") is not None and proof.get("slot") == placement.get("slot")]
+        item["source_resolution"] = matches[0] if len(matches) == 1 else {"status": "unknown"}
         placements.append(item)
     source = _source(event, op.source_event_index)
     linked_searches = [
@@ -772,6 +770,8 @@ def prepare_episodes(
         # no user input was recorded, or when it supplies a distinct task.
         for fallback, event in enumerate(events):
             if event.get("type") != "memory_session":
+                continue
+            if _payload(event).get("session_kind") != "episode":
                 continue
             if not boundary.contains(_event_index(event, fallback)):
                 continue

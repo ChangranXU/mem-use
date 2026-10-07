@@ -1,5 +1,5 @@
-"""Report assembly: the `injudge.report/v15` JSON artifact, the statistics-only
-`injudge.summary/v13` distillation, and the stdout summary.
+"""Report assembly: the `injudge.report/v16` JSON artifact, the statistics-only
+`injudge.summary/v14` distillation, and the stdout summary.
 
 The runtime artifact's output contract: per operation
 {operation_id, kind, seq, payload_summary, verdict, confidence, evidence[]}

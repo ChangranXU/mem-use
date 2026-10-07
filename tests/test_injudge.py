@@ -384,7 +384,7 @@ def test_step_stream_normalizes_non_openai_message_shapes():
     assert steps[0].reasoning == "ponder"
     assert steps[0].content == "first\nsecond"
     span, _steps = _judge_input_fixture()
-    files, _ = build_span_evidence(span, _test_episode(span, steps))
+    files = build_span_evidence(span, _test_episode(span, steps))
     step_text = files["steps/step_000001.md"]
     assert "reasoning: ponder" in step_text and "content: first\nsecond" in step_text
     assert "command: bash — ls --color" in step_text  # raw args, not "\"ls --color\""
@@ -888,7 +888,7 @@ def test_spans_window_survives_a_later_narrower_redelivery(tmp_path):
 
 @pytest.mark.parametrize("fault", [None, "key_ends_sentence", "scheduled", "hidden_key",
                                   "hidden_key_prefix", "hidden_key_version", "wrong_store", "pre_exposure",
-                                  "unproven_host", "unrelated_host"])
+                                  "unproven_host", "unrelated_host", "different_local_content"])
 def test_spans_record_only_proven_candidate_followups(tmp_path, fault):
     """A delayed result cannot move its issuing action to delivery minus one,
     and an automatic/key-matching search alone never proves selection."""
@@ -899,6 +899,13 @@ def test_spans_record_only_proven_candidate_followups(tmp_path, fault):
     full = cure_ref("kb-7", "Fix: clear memo in set()", item_id="kb-7")
     if fault == "wrong_store":
         full["namespace"] = "another-store"
+    if fault == "different_local_content":
+        # Neither item has a cross-operation identity. Two missing item ids
+        # must not make unrelated content the same memory.
+        for ref in (preview, full):
+            ref.pop("item_id", None)
+            ref["identity_strength"] = "operation_local"
+            ref["version_id"] = "kb-7"
     b = TrajBuilder().episode_open().agent_turn(with_task=True)
     shown = {"hidden_key": "Issue: stale reads", "hidden_key_prefix": "kb-70: Issue: stale reads",
              "hidden_key_version": "kb-7.1: Issue: stale reads",
@@ -999,13 +1006,8 @@ def test_spans_unattributed_tail(tmp_path):
     assert verdict["memory_usage"]["m1"]["usage"] == "unclear"
 
 
-def test_spans_unattributed_tail_merges_into_an_earlier_matching_span(tmp_path):
-    """Step-less ops sort after every attributed one, so the immediately
-    previous span may carry DIFFERENT content: a step-less re-delivery
-    merges into the newest matching-content span (it is a restated
-    injection), never a spurious null-step span judged auto-neutral.
-    (Step-less ops exist only when no agent turn ever classified, so the
-    whole fixture run is memory-lane-only.)"""
+def test_unobserved_deliveries_preserve_consecutive_treatments(tmp_path):
+    """Unobserved content cannot bridge a different intervening treatment."""
     b = TrajBuilder()
     sid_a = b.search(returned=[REF_A])
     b.delivery(sid_a, memories=[REF_A])
@@ -1014,24 +1016,19 @@ def test_spans_unattributed_tail_merges_into_an_earlier_matching_span(tmp_path):
     sid_a2 = b.search(returned=[REF_A])
     b.delivery(sid_a2, memories=[REF_A])  # restated content of the first span
     spans = group_spans(_recall_ops(b, tmp_path), "T1")
-    assert len(spans) == 2
-    assert spans[0].n_injections == 2  # the tail op rolled into the REF_A span
-    assert spans[1].n_injections == 1
-    assert all(s.step_first is None for s in spans)
+    assert len(spans) == 3
+    assert all(s.n_injections == 1 and s.step_first is None for s in spans)
 
 
 def test_spans_seq_range_brackets_every_op(tmp_path):
-    """seq_first/seq_last are the min/max over the span's ops, not the last
-    merged op's seq: a step-less op merged into an EARLIER span must not
-    leave a range below its own seq, and a declared/bound step inversion must
-    not shrink it either."""
+    """Step order can invert seqs; the range must bracket every member."""
     b = TrajBuilder()  # no agent turns → every delivery is step-less
     sid_a = b.search(returned=[REF_A])
     b.delivery(sid_a, memories=[REF_A])
     sid_b = b.search(returned=[REF_B])
     b.delivery(sid_b, memories=[REF_B])  # different content: a second span
     sid_a2 = b.search(returned=[REF_A])
-    b.delivery(sid_a2, memories=[REF_A])  # merges into the EARLIER REF_A span
+    b.delivery(sid_a2, memories=[REF_A])  # a new unobserved span
     ops = _recall_ops(b, tmp_path)
     by_id = {o.id: o for o in ops}
     for span in group_spans(ops, "T1"):
@@ -1239,6 +1236,7 @@ def test_fingerprint_operation_local_version_id_is_no_item_identity():
 
 
 class _FakeSpan:
+    step_first = None
     id = "T1:S1"
     memories = [{"key": "key_a", "value": "v"}, {"key": "key_b", "value": "w"}]
 
@@ -1255,15 +1253,13 @@ def _signals(rel=True, acc="uncontradicted", nov="novel", inf="none", pe=None):
 
 
 def parse_verdict(text, span, warnings):
-    """Test facade over the strict-parse → assemble chain _scoring_call
-    inlines. The span-relative semantics (_verdict_semantics) ride the
-    attempt loop's validate hook — exercised by the judge_span tests, never
-    here (a _FakeSpan carries no step stream to anchor against). No api key
-    in play, so the mask argument is empty."""
+    """Use the production validation order; the fake span has no anchors."""
     obj, error = _strict_parse(text or "")
-    if obj is None:
+    if obj is not None:
+        error = _verdict_semantics(obj, span, None)
+    if error is not None:
         return _error_verdict(f"judge output {error}", text, span, warnings, "")
-    return _assemble_verdict(obj, text or "", span, warnings, "")
+    return _assemble_verdict(obj, span, warnings, "")
 
 
 GOOD = json.dumps({
@@ -1324,7 +1320,7 @@ def test_parse_verdict_fenced_or_embedded_is_error():
     assert v["verdict"] == "error"
 
 
-def test_parse_verdict_garbage_is_error_unmatched_ids_degrade():
+def test_parse_verdict_garbage_and_unmatched_ids_are_errors():
     warnings = []
     v = parse_verdict("total garbage", _FakeSpan(), warnings)
     assert v["verdict"] == "error" and v["judge_raw"] == "total garbage"
@@ -1335,14 +1331,9 @@ def test_parse_verdict_garbage_is_error_unmatched_ids_degrade():
     v = parse_verdict(json.dumps({"memories": [{"id": "m9", **_signals(),
                                                 "anchors": []}],
                                   "confidence": 0.5}), _FakeSpan(), warnings)
-    # the shape is valid, so assembly degrades the unmatched entries; the
-    # live path (the attempt loop) rejects unknown ids as a semantic
-    # violation before assembly ever runs — see the semantics tests; an
-    # unanswered entry is unresolved, never a measured neutral
-    assert v["verdict"] == "unresolved"
-    assert all(e["usage"] == "unclear" for e in v["memory_usage"].values())
-    # the unknown id is dropped WITH a warning, never silently
-    assert any("unknown id" in w and "m9" in w for w in warnings)
+    assert v["verdict"] == "error"
+    assert "unknown ['m9']" in v["error"]
+    assert not v["rubric"] and not v["memory_usage"]
 
 
 def test_parse_verdict_out_of_contract_values_are_errors():
@@ -1383,7 +1374,7 @@ def test_parse_verdict_span_delivering_two_versions_of_one_key():
     identities); the span-local id contract scores them INDEPENDENTLY — the
     display-key collapse that merged them into one judgment is gone, and the
     two entries keep their own rubric rows."""
-    class Span:
+    class Span(_FakeSpan):
         id = "T1:S1"
         memories = [
             {"key": "k", "value": "v1", "version_id": "1:a", "content_sha256": "a"},
@@ -1602,20 +1593,12 @@ def test_footprint_reason_taxonomy():
     assert all(e["reason"] == "ignored_novel" for e in v["memory_usage"].values())
 
 
-def test_missing_memory_entry_is_unclear_not_ignored():
-    """The direct-assembly degrade for an unanswered entry: nulled signals +
-    unclear usage + a warning. Through _scoring_call this cannot happen —
-    coverage is enforced inside the attempt loop — so this is the belt under
-    the loop's braces, never a live path."""
+def test_missing_memory_entry_cannot_produce_a_partial_positive():
     payload = json.loads(GOOD)
     payload["memories"] = [e for e in payload["memories"] if e["id"] != "m2"]
-    warnings = []
-    v = parse_verdict(json.dumps(payload), _FakeSpan(), warnings)
-    assert v["memory_usage"]["m2"]["usage"] == "unclear"
-    assert all(v["rubric"]["m2"][s]["value"] is None for s in
-               ("relevance", "accuracy", "novelty", "influence", "positive_effect"))
-    assert any("rubric missing memory" in w for w in warnings)
-    assert v["verdict"] == "positive"  # m1 still establishes use
+    v = parse_verdict(json.dumps(payload), _FakeSpan(), [])
+    assert v["verdict"] == "error" and "missing ['m2']" in v["error"]
+    assert not v["rubric"] and not v["memory_usage"]
 
 
 def test_keyless_span_is_judged_not_dropped():
@@ -1634,7 +1617,7 @@ def test_keyless_span_is_judged_not_dropped():
     # a span delivering nothing at all takes the empty-rubric warning path
     span.memories = []
     warnings = []
-    v = parse_verdict(GOOD, span, warnings)
+    v = parse_verdict(json.dumps({"memories": [], "confidence": 0.9}), span, warnings)
     assert v["verdict"] == "neutral"
     assert any("delivers no memories" in w for w in warnings)
 
@@ -1883,8 +1866,8 @@ def test_summary_keeps_comparisons_ahead_of_drilldown(tmp_path):
     assert list(summary) == ["overall", "trajectories", "details", "generated_at", "tool"]
     assert list(summary["overall"])[0] == "headline"
     assert summary["tool"] == {
-        "name": "injudge", "schema": "injudge.summary/v13",
-        "source_report_schema": "injudge.report/v15",
+        "name": "injudge", "schema": "injudge.summary/v14",
+        "source_report_schema": "injudge.report/v16",
         "judge_model": "judge", "config": {"max_steps": 4},
     }
     assert summary["generated_at"] == artifact["generated_at"]
@@ -1942,7 +1925,7 @@ def test_cli_writes_results_first_summary(monkeypatch, tmp_path):
     summary = json.loads(text)
     report = json.loads((run_dir / "injudge-report.json").read_text())
     assert text.startswith('{\n  "overall": {\n') and text.endswith("\n")
-    assert summary["tool"]["schema"] == "injudge.summary/v13"
+    assert summary["tool"]["schema"] == "injudge.summary/v14"
     assert summary["tool"]["source_report_schema"] == report["tool"]["schema"]
     assert "test-key-only" not in text
     (row,) = summary["trajectories"]
@@ -2062,7 +2045,7 @@ def test_cli_runs_share_the_container_without_clobbering(monkeypatch, tmp_path):
     assert len(run_dirs) == 2  # distinct stamps even for same-second runs
     for run_dir in run_dirs:
         report = json.loads((run_dir / "injudge-report.json").read_text())
-        assert report["tool"]["schema"] == "injudge.report/v15"
+        assert report["tool"]["schema"] == "injudge.report/v16"
         assert (run_dir / "summary.json").is_file()
         (span_evidence,) = (run_dir / "evidence").iterdir()
         assert (span_evidence / "manifest.json").is_file()
@@ -2519,19 +2502,6 @@ def test_rubric_rollup_excludes_auto_neutral_placeholders(capsys):
     assert "rubric:" not in capsys.readouterr().out
     assert _rubric_line(rub) is None
 
-    # a judged span's all-null rubric entry is a coverage-gap placeholder
-    # (the judge never returned that key — the contract forbids null signals
-    # in a returned entry): not a judged delivery either, and the renderers
-    # must still not crash on the resulting all-None rates
-    op2 = {**_op("T1:S1", "neutral", 0.9, rubric={"k": _signals(rel=None, acc=None,
-                                                                nov=None, inf=None)}),
-           "payload_summary": "1 injection"}
-    artifact2 = build_artifact({}, [{"id": "T1", "run_id": "r"}], [op2], [], {"T1": 1}, [])
-    rub2 = artifact2["aggregates"]["overall"]["rubric"]
-    assert rub2["deliveries"] == 0
-    assert print_summary(artifact2) == 0
-    assert "rubric:" not in capsys.readouterr().out
-    assert _rubric_line(rub2) is None
 
 
 def test_aggregate_headline_metrics():
@@ -2925,7 +2895,7 @@ def test_render_steps_reports_the_recorded_close_status():
                  seq_start=5),  # truncated: no close at all
     ]
     from injudge.evidence import _episode_step_text
-    text = _episode_step_text(_test_episode(InjectionSpan(id="T1:S1", traj="T1"), [step]), step)
+    text = _episode_step_text(_test_episode(InjectionSpan(id="T1:S1", traj="T1"), [step]), step, set())
     assert "result (interrupted): (none recorded)" in text
     assert "result: (never observed)" in text  # the truly unclosed one
 
@@ -3542,7 +3512,7 @@ def test_evidence_exposure_grounding_lands_in_the_span_document(tmp_path):
         {"state": "clipped", "exposed_chars": 1, "value_chars": 1},
         {"state": "unknown"},
     ]
-    write_evidence(tmp_path, build_span_evidence(span, _test_episode(span, steps))[0])
+    write_evidence(tmp_path, build_span_evidence(span, _test_episode(span, steps)))
     doc = (tmp_path / "span.md").read_text()
     assert "EXPOSED CLIP" in doc and "only the first 1 of 1 chars" in doc
     assert "EXPOSURE UNVERIFIED" in doc
@@ -3554,12 +3524,12 @@ def test_evidence_replaces_a_prior_run(tmp_path):
     """A re-judged span must never read stale files: the folder is replaced
     wholesale."""
     span, steps = _judge_input_fixture()
-    write_evidence(tmp_path, build_span_evidence(span, _test_episode(span, steps, "old task"))[0])
-    write_evidence(tmp_path, build_span_evidence(span, _test_episode(span, steps, "new task"))[0])
+    write_evidence(tmp_path, build_span_evidence(span, _test_episode(span, steps, "old task")))
+    write_evidence(tmp_path, build_span_evidence(span, _test_episode(span, steps, "new task")))
     assert "new task" in (tmp_path / "task.md").read_text()
     assert "old task" not in (tmp_path / "task.md").read_text()
     assert sorted(p.name for p in tmp_path.iterdir()) == [
-        "baseline.md", "context.json", "deliveries.md", "episode.md", "manifest.json",
+        "baseline.md", "context.json", "deliveries.md", "manifest.json",
         "searches.json", "span.md", "steps", "task.md"]
 
 
@@ -3625,14 +3595,14 @@ def test_agent_unknown_novelty_preserves_independent_signals(
     path = tmp_path / "report.json"
     path.write_text(json.dumps(artifact))
     saved = json.loads(path.read_text())
-    assert saved["tool"]["schema"] == "injudge.report/v15"
+    assert saved["tool"]["schema"] == "injudge.report/v16"
     assert saved["operations"][0]["rubric"]["m1"]["novelty"]["value"] is None
     rub = saved["aggregates"]["overall"]["rubric"]
     assert rub["deliveries"] == 2
     assert rub["counts"]["novelty"] == {"null": 1, "novel": 1}
     assert rub["rates"]["novelty"] == 1.0  # unknown does not dilute the rate
     summary = build_summary(saved)
-    assert summary["tool"]["schema"] == "injudge.summary/v13"
+    assert summary["tool"]["schema"] == "injudge.summary/v14"
     assert summary["details"]["overall"]["rubric"]["counts"]["novelty"] == rub["counts"]["novelty"]
     if usage == "ignored":
         assert rub["no_footprint_reasons"] == {"ignored_unknown_novelty": 1, "irrelevant": 1}
@@ -3730,11 +3700,27 @@ def test_unattributed_redelivery_never_backfills_an_earlier_hidden_placement(tmp
     ops[0].exposure = [{"state": "unknown"}]
     ops[1].step = None
     spans = group_spans(ops, "T1")
-    assert len(spans) == 1 and spans[0].n_injections == 2
-    files, _ = build_span_evidence(spans[0], _test_episode(spans[0], []))
+    assert len(spans) == 2 and spans[0].n_injections == 1
+    assert spans[1].step_first is None
+    files = build_span_evidence(spans[0], _test_episode(spans[0], []))
     assert REF_A["content"]["text"] not in files["span.md"]
     assert spans[0].placements == []
     assert spans[0].memory_exposure == [{"state": "unknown"}]
+
+
+def test_unobserved_copy_does_not_inherit_a_verdict_or_its_cost(tmp_path):
+    builder = TrajBuilder().agent_turn(with_task=True).recall(REF_A).recall(REF_A)
+    ops = _recall_ops(builder, tmp_path)
+    ops[1].step = None
+    observed, unobserved = group_spans(ops, "T1")
+    positive = {"verdict": "positive", "confidence": 1.0}
+    rows = [operation_record(observed, positive, {"approx_tokens_total": 10}),
+            operation_record(unobserved, auto_verdict_no_subsequent_turn(unobserved),
+                             {"approx_tokens_total": 20})]
+    counts = aggregate(rows, 2)
+    assert counts["positive"] == counts["unassessable"] == 1
+    assert counts["cost"]["approx_tokens_by_verdict"]["positive"] == 10
+    assert counts["cost"]["approx_tokens_by_verdict"]["unassessable"] == 20
 
 
 @pytest.mark.parametrize("influence,anchors,violation", [

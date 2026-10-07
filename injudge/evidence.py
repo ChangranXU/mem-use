@@ -2,8 +2,13 @@
 
 Python writes the target span and its parent's prepared episode evidence to
 one folder: task, visible context, deliveries, searches, optional attachments,
-and one file per recorded global agent step. A manifest indexes files and
-source bounds. The runner scopes its two tools to that folder.
+and one file per recorded global agent step. A manifest indexes and describes
+the files. The runner scopes its two tools to that folder.
+
+Each text lives in one file. Visible input and the visibility index name the
+task or step file that already holds a message instead of copying it: a judge
+reading a copy twice spends context and can mistake it for a second source.
+JSON files hold one record per line, so a search hit shows a whole record.
 
 The opening includes span.md and compact navigation; the detailed episode
 manifest, step bodies, and gold remain available through tools. The span text
@@ -56,6 +61,41 @@ def episode_dir_name(execution_id: str) -> str:
     return f"{safe}-{digest}"
 
 
+def _records_json(payload: dict) -> str:
+    """Valid JSON with each list item on its own line."""
+    parts = []
+    for key, value in payload.items():
+        if isinstance(value, list) and value:
+            items = ",\n".join("    " + json.dumps(item, ensure_ascii=False) for item in value)
+            parts.append(f"  {json.dumps(key)}: [\n{items}\n  ]")
+        else:
+            parts.append(f"  {json.dumps(key)}: {json.dumps(value, ensure_ascii=False)}")
+    return "{\n" + ",\n".join(parts) + "\n}\n"
+
+
+def _compact(source: dict | None) -> dict | None:
+    """A source reference without its unrecorded fields."""
+    return {k: v for k, v in source.items() if v is not None} if isinstance(source, dict) else source
+
+
+def _visible_text(item: dict) -> list[str]:
+    """A message's own text and tool calls, rendered as the step files do."""
+    calls = [f"command: {call.get('name') if isinstance(call.get('name'), str) else '?'} — "
+             f"{_cmd_of(call.get('args'))}" for call in item.get("tool_calls") or []]
+    return [part for part in [item.get("content") or "", *calls] if part]
+
+
+def _text_home(item: dict, files: dict[str, str], step_files: dict[int, str]) -> str | None:
+    """The task or step file that already holds a message's whole text."""
+    parts = _visible_text(item)
+    path = "task.md" if item.get("role") == "user" else step_files.get(item.get("turn"))
+    if not parts or path is None or path not in files:
+        return None
+    if item.get("kind") == "tool_result" and f"tool result [{item.get('occurrence_id')}]" not in files[path]:
+        return None
+    return path if all(part in files[path] for part in parts) else None
+
+
 def _episode_memory_line(entry: dict) -> str:
     """Render only placement-grounded memory text for judge-readable files."""
     audit = entry.get("audit") if isinstance(entry.get("audit"), dict) else {}
@@ -81,8 +121,9 @@ def _episode_memory_line(entry: dict) -> str:
     return f"{label}: {shown}"
 
 
-def _episode_step_text(episode: EpisodeInput, step: AgentStep, before_index: int | None = None) -> str:
-    """Keep tool-result ownership and availability tied to the shared parser."""
+def _episode_step_text(episode: EpisodeInput, step: AgentStep, targets: set[str]) -> str:
+    """Keep tool-result ownership and availability tied to the shared parser.
+    `targets` names the span's own deliveries, whose text span.md holds."""
     seq_end = step.seq_end if step.seq_end is not None else "?"
     lines = [f"[step {step.step}, turn {step.turn}, seqs {step.seq_start}–{seq_end}]"]
     if step.reasoning:
@@ -92,10 +133,12 @@ def _episode_step_text(episode: EpisodeInput, step: AgentStep, before_index: int
     occurrences = {item["source"]["event_index"]: item for item in episode.message_occurrences}
     close_index = episode.recorded_episode_identity.get("close_event_index")
     for tool in step.tools:
-        if before_index is not None and (tool.source_event_index is None or tool.source_event_index >= before_index):
-            continue
         lines.append(f"command: {tool.name} — {_cmd_of(tool.args)}")
         index = tool.source_event_index
+        # A step may hold several results while only one survives in the
+        # consumer's input. Match its baseline/context occurrence exactly.
+        if is_int(index):
+            lines.append(f"tool result [event:{index}]")
         late = tool.seq_end is not None and step.seq_end is not None and tool.seq_end > step.seq_end
         avail = f", available from seq {tool.seq_end} — after this turn's end" if late else ""
         if index is not None and isinstance(close_index, int) and index > close_index:
@@ -108,7 +151,8 @@ def _episode_step_text(episode: EpisodeInput, step: AgentStep, before_index: int
         projected = project_occurrence(occurrence, episode.deliveries) if occurrence else {}
         refs = projected.get("memory_delivery_refs", [])
         if refs:
-            lines.append(f"result ({tool.status or '?'}{avail}): [memory delivery {', '.join(refs)}; see deliveries.md]")
+            where = "span.md" if set(refs) <= targets else "deliveries.md"
+            lines.append(f"result ({tool.status or '?'}{avail}): [memory delivery {', '.join(refs)}; see {where}]")
             if projected.get("content"):
                 lines.append(projected["content"])
         elif tool.result is not None:
@@ -122,40 +166,58 @@ def _episode_step_text(episode: EpisodeInput, step: AgentStep, before_index: int
     return prefix + "\n".join(lines)
 
 
-def span_baseline(episode: EpisodeInput, span: InjectionSpan, files: dict[str, str]) -> tuple[dict, str, dict[int, dict]]:
-    delivery = next((item for item in episode.deliveries if item["op_id"] in span.op_ids), None)
-    source_index = (delivery or {}).get("source", {}).get("event_index")
+def span_baseline(episode: EpisodeInput, span: InjectionSpan,
+                  files: dict[str, str]) -> tuple[dict, str]:
+    """The consumer's visible input, excluding proven memory placements.
+
+    Returns the audit record and baseline.md. The
+    file names the task or step file holding a message rather than copying
+    it. Historical actions remain in steps/; re-inserting them here would
+    present evicted history as current knowledge.
+    """
+    # Span members are ordered by consumer step; annotations can arrive late.
+    first_op = span.op_ids[0] if span.op_ids else None
+    delivery = next((item for item in episode.deliveries if item["op_id"] == first_op), None)
     consumer = (delivery or {}).get("consumer") or {}
     view = next((item for item in episode.context if item.turn == consumer.get("turn")), None)
     occurrences = {item["occurrence_id"]: item for item in episode.message_occurrences}
     visible = [project_occurrence(occurrences[ref["occurrence_id"]], episode.deliveries)
                for ref in view.messages if ref.get("occurrence_id") in occurrences] if view else []
     # Occurrences that still carry text once placement text moved out; a host
-    # holding only memory text stays visible but contributes no baseline text.
-    independent = [item for item in visible if item.get("content")]
-    prior_steps = [step for step in episode.steps if span.step_first is not None
-                   and step.step < span.step_first
-                   and isinstance(source_index, int)
-                   and episode._step_sources.get(step.turn) is not None
-                   and episode._step_sources[step.turn].event_index < source_index]
-    parts = [str(item["content"]) for item in independent]
-    # Index only the step copies rendered here, not matching strings that
-    # happen to occur in a task or tool result. The heading adds two lines.
-    line = 3 + sum(part.count("\n") + 1 for part in parts)
-    copies: dict[int, dict] = {}
-    for step in prior_steps:
-        text = _episode_step_text(episode, step, source_index)
-        if text == files[f"steps/step_{step.step:06d}.md"]:
-            copies[step.step] = {"path": "baseline.md", "start": line,
-                                 "end": line + text.count("\n")}
-        parts.append(text)
-        line += text.count("\n") + 1
-    baseline = "\n".join(parts)
-    return ({"target_delivery_source": (delivery or {}).get("source"),
-             "consumer": consumer, "visible_occurrences": visible,
+    # holding only memory text stays visible as a marker without text. An
+    # assistant message can contain only tool calls; omitting its arguments
+    # would turn an already visible plan into novel advice.
+    independent = [item for item in visible if _visible_text(item)]
+    step_files = {step.turn: f"steps/step_{step.step:06d}.md" for step in episode.steps}
+    targets = {item["entry_prefix"] for item in episode.deliveries if item["op_id"] in span.op_ids}
+    blocks = []
+    for item in visible:
+        # A memory host keeps its place in the input order; its memory text
+        # lives in span.md (the target) or deliveries.md.
+        refs = item.get("memory_delivery_refs") or []
+        notes = [f"memory delivery {', '.join(refs)} (text in "
+                 f"{'span.md' if set(refs) <= targets else 'deliveries.md'})"] if refs else []
+        text = _visible_text(item)
+        home = _text_home(item, files, step_files) if text else None
+        if home == "task.md":
+            notes.append("text in task.md")
+        elif home is not None and item.get("kind") == "tool_result":
+            notes.append(f"result in {home}")
+        elif home is not None:
+            notes.append(f"content and commands in {home}; that file's reasoning line is not part of this message")
+        if notes or text:
+            head = " ".join([f"[{item['role']} {item['occurrence_id']}]", "; ".join(notes)]).rstrip()
+            blocks.append(head if home or not text else head + "\n" + "\n".join(text))
+    step = consumer.get("step")
+    rendered = (f"# Visible input at step {step if is_int(step) else '?'}, the first consuming step\n\n"
+                "The consumer's input in recorded order, one [role occurrence] block per message. "
+                "Memory placements are removed: the target's is in span.md, others in deliveries.md. "
+                "A message already held by task.md or a step file names that file instead of "
+                "repeating its text.\n\n" + "\n\n".join(blocks) + "\n")
+    return ({"target_delivery_source": _compact((delivery or {}).get("source")), "consumer": consumer,
+             "visible_occurrence_ids": [item["occurrence_id"] for item in visible],
              "non_memory_text_occurrence_ids": [item["occurrence_id"] for item in independent],
-             "prior_step_numbers": [step.step for step in prior_steps],
-             "visibility_gaps": view.gaps if view else ["consumer input view unavailable"]}, baseline, copies)
+             "visibility_gaps": view.gaps if view else ["consumer input view unavailable"]}, rendered)
 
 
 def _earlier_deliveries(span: InjectionSpan, episode: EpisodeInput, baseline: dict) -> str | None:
@@ -166,15 +228,20 @@ def _earlier_deliveries(span: InjectionSpan, episode: EpisodeInput, baseline: di
     rediscovering it in context.json. A delivery consumed at the target's
     own first step arrived with it, not before it.
     """
-    starts = [item["source"].get("event_index") for item in episode.deliveries
-              if item["op_id"] in span.op_ids]
-    starts = [index for index in starts if isinstance(index, int)]
-    if span.step_first is None or not starts:
+    if span.step_first is None:
         return None
-    earlier = [item for item in episode.deliveries if item["op_id"] not in span.op_ids
-               and isinstance(item["source"].get("event_index"), int)
-               and item["source"]["event_index"] < min(starts)]
-    visible = {occurrence["occurrence_id"] for occurrence in baseline["visible_occurrences"]}
+    source_index = (baseline.get("target_delivery_source") or {}).get("event_index")
+    earlier = []
+    for item in episode.deliveries:
+        if item["op_id"] in span.op_ids:
+            continue
+        step, index = item.get("step"), item["source"].get("event_index")
+        # Known consumers establish exposure order even if their annotation
+        # was recorded later. Unobserved consumers retain their audit timing.
+        if (step <= span.step_first if is_int(step) else
+                is_int(index) and is_int(source_index) and index < source_index):
+            earlier.append(item)
+    visible = set(baseline["visible_occurrence_ids"])
     lines = []
     for i, (memory, exposure) in enumerate(span.iter_exposed()):
         ident, text = entry_ident(memory), _exposed_text(memory, exposure)
@@ -235,82 +302,68 @@ def _earlier_deliveries(span: InjectionSpan, episode: EpisodeInput, baseline: di
             + "\n".join(lines))
 
 
-def build_span_evidence(span: InjectionSpan, episode: EpisodeInput) -> tuple[dict[str, str], str]:
-    files = build_episode_evidence(episode)
-    baseline, baseline_text, copies = span_baseline(episode, span, files)
+# One line per file in the opening navigation and manifest. Steps are listed
+# by range there, so they need no per-file description.
+_FILE_GUIDE = {
+    "target": "the target span: entries [m1]…, placement, windows, earlier deliveries",
+    "baseline": "the consumer's visible input at the first consuming step; names the task or step file "
+                "that holds each message",
+    "task": "the task and later user messages, with source positions",
+    "deliveries": "every memory delivery in this episode (D1, D2, …): consumer step, queries, placement, entries",
+    "searches": "memory searches, one per line: query, trigger, returned count",
+    "context": "visibility index, one record per line: messages visible at each turn and the file "
+               "holding each message's text",
+    "gold": "evaluator-only golden attachment",
+    "outcome": "evaluator-only recorded outcome",
+}
+
+
+def _file_entry(path: str, kind: str, files: dict[str, str]) -> dict:
+    return {"path": path, "kind": kind, "chars": len(files[path]), "description": _FILE_GUIDE[kind]}
+
+
+def build_span_evidence(span: InjectionSpan, episode: EpisodeInput) -> dict[str, str]:
+    """The span folder, with visible-input provenance in context.json."""
+    files = build_episode_evidence(episode, set(span.op_ids))
+    baseline, files["baseline.md"] = span_baseline(episode, span, files)
     context = json.loads(files["context.json"])
+    visible = set(baseline["visible_occurrence_ids"])
+    for record in context["message_occurrences"]:
+        if record["occurrence_id"] in visible and _visible_text(record):
+            # Text with no task/step home is already written in baseline.md.
+            record.pop("content", None)
+            record.pop("tool_calls", None)
+            record["text_in"] = "baseline.md"
     context["target_baseline"] = baseline
-    files["context.json"] = json.dumps(context, ensure_ascii=False, indent=2) + "\n"
-    # A readable baseline is also a canonical citation source. Index only
-    # complete copies of step files: a pre-exposure cut must never certify
-    # a tool result that became available after the delivery.
-    files["baseline.md"] = "# Pre-exposure record\n\n" + baseline_text + "\n"
-    step_sources = []
-    for step in episode.steps:
-        path = f"steps/step_{step.step:06d}.md"
-        lines = files[path].split("\n")
-        sources = [{"path": path, "start": 1, "end": len(lines)}]
-        if step.step in copies:
-            sources.append(copies[step.step])
-        step_sources.append({"step": step.step, "sources": sources})
+    files["context.json"] = _records_json(context)
     header = _render_span_header(span, MEMORIES_NOTE, _earlier_deliveries(span, episode, baseline))
     delivery_refs = [item for item in episode.deliveries if item["op_id"] in span.op_ids]
     files["span.md"] = (f"# Target span in parent episode {episode.execution_id}\n\n"
-                        f"Delivery provenance: {json.dumps([{'op_id': item['op_id'], 'source': item['source'], 'consumer': item['consumer']} for item in delivery_refs], ensure_ascii=False)}\n\n"
+                        f"Delivery provenance: {json.dumps([{'op_id': item['op_id'], 'source': _compact(item['source']), 'consumer': item['consumer']} for item in delivery_refs], ensure_ascii=False)}\n\n"
                         + header + "\n\n" + _SPAN_CONTEXT + "\n")
     manifest = json.loads(files["manifest.json"])
     manifest["span_id"] = span.id
-    manifest["step_sources"] = step_sources
     manifest["footprint_from_step"] = span.step_first
-    manifest["files"].insert(0, {"path": "span.md", "kind": "target", "chars": len(files["span.md"])})
-    manifest["files"].insert(1, {"path": "baseline.md", "kind": "baseline", "chars": len(files["baseline.md"])})
+    manifest["files"][:0] = [_file_entry("span.md", "target", files), _file_entry("baseline.md", "baseline", files)]
     # atomic_write escapes lone JSON surrogates. Coverage and hashes must
     # describe those actual saved bytes, not an unwritable in-memory spelling.
     files = {path: utf8_safe(text).decode("utf-8") for path, text in files.items()}
     manifest["files"] = [{**entry, "chars": len(files[entry["path"]])} for entry in manifest["files"]]
-    files["manifest.json"] = utf8_safe(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").decode("utf-8")
-    return files, baseline_text
+    files["manifest.json"] = utf8_safe(_records_json(manifest)).decode("utf-8")
+    return files
 
 
-def build_episode_evidence(episode: EpisodeInput) -> dict[str, str]:
+def build_episode_evidence(episode: EpisodeInput, target_ops: set[str] | None = None) -> dict[str, str]:
     """Build a bounded, exposure-grounded episode evidence map.
 
     The map is pure so callers can inspect it or atomically materialize it.
     Canonical memory records stay in ``episode-inputs.json``; files under an
     episode folder contain only placement text and exposure-safe projections.
+    `target_ops` names a span's own deliveries, whose text span.md holds.
     """
     files: dict[str, str] = {}
     execution_id = episode.execution_identity.get("execution_id") or "unresolved"
-    status = episode.preparation_status
     identity = episode.recorded_episode_identity
-    lines = [
-        "# Episode input",
-        "",
-        f"execution_id: {execution_id}",
-        f"episode_id: {identity.get('episode_id') or '(unresolved)'}",
-        f"trace_session_id: {identity.get('trace_session_id') or '(unknown)'}",
-        f"sequence_id: {identity.get('sequence_id') or '(unknown)'}",
-        f"preparation_status: {status}",
-        f"steps: {len(episode.steps)}",
-        f"context_views: {len(episode.context)}",
-        f"searches: {len(episode.searches)}",
-        f"deliveries: {len(episode.deliveries)}",
-        "",
-        "Files:",
-        "- task.md — recorded user task and later user updates",
-        "- context.json — per-turn visible message occurrence references",
-        "- deliveries.md — chronological delivery and exposure evidence",
-        "- searches.json — search arguments and returned-count provenance",
-        "- steps/ — original global agent steps and tool availability",
-        "- manifest.json — navigation and source counts",
-    ]
-    if episode.attachments.get("golden"):
-        lines.append("- gold.md — evaluator-only golden attachment")
-    if episode.attachments.get("correctness") or episode.attachments.get("outcome_status"):
-        lines.append("- outcome.json — evaluator-only recorded outcome")
-    if episode.diagnostics:
-        lines.extend(["", "Preparation diagnostics:", *[f"- {d}" for d in episode.diagnostics]])
-    files["episode.md"] = "\n".join(lines) + "\n"
 
     task_lines = ["# Recorded task context", ""]
     if episode.task:
@@ -327,14 +380,33 @@ def build_episode_evidence(episode: EpisodeInput) -> dict[str, str]:
         task_lines.append("(no task message was recorded)")
     files["task.md"] = "\n".join(task_lines) + "\n"
 
-    context_payload = {
-        "episode_id": identity.get("episode_id"),
-        "message_occurrences": [project_occurrence(item, episode.deliveries) for item in episode.message_occurrences],
-        "views": [view.to_dict() for view in episode.context],
-        "gaps": episode.diagnostics,
-    }
+    targets = {item["entry_prefix"] for item in episode.deliveries if item["op_id"] in (target_ops or ())}
+    step_files = {}
+    for step in episode.steps:
+        step_files[step.turn] = f"steps/step_{step.step:06d}.md"
+        files[step_files[step.turn]] = _episode_step_text(episode, step, targets)
 
-    files["context.json"] = json.dumps(context_payload, ensure_ascii=False, indent=2) + "\n"
+    occurrences = []
+    for item in episode.message_occurrences:
+        projected = project_occurrence(item, episode.deliveries)
+        record = {"occurrence_id": projected["occurrence_id"], "role": projected.get("role"),
+                  "kind": projected.get("kind"), "source": _compact(projected.get("source"))}
+        record.update({key: projected[key] for key in
+                       ("memory_delivery_refs", "memory_delivery_text", "source_ownership") if key in projected})
+        home = _text_home(projected, files, step_files)
+        if home is not None:
+            record["text_in"] = home
+        elif _visible_text(projected):
+            record.update({key: projected[key] for key in ("content", "tool_calls") if projected.get(key)})
+        occurrences.append(record)
+    files["context.json"] = _records_json({
+        "episode_id": identity.get("episode_id"),
+        "message_occurrences": occurrences,
+        "views": [{"turn": view.turn, "step": view.step,
+                   "visible": [ref.get("occurrence_id") for ref in view.messages], "gaps": list(view.gaps)}
+                  for view in episode.context],
+        "gaps": episode.diagnostics,
+    })
 
     delivery_lines = ["# Memory deliveries", ""]
     if not episode.deliveries:
@@ -342,8 +414,10 @@ def build_episode_evidence(episode: EpisodeInput) -> dict[str, str]:
     for delivery in episode.deliveries:
         prefix = delivery.get("entry_prefix") or "D?"
         consumer = delivery.get("consumer") or {}
+        target = delivery.get("op_id") in (target_ops or ())
         delivery_lines.extend([
-            f"## {prefix} — {delivery.get('delivery_id') or '(unidentified delivery)'}",
+            f"## {prefix} — {delivery.get('delivery_id') or '(unidentified delivery)'}"
+            + (" (target of this span)" if target else ""),
             f"source event: {(delivery.get('source') or {}).get('event_index', '?')}, seq {(delivery.get('source') or {}).get('seq', '?')}",
             f"consumer: {consumer.get('status', 'unknown')} (global step {consumer.get('step') or '?'}, turn {consumer.get('turn') or '?'})",
             f"status: {delivery.get('status') or '(unknown)'}; binding: {delivery.get('binding_status') or '(unknown)'}",
@@ -351,6 +425,10 @@ def build_episode_evidence(episode: EpisodeInput) -> dict[str, str]:
         queries = delivery.get("queries") or [s.get("query") for s in delivery.get("searches", []) if s.get("query")]
         if queries:
             delivery_lines.append("search queries: " + "; ".join(json.dumps(q, ensure_ascii=False) for q in queries))
+        if target:
+            delivery_lines.extend([f"placement and entries: in span.md ({prefix}.E1, {prefix}.E2, … are "
+                                   "[m1], [m2], … in order)", ""])
+            continue
         for placement in delivery.get("placements", []):
             delivery_lines.append(
                 f"placement {placement.get('slot')!r} ({placement.get('kind') or 'kind unrecorded'}; "
@@ -367,40 +445,27 @@ def build_episode_evidence(episode: EpisodeInput) -> dict[str, str]:
         delivery_lines.append("")
     files["deliveries.md"] = "\n".join(delivery_lines) + "\n"
 
-    search_payload = {
+    files["searches.json"] = _records_json({
         # Opaque adapter extensions are audit data, not grounded agent
         # evidence: they can contain unexposed candidates or configuration.
-        "searches": [{key: value for key, value in search.items() if key != "extensions"}
+        "searches": [{key: _compact(value) if key.startswith("source") else value
+                      for key, value in search.items() if key != "extensions"}
                      for search in episode.searches],
         "count": len(episode.searches),
-    }
-    files["searches.json"] = json.dumps(search_payload, ensure_ascii=False, indent=2) + "\n"
+    })
 
-    entries: list[dict] = []
-    for name, kind in (
-        ("episode.md", "episode"),
-        ("task.md", "task"),
-        ("context.json", "context"),
-        ("deliveries.md", "deliveries"),
-        ("searches.json", "searches"),
-    ):
-        entries.append({"path": name, "kind": kind, "chars": len(files[name])})
+    entries = [_file_entry(name, kind, files) for name, kind in (
+        ("task.md", "task"), ("deliveries.md", "deliveries"),
+        ("searches.json", "searches"), ("context.json", "context"))]
     for step in episode.steps:
-        name = f"steps/step_{step.step:06d}.md"
-        files[name] = _episode_step_text(episode, step)
-        entries.append({
-            "path": name,
-            "kind": "step",
-            "step": step.step,
-            "turn": step.turn,
-            "seqs": [step.seq_start, step.seq_end],
-            "chars": len(files[name]),
-        })
+        name = step_files[step.turn]
+        entries.append({"path": name, "kind": "step", "step": step.step, "turn": step.turn,
+                        "seqs": [step.seq_start, step.seq_end], "chars": len(files[name])})
     if episode.attachments.get("golden"):
         files["gold.md"] = "# Golden attachment\n\n" + str(episode.attachments["golden"])
         if not files["gold.md"].endswith("\n"):
             files["gold.md"] += "\n"
-        entries.append({"path": "gold.md", "kind": "gold", "chars": len(files["gold.md"])})
+        entries.append(_file_entry("gold.md", "gold", files))
     if episode.attachments.get("correctness") or episode.attachments.get("outcome_status"):
         outcome = {
             "status": episode.attachments.get("outcome_status"),
@@ -408,18 +473,21 @@ def build_episode_evidence(episode: EpisodeInput) -> dict[str, str]:
             "join": episode.attachments.get("outcome_join"),
         }
         files["outcome.json"] = json.dumps(outcome, ensure_ascii=False, indent=2) + "\n"
-        entries.append({"path": "outcome.json", "kind": "outcome", "chars": len(files["outcome.json"])})
-    manifest = {
+        entries.append(_file_entry("outcome.json", "outcome", files))
+    files["manifest.json"] = _records_json({
         "schema": EPISODE_INPUT_SCHEMA,
         "execution_id": execution_id,
         "episode_id": identity.get("episode_id"),
-        "files": entries,
+        "trace_session_id": identity.get("trace_session_id"),
+        "sequence_id": identity.get("sequence_id"),
+        "preparation_status": episode.preparation_status,
         "counts": {
             "steps": len(episode.steps),
             "context_views": len(episode.context),
             "searches": len(episode.searches),
             "deliveries": len(episode.deliveries),
         },
-    }
-    files["manifest.json"] = json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
+        "diagnostics": list(episode.diagnostics),
+        "files": entries,
+    })
     return files

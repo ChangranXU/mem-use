@@ -2084,7 +2084,7 @@ def test_load_verdict_report_requires_injudge_schema(tmp_path):
     with pytest.raises(SystemExit):
         load_verdict_report(bad)
     # older artifact versions are rejected, not adapted
-    bad.write_text(json.dumps({"tool": {"schema": "injudge.report/v10"}}), encoding="utf-8")
+    bad.write_text(json.dumps({"tool": {"schema": "injudge.report/v15"}}), encoding="utf-8")
     with pytest.raises(SystemExit, match=REPORT_SCHEMA):
         load_verdict_report(bad)
     good = tmp_path / "good.json"

@@ -46,7 +46,6 @@ from injudge.judge import (
     GoldInput,
     _assemble_verdict,
     _corrective_note,
-    _echo_overlap_warnings,
     _error_verdict,
     _mask_key,
     _masked_head,
@@ -83,13 +82,13 @@ _RESUME = load_prompt("injudge/agent/resume")
 def _opening_message(span_id: str, files: dict[str, str]) -> str:
     """Keep the target verbatim; leave the detailed episode index to tools."""
     index = json.loads(files["manifest.json"])
-    navigation = [f"{entry['path']} ({entry['chars']} chars)" for entry in index["files"]
-                  if entry.get("kind") != "step"]
+    navigation = [f"{entry['path']} ({entry['chars']} chars) — {entry['description']}"
+                  for entry in index["files"] if entry.get("kind") != "step"]
     step_files = [entry["path"] for entry in index["files"] if entry.get("kind") == "step"]
     # name real files: the zero-padded names are not guessable from step numbers
     navigation.append(f"steps/: {len(step_files)} files, "
                       f"{step_files[0] if step_files else '?'} … {step_files[-1] if step_files else '?'}"
-                      " (one per global step)")
+                      " — one per global step: reasoning, content, commands, results")
     return (
         f"## span.md\n{files['span.md']}"
         + "\n\n## Evidence navigation\n" + "\n".join(navigation)
@@ -425,7 +424,6 @@ def _read_steps(messages: list, files: dict[str, str]) -> list[int]:
 
     Only text actually returned and retained counts. Line-range metadata
     alone would certify a header or a truncated result as an entire step.
-    A complete copy in baseline.md is equivalent to the original step file.
     """
     lines = {path: text.split("\n") for path, text in files.items()}
     covered: dict[str, dict[int, list[tuple[int, int]]]] = {}
@@ -464,24 +462,23 @@ def _read_steps(messages: list, files: dict[str, str]) -> list[int]:
                 complete.setdefault(path, set()).add(number)
     index = json.loads(files["manifest.json"])
     read = []
-    for entry in index["step_sources"]:
-        for source in entry["sources"]:
-            path = source["path"]
-            needed = {i for i in range(source["start"], source["end"] + 1)
-                      if lines[path][i - 1].strip()}
-            if needed and needed <= complete.get(path, set()):
-                read.append(entry["step"])
-                break
+    for entry in index["files"]:
+        if entry.get("kind") != "step":
+            continue
+        path = entry["path"]
+        needed = {i for i, line in enumerate(lines[path], 1) if line.strip()}
+        if needed and needed <= complete.get(path, set()):
+            read.append(entry["step"])
     return sorted(read)
 
 
 def _coverage_error(obj: dict, span: InjectionSpan, eligible: set[int], read: set[int]) -> str | None:
     """Absence of influence needs the whole window, not a search miss.
 
-    So does an improved or no_effect effect: a read anchor proves one action,
-    but a later harmful use of the same entry, unread, would decide the
-    effect. One harmful consequence already decides it. Unknown attribution
-    or effect remains available when the budget cannot cover the window.
+    So does every known effect: a later harmful use can decide an apparent
+    benefit, while a later use of diagnostic work can refute apparent waste.
+    Unknown attribution or effect remains available when the budget cannot
+    cover the window.
     """
     if span.step_first not in read:
         return f"first consuming step {span.step_first} was not read completely; read its step file"
@@ -490,7 +487,7 @@ def _coverage_error(obj: dict, span: InjectionSpan, eligible: set[int], read: se
         effect = entry["positive_effect"]["value"]
         if influence in ("none", "referenced", "selected"):
             claim, fallback = "no acted-on influence", "influence null if attribution"
-        elif influence == "acted_on" and effect in ("improved", "no_effect"):
+        elif influence == "acted_on" and effect is not None:
             claim, fallback = f"positive_effect {effect!r}", "positive_effect null if the effect"
         else:
             continue
@@ -614,7 +611,7 @@ def judge_span(
     system = _scoring_system(gold)
     span_dir = span_dir_name(span.id)
     dest = evidence_root / span_dir
-    files, baseline = build_span_evidence(span, episode)
+    files = build_span_evidence(span, episode)
     write_evidence(dest, files)
     # one trajectory per judging run: a re-judged span never mixes its old
     # conversation into the new audit trail
@@ -733,9 +730,8 @@ def judge_span(
                 if error is not None:
                     obj = None  # a semantic violation is as out-of-contract as a parse one
         if obj is not None:
-            verdict = _assemble_verdict(obj, text, span, warnings, cfg.api_key)
+            verdict = _assemble_verdict(obj, span, warnings, cfg.api_key)
             verdict["input"] = _input_record(gold, attempt, result, transcript, health)
-            _echo_overlap_warnings(verdict, span, baseline, warnings)
             _prose_warnings(verdict, span, files, warnings)
             return verdict
         last_text, last_error = text, error
@@ -759,6 +755,6 @@ def dry_run_print(
     episode: EpisodeInput,
 ) -> None:
     """Print the exact opening of a real run, without calls or files."""
-    files, _baseline = build_span_evidence(span, episode)
+    files = build_span_evidence(span, episode)
     print_safe(f"EVIDENCE FOLDER for {span.id}: {len(files)} files")
     print_safe(f"\nOPENING MESSAGE:\n{_opening_message(span.id, files)}")

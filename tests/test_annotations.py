@@ -41,7 +41,7 @@ def _span_files(span):
         execution_identity={"execution_id": "test-execution"},
         recorded_episode_identity={"episode_id": "test"},
     )
-    return build_span_evidence(span, episode)[0]
+    return build_span_evidence(span, episode)
 
 
 # ---------------------------------------------------------------- parsing

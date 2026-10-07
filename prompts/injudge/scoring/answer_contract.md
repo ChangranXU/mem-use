@@ -32,4 +32,4 @@ mention alone is not an action anchor. Anchors are required for acted_on or
 selected, optional for referenced or null, empty for none; out-of-window
 anchors are rejected. positive_effect must be null unless influence is
 acted_on. Read the complete text of every step cited in anchors or evidence;
-paged reads combine, and a complete step copy in baseline.md also counts.
+paged reads of a step file combine.

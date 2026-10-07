@@ -280,9 +280,8 @@ class InjectionSpan:
     identical across the span's deliveries by construction (a changed
     exposure splits the span): the judge scores the exposure,
     never an unseen suffix.
-    `seq_first`/`seq_last` bracket the span's ops (min/max event seq); a
-    truncated-tail op merged across newer spans can make the range overlap
-    a neighbor's.
+    `seq_first`/`seq_last` bracket the span's ops (min/max event seq).
+    Unobserved consumers never merge into an attributed span.
     `queries` is the distinct recorded search queries that produced the
     span's injections (in delivery order); `placements` keeps each rendered
     slot's kind and full resolved text in recorded order, with the digest

@@ -9,7 +9,7 @@ repeated search's list, scored as `<case>/read`, `<case>/read/m2`, …).
 They cover explicit and
 uncited use, routine practice, source and novelty distinctions, uncertainty,
 plan execution and reversal, harmful advice, a benefit followed by harm,
-unproductive use, a change kept without a check that could show its benefit,
+a wasted detour, a change kept without a check that could show its benefit,
 reading a listed candidate whose unrecorded full text is
 then set aside or used,
 recorded preview/full-read pairs, a historically scoped claim, whole-list
@@ -401,8 +401,9 @@ CASES: dict[str, dict] = {
         "expect": {"influence": ["acted_on"],
                    "positive_effect": ["improved"], "verdict": ["positive"]},
     },
-    # Acted on without benefit or harm: unproductive, which is not misuse.
-    "unproductive_action": {
+    # A memory-caused run that added work and contributed nothing is harm,
+    # even though the agent dropped it at once.
+    "wasted_detour": {
         "task": "Fix the parser's empty input crash.",
         "before": [("The crash is an unguarded first-token access; add an empty-input guard next.",
                     "cat src/parser.py", "def parse(tokens): return tokens[0]")],
@@ -416,7 +417,27 @@ CASES: dict[str, dict] = {
             ("Verify the guard.", "pytest tests/test_parser.py", "8 passed"),
         ],
         "expect": {"influence": ["acted_on"],
-                   "positive_effect": ["no_effect"], "verdict": ["neutral"]},
+                   "positive_effect": ["harmed"], "verdict": ["negative"]},
+    },
+    # A disproved hypothesis still contributes when the next action uses
+    # its diagnostic result. Removing the temporary probe is not wasted work.
+    "diagnostic_rules_out_hypothesis": {
+        "task": "The parser rejects empty input. Find the cause and fix it.",
+        "before": [("It may reject an empty token list or an empty first token; inspect the entry point.",
+                    "cat src/parser.py", "def parse(tokens): return validate(first(tokens))")],
+        "memory": ("parser_probe", "Temporarily log the token count at the parser entry point "
+                   "to distinguish an empty list from an empty first token."),
+        "consumer": ("Use the memory's diagnostic probe to distinguish the two live hypotheses.",
+                     "python add_token_count_probe.py && python repro.py", "token count: 1; parse failed"),
+        "after": [
+            ("The probe rules out an empty list. Inspect validate() for its handling of an empty string.",
+             "cat src/validate.py", "def validate(token):\n    if not token: raise ValueError('empty')\n    return token"),
+            ("validate rejects the empty string. Allow it and remove the now-completed diagnostic probe.",
+             "python allow_empty_token.py && python remove_token_count_probe.py", "validator fixed; probe removed"),
+            ("Verify the diagnosed failure.", "python repro.py", "empty input accepted"),
+        ],
+        "expect": {"influence": ["acted_on"], "positive_effect": ["improved"],
+                   "verdict": ["positive"]},
     },
     # Acted on and submitted, but the only check passed before the change too:
     # nothing observed ties a benefit to it, and nothing shows it unproductive.
@@ -748,21 +769,26 @@ def score(reports: list[dict]) -> list[str]:
     labeled = [_labels(r) for r in reports]
     expected = expected_labels()
     for i, cases in enumerate(labeled, 1):
-        agree = total = 0
+        agree = total = unavailable = 0
         misses = []
         for name, labels in expected.items():
             got = cases[name]
             for label, allowed in labels.items():
-                total += 1
                 if "problem" in got:
+                    unavailable += 1
                     misses.append(f"    {name}.{label}: unscored ({got['problem']})")
-                elif got[label] in allowed:
+                    continue
+                # Provider failures and missing cases say nothing about
+                # label agreement; report them beside its denominator.
+                total += 1
+                if got[label] in allowed:
                     agree += 1
                 else:
                     note = got["notes"].get(label) if label in _SIGNALS else None
                     misses.append(f"    {name}.{label}: expected {allowed}, got {got[label]!r}"
                                   + (f" — {note}" if note else ""))
-        lines.append(f"report {i}: {agree}/{total} expected labels agree")
+        headline = f"{agree}/{total} expected labels agree" if total else "no expected labels assessed"
+        lines.append(f"report {i}: {headline}" + (f"; {unavailable} unavailable" if unavailable else ""))
         lines.extend(misses)
     if len(labeled) > 1:
         # Only labels every report produced can be stable; a missing or

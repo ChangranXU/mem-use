@@ -13,11 +13,11 @@ usage and span verdicts. Task success never decides a memory verdict.
 
 | Signal | Values and meaning |
 |---|---|
-| `relevance` | `true` / `false`: the exposed claim applies to the task or subgoal at delivery. A proposed remedy can be relevant even when wrong. Shared names alone do not establish relevance. |
+| `relevance` | `true` / `false`: the exposed claim applies to the task or subgoal at delivery. A cause or remedy offered for the current failure is relevant even when wrong. An account of a different failure is relevant only with the same mechanism: what goes wrong, and what action diagnoses, fixes, or checks it. A shared topic, symptom, or name alone is not enough. An uncertain mechanism match is `false`. |
 | `accuracy` | `corroborated` / `uncontradicted` / `contradicted`, within the claim's own repository/version/situation. Uncontradicted means neither confirmed nor refuted. |
 | `novelty` | `novel` / `confirming` / `redundant` / `null`, relative to the recorded pre-exposure input. Confirming settles a voiced doubt; redundant requires already-established substance. Expected task outputs do not automatically supply the solution mechanism. Mixed entries are redundant only when every material claim was established. An earlier delivery counts as baseline only while still in the consuming input, as `span.md` states; a copy arriving in the same input is not earlier. |
 | `influence` | `none` / `referenced` / `selected` / `acted_on` / `null`, defined below. |
-| `positive_effect` | `improved` / `no_effect` / `harmed` / `null`. Non-null only for `acted_on`; judge observed consequences of the anchored action. Keeping or submitting a change is not itself a benefit. Any harm among the entry's actions makes it `harmed`, even after an earlier benefit. Unknown direction remains null. |
+| `positive_effect` | `improved` / `no_effect` / `harmed` / `null`. Non-null only for `acted_on`; judge observed consequences of the anchored action. Keeping or submitting a change is not itself a benefit. `harmed` includes added work that contributed nothing to the outcome or process: a memory-caused command, edit, or run that was discarded, undone, or corrected, even quickly. This includes the memory-caused part of a useful change that a later step had to correct. Reading memory content is delivery cost, not added work. `no_effect` requires an acted-on action that made no difference and added no work. Any harm among the entry's actions makes it `harmed`, even after an earlier benefit. Unknown direction remains null. |
 
 Novelty, correctness, influence and effect are independent. A redundant reminder
 can shape an action; an inaccurate claim can trigger a useful diagnostic. A
@@ -51,8 +51,13 @@ but do not determine a signal.
 - `acted_on`: distinctive exposed content, explicit credit, or a demonstrated
   memory-shaped change of direction influenced an action. A decision needs
   subsequent execution. Routine practice or wording overlap alone is not use.
-- `null`: attribution is ambiguous between sources or investigation is
-  incomplete. Name the competing sources or missing evidence. Effect is null.
+- `null`: an action uses the entry's distinctive content, but an independent
+  source explains the same action equally. Independent sources are the task,
+  code and tool output, and reasoning stated before the delivery. A plan first
+  stated after the delivery is not one. Or the investigation is incomplete. Name
+  the action and the competing source, or the missing evidence. Effect is null.
+  If no action uses the entry's distinctive content, the label is `none`. A
+  shared general direction is not ambiguity.
 
 The redundant `decisive` tier was removed in v15. Describe a course change in
 an `acted_on` note. A preview can directly shape an edit without being opened;
@@ -91,15 +96,15 @@ complete step text retained in the judge conversation.
 
 Read tracking verifies actual numbered tool-result text against the evidence
 files. Paged reads combine; a truncated line, header-only read, search hit, error
-result or rolled-back read does not certify a complete step. Complete prior-step
-copies indexed in `baseline.md` count just like the original step files. A
-pre-exposure copy omitting a later tool result does not certify that full step.
+result or rolled-back read does not certify a complete step. `baseline.md`
+contains visible input, not complete historical step copies; read cited steps
+from their own files.
 
-Every answer requires the complete first consuming step. `none`, `referenced`, and `selected`
-additionally require every eligible step in that entry's window, and so do the
-`improved` and `no_effect` effects: a later harmful use would decide the effect.
-`harmed` still requires the first consuming step and its cited steps, but not
-the remaining window. If acted-on influence is established but effect inspection
+Every answer requires the complete first consuming step. `none`, `referenced`,
+and `selected` additionally require every eligible step in that entry's window,
+and so does every non-null effect. A later harmful use can decide an apparent
+benefit, while later use of diagnostic work can refute apparent waste.
+If acted-on influence is established but effect inspection
 is incomplete, keep `acted_on` and use `positive_effect: null`. Unassessed
 attribution uses influence null; do not invent neutrality or benefit to finish
 a budget-limited investigation.
@@ -125,8 +130,13 @@ words is noted.
 | `none` | `null` | `ignored` |
 | `null` | `null` | `unclear` |
 
-Unproductive use requires evidence that the action produced no useful consequence;
-it is not harm. A rejected investigation may still resolve uncertainty and help.
+Unproductive use requires evidence that an acted-on action made no difference
+and added no work; it is not harm. Memory-caused
+work that contributed nothing is `harmed`. A diagnostic experiment improves work
+only when later actions demonstrably use its finding, such as ruling out a live
+hypothesis to direct the next check. Removing a completed temporary probe is not
+harm; an abandoned attempt without a used finding is harm. An unproven
+contribution stays null, and separate harmful actions still dominate.
 Costs are recorded separately. `misused` is reserved for harmful acted-on influence.
 
 The conservative span triage rule is: any `misused` → negative; otherwise any
@@ -147,6 +157,7 @@ denominators. Unselected episodes/limited spans are `unjudged`; judge failures a
 `error`. Influence null is counted explicitly and excluded from the assessed
 influence-rate denominator, as novelty null is for novelty.
 
-Report v15 and summary v13 deliberately change the categories and the meaning of
-complete `read_steps`; older reports are not silently reinterpreted. See
+Report v16 and summary v14 distinguish memory-caused work without a contribution
+from no-effect use. Complete `read_steps` now certifies the step files themselves;
+baseline references do not count as reading those files. Older reports are not silently reinterpreted. See
 [Artifacts](artifacts.md) and [Judge evidence](scoring-input.md).

@@ -1,11 +1,15 @@
 Your evidence is one folder with the target span and its parent episode,
 read through read_evidence and search_evidence. span.md holds the target's
 entries ([m1], [m2], ... — key your answer by these ids), placement,
-exposure, and each entry's footprint window. task.md holds the task and later
-user updates; baseline.md holds the pre-exposure record and earlier steps.
-context.json holds the detailed visibility audit. Memory text is in deliveries.md under
-its D-ref (memory_delivery_text), never absent; steps/ holds one file per
-agent step, named by its global step number. Other deliveries are competing sources, not targets.
+exposure, and each entry's footprint window. task.md holds the
+task and later user updates; baseline.md lists the consumer's visible input in
+order. baseline.md and context.json reference text already held elsewhere;
+remaining visible text lives in baseline.md. Memory text is in
+span.md (the target) or deliveries.md under its D-ref, never absent. Earlier
+actions remain in steps/; they can establish a prior direction, but are not
+necessarily still visible after a history rewrite. context.json is the
+detailed visibility index; steps/ holds one file per agent step, named by its
+global step number. Other deliveries are competing sources, not targets.
 Optional gold.md is a reference solution; outcome.json is corroboration only.
 
 Order exposure by step, not seq: the first consuming step had the memory in

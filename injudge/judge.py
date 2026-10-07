@@ -214,54 +214,6 @@ def _cmd_of(args: dict | str) -> str:
     return json.dumps(args or {}, ensure_ascii=False)
 
 
-# ------------------------------------------------- the same-episode echo guard
-
-# Content words the overlap check counts (4+ chars — shorter tokens are
-# stopword-grade noise). Heuristic thresholds: the guard is a display-level
-# warning, never a verdict rewrite, so a miss keeps today's behavior.
-_ECHO_WORD = re.compile(r"[A-Za-z0-9_]{4,}")
-_ECHO_MIN_WORDS = 6  # a shorter value is too coarse to call an echo
-_ECHO_MIN_OVERLAP = 0.8  # share of the value's words already seen pre-injection
-
-def _echo_overlap_warnings(
-    verdict: dict,
-    span: InjectionSpan,
-    baseline: str,
-    warnings: list[str],
-) -> None:
-    """Display-level guard against the same-episode echo trap: a memory whose
-    value substantially overlaps the pre-injection context (the task statement
-    or the agent's own pre-span steps) but was judged novelty=novel is the
-    signature of mid-episode extraction re-injecting the agent's own reasoning.
-    Warn like every other correction note here — the judged value stands."""
-    rubric = verdict.get("rubric") or {}
-    if not rubric or span.step_first is None:
-        return
-    pre = {w.lower() for w in _ECHO_WORD.findall(baseline)}
-    if not pre:
-        return
-    for i, m in enumerate(span.memories):
-        mid = memory_id(i)
-        key = m.get("key")
-        signals = rubric.get(mid)
-        if not signals or (signals.get("novelty") or {}).get("value") != "novel":
-            continue
-        value = m.get("value")
-        if not isinstance(value, str):
-            continue
-        words = {w.lower() for w in _ECHO_WORD.findall(value)}
-        if len(words) < _ECHO_MIN_WORDS:
-            continue
-        overlap = len(words & pre) / len(words)
-        if overlap >= _ECHO_MIN_OVERLAP:
-            warnings.append(
-                f"{span.id}: {mid} ({key or 'unkeyed'}).novelty judged 'novel' but "
-                f"{overlap:.0%} of the value's words already appear in the independent "
-                "pre-delivery context or prior steps — a possible same-episode "
-                "echo (the judged novelty stands; review the span)"
-            )
-
-
 # A quotation mark claims verbatim text, whichever source the prose names, so
 # any quoted fragment must occur in the evidence the judge could read.
 # Backticks format code, not quotations.
@@ -859,52 +811,24 @@ def _error_verdict(
 
 
 def _assemble_verdict(
-    obj: dict, text: str, span: InjectionSpan, warnings: list[str], api_key: str
+    obj: dict, span: InjectionSpan, warnings: list[str], api_key: str
 ) -> dict:
-    """Contract validation and assembly of a shape-valid judge object into
-    the internal verdict record; memory_usage and the span verdict derive
-    in code.
+    """Derive usage and verdict after strict shape and span validation.
 
-    These are the semantic checks a JSON schema cannot express, not format
-    tolerance: the positive_effect↔influence pairing correction and the
-    confidence range clamp. Id coverage and anchor windows are the
-    corrective loop's (_verdict_semantics) — an answer reaching this point
-    already carries exactly one entry per delivered memory id, so the
-    missing-entry and unknown-id branches below are the direct-caller
-    degrade, never a live path. Every delivered ENTRY is judged — two
-    entries sharing one display key stay two entries (distinct span-local
-    ids), never collapsed."""
+    Coverage and anchor checks have one owner: _verdict_semantics. Assembly
+    never invents partial rubric entries for an invalid answer.
+    """
     verdict = blank_verdict()
     entries = {e["id"]: e for e in obj["memories"]}
-    unknown = sorted(
-        set(entries) - {memory_id(i) for i in range(len(span.memories))}
-    )
-    if unknown:
-        # direct-caller noise, dropped like the missing-entry degrade —
-        # never silently; the ids are endpoint output, so mask like every
-        # other echo path
-        warnings.append(
-            f"{span.id}: rubric entry for unknown id "
-            f"{_mask_key(repr(unknown), api_key)} dropped"
-        )
-    for i, m in enumerate(span.memories):
+    for i in range(len(span.memories)):
         mid = memory_id(i)
-        entry = entries.get(mid)
-        if entry is None:
-            # unreachable through the corrective loop (coverage is enforced
-            # there); kept so a direct assembly call degrades, never
-            # KeyErrors — the entry is visibly unanswered, never invented
-            warnings.append(f"{span.id}: rubric missing memory {mid}; signals nulled")
-            signals = {s: {"value": None, "note": ""} for s in _SIGNALS}
-            anchors: list[int] = []
-        else:
-            signals = {
-                s: {"value": entry[s]["value"],
-                    "note": _mask_key(str(entry[s].get("note") or ""), api_key)}
-                for s in _SIGNALS
-            }
-            anchors = entry.get("anchors")
-            anchors = anchors if isinstance(anchors, list) else []
+        entry = entries[mid]
+        signals = {
+            s: {"value": entry[s]["value"],
+                "note": _mask_key(str(entry[s].get("note") or ""), api_key)}
+            for s in _SIGNALS
+        }
+        anchors = entry["anchors"]
         # positive_effect pairs with acted-on influence
         inf, pe = signals["influence"], signals["positive_effect"]
         if inf["value"] in _ACTED and pe["value"] is None:

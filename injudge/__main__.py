@@ -30,7 +30,6 @@ network access or file writes.
 from __future__ import annotations
 
 import argparse
-import bisect
 import json
 import sys
 import threading
@@ -151,62 +150,6 @@ def _unjudged(reason: str) -> dict:
 
 # The judge endpoint config lives next to the package, not in the cwd.
 _DEFAULT_ENV = Path(__file__).resolve().parents[1] / ".env"
-
-
-def _residency_note(
-    t: Trajectory, recall_ops: list[MemoryOp], restated_ratio: float | None
-) -> str | None:
-    """The restated-merge residency regime note; None when not warranted.
-
-    group_spans judges identical re-deliveries once per span, presupposing
-    the earlier injection still resides in the agent's context. A harness
-    that rewrites history after each delivery (dropping the previous
-    injection) instead keeps only the LATEST memory block resident —
-    re-delivery is the mechanism of continued visibility. The
-    judge-once-per-span treatment stays defensible either way (the agent's
-    own turns persist and the content was seen one step earlier), but the
-    restated numbers presuppose one of the two regimes — so when restating
-    dominates and the recorded rewrites show the drop pattern (most
-    deliveries followed by a dropping main-lane rewrite before the next
-    delivery — a drop trailing the final delivery counts too: it evicts that
-    block before the run's end), the note states which regime the metrics
-    assume.
-    """
-    if restated_ratio is None or restated_ratio <= 0.5 or len(recall_ops) < 2:
-        return None
-    seqs = sorted(op.seq for op in recall_ops)
-    drops = []
-    for r in t.rewrites:
-        src = r.get("proxy_source")
-        # a dropping rewrite on the main side (not memory-lane, not a side
-        # lane); a corrupt non-string lane names no side lane and counts as
-        # main-side traffic, matching the parser's classification guards
-        if not r.get("dropped") or r.get("on_memory_lane"):
-            continue
-        if (src is None or isinstance(src, str)) and src in t.side_lanes:
-            continue
-        drops.append(r["seq"])
-    if not drops:
-        return None
-    drops.sort()
-    followed = 0
-    for i, seq in enumerate(seqs):
-        end = seqs[i + 1] if i + 1 < len(seqs) else None
-        j = bisect.bisect_right(drops, seq)
-        if j < len(drops) and (end is None or drops[j] < end):
-            followed += 1
-    if followed * 2 < len(seqs):
-        return None
-    return (
-        f"{followed} of {len(seqs)} deliveries were followed by a history "
-        "rewrite dropping resident context (before the next delivery — or, "
-        "after the final delivery, before the run's end; a trailing drop "
-        "evicts that block too), and restated re-deliveries are "
-        f"{restated_ratio:.0%} of injections: this harness "
-        "keeps only the LATEST memory block resident (re-delivery is the "
-        "visibility mechanism) — the one-verdict-per-span metrics assume "
-        "that residency regime"
-    )
 
 
 def _exposure_notes(run_id: str, spans: list[InjectionSpan]) -> list[dict]:
@@ -965,12 +908,6 @@ def main(argv: list[str] | None = None) -> int:
             "prompt_tokens_total": prompt_total or None,
             "injected_token_share": share,
         }
-        # the residency regime the restated metrics assume: a harness that
-        # rewrites history after deliveries keeps only the LATEST memory
-        # block resident — say so when restating dominates
-        residency = _residency_note(t, recall_ops, policy["restated_ratio"])
-        if residency is not None:
-            validation.append({"level": "info", "msg": f"{run_id}: {residency}"})
         trajectories.append(
             {
                 "id": t.id,

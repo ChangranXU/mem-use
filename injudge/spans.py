@@ -51,13 +51,10 @@ inclusive (`same_step_bound`), with the collision noted in warnings. A copy
 showing new verified text is eligible at that step too; one adding nothing
 verifiable — indistinguishable, so creditable once — opens after it
 (`memory_window_starts`).
-A delivery carries no step only when no agent turn ever classified in the
-run (a memory-only or pre-first-response recording) or its bound consumer
-never completed a classified turn; such ops sort last and
-merge only into a matching-content span, and a span whose ops are ALL
-unattributed gets step_first/step_last = None and is auto-judged neutral
-without an LLM call (no downstream can be observed — observation
-missingness, reported apart from measured neutrality in the aggregates).
+Unattributed deliveries have no observed consumer and stay separate from
+attributed spans. Consecutive unattributed copies merge only under the same
+treatment; their spans remain unassessable and cannot inherit a verdict or
+charge their tokens to an observed effect.
 """
 
 from __future__ import annotations
@@ -110,19 +107,14 @@ def _same_treatment(span: InjectionSpan, op: MemoryOp) -> bool:
       order is presentation: a re-ranked bundle is not the same treatment);
     - placement presentation (ordered slot names, kinds and full texts,
       or recorded digests for unresolved texts — reframing is a new treatment);
-    - per-entry EXPOSURE (state and exposed length): merging a wider later
-      exposure backward would show the judge content the span's early
-      anchors predate — the clipped→full leak. A corrupt exposure record
-      (length mismatch) compares as "no contradiction": the op then merges
-      and the span's recorded exposure stands (never widened).
+    - per-entry EXPOSURE: merging a wider later exposure backward would
+      show the judge content the span's early anchors predate.
     """
     if [canonical_entry(m) for m in op.memories] != [canonical_entry(m) for m in span.memories]:
         return False
     if op.placements != span.placements:
         return False
-    if not op.exposure or len(op.exposure) != len(span.memory_exposure):
-        return True
-    return all(a == b for a, b in zip(span.memory_exposure, op.exposure))
+    return op.exposure == span.memory_exposure
 
 
 def group_spans(
@@ -159,40 +151,25 @@ def _merge_spans(
     """Collapse consecutive same-treatment deliveries; return the spans and
     the attributed steps of each (parallel lists).
 
-    A truncated-tail re-delivery (no step) merges into the newest matching
-    span wherever it sits — it cannot break consecutiveness, and must never
-    become a spurious null-step span judged auto-neutral on its own. Its
-    exposure is never merged (unknown step, so nothing it showed can be
-    time-bounded — the span keeps the exposure AND placement its attributed
-    deliveries recorded, never widened or backfilled backward). An attributed merge is the same
-    treatment by construction, so its exposure record equals the span's:
-    nothing to merge. Delivery context rides the span: distinct queries
-    (a query rewrite between identical deliveries is still the span's
-    provenance) and the first recorded placement description."""
+    Observed and unobserved consumers are separate populations. A missing
+    consumer supplies no evidence that an earlier span's effect applies.
+    """
     ops = sorted(recall_ops, key=lambda o: (o.step is None, o.step or 0, o.seq))
     spans: list[InjectionSpan] = []
     steps_seen: list[list[int]] = []
-    latest: dict[str, int] = {}  # fingerprint -> newest span with it
-
     for op in ops:
         fp = content_fingerprint(op)
         target = None
-        if spans and fp == spans[-1].fingerprint:
+        if (spans and fp == spans[-1].fingerprint
+                and bool(steps_seen[-1]) == (op.step is not None)
+                and _same_treatment(spans[-1], op)):
             target = len(spans) - 1
-        elif op.step is None and fp in latest:
-            target = latest[fp]
-        if target is not None and op.step is not None and not _same_treatment(spans[target], op):
-            # identical content under a NEW treatment: split — merging would
-            # lend the later delivery's exposure/presentation to anchors
-            # that predate it
-            target = None
         if target is not None:
             span = spans[target]
             span.op_ids.append(op.id)
             span.n_injections += 1
             # min/max: ops arrive in step order, but a declared/bound step
-            # can invert seqs, and a truncated-tail op merges across newer
-            # spans — the range must still bracket every op of the span
+            # can invert seqs: the range must still bracket every op.
             span.seq_first = min(span.seq_first, op.seq)
             span.seq_last = max(span.seq_last, op.seq)
             if op.step is not None:
@@ -202,11 +179,7 @@ def _merge_spans(
             for query in op.queries:
                 if query and query not in span.queries:
                     span.queries.append(query)
-            # Attributed merges already have identical presentation. An
-            # unattributed tail must not backfill a missing placement: its
-            # text could expose content the earlier consumer never saw.
             continue
-        latest[fp] = len(spans)
         spans.append(
             InjectionSpan(
                 id=f"{traj_id}:S{id_offset + len(spans) + 1}",
@@ -426,8 +399,7 @@ def _stamp_followups(spans: list[InjectionSpan], episode: EpisodeInput) -> None:
             end = span.memory_windows.get(mid)
             for delivery in episode.deliveries:
                 shown = [ref["exposure"].get("shown") for ref in delivery["memories"]
-                         if namespace_of(ref["audit"]) == namespace_of(m)
-                         and grouping_item_key(ref["audit"]) == grouping_item_key(m)]
+                         if entry_ident(ref["audit"]) == entry_ident(m)]
                 if not shown:
                     continue
                 searches = [s for s in delivery["searches"]

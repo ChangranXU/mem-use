@@ -47,7 +47,9 @@ uv run -m injudge calibration-cases/ -o output/calibration   # 付费；重复�
 uv run -m calibration score output/calibration/*/injudge-report.json
 ```
 
-`score` 报告每处分歧、重复运行的逐标签稳定性，以及匹配用例的新颖性一致性。相同设置
+`score` 报告每处分歧、重复运行的逐标签稳定性，以及匹配用例的新颖性一致性。
+缺失或失败的目标单独计为不可评估，不进入一致率分母；没有有效答案时报告没有已评估标签，
+不产生一致率。相同设置
 衡量可重复性，改变设置衡量敏感性。除标签外还须审阅来源断言：neutral 判定仍可能错误
 描述证据。`AGENTS.md` 要求付费校准取得用户授权。
 

@@ -85,9 +85,35 @@ def test_calibration_missing_cases_are_unavailable_not_stable(tmp_path, monkeypa
     pair = {case_id("matched_a"), case_id("matched_b")}
     report["operations"] = [o for o in report["operations"] if runs[o["traj"]] not in pair]
     lines = score([report, report, report])
+    expected = expected_labels()
+    missing = sum(len(expected[name]) for name in ("matched_a", "matched_b"))
+    assessed = sum(map(len, expected.values())) - missing
+    assert lines[0] == f"report 1: {assessed}/{assessed} expected labels agree; {missing} unavailable"
     available = _stability_labels(expected_labels()) - 12
     assert f"stability: {available}/{available} labels identical across 3 reports; 12 unavailable (missing or errored in a report)" in lines
     assert all("novelty unavailable" in line for line in lines if line.startswith("matched pair"))
+
+
+def test_calibration_errors_do_not_hide_assessed_disagreements(tmp_path, monkeypatch):
+    _status, report = _judge_cases(tmp_path, monkeypatch)
+    runs = {t["id"]: t["run_id"] for t in report["trajectories"]}
+    failed = next(o for o in report["operations"] if runs[o["traj"]] == case_id("implicit_action"))
+    failed.update(verdict="error", error="provider unavailable", rubric={})
+    changed = next(o for o in report["operations"] if runs[o["traj"]] == case_id("matched_a"))
+    changed["rubric"]["m1"]["novelty"]["value"] = "novel"
+    expected = expected_labels()
+    unavailable = len(expected["implicit_action"])
+    assessed = sum(map(len, expected.values())) - unavailable
+    lines = score([report])
+    assert lines[0] == f"report 1: {assessed - 1}/{assessed} expected labels agree; {unavailable} unavailable"
+    assert "    implicit_action.influence: unscored (provider unavailable)" in lines
+    assert any("matched_a.novelty: expected ['redundant'], got 'novel'" in line for line in lines)
+
+
+def test_calibration_with_no_answers_reports_no_assessed_labels():
+    unavailable = sum(map(len, expected_labels().values()))
+    lines = score([{"trajectories": [], "operations": []}])
+    assert lines[0] == f"report 1: no expected labels assessed; {unavailable} unavailable"
 
 
 def test_calibration_evidence_does_not_name_the_case(tmp_path, monkeypatch):
@@ -131,7 +157,8 @@ def test_recorded_followup_cases_have_real_host_links_and_separate_credit(tmp_pa
         assert (hit["step"], hit["delivery_step"]) == (action, action + 1)
         root = by_span[full["operation_id"]]
         assert case["followup"]["value"] not in (root / "baseline.md").read_text()
-        assert "[memory delivery D2; see deliveries.md]" in (root / "steps" / f"step_{hit['step']:06d}.md").read_text()
+        # The full read is this span's own delivery: its text is in span.md, one hop away.
+        assert "[memory delivery D2; see span.md]" in (root / "steps" / f"step_{hit['step']:06d}.md").read_text()
         assert preview["verdict"] in case["expect"]["verdict"]
         assert full["verdict"] in case["followup"]["expect"]["verdict"]
 

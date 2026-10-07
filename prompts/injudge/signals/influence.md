@@ -22,9 +22,16 @@
      the memory, or demonstrably changes a prior direction because of it.
      Anchor the action or a decision later substantiated by execution. An
      unexecuted plan, a matching phrase, or routine practice alone is not use;
-   - null: attribution is ambiguous between memory and another source, or
-     the window was not inspected sufficiently. Name the competing sources
-     or unread evidence; positive_effect is null.
+   - null: an action in the window uses this entry's distinctive exposed
+     content, but an independent source supports that same action equally
+     and the record cannot decide; or the window was not inspected
+     sufficiently. Independent sources are the task, code and tool output,
+     and reasoning stated before the delivery; a plan first stated after the
+     delivery is not one. Name the action and the competing source, or the
+     unread evidence; positive_effect is null. When no action uses the entry's
+     distinctive content (its specific mechanism, location, or remedy) and
+     other sources explain the actions, use none: a shared general
+     direction is not ambiguity.
 
    Start with the first consuming step: it is already post-exposure. A prior
    direction needs an earlier step or pre-exposure input, not a plan first
@@ -33,10 +40,9 @@
    A skipped action needs a pre-delivery announced intent or explicit credit.
    Distinguish task requirements, prior code/tool evidence, common practice,
    and memory. Expected task outputs do not automatically supply the solution.
-   Minimal edits and focused-before-full testing are routine, not distinctive
-   content. Their absence from the task does not establish memory use. Uncited
-   matching of these practices is none; explicit credit or a demonstrated
-   reversal of a prior plan can establish acted_on.
+   A generic practice matching later behavior (such as a small diff, or
+   targeted tests before the full suite) is not distinctive content: without
+   explicit credit or a demonstrated change of direction, influence is none.
 
    Other deliveries are competing sources, with one exception: when a
    preview's shown identifier selected a recorded fuller delivery of the same

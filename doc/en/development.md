@@ -59,7 +59,9 @@ uv run -m calibration score output/calibration/*/injudge-report.json
 ```
 
 `score` reports every disagreement, per-label stability across repeats, and
-matched-pair novelty consistency. Use identical settings to measure repeatability;
+matched-pair novelty consistency. Missing or failed targets are reported as
+unavailable and excluded from the agreement denominator; with no answers, it
+reports no assessed labels rather than an agreement score. Use identical settings to measure repeatability;
 changed settings measure sensitivity. Inspect source claims as well as labels:
 a neutral verdict can still misdescribe its evidence. Paid calibration requires
 the user's go-ahead under `AGENTS.md`.

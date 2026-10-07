@@ -28,8 +28,8 @@ Each run writes its own `<run-stamp>/` folder (`YYYYMMDD-HHMMSS-<hex>`) under `-
 
 | File | Contents |
 |---|---|
-| `injudge-report.json` | The runtime judging record (`injudge.report/v15`), written before paid work with pending spans marked `unjudged`, then checkpointed after each completed span, including parallel completions |
-| `summary.json` | The final statistics (`injudge.summary/v13`): counts, rates, per-memory usage |
+| `injudge-report.json` | The runtime judging record (`injudge.report/v16`), written before paid work with pending spans marked `unjudged`, then checkpointed after each completed span, including parallel completions |
+| `summary.json` | The final statistics (`injudge.summary/v14`): counts, rates, per-memory usage |
 | `memgraph-verdicts.html` | Only with `--html`: memgraph with recall nodes colored by verdict |
 | `evidence/` | One folder per span sent to the judge agent (error verdicts from a failed run included): target `span.md` plus only its parent's prepared episode files and optional attachments |
 | `agent-runs/` | One trajectory JSONL per span sent to the judge agent: the pi event-sourced recording of how each verdict was reached |
@@ -44,7 +44,7 @@ Assessable spans are also rejected when the episode has unresolved placement own
 
 ## Offline Preparation
 
-`--prepare-only` writes the offline episode package instead of a judged run: `<run-stamp>/episode-inputs.json` (the `injudge.episode-inputs/v1` index) plus one `<run-stamp>/episodes/<episode-dir>/` folder per materialized episode. It loads no `.env`, needs no Node, and makes no judge calls; the package is written before a nonzero exit when a boundary or assignment needs review. See [Configuration](configuration.md#offline-preparation).
+`--prepare-only` writes the offline episode package instead of a judged run: `<run-stamp>/episode-inputs.json` (the `injudge.episode-inputs/v2` index) plus one `<run-stamp>/episodes/<episode-dir>/` folder per materialized episode. It loads no `.env`, needs no Node, and makes no judge calls; the package is written before a nonzero exit when a boundary or assignment needs review. See [Configuration](configuration.md#offline-preparation).
 
 ## Injection Spans
 
@@ -57,9 +57,13 @@ Episodes are partitioned before span grouping. Identical treatments across episo
 - Re-deliveries roll up as `restated`: they count toward delivery cost and `n_injections`, but never appear in verdict rates.
 - A span with no attributed agent step (`step_first` is `None`) has no downstream footprint. It is rule-judged **neutral** with `auto: no_subsequent_turn`, and no judge call is made. Aggregates tally it as `unassessable`, out of every directional rate.
 
-The one-verdict-per-span rollup presupposes the earlier injection still resides in the agent's context. When the recording shows the opposite regime — at least half of the deliveries followed by a dropping history rewrite before the next delivery (a drop trailing the final delivery counts too: it evicts that block before the run's end), so only the LATEST memory block is resident and re-delivery is the visibility mechanism — and restated re-deliveries dominate the run, the report states that residency regime in its validation notes, so readers know which harness semantics the restated metrics assume.
-
 Span construction, including the fingerprint fallback for undigested content, is specified in [Memory identity](input-contract.md#memory-identity).
+
+Unobserved consumers stay in separate unassessable spans, even when their
+content matches an observed delivery. Their tokens cannot inherit an earlier
+verdict. Grouping repeated treatments is an accounting convention; it does
+not prove continuous residency or independent causal effects. Recorded input
+views establish visibility, not the frequency of history rewrites.
 
 ## How a Span Is Judged
 

@@ -46,7 +46,7 @@ A forced answer can be a valid verdict after retained investigation. Without a s
 
 ## Corrective Retries
 
-Python checks strict JSON shape and span-relative semantics (exact id coverage, action-anchor windows, anchors empty for `none`), and that every cited anchor and structured `evidence[].steps` citation names a step whose complete text the retained conversation actually read (its file or an indexed copy in baseline.md) (`read_steps` in the operation's `input`); an anchor resting on an unread step takes the repair, which can request the file with `needs_evidence`. A valid answer needs no additional model call.
+Python checks strict JSON shape and span-relative semantics (exact id coverage, action-anchor windows, anchors empty for `none`), and that every cited anchor and structured `evidence[].steps` citation names a step whose complete text the retained conversation actually read (from its step file) (`read_steps` in the operation's `input`); an anchor resting on an unread step takes the repair, which can request the file with `needs_evidence`. A valid answer needs no additional model call.
 
 An invalid answer gets **one repair call with no evidence tools**, using the full transcript and the validation error. The repair preserves supported assessments and only fixes the contract violation. Python validates the result again; another invalid answer becomes a visible `error`, not another blind rewrite.
 
@@ -69,7 +69,7 @@ The API key travels from Python to the runner only through the `JUDGE_API_KEY` e
 Masking also follows JSON string escaping, including answer JSON embedded inside a transcript record, so escaped credentials cannot survive in saved output.
 Excessively nested string wrappers are masked as a whole. An interrupted UTF-8 write still gets masked; if saving the masked transcript fails, the raw file is removed and the span records an error with its input diagnostics.
 
-Successful read metadata includes `line_start`, `line_end`, and `truncated`, counting only text actually returned after the character cap. A read whose `limit` stops before the file's last non-blank line ends with a note giving the remaining line count and the next offset. Paged reads combine. `read_steps` certifies complete step text, not just file access: header-only reads, truncated lines, search hits and rolled-back reads do not qualify. The first consuming step is required for every answer, and none/referenced/selected, like an improved/no_effect effect, require the full entry window; incomplete attribution or effect uses influence or positive_effect null. Complete coverage does not prove the judgment itself is correct.
+Successful read metadata includes `line_start`, `line_end`, and `truncated`, counting only text actually returned after the character cap. A read whose `limit` stops before the file's last non-blank line ends with a note giving the remaining line count and the next offset. Paged reads combine. `read_steps` certifies complete step text, not just file access: header-only reads, truncated lines, search hits and rolled-back reads do not qualify. The first consuming step is required for every answer, and none/referenced/selected, like any non-null effect, require the full entry window; incomplete attribution or effect uses influence or positive_effect null. Complete coverage does not prove the judgment itself is correct.
 
 A character-capped read gives an exact continuation `offset` and `column`.
 `column` counts Unicode characters within the first requested line, starting

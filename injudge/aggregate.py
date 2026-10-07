@@ -165,9 +165,8 @@ def _rubric_rollup(operations: list[dict]) -> dict:
     `uncontradicted` ("nothing refutes it") into an "accurate" rate would
     report ≈1.0 on a run of mostly unverifiable memories while the
     corroborated share is far lower. `deliveries` counts
-    judge-answered entries only — a coverage gap's all-null entry is skipped —
-    while aggregate()'s memory_usage tallies every delivered key (a gap lands
-    as `unclear`): two populations over the same spans, by design.
+    entries in valid judge answers only; mechanical skips and failed answers
+    are excluded before counting.
     """
     counts: dict[str, dict[str, int]] = {s: {} for s in RUBRIC_SIGNALS}
     contradicted: dict[tuple[str | None, str], list[str]] = {}
@@ -182,11 +181,6 @@ def _rubric_rollup(operations: list[dict]) -> dict:
             continue  # error/unjudged/rule-judged spans: rubric untrusted or placeholder
         records = _entry_records(op)
         for entry_id, signals in (op.get("rubric") or {}).items():
-            if all((signals.get(s) or {}).get("value") is None for s in RUBRIC_SIGNALS):
-                # all-null entry: the judge never returned this memory (a
-                # coverage gap, warned about at assembly) — not a judged
-                # delivery, and its nulls must not enter the distributions
-                continue
             deliveries += 1
             for s in RUBRIC_SIGNALS:
                 b = _bucket_value((signals.get(s) or {}).get("value"))

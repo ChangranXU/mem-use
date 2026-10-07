@@ -28,8 +28,8 @@ uv run -m injudge <paths> --dry-run --limit 3
 
 | 文件 | 内容 |
 |---|---|
-| `injudge-report.json` | 运行时评审记录（`injudge.report/v15`），付费调用前写入并将待评区间标为 `unjudged`；每个区间完成后保存，包括并行完成的结果 |
-| `summary.json` | 最终统计（`injudge.summary/v13`）：计数、比率、逐记忆使用 |
+| `injudge-report.json` | 运行时评审记录（`injudge.report/v16`），付费调用前写入并将待评区间标为 `unjudged`；每个区间完成后保存，包括并行完成的结果 |
+| `summary.json` | 最终统计（`injudge.summary/v14`）：计数、比率、逐记忆使用 |
 | `memgraph-verdicts.html` | 仅在 `--html` 时产出：召回节点按判定着色的 memgraph |
 | `evidence/` | 每个送入评审智能体的区间一个文件夹（含运行失败产生的 error 判定）：只包含目标 `span.md`，加上其父 episode 已准备的文件与可选附件 |
 | `agent-runs/` | 每个送入评审智能体的区间一条轨迹 JSONL：判定如何得出的 pi 事件流记录 |
@@ -44,7 +44,7 @@ uv run -m injudge <paths> --dry-run --limit 3
 
 ## 离线准备
 
-`--prepare-only` 写出离线 episode 包，而不是一次评审运行：`<run-stamp>/episode-inputs.json`（`injudge.episode-inputs/v1` 索引），外加每个物化 episode 一个 `<run-stamp>/episodes/<episode-dir>/` 文件夹。它不加载 `.env`、不需要 Node，也不发起任何评审调用；若边界或归属需要复核，包会先写出，再以非零状态退出。参见[配置](configuration.md#离线准备)。
+`--prepare-only` 写出离线 episode 包，而不是一次评审运行：`<run-stamp>/episode-inputs.json`（`injudge.episode-inputs/v2` 索引），外加每个物化 episode 一个 `<run-stamp>/episodes/<episode-dir>/` 文件夹。它不加载 `.env`、不需要 Node，也不发起任何评审调用；若边界或归属需要复核，包会先写出，再以非零状态退出。参见[配置](configuration.md#离线准备)。
 
 ## 注入区间
 
@@ -57,9 +57,9 @@ uv run -m injudge <paths> --dry-run --limit 3
 - 重复投递归并为 `restated`：计入投递成本与 `n_injections`，但绝不进入判定率。
 - 没有可归属 agent 步骤的区间（`step_first` 为 `None`）没有下游足迹。按规则判 **neutral** 并标记 `auto: no_subsequent_turn`，不发起评审调用。汇总将其计为 `unassessable`，不进入任何方向性比率。
 
-"每区间判定一次"的归并预设了较早注入仍驻留在 agent 的上下文中。当录制显示相反的情形——至少一半的投递在下一次投递之前被一次丢弃上下文的历史重写跟随（尾随最后一次投递的丢弃也算：它在运行结束前驱逐了该块），即只有最新的记忆块驻留、重复投递才是可见性机制——且重述投递占主导时，报告会在 validation 备注中声明这一驻留情形，让读者知道 restated 指标假设的是哪种 harness 语义。
-
 区间如何构造（含未摘要内容的指纹回退）见[记忆身份](input-contract.md#记忆身份)。
+
+未观测到消费者的投递单独计为不可评估区间，即使内容与已观测投递相同，也不继承其判定或成本归类。重复处理的归并是记账约定，不证明持续驻留或独立的因果效应；可见性由录制的输入视图确定。
 
 ## 区间如何评审
 
