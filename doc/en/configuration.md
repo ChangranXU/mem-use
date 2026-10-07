@@ -81,9 +81,12 @@ The mode accepts `--limit` (counting materialized episodes), the two
 single-episode attachments (`--golden` / `--correctness`), and the keyed gold
 and harness attachment options. `--dry-run`, `--html`, and the judge options
 (`--env`, `--judge-model`, `--timeout`, `--max-attempts`,
-`--judge-max-tokens`) are rejected. A package is written before a nonzero exit
-when a boundary or assignment needs review, so the diagnostics remain
-inspectable.
+`--judge-max-tokens`) are rejected. A package is written before exit status 2
+when scope, assignment, episode evidence, or conflicting outcome attachments
+need review, or an error-level diagnostic exists. Ordinary warnings alone
+do not fail preparation. Status follows these recorded conditions, never
+words in a warning or an input identifier. `--limit` only limits materialized
+episodes; it does not hide problems elsewhere in the input.
 
 {% hint style="warning" %}
 The judge API key must not appear in artifacts, reports, logs, or error messages; [Credentials](judge-client.md#credentials) documents how it travels to the runner and how echoed endpoint output is masked.

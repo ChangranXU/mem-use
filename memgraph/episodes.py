@@ -205,7 +205,7 @@ def discover_boundaries(events: list[dict[str, Any]], diagnostics: list[str]) ->
     return boundaries
 
 
-def session_boundaries(events: list[dict[str, Any]], diagnostics: list[str]) -> list[Boundary]:
+def session_boundaries(events: list[dict[str, Any]], information: list[str]) -> list[Boundary]:
     """Fallback scope from explicitly episode-scoped memory_session events."""
     sessions: list[tuple[int, dict[str, Any], str | None, str | None]] = []
     for fallback, event in enumerate(events):
@@ -233,7 +233,7 @@ def session_boundaries(events: list[dict[str, Any]], diagnostics: list[str]) -> 
         )
         out.append(b)
     if out:
-        diagnostics.append("episode scope came from explicitly episode-scoped memory_session events")
+        information.append("episode scope came from explicitly episode-scoped memory_session events")
     return out
 
 
@@ -253,9 +253,14 @@ def episode_for_index(boundaries: list[Boundary], index: int | None, event: dict
     return matches[0] if len(matches) == 1 else None
 
 
-def episode_scopes(events: list[dict[str, Any]], diagnostics: list[str]) -> list[Boundary]:
-    """Bridge episode scopes in file order, else explicitly episode-scoped sessions."""
-    return discover_boundaries(events, diagnostics) or session_boundaries(events, diagnostics)
+def episode_scopes(events: list[dict[str, Any]], diagnostics: list[str],
+                   information: list[str]) -> list[Boundary]:
+    """Separate scope problems from the informational session fallback.
+
+    A recorded identifier can contain any words, so consumers must not infer
+    scope validity from the spelling of a diagnostic.
+    """
+    return discover_boundaries(events, diagnostics) or session_boundaries(events, information)
 
 
 def episode_rows(events: list[dict[str, Any]], step_of_turn: dict[int, int], ops: list[MemoryOp]) -> list[dict]:
@@ -266,7 +271,7 @@ def episode_rows(events: list[dict[str, Any]], step_of_turn: dict[int, int], ops
     anchor event. Scope diagnostics are not repeated here: injudge's preparation
     reports them, and the row's `status` already says when a scope needs review.
     """
-    scopes = episode_scopes(events, [])
+    scopes = episode_scopes(events, [], [])
     turn_index: dict[int, int] = {}
     for fallback, event in enumerate(events):
         if event.get("type") == "turn_start" and is_int(event.get("turn")):

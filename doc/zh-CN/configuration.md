@@ -79,8 +79,10 @@ uv run -m injudge <paths> --prepare-only -o output/
 该模式接受 `--limit`（按物化的 episode 计数）、两个单 episode 附件
 （`--golden` / `--correctness`），以及带键的 gold 与 harness 附件选项。
 `--dry-run`、`--html` 和评审参数（`--env`、`--judge-model`、`--timeout`、
-`--max-attempts`、`--judge-max-tokens`）会被拒绝。若边界或归属需要复核，
-仍先写出包，再以非零状态退出，好让诊断保持可查。
+`--max-attempts`、`--judge-max-tokens`）会被拒绝。范围、归属、episode 证据或
+相互冲突的结果附件需要复核，或存在 error 级诊断时，先写出包，再以状态 2 退出。
+普通警告本身不导致失败；退出状态由这些实际条件决定，不取决于警告文字或输入标识符。
+`--limit` 只限制物化数量，不会隐藏输入中其他 episode 的问题。
 
 {% hint style="warning" %}
 评审 API key 不得出现在产物、报告、日志或错误信息中；[凭证](judge-client.md#凭证)说明了它如何传给运行器，以及回显了请求的端点输出如何被打码。

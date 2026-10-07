@@ -382,9 +382,12 @@ Easy to get wrong:
   (`anchors` stay empty when influence is `none`); injudge/agent.py adds
   that every cited anchor and structured `evidence[].steps` citation names a
   step whose complete text the retained conversation read (paged reads of a
-  step file combine). Header-only reads do not count; none/referenced/selected,
-  and any non-null effect, additionally
-  require the complete footprint window. Incomplete investigation must use
+  step file combine). Header-only reads do not count. Every answer also requires complete task.md,
+  baseline.md, and the preceding episode step when present; baseline references
+  do not certify their source files, so non-null novelty and acted_on influence
+  also require every step file baseline.md names for visible input. None/referenced/selected require the complete
+  footprint window; a non-null acted-on effect requires reading from its start
+  through the episode end, since consequences can outlive action credit. Incomplete investigation must use
   influence (or effect) null, not fabricate neutrality or benefit. Harm in any
   of an entry's shaped actions makes its effect harmed. A violation takes the
   single-call repair with no evidence tools, continuing job.history. Only

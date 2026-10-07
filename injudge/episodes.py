@@ -534,7 +534,9 @@ def prepare_episodes(
 ) -> PreparationResult:
     """Partition one parsed trajectory into inspectable episode inputs."""
     diagnostics: list[str] = []
-    boundaries = episode_scopes(events, diagnostics)
+    information: list[str] = []
+    boundaries = episode_scopes(events, diagnostics, information)
+    scope_needs_review = bool(diagnostics)
     if not boundaries:
         diagnostics.append(
             f"{trajectory.run_id}: no bridge episode boundary or episode-scoped memory_session; "
@@ -552,6 +554,8 @@ def prepare_episodes(
                 "reason": "no_episode_scope",
             }],
             diagnostics=diagnostics,
+            information=information,
+            scope_needs_review=scope_needs_review,
         )
 
     annotation_index = build_annotation_index(events)
@@ -860,6 +864,8 @@ def prepare_episodes(
         episodes=list(episode_data.values()),
         unassigned=unassigned,
         diagnostics=diagnostics,
+        information=information,
+        scope_needs_review=scope_needs_review,
     )
 
 

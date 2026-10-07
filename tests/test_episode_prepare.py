@@ -468,6 +468,87 @@ def test_prepare_cli_is_offline_and_writes_review_package(tmp_path, monkeypatch)
     assert package["counts"]["needs_review"] == 1
 
 
+@pytest.mark.parametrize("value", [
+    "invalid", "overlap", "ambiguous", "conflict", "unmatched",
+    "without a close", "no episode scope",
+])
+def test_prepare_warning_payload_does_not_decide_review_status(tmp_path, value):
+    from injudge import __main__ as cli
+
+    builder = AnnotatedBuilder().episode_open().agent_turn(with_task=True)
+    builder._emit("tool_execution_start", proxy_source=builder.main, turn=1,
+                  tool_call_id=[value], name="bash", args={})
+    builder.episode_close()
+    source = builder.write(tmp_path / "source")
+    output = tmp_path / "output"
+    assert cli.main([str(source), "--prepare-only", "-o", str(output)]) == 0
+    package = json.loads(next(output.glob("*/episode-inputs.json")).read_text())
+    assert package["counts"]["needs_review"] == 0
+    assert package["episodes"][0]["status"] == "prepared"
+    notes = [n for n in package["diagnostics"] if "missing or corrupt tool_call_id" in n["msg"]]
+    assert len(notes) == 1 and notes[0]["level"] == "warn"
+
+
+@pytest.mark.parametrize("extra_close", ["episode-1", "orphan"])
+def test_prepare_scope_problem_without_an_affected_episode_requires_review(tmp_path, extra_close):
+    from injudge import __main__ as cli
+
+    builder = AnnotatedBuilder().episode_open().agent_turn(with_task=True).episode_close()
+    builder.episode_close(extra_close)
+    source = builder.write(tmp_path / "source")
+    output = tmp_path / "output"
+    assert cli.main([str(source), "--prepare-only", "-o", str(output)]) == 2
+    package = json.loads(next(output.glob("*/episode-inputs.json")).read_text())
+    assert package["episodes"][0]["status"] == "prepared"
+    assert any(n["level"] == "warn" and ("episode close" in n["msg"] or "duplicate close" in n["msg"])
+               for n in package["diagnostics"])
+
+
+@pytest.mark.parametrize("orphan_close", [False, True])
+def test_prepare_session_fallback_keeps_information_separate_from_scope_problems(tmp_path, orphan_close):
+    from injudge import __main__ as cli
+
+    builder = AnnotatedBuilder()
+    if orphan_close:
+        builder.episode_close("orphan")
+    builder.agent_turn(with_task=True)
+    source = builder.write(tmp_path / "source")
+    output = tmp_path / "output"
+    assert cli.main([str(source), "--prepare-only", "-o", str(output)]) == (2 if orphan_close else 0)
+    package = json.loads(next(output.glob("*/episode-inputs.json")).read_text())
+    assert package["episodes"][0]["status"] == "prepared"
+    fallback = [n for n in package["diagnostics"] if "scope came from" in n["msg"]]
+    assert len(fallback) == 1 and fallback[0]["level"] == "info"
+
+
+def test_prepare_conflicting_outcome_requires_review_without_keyword_matching(tmp_path):
+    from injudge import __main__ as cli
+
+    builder = AnnotatedBuilder().episode_open().agent_turn(with_task=True).episode_close()
+    source = builder.write(tmp_path / "source")
+    report = tmp_path / "harness.json"
+    report.write_text(json.dumps({"resolved_ids": ["episode-1"], "unresolved_ids": ["episode-1"]}))
+    output = tmp_path / "output"
+    assert cli.main([str(source), "--prepare-only", "--harness-report", str(report), "-o", str(output)]) == 2
+    package = json.loads(next(output.glob("*/episode-inputs.json")).read_text())
+    assert package["episodes"][0]["attachments"]["outcome"] == "conflicting_result"
+
+
+def test_prepare_limit_does_not_hide_an_incomplete_later_episode(tmp_path):
+    from injudge import __main__ as cli
+
+    builder = AnnotatedBuilder().episode_open().agent_turn(with_task=True).episode_close()
+    builder.episode_open("episode-2").agent_turn(with_task=True)
+    source = builder.write(tmp_path / "source")
+    output = tmp_path / "output"
+    assert cli.main([str(source), "--prepare-only", "--limit", "1", "-o", str(output)]) == 2
+    package = json.loads(next(output.glob("*/episode-inputs.json")).read_text())
+    assert package["episodes"][0]["status"] == "prepared"
+    assert package["counts"]["episodes_materialized"] == 1
+    assert package["counts"]["episodes_discovered"] == 2
+    assert package["counts"]["needs_review"] == 1
+
+
 def test_conflicting_repeated_boundary_identity_requires_review(tmp_path):
     from copy import deepcopy
     from injudge import __main__ as cli

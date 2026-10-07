@@ -9,10 +9,12 @@ repeated search's list, scored as `<case>/read`, `<case>/read/m2`, …).
 They cover explicit and
 uncited use, routine practice, source and novelty distinctions, uncertainty,
 plan execution and reversal, harmful advice, a benefit followed by harm,
-a wasted detour, a change kept without a check that could show its benefit,
+a wasted detour, a memory's own remedy tested and dropped, a change kept
+without a check that could show its benefit,
 reading a listed candidate whose unrecorded full text is
 then set aside or used,
-recorded preview/full-read pairs, a historically scoped claim, whole-list
+recorded preview/full-read pairs, historically scoped claims and issue
+summaries, mixed known and new advice, a correction after re-exposure, whole-list
 versus named-entry remarks on a result list, a repeated search re-showing
 entries still in the agent's input, and paraphrased baselines.
 Only labels decided by the construction are pinned.
@@ -401,6 +403,31 @@ CASES: dict[str, dict] = {
         "expect": {"influence": ["acted_on"],
                    "positive_effect": ["improved"], "verdict": ["positive"]},
     },
+    # Testing a memory's own remedy yields a finding, but its only use is to
+    # drop that remedy and resume the plan voiced before delivery: the run
+    # contributed nothing beyond cancelling the memory's proposal.
+    "refuted_remedy_dropped": {
+        "task": "format_size(1024) returns '1.0 KB'. Print whole sizes without a decimal, "
+                "as '1 KB', and keep '1.5 KB' for 1536.",
+        "before": [
+            ("Reproduce.", "python size_repro.py", "1024 -> '1.0 KB'; 1536 -> '1.5 KB'"),
+            ("The formatter always prints one decimal. Strip a trailing .0 after formatting next.",
+             "cat src/size.py", "def format_size(n): return f'{n / 1024:.1f} KB'"),
+        ],
+        "memory": ("size_rounding", "Whole sizes show a decimal because format_size rounds; "
+                   "floor the value with math.floor before formatting."),
+        "consumer": ("The memory blames rounding. Check whether flooring removes the decimal.",
+                     "python -c \"import math; print(f'{math.floor(1024 / 1024):.1f} KB')\"",
+                     "1.0 KB"),
+        "after": [
+            ("Flooring still prints 1.0, so the memory's remedy would not help. Strip the "
+             "trailing .0 as planned.", "python strip_trailing_zero.py src/size.py",
+             "trailing .0 stripped"),
+            ("Verify.", "python size_repro.py", "1024 -> '1 KB'; 1536 -> '1.5 KB'"),
+        ],
+        "expect": {"influence": ["acted_on"],
+                   "positive_effect": ["harmed"], "verdict": ["negative"]},
+    },
     # A memory-caused run that added work and contributed nothing is harm,
     # even though the agent dropped it at once.
     "wasted_detour": {
@@ -507,6 +534,56 @@ CASES: dict[str, dict] = {
         "expect": {"relevance": [False], "accuracy": ["uncontradicted", "corroborated"],
                    "influence": ["none"], "positive_effect": [None], "verdict": ["neutral"]},
     },
+    "issue_summary_scope": {
+        "task": "Client.send() ignores the timeout argument. Fix it without changing retry behavior.",
+        "before": [("send has retries but hard-codes its timeout. Pass the argument through.",
+                    "cat src/client.py", "def send(timeout): return request(timeout=30, retries=3)")],
+        "memory": ("client_issue", "Resolved issue record: Client.send() has no retry support. "
+                   "Fix: add three retries around the request."),
+        "consumer": ("Continue the timeout fix already identified.",
+                     "python forward_timeout.py", "send now passes timeout=timeout, retries=3"),
+        "after": [("Verify timeout and existing retries.", "python check_client.py",
+                   "timeout argument honored; three retries preserved")],
+        "expect": {"accuracy": ["uncontradicted"], "novelty": ["novel"],
+                   "influence": ["none"], "positive_effect": [None], "verdict": ["neutral"]},
+    },
+    "mixed_verification_advice": {
+        "task": "parse_count accepts negative counts. Reject them and preserve zero.",
+        "before": [("Add a negative-value guard, then check zero and a negative count.",
+                    "cat src/count.py", "def parse_count(value): return int(value)")],
+        "memory": ("count_validation", "Reject negative counts in parse_count. "
+                   "Also verify whitespace-padded input: int accepts surrounding spaces, "
+                   "so a string-prefix guard alone misses ' -1 '."),
+        "consumer": ("The negative guard was planned; the memory adds the padded-input check. "
+                     "Use its check before implementing the guard.",
+                     "python compare_guards.py", "prefix guard: ' -1 ' accepted; numeric guard: rejected"),
+        "after": [("That check shows the guard must follow conversion. Implement it there.",
+                   "python guard_converted_count.py", "guard added after int(value)"),
+                  ("Verify the requested cases and the memory's padded case.",
+                   "python check_counts.py", "0 accepted; -1 and ' -1 ' rejected")],
+        "expect": {"novelty": ["novel"], "influence": ["acted_on"],
+                   "positive_effect": ["improved"], "verdict": ["positive"]},
+    },
+    "reexposure_late_correction": {
+        "task": "choose_limit(None, 10) should return 10; keep every explicitly supplied limit.",
+        "before": [("Inspect the function.", "cat src/limits.py",
+                    "def choose_limit(value, default): return value")],
+        "memory": ("kb-limit", "ID kb-limit: implement choose_limit as return value or default."),
+        "consumer": ("Apply the memory's proposed expression.",
+                     "python use_default_expression.py", "return value or default"),
+        "followup": {
+            "lookup": "The expression is applied. Read kb-limit for any further details.",
+            "value": "ID kb-limit: implement choose_limit as return value or default. "
+                     "That expression is the complete proposed fix.",
+            "expect": {"influence": ["referenced"], "positive_effect": [None], "verdict": ["neutral"]},
+        },
+        "after": [("The full read only repeats the applied expression. Check the task's explicit limits.",
+                   "python check_limits.py", "None -> 10; 0 -> 10 (expected 0)"),
+                  ("The earlier memory-caused edit wrongly replaced zero. Correct it to check None.",
+                   "python use_none_guard.py", "return default if value is None else value"),
+                  ("Verify.", "python check_limits.py", "None -> 10; 0 -> 0; 5 -> 5")],
+        "expect": {"influence": ["acted_on"], "positive_effect": ["harmed"], "verdict": ["negative"]},
+    },
     "recorded_followup_used": {
         "task": "The parser rejects hexadecimal identifiers. Make parse_id('0xff') return 255.",
         "before": [("Reproduce.", "python reproduce.py", "ValueError: invalid literal '0xff'")],
@@ -552,6 +629,16 @@ CASES: dict[str, dict] = {
                   ("Check the patch.", "git diff", "-return int(value)\n+return int(value, 0)")],
         "expect": {"influence": ["acted_on"], "positive_effect": ["improved"], "verdict": ["positive"]},
     },
+}
+
+# The same statement about the current checkout is refutable by its code.
+# Explicit source scope makes this pair decidable without assuming that every
+# delivered claim describes a historical state or that none ever does.
+CASES["current_claim_scope"] = {
+    **CASES["issue_summary_scope"],
+    "memory": ("client_issue", "In the current checkout, Client.send() has no retry support. "
+               "Fix: add three retries around the request."),
+    "expect": {**CASES["issue_summary_scope"]["expect"], "accuracy": ["contradicted"]},
 }
 
 # The matched pair: identical memory and task, baselines that state the same

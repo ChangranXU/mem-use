@@ -355,6 +355,7 @@ def _prepare_only_main(args: argparse.Namespace) -> int:
     validation: list[dict] = [{"level": "warn", "msg": warning} for warning in load_warnings]
     all_episodes: list[EpisodeInput] = []
     all_unassigned: list[dict] = []
+    scope_needs_review = False
     for trajectory in trajectories:
         prepared = prepare_trajectory(
             trajectory,
@@ -363,13 +364,9 @@ def _prepare_only_main(args: argparse.Namespace) -> int:
         )
         all_episodes.extend(prepared.episodes)
         all_unassigned.extend(prepared.unassigned)
-        validation.extend({
-            "level": "warn" if any(
-                marker in diagnostic
-                for marker in ("ambiguous", "conflict", "unresolved", "without a close", "overlap", "no episode scope")
-            ) else "info",
-            "msg": diagnostic,
-        } for diagnostic in prepared.diagnostics)
+        scope_needs_review |= prepared.scope_needs_review
+        validation.extend({"level": "warn", "msg": note} for note in prepared.diagnostics)
+        validation.extend({"level": "info", "msg": note} for note in prepared.information)
         reset_count = sum(
             1 for episode in prepared.episodes
             if episode.boundary_provenance.get("episode_reset")
@@ -466,16 +463,10 @@ def _prepare_only_main(args: argparse.Namespace) -> int:
         "0 judge calls"
     )
     print_safe(f"wrote {index_path}")
-    review = any(
-        item.get("level") == "error"
-        or "ambiguous" in str(item.get("msg", "")).lower()
-        or "unmatched" in str(item.get("msg", "")).lower()
-        or "conflict" in str(item.get("msg", "")).lower()
-        or "without a close" in str(item.get("msg", "")).lower()
-        or "overlap" in str(item.get("msg", "")).lower()
-        or "no episode scope" in str(item.get("msg", "")).lower()
-        for item in validation
-    ) or any(episode.preparation_status in ("needs_review", "incomplete") for episode in all_episodes)
+    review = (scope_needs_review or any(item.get("level") == "error" for item in validation)
+              or any(episode.preparation_status in ("needs_review", "incomplete")
+                     or episode.attachments.get("outcome_status") == "conflicting_result"
+                     for episode in all_episodes))
     return 2 if review else 0
 
 
@@ -704,6 +695,7 @@ def main(argv: list[str] | None = None) -> int:
         prepared = prepare_trajectory(trajectory, events_by_traj[trajectory.id], ops_by_traj[trajectory.id])
         episodes_by_traj[trajectory.id] = prepared.episodes
         validation.extend({"level": "warn", "msg": note} for note in prepared.diagnostics)
+        validation.extend({"level": "info", "msg": note} for note in prepared.information)
         validation.extend({"level": "error", "msg": f"{trajectory.run_id}: unassigned {item}"}
                           for item in prepared.unassigned)
         for episode in prepared.episodes:

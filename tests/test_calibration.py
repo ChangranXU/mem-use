@@ -193,3 +193,23 @@ def test_unpinned_list_entries_still_count_toward_stability(tmp_path, monkeypatc
     first["rubric"]["m2"]["accuracy"]["value"] = "corroborated"
     lines = score([report, changed])
     assert "    list_repeated/m2.accuracy: 'uncontradicted' ×1, 'corroborated' ×1" in lines
+
+
+def test_correction_case_keeps_consequences_after_the_original_action_window(tmp_path):
+    from injudge.episodes import prepare_trajectory
+    from injudge.evidence import build_span_evidence
+    from injudge.spans import group_spans
+    from memgraph.graph import load_trajectories
+
+    build(tmp_path / "cases")
+    trajectories, ops, events, _ = load_trajectories([
+        tmp_path / "cases" / case_id("reexposure_late_correction")])
+    trajectory, = trajectories
+    episode, = prepare_trajectory(trajectory, events[trajectory.id], ops[trajectory.id]).episodes
+    first, second = group_spans(ops[trajectory.id], trajectory.id,
+                               last_step=episode.steps[-1].step, episode=episode)
+    assert first.memory_windows == {"m1": 3}
+    assert second.step_first == 4
+    files = build_span_evidence(first, episode)
+    assert "0 -> 10 (expected 0)" in files["steps/step_000004.md"]
+    assert "earlier memory-caused edit" in files["steps/step_000005.md"]

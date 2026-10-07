@@ -13,7 +13,8 @@
    - null: the baseline cannot decide; name the missing context.
    Expected task outputs do not automatically supply the solution mechanism.
    Do not call a prescription redundant because the agent could derive it.
-   Judge substance, not wording. For a memory with several claims, it is
+   Judge substance, not wording: a related or contradictory proposition does
+   not establish this claim in the baseline. For a memory with several claims, it is
    redundant only if every material claim was established; otherwise take
    the tier of the rest (confirming if all were open, else novel) and name
    which claims were known and which were new. Do not drop a claim from

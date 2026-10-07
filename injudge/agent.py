@@ -419,8 +419,8 @@ def _invoke_runner(
         return result
 
 
-def _read_steps(messages: list, files: dict[str, str]) -> list[int]:
-    """Certify complete step text, including reads paged across calls.
+def _read_files(messages: list, files: dict[str, str]) -> set[str]:
+    """Certify complete evidence text, including reads paged across calls.
 
     Only text actually returned and retained counts. Line-range metadata
     alone would certify a header or a truncated result as an entire step.
@@ -460,28 +460,69 @@ def _read_steps(messages: list, files: dict[str, str]) -> list[int]:
                 end = max(end, stop)
             if end == len(lines[path][number - 1]):
                 complete.setdefault(path, set()).add(number)
-    index = json.loads(files["manifest.json"])
-    read = []
-    for entry in index["files"]:
-        if entry.get("kind") != "step":
-            continue
-        path = entry["path"]
+    read: set[str] = set()
+    for path in lines:
         needed = {i for i, line in enumerate(lines[path], 1) if line.strip()}
         if needed and needed <= complete.get(path, set()):
-            read.append(entry["step"])
-    return sorted(read)
+            read.add(path)
+    return read
+
+
+def _read_steps(read_files: set[str], files: dict[str, str]) -> list[int]:
+    index = json.loads(files["manifest.json"])
+    return sorted(entry["step"] for entry in index["files"]
+                  if entry.get("kind") == "step" and entry["path"] in read_files)
+
+
+def _baseline_error(obj: dict, span: InjectionSpan, files: dict[str, str],
+                    read_files: set[str]) -> str | None:
+    """Require the opening's baseline inspection, not just post-exposure evidence.
+
+    The index does not certify its referenced sources; a complete preceding
+    step gives the immediate prior direction without restoring evicted history.
+    Novelty and acted-on credit compare the entry with everything the consumer
+    could still see, so those claims need every step file holding that input.
+    """
+    required = {"task.md", "baseline.md"}
+    index = json.loads(files["manifest.json"])
+    step_paths = {entry["path"] for entry in index["files"] if entry.get("kind") == "step"}
+    earlier = [entry for entry in index["files"] if entry.get("kind") == "step"
+               and span.step_first is not None and entry["step"] < span.step_first]
+    if earlier:
+        required.add(max(earlier, key=lambda entry: entry["step"])["path"])
+    gaps: list[str] = []
+    missing = sorted(required - read_files)
+    if missing:
+        gaps.append(f"baseline evidence was not read completely: {missing}; "
+                    "read these files and follow relevant baseline references")
+    context = json.loads(files["context.json"])
+    visible = set(context["target_baseline"]["visible_occurrence_ids"])
+    sources = sorted({record["text_in"] for record in context["message_occurrences"]
+                      if record["occurrence_id"] in visible and record.get("text_in") in step_paths}
+                     - read_files)
+    for entry in obj["memories"] if sources else []:
+        novelty = entry["novelty"]["value"]
+        claims = [f"novelty {novelty!r}"] if novelty is not None else []
+        if entry["influence"]["value"] == "acted_on":
+            claims.append("acted_on influence")
+        if claims:
+            gaps.append(f"{entry['id']} claims {' and '.join(claims)} without reading the step files "
+                        f"baseline.md names for visible input: {sources}; read them, or use null "
+                        "for a signal whose prior-knowledge comparison remains unassessed")
+    return "; ".join(gaps) or None
 
 
 def _coverage_error(obj: dict, span: InjectionSpan, eligible: set[int], read: set[int]) -> str | None:
     """Absence of influence needs the whole window, not a search miss.
 
-    So does every known effect: a later harmful use can decide an apparent
-    benefit, while a later use of diagnostic work can refute apparent waste.
+    Known effects also need the episode remainder: re-exposure bounds action
+    credit, not when an earlier action's consequences can be observed.
     Unknown attribution or effect remains available when the budget cannot
     cover the window.
     """
+    gaps: list[str] = []
     if span.step_first not in read:
-        return f"first consuming step {span.step_first} was not read completely; read its step file"
+        gaps.append(f"first consuming step {span.step_first} was not read completely; read its step file")
     for entry in obj["memories"]:
         influence = entry["influence"]["value"]
         effect = entry["positive_effect"]["value"]
@@ -493,20 +534,22 @@ def _coverage_error(obj: dict, span: InjectionSpan, eligible: set[int], read: se
             continue
         mid = entry["id"]
         start = span.memory_window_starts.get(mid, span.step_first)
-        end = span.memory_windows.get(mid)
+        end = None if influence == "acted_on" and effect is not None else span.memory_windows.get(mid)
         missing = sorted(s for s in eligible if s >= start and (end is None or s <= end) and s not in read)
         if missing:
-            return (f"{mid} claims {claim} without complete window coverage; "
-                    f"read step(s) {missing}, or use {fallback} remains unassessed")
-    return None
+            scope = "window coverage through the episode's end" if end is None else "window coverage"
+            gaps.append(f"{mid} claims {claim} without complete {scope}; "
+                        f"read step(s) {missing}, or use {fallback} remains unassessed")
+    return "; ".join(gaps) or None
 
 
 def _unread_anchor_error(obj: dict, read: set[int]) -> str | None:
     """Citations require the complete step, from any indexed evidence source."""
+    gaps: list[str] = []
     for entry in obj["memories"]:
         unread = sorted({a for a in entry["anchors"] if a not in read})
         if unread:
-            return (
+            gaps.append(
                 f"cites {entry['id']} anchor step(s) {unread} whose complete text was not "
                 "read in this conversation (read every cited step; request the missing "
                 "files with needs_evidence)"
@@ -517,11 +560,11 @@ def _unread_anchor_error(obj: dict, read: set[int]) -> str | None:
         unread = sorted({step for step in steps if isinstance(step, int)
                          and not isinstance(step, bool) and step not in read}) if isinstance(steps, list) else []
         if unread:
-            return (
+            gaps.append(
                 f"cites evidence step(s) {unread} whose complete text was not read "
                 "in this conversation (request the missing files with needs_evidence)"
             )
-    return None
+    return "; ".join(gaps) or None
 
 
 def _input_record(
@@ -680,7 +723,8 @@ def judge_span(
         health["retained_llm_calls"] = result.get("llm_calls", 0)
         health["retained_tool_calls"] = result.get("tool_calls", 0)
         health["retained_evidence"] = result.get("retained_evidence", 0)
-        read_steps = _read_steps(result["messages"], files)
+        read_files = _read_files(result["messages"], files)
+        read_steps = _read_steps(read_files, files)
         # which step files the retained conversation actually read: the
         # coverage an effect or no-influence answer rests on, and the set anchors need
         health["read_steps"] = read_steps
@@ -724,9 +768,12 @@ def judge_span(
             if obj is not None:
                 error = _verdict_semantics(obj, span, last_step, {step.step for step in steps})
                 if error is None:
-                    error = _unread_anchor_error(obj, set(read_steps))
-                if error is None:
-                    error = _coverage_error(obj, span, {step.step for step in steps}, set(read_steps))
+                    # Name every unread requirement at once: each repair and
+                    # resumed investigation spends one of MAX_ATTEMPTS.
+                    gaps = [_unread_anchor_error(obj, set(read_steps)),
+                            _coverage_error(obj, span, {step.step for step in steps}, set(read_steps)),
+                            _baseline_error(obj, span, files, read_files)]
+                    error = "; ".join(gap for gap in gaps if gap) or None
                 if error is not None:
                     obj = None  # a semantic violation is as out-of-contract as a parse one
         if obj is not None:

@@ -100,10 +100,16 @@ result or rolled-back read does not certify a complete step. `baseline.md`
 contains visible input, not complete historical step copies; read cited steps
 from their own files.
 
-Every answer requires the complete first consuming step. `none`, `referenced`,
-and `selected` additionally require every eligible step in that entry's window,
-and so does every non-null effect. A later harmful use can decide an apparent
-benefit, while later use of diagnostic work can refute apparent waste.
+Every answer requires complete reads of `task.md`, `baseline.md`, the first
+consuming step, and its preceding step within the episode, if present. Baseline
+references do not certify their source files: a non-null novelty or an `acted_on`
+influence also requires every step file `baseline.md` names for visible input,
+or that signal stays null.
+`none`, `referenced`, and `selected` additionally require every eligible step in
+that entry's window. Every non-null acted-on effect requires reading from the
+window's start through the episode's end: re-exposure limits action anchors,
+not when an earlier action's consequences can appear. A later correction can
+decide an apparent benefit, while later use of a finding can refute apparent waste.
 If acted-on influence is established but effect inspection
 is incomplete, keep `acted_on` and use `positive_effect: null`. Unassessed
 attribution uses influence null; do not invent neutrality or benefit to finish

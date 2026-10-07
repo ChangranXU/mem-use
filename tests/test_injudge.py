@@ -3057,10 +3057,11 @@ def test_cli_timeout_override_must_be_finite(monkeypatch, timeout):
 
 
 def _reads(*steps):
-    """Retained successful step-file reads, shaped like the runner's toolResult messages."""
+    """Retained baseline and step reads, shaped like runner toolResult messages."""
     return [{"role": "toolResult", "toolName": "read_evidence", "isError": False,
              "_fixture_read": True,
-             "details": {"path": f"steps/step_{s:06d}.md", "lines_read": 3}} for s in steps]
+             "details": {"path": path, "lines_read": 3}}
+            for path in ["task.md", "baseline.md", *(f"steps/step_{s:06d}.md" for s in steps)]]
 
 
 def _fill_reads(result, evidence_dir):

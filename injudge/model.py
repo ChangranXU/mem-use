@@ -207,12 +207,16 @@ class PreparationResult:
     episodes: list[EpisodeInput] = field(default_factory=list)
     unassigned: list[dict[str, Any]] = field(default_factory=list)
     diagnostics: list[str] = field(default_factory=list)
+    information: list[str] = field(default_factory=list)
+    # Internal routing state; warnings unrelated to scope do not imply that
+    # otherwise prepared evidence is unusable.
+    scope_needs_review: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "episodes": [episode.to_dict() for episode in self.episodes],
             "unassigned": self.unassigned,
-            "diagnostics": list(self.diagnostics),
+            "diagnostics": [*self.diagnostics, *self.information],
         }
 
 

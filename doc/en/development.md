@@ -37,8 +37,10 @@ The suite does not use the network. Python tests stub paid judge calls with cann
 Canned answers test the contract, not judgment quality. `calibration/` contains
 controlled development regressions for explicit and uncited use, routine
 practice, source and novelty distinctions, uncertainty, plan execution and
-reversal, harmful and unproductive actions, a change kept without a check that
-could show its benefit, reading a listed candidate whose unrecorded full text
+reversal, harmful and unproductive actions, a memory's own remedy tested and
+dropped, a change kept without a check that could show its benefit, historically
+scoped claims and issue summaries, mixed known and new advice, a correction
+after re-exposure, reading a listed candidate whose unrecorded full text
 is used or set aside, recorded preview/full-read pairs, whole-list versus
 named-entry remarks on a result list, a repeated search re-showing entries
 still in the agent's input, and paraphrased baselines. Each case pins
