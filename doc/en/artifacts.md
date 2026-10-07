@@ -232,7 +232,7 @@ The report's `tool` block names the tool (`name: "injudge"`) and its `schema`, a
 
 The `injections` array lists every raw delivery with its span, its `episode_execution_id` when the span has one, `role` (`first` or `restated`), `verdict`, `content_chars`, and its `op_id` / `seq` / `step`.
 
-## Version 15 provenance and interpretation
+## Provenance and interpretation
 
 `tool.provenance` carries `implementation_sha256` and `prompts_sha256`; each executed
 span input carries `evidence_sha256` and `system_prompt_sha256`. These identify

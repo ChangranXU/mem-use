@@ -227,7 +227,7 @@ report 的 `tool` 块给出工具名（`name: "injudge"`）与其 `schema`，并
 
 `injections` 数组列出每一次原始投递及其所属区间、该区间的 `episode_execution_id`（若有时）、`role`（`first` 或 `restated`）、`verdict`、`content_chars`，以及 `op_id` / `seq` / `step`。
 
-## v15 的来源记录与解释
+## 来源记录与解释
 
 `tool.provenance` 保存 implementation_sha256 和 prompts_sha256；执行过的区间
 input 保存 evidence_sha256 和 system_prompt_sha256。它们标识当前代码、提示词及
