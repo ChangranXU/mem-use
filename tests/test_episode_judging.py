@@ -54,6 +54,11 @@ def test_three_spans_in_one_episode_have_independent_judges_and_graph_links(tmp_
     )
     assert status == 0 and len(calls) == 3
     assert (run_dir / "memgraph-verdicts.html").is_file()
+    summary = json.loads((run_dir / "summary.json").read_text())
+    assert summary["diagnostics"] == {
+        level: sum(note["level"] == level for note in report["validation"])
+        for level in ("error", "warn", "info")
+    }
     operations = report["operations"]
     assert len({op["episode_execution_id"] for op in operations}) == 1
     assert len({op["operation_id"] for op in operations}) == 3
@@ -98,7 +103,7 @@ def test_episode_selector_judges_only_the_named_episode(tmp_path, monkeypatch, c
     assert overall["rates"]["neutral"] == 1.0
     # statistics describe the selection: the excluded span is in no count or cost
     assert (overall["n_spans"], overall["n_injections"], overall["unjudged"]) == (1, 1, 0)
-    assert overall["n_episodes"] == 1 and "error_unjudged_tokens" not in overall["headline"]
+    assert overall["n_episodes"] == 1
     assert overall["cost"]["approx_tokens_total"] == report["operations"][1]["delivery_cost"]["approx_tokens_total"]
     summary = json.loads((_run_dir / "summary.json").read_text())
     assert summary["overall"]["counts"]["n_spans"] == 1
@@ -134,7 +139,6 @@ def test_identical_delivery_is_partitioned_then_merged_within_each_episode(tmp_p
                                  last_step=episode.steps[-1].step))
     assert len(spans) == 2 and [span.n_injections for span in spans] == [2, 1]
     assert spans[0].id != spans[1].id
-    assert spans[1].previous_keys == []
     assert spans[1].step_first > 1
     assert spans[0].memory_windows["m1"] == prepared.episodes[0].steps[-1].step
     assert spans[1].memory_windows["m1"] == prepared.episodes[1].steps[-1].step
@@ -298,7 +302,9 @@ def test_visible_tool_result_keeps_its_occurrence_in_a_step_with_multiple_result
         occurrence = visible["occurrence_id"]
         assert f"[tool {occurrence}] result in steps/step_000001.md" in files["baseline.md"]
         step = files["steps/step_000001.md"]
-        assert f"tool result [{occurrence}]\nresult (completed): {visible['content']}" in step
+        seq = visible["source"]["seq"]
+        assert seq != visible["source"]["event_index"]
+        assert f"tool result [{occurrence}], seq {seq}\nresult (completed): {visible['content']}" in step
 
 
 @pytest.mark.parametrize("evicted", [False, True])
@@ -444,14 +450,15 @@ def test_placement_host_keeps_independent_task_or_system_text(tmp_path, slot, ro
     assert not any(memory in files[name] for name in ("deliveries.md", "context.json", "baseline.md"))
 
 
-def test_tool_result_delivery_is_not_its_own_baseline(tmp_path):
+@pytest.mark.parametrize("reasoning", ["earlier reasoning", ""])
+def test_tool_result_delivery_is_not_its_own_baseline(tmp_path, reasoning):
     import hashlib
     builder = AnnotatedBuilder().episode_open()
     memory = "The injected memory content belongs only to delivery."
     other = "Unrelated tool result and earlier reasoning remain usable."
     ref = cure_ref("hint", memory)
     search = builder.search(returned=[ref])
-    builder.agent_turn(with_task=True, reasoning="earlier reasoning", result=other + "\n" + memory)
+    builder.agent_turn(with_task=True, reasoning=reasoning, result=other + "\n" + memory)
     builder.agent_turn()
     delivery = builder.delivery(search, memories=[ref], bind=builder.last_call, placements=[{
         "slot": "tool_result", "kind": "tool_result", "proof_kind": "canonical_message",
@@ -471,9 +478,15 @@ def test_tool_result_delivery_is_not_its_own_baseline(tmp_path):
     files = build_span_evidence(span, episode)
     assert "result in steps/step_000001.md" in files["baseline.md"]
     assert other in files["steps/step_000001.md"]
-    assert "earlier reasoning" in files["steps/step_000001.md"]
+    assert ("reasoning:" in files["steps/step_000001.md"]) == bool(reasoning)
+    assert ("separate reasoning" in files["baseline.md"]) == bool(reasoning)
     result_source = episode.deliveries[0]["placements"][0]["source_resolution"]["occurrence_id"]
-    assert f"tool result [{result_source}]\nresult (completed): [memory delivery D1; see span.md]" in files["steps/step_000001.md"]
+    result_seq = next(item["source"]["seq"] for item in episode.message_occurrences
+                      if item["occurrence_id"] == result_source)
+    assert f"tool result [{result_source}], seq {result_seq}\nresult (completed): [memory delivery D1 (consumed at global step 2); see span.md]" in files["steps/step_000001.md"]
+    for name in ("span.md", "deliveries.md"):
+        assert f"host message: {result_source}" in files[name]
+        assert "annotation event:" in files[name]
     assert memory not in files["baseline.md"]
     assert memory not in files[f"steps/step_{episode.steps[0].step:06d}.md"]
     assert memory in files["span.md"] and memory not in files["deliveries.md"]
@@ -777,6 +790,40 @@ def test_parallel_checkpoints_keep_validation_in_span_order(tmp_path, monkeypatc
     assert status == 0
     notes = [note["msg"] for note in report["validation"] if note["msg"].startswith("review diagnostic")]
     assert notes == ["review diagnostic for T1:S1", "review diagnostic for T1:S2"]
+
+
+def test_parallel_pool_spans_trajectories(tmp_path, monkeypatch):
+    import threading
+    from injudge import __main__ as cli
+
+    for name in ("a", "b"):
+        builder = AnnotatedBuilder().episode_open().agent_turn(with_task=True)
+        builder.recall(cure_ref(name, name + " fact")).episode_close()
+        builder.write(tmp_path / "runs" / name, run_id=f"run-{name}")
+    second_started = threading.Event()
+    real_judge, real_env = cli.judge_span, cli.load_env
+
+    def judge(span, *args, **kwargs):
+        # The first trajectory's span finishes only after the second
+        # trajectory's span starts: one pool covers both trajectories.
+        if span.id.startswith("T1:"):
+            assert second_started.wait(5), "the second trajectory waited for the first"
+        else:
+            second_started.set()
+        return real_judge(span, *args, **kwargs)
+
+    env = tmp_path / ".env"
+    env.write_text("BASE_URL=https://judge.invalid\nAPI_KEY=test-key-only\nMODEL=test-judge\n")
+    monkeypatch.setattr("injudge.agent._check_runner", lambda: None)
+    stub_runner(monkeypatch, [_result(_answer()), _result(_answer())])
+    monkeypatch.setattr(cli, "judge_span", judge)
+    monkeypatch.setattr(cli, "load_env", lambda path: {**real_env(path), "JUDGE_PARALLEL": "2"})
+    status = main([str(tmp_path / "runs"), "--env", str(env), "-o", str(tmp_path / "output")])
+    (run_dir,) = (tmp_path / "output").iterdir()
+    report = json.loads((run_dir / "injudge-report.json").read_text())
+    assert status == 0
+    assert [op["verdict"] for op in report["operations"]] == ["neutral", "neutral"]
+    assert {op["traj"] for op in report["operations"]} == {"T1", "T2"}
 
 
 def test_global_attachment_rejects_multiple_episodes_before_limit(tmp_path):

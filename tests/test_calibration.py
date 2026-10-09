@@ -46,6 +46,9 @@ def _judge_cases(tmp_path, monkeypatch, roots=None):
         span = (evidence_dir / "span.md").read_text()
         (case,) = [c for n, c in CASES.items() if case_id(n) in span]
         manifest = json.loads((evidence_dir / "manifest.json").read_text())
+        if "golden" in case:
+            assert case["golden"] in (evidence_dir / "gold.md").read_text()
+            assert json.loads((evidence_dir / "outcome.json").read_text())["correctness"] == case["correctness"]
         return _fill_reads(_result(_answer(case, manifest["span_id"].endswith(":S2"),
                                           manifest["footprint_from_step"])), evidence_dir)
 
@@ -168,7 +171,8 @@ def test_recorded_followup_cases_have_real_host_links_and_separate_credit(tmp_pa
         root = by_span[full["operation_id"]]
         assert case["followup"]["value"] not in (root / "baseline.md").read_text()
         # The full read is this span's own delivery: its text is in span.md, one hop away.
-        assert "[memory delivery D2; see span.md]" in (root / "steps" / f"step_{hit['step']:06d}.md").read_text()
+        marker = f"[memory delivery D2 (consumed at global step {hit['delivery_step']}); see span.md]"
+        assert marker in (root / "steps" / f"step_{hit['step']:06d}.md").read_text()
         assert preview["verdict"] in case["expect"]["verdict"]
         assert full["verdict"] in case["followup"]["expect"]["verdict"]
 
@@ -320,3 +324,26 @@ def test_attribution_controls_keep_the_fix_out_of_the_symptom_only_task(tmp_path
     assert "self.memo.setdefault" in tie["steps/step_000001.md"]
     assert "I will make that exact change" in plan["steps/step_000002.md"]
     assert "evict key from self.memo" in instructed["task.md"]
+
+
+def test_query_controls_keep_actions_fixed_and_move_exposure(tmp_path):
+    from injudge.episodes import prepare_trajectory
+    from injudge.evidence import build_span_evidence
+    from injudge.spans import group_spans
+    from memgraph.graph import load_trajectories
+
+    names = ["query_before_delivery", "query_after_delivery"]
+    trajectories, ops, events, _ = load_trajectories(build(tmp_path, names))
+    actions = []
+    for trajectory in trajectories:
+        episode, = prepare_trajectory(trajectory, events[trajectory.id], ops[trajectory.id]).episodes
+        span, = group_spans(ops[trajectory.id], trajectory.id, episode=episode,
+                           last_step=episode.steps[-1].step)
+        actions.append([(step.reasoning, step.content, [(tool.name, tool.args, tool.result)
+                        for tool in step.tools]) for step in episode.steps])
+        files = build_span_evidence(span, episode)
+        before = trajectory.run_id == case_id("query_before_delivery")
+        assert span.step_first == (3 if before else 2)
+        assert "docs-search" in files["steps/step_000002.md"]
+        assert ("steps/step_000002.md" in files["baseline.md"]) == before
+    assert actions[0] == actions[1]

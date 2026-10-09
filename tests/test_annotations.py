@@ -2670,8 +2670,6 @@ def test_local_memory_treatment_split_bounds_windows(tmp_path, digest, same_step
     # the full re-exposure shows text the clip lacked: it stays eligible at
     # its own consuming step even when both reached one turn
     assert second.memory_window_starts == {}
-    assert second.new_keys == second.removed_keys == []
-    assert second.previous_keys == ["note-1"]
 
 
 def test_annotated_zero_operations_is_valid(tmp_path):

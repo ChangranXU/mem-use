@@ -52,7 +52,7 @@ Memories are identified by the recorder's portable MemoryRef fields, never by ad
 
 | Layer | Key | Used for |
 |---|---|---|
-| Item | `(namespace, item_id)` or a stable display key | Graph registry, usage roll-ups, span set-diffs, and footprint windows. Stable across versions; an operation-local ID used as a display key is withheld. |
+| Item | `(namespace, item_id)` or a stable display key | Graph registry, usage roll-ups, and footprint windows. Stable across versions; an operation-local ID used as a display key is withheld. |
 | Content fallback | Canonical entry with local IDs withheld | Cross-operation grouping when only an operation-local display key is available. Same content under a fresh local ID groups together; different content stays separate. |
 | Version | `namespace` / `identity_scheme` / `version_id` / content sha256, plus the recorded item identity (`item_id`, else the display-key fallback) | Span fingerprints and candidate deduplication. |
 
@@ -67,7 +67,7 @@ Adapter extensions (`extensions.cure`) contribute a **display** projection only:
 {% hint style="info" %}
 **Span fingerprint fallback.** A memory with no portable version identity (an `operation_local` version id over undigested content) fingerprints on the delivered `(namespace, item, value)` instead. Redacted content records no value, so distinct redacted bodies under one `(namespace, item)` share a span: nothing recorded can tell them apart.
 
-Without a stable item key, the graph, usage roll-ups, span set-diffs, and footprint windows use the same canonical entry as the fingerprint. A new treatment under a fresh local ID therefore bounds the earlier treatment's window when it re-exposes that treatment's text (a different or narrower verified text leaves it open); stable item IDs still track revisions of the same item.
+Without a stable item key, the graph, usage roll-ups, and footprint windows use the same canonical entry as the fingerprint. A new treatment under a fresh local ID therefore bounds the earlier treatment's window when it re-exposes that treatment's text (a different or narrower verified text leaves it open); stable item IDs still track revisions of the same item.
 {% endhint %}
 
 ## Agent Steps

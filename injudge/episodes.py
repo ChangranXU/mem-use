@@ -19,34 +19,20 @@ from typing import Any
 from injudge.model import AgentStep, ContextView, EpisodeInput, PreparationResult, SourceRef
 from injudge.steps import _tool_calls_of, build_step_stream
 from memgraph.annotations import AnnotationIndex, build_annotation_index, is_int, message_text, resolved_content_text
-from memgraph.episodes import Boundary, episode_for_index, episode_scopes
+from memgraph.episodes import Boundary, _as_str, _payload, episode_for_index, episode_scopes
 from memgraph.model import MemoryOp, Trajectory
-
-
-def _as_str(value: object) -> str | None:
-    return value if isinstance(value, str) and value else None
 
 
 def _as_int(value: object) -> int | None:
     return value if is_int(value) else None
 
 
-def _payload(event: dict[str, Any]) -> dict[str, Any]:
-    value = event.get("payload")
-    return value if isinstance(value, dict) else {}
-
-
-def _event_index(event: dict[str, Any], fallback: int) -> int:
-    value = event.get("_event_index")
-    return value if is_int(value) and value >= 0 else fallback
-
-
-def _source(event: dict[str, Any], index: int | None = None) -> SourceRef:
-    idx = _event_index(event, index or 0)
+def _source(event: dict[str, Any]) -> SourceRef:
+    """Provenance by parsed position (the parser stamps `_event_index`)."""
     call_ref = event.get("terminal_call_ref")
     call_id = call_ref.get("call_id") if isinstance(call_ref, dict) else event.get("call_id")
     return SourceRef(
-        event_index=idx,
+        event_index=event["_event_index"],
         seq=event.get("seq") if is_int(event.get("seq")) else None,
         original_seq=event.get("_original_seq"),
         lane=event.get("proxy_source") if event.get("proxy_source") is None or isinstance(event.get("proxy_source"), str) else None,
@@ -80,17 +66,13 @@ def _main_lanes(events: list[dict[str, Any]], memory_lanes: set[str | None], sid
 
 def _turn_maps(events: list[dict[str, Any]], steps: list[AgentStep]) -> tuple[dict[int, int], dict[int, SourceRef], dict[str, tuple[int, int | None]]]:
     turn_index: dict[int, int] = {}
-    for fallback, event in enumerate(events):
+    for index, event in enumerate(events):
         if event.get("type") == "turn_start" and is_int(event.get("turn")):
-            turn_index.setdefault(event["turn"], _event_index(event, fallback))
+            turn_index.setdefault(event["turn"], index)
     step_by_turn = {step.turn: step.step for step in steps}
-    sources = {
-        step.turn: _source(events[turn_index[step.turn]], turn_index[step.turn])
-        for step in steps
-        if step.turn in turn_index
-    }
+    sources = {step.turn: _source(events[turn_index[step.turn]]) for step in steps if step.turn in turn_index}
     call_map: dict[str, tuple[int, int | None]] = {}
-    for fallback, event in enumerate(events):
+    for event in events:
         if event.get("type") != "turn_start" or not is_int(event.get("turn")):
             continue
         call_id = event.get("call_id")
@@ -115,8 +97,8 @@ def _content_text(event: dict[str, Any]) -> str | None:
     return None
 
 
-def _occurrence(event: dict[str, Any], index: int) -> dict[str, Any]:
-    source = _source(event, index)
+def _occurrence(event: dict[str, Any]) -> dict[str, Any]:
+    source = _source(event)
     role = event.get("role") if isinstance(event.get("role"), str) else (
         "tool" if event.get("type") == "tool_execution_end" else None
     )
@@ -150,8 +132,7 @@ def _replay_context(
     gaps: dict[str | None, list[str]] = {}
     step_by_turn = {step.turn: step.step for step in steps}
     diagnostics: list[str] = []
-    for fallback, event in enumerate(events):
-        index = _event_index(event, fallback)
+    for index, event in enumerate(events):
         typ, lane = event.get("type"), event.get("proxy_source")
         if lane is not None and not isinstance(lane, str):
             continue  # The shared parser reports corrupt lanes.
@@ -190,7 +171,7 @@ def _replay_context(
                 continue  # A result without a slot remains step evidence only.
             if typ == "message_end" and not isinstance(event.get("role"), str):
                 continue
-            item = _occurrence(event, index)
+            item = _occurrence(event)
             occurrences[index] = item
             prior[msg] = item
         elif typ == "turn_start" and is_int(event.get("turn")):
@@ -469,8 +450,8 @@ def _search_projection(search_id: str, events: list[dict[str, Any]],
         "matched_count": _payload(end).get("matched_count") if end else None,
         "returned_count": len(returned) if isinstance(returned, list) else None,
         "status": _payload(end).get("status") if end else "missing_end",
-        "source_start": _source(start, _event_index(start, 0)).to_dict() if start else None,
-        "source_end": _source(end, _event_index(end, 0)).to_dict() if end else None,
+        "source_start": _source(start).to_dict() if start else None,
+        "source_end": _source(end).to_dict() if end else None,
     }
 
 
@@ -481,7 +462,6 @@ def _delivery_projection(
     events: list[dict[str, Any]],
     occurrences: dict[int, dict[str, Any]],
     call_map: dict[str, tuple[int, int | None]],
-    step_source_by_turn: dict[int, SourceRef],
     view: ContextView | None,
     index: AnnotationIndex,
     directory: Path,
@@ -504,7 +484,6 @@ def _delivery_projection(
         audit["entry_id"] = f"D{delivery_number}.E{i + 1}"
         projections.append({"entry_id": audit["entry_id"], "audit": audit, "exposure": safe})
     placements = []
-    raw_placements = payload.get("placements") if isinstance(payload.get("placements"), list) else []
     proof_sources = _proof_sources(event, occurrences, view, directory)
     for placement in op.placements:
         item = dict(placement)
@@ -514,7 +493,7 @@ def _delivery_projection(
                    if proof.get("slot") is not None and proof.get("slot") == placement.get("slot")]
         item["source_resolution"] = matches[0] if len(matches) == 1 else {"status": "unknown"}
         placements.append(item)
-    source = _source(event, op.source_event_index)
+    source = _source(event)
     linked_searches = [
         _search_projection(item["operation_id"], events, index, _as_str(payload.get("trace_session_id")))
         for item in op.searches
@@ -536,9 +515,6 @@ def _delivery_projection(
         "memories": projections,
         "placements": placements,
         "empty": not projections and not placements,
-        "raw_placement_count": len(raw_placements),
-        "delivery_source_proofs": proof_sources,
-        "step_source": step_source_by_turn.get(consumer.get("turn")).to_dict() if consumer.get("turn") in step_source_by_turn else None,
     }
 
 
@@ -587,7 +563,7 @@ def prepare_episodes(
     for session_id, session_event in annotation_index.sessions.items():
         if _payload(session_event).get("session_kind") != "other":
             continue
-        boundary = episode_for_index(boundaries, _event_index(session_event, 0))
+        boundary = episode_for_index(boundaries, session_event["_event_index"])
         if boundary and boundary.open_event.get("type") == "memory_session" and boundary.session_id:
             participant_episodes[session_id] = boundary.session_id
     main_lanes = _main_lanes(events, trajectory.memory_lanes, trajectory.side_lanes)
@@ -628,18 +604,17 @@ def prepare_episodes(
             benchmark_identity=episode_id or _as_str(open_payload.get("instance_id")),
             boundary_provenance={
                 "status": boundary.status,
-                "open": _source(boundary.open_event, boundary.open_index).to_dict(),
-                "close": _source(boundary.close_event, boundary.close_index).to_dict() if boundary.close_event else None,
+                "open": _source(boundary.open_event).to_dict(),
+                "close": _source(boundary.close_event).to_dict() if boundary.close_event else None,
                 "diagnostics": list(boundary.diagnostics),
             },
             preparation_status=status,
             diagnostics=list(boundary.diagnostics),
-            _events=events,
             _step_sources=step_sources,
         )
         episode.source_refs.extend([
-            _source(boundary.open_event, boundary.open_index),
-            *([_source(boundary.close_event, boundary.close_index)] if boundary.close_event else []),
+            _source(boundary.open_event),
+            *([_source(boundary.close_event)] if boundary.close_event else []),
         ])
         episode_data[boundary.ordinal] = episode
 
@@ -681,7 +656,6 @@ def prepare_episodes(
             assigned_views.add(id(view))
 
     recalls = [op for op in operations if op.kind == "recall"]
-    assigned_recall_ids: set[str] = set()
     for op in sorted(recalls, key=lambda item: (item.source_event_index if item.source_event_index is not None else 10**18, item.seq)):
         source_index = op.source_event_index
         event = events[source_index] if source_index is not None and 0 <= source_index < len(events) else None
@@ -724,7 +698,6 @@ def prepare_episodes(
             events,
             occurrences,
             call_map,
-            step_sources,
             views.get(turn_index.get(call_map.get(call_id, (None, None))[0], -1))
             if isinstance(call_id, str) else None,
             annotation_index,
@@ -732,8 +705,7 @@ def prepare_episodes(
         )
         episode = episode_data[boundary.ordinal]
         episode.deliveries.append(projection)
-        episode.source_refs.append(_source(event, source_index))
-        assigned_recall_ids.add(op.id)
+        episode.source_refs.append(_source(event))
 
     # Searches are attached through deliveries when possible, then by their
     # source interval. This preserves empty searches and delayed completion.
@@ -747,14 +719,14 @@ def prepare_episodes(
                     episode.searches.append(search)
                     episode_search_ids.add(sid)
                     assigned_search_ids.add(sid)
-    for fallback, event in enumerate(events):
+    for index, event in enumerate(events):
         if event.get("type") != "memory_search_start":
             continue
         payload = _payload(event)
         sid = _as_str(payload.get("operation_id"))
         if sid is None or sid in assigned_search_ids:
             continue
-        boundary = episode_for_index(boundaries, _event_index(event, fallback), event, participant_episodes)
+        boundary = episode_for_index(boundaries, index, event, participant_episodes)
         if boundary is None:
             diagnostics.append(f"{trajectory.run_id}: search {sid} has ambiguous episode membership")
             unassigned.append({
@@ -766,6 +738,21 @@ def prepare_episodes(
         episode_data[boundary.ordinal].searches.append(_search_projection(sid, events, annotation_index, _as_str(payload.get("trace_session_id"))))
         assigned_search_ids.add(sid)
 
+    # An explicit episode-scoped session task is an additional source when no
+    # user input was recorded, or when it supplies a distinct task.
+    session_tasks = []
+    for index, event in enumerate(events):
+        payload = _payload(event)
+        if event.get("type") != "memory_session" or payload.get("session_kind") != "episode":
+            continue
+        text = resolved_content_text(payload.get("task"), events,
+                                     annotation_index.binds.get(_as_str(payload.get("trace_session_id")), {}))
+        if text:
+            session_tasks.append((index, {
+                "occurrence_id": f"session-task:{index}", "role": "user", "content": text,
+                "source_kind": "memory_session_task", "source": _source(event).to_dict(),
+            }))
+
     for boundary in boundaries:
         episode = episode_data[boundary.ordinal]
         used_occurrence_ids = {
@@ -776,10 +763,10 @@ def prepare_episodes(
         }
         episode.message_occurrences = [
             copy.deepcopy(item)
-            for index, item in sorted(occurrences.items())
+            for _, item in sorted(occurrences.items())
             if item.get("occurrence_id") in used_occurrence_ids
         ]
-        for index, occurrence in sorted(occurrences.items()):
+        for _, occurrence in sorted(occurrences.items()):
             if occurrence["occurrence_id"] not in used_occurrence_ids or occurrence.get("lane") not in main_lanes:
                 continue
             if occurrence.get("role") != "user":
@@ -791,36 +778,9 @@ def prepare_episodes(
                 continue
             item["source_kind"] = "recorded_user_message"
             episode.task.append(item)
-        # An explicit episode-scoped session task is an additional source when
-        # no user input was recorded, or when it supplies a distinct task.
-        for fallback, event in enumerate(events):
-            if event.get("type") != "memory_session":
-                continue
-            if _payload(event).get("session_kind") != "episode":
-                continue
-            if not boundary.contains(_event_index(event, fallback)):
-                continue
-            task_ref = _payload(event).get("task")
-            if task_ref is None:
-                continue
-            try:
-                text = resolved_content_text(
-                    task_ref, events, annotation_index.binds.get(
-                        _as_str(_payload(event).get("trace_session_id")), {}
-                    )
-                )
-            except (TypeError, ValueError, RecursionError):
-                text = None
-            if isinstance(text, str) and text:
-                item = {
-                    "occurrence_id": f"session-task:{_event_index(event, fallback)}",
-                    "role": "user",
-                    "content": text,
-                    "source_kind": "memory_session_task",
-                    "source": _source(event, _event_index(event, fallback)).to_dict(),
-                }
-                if not any(x.get("content") == text for x in episode.task):
-                    episode.task.insert(0, item)
+        for index, item in session_tasks:
+            if boundary.contains(index) and not any(x.get("content") == item["content"] for x in episode.task):
+                episode.task.insert(0, dict(item))
         episode.source_refs = list({ref.event_index: ref for ref in episode.source_refs}.values())
         episode.context.sort(key=lambda view: turn_index.get(view.turn, 10**18))
         episode.steps.sort(key=lambda step: step.step)
@@ -832,38 +792,6 @@ def prepare_episodes(
                 episode.diagnostics.append(f"{delivery['entry_prefix']}: placement proof cannot be resolved in the consumer input")
             if delivery["consumer"]["status"] != "observed":
                 episode.diagnostics.append(f"{delivery['entry_prefix']}: consuming agent step is unobserved")
-        context_indexes = [turn_index[view.turn] for view in episode.context if view.turn in turn_index]
-        rewrites = [event for event in events[boundary.open_index:boundary.end_index + 1]
-                    if event.get("type") == "history_rewritten"
-                    and (event.get("proxy_source") is None or isinstance(event.get("proxy_source"), str))
-                    and event.get("proxy_source") in main_lanes]
-        first_input = min(context_indexes) if context_indexes else boundary.end_index
-        resets = [event for event in rewrites if _event_index(event, 0) < first_input]
-        episode.boundary_provenance["episode_reset"] = bool(resets)
-        episode.boundary_provenance["reset_source"] = _source(resets[-1]).to_dict() if resets else None
-        wrapper = None
-        for rewrite in rewrites:
-            idx = _event_index(rewrite, 0)
-            if idx <= first_input:
-                continue
-            preceding = [view for view in episode.context if turn_index.get(view.turn, 10**18) < idx]
-            following = [view for view in episode.context if turn_index.get(view.turn, -1) > idx]
-            if not preceding or not following:
-                continue
-            by_id = {item["occurrence_id"]: project_occurrence(item, episode.deliveries)
-                     for item in episode.message_occurrences}
-            before = [by_id[item["occurrence_id"]] for item in preceding[-1].messages]
-            after = [by_id[item["occurrence_id"]] for item in following[0].messages]
-            before_refs = {ref for item in before for ref in item.get("memory_delivery_refs", [])}
-            after_refs = {ref for item in after for ref in item.get("memory_delivery_refs", [])}
-            before_tasks = [item.get("content", "").strip() for item in before
-                            if item.get("role") == "user" and item.get("content")]
-            after_tasks = [item.get("content", "").strip() for item in after
-                           if item.get("role") == "user" and item.get("content")]
-            if before_refs - after_refs and before_tasks == after_tasks:
-                wrapper = rewrite
-                break
-        episode.boundary_provenance["wrapper_removal_rewrite"] = _source(wrapper).to_dict() if wrapper else None
         if not episode.task:
             episode.diagnostics.append("no main-lane user task message was recorded")
         if not episode.steps and episode.deliveries:
@@ -874,13 +802,6 @@ def prepare_episodes(
         if episode.diagnostics and episode.preparation_status == "prepared":
             episode.preparation_status = "needs_review"
 
-    if len(assigned_recall_ids) != len(recalls):
-        if not any(item.get("kind") == "delivery" for item in unassigned):
-            unassigned.append({
-                "kind": "deliveries",
-                "count": len(recalls) - len(assigned_recall_ids),
-                "reason": "ambiguous_or_missing_episode_membership",
-            })
     return PreparationResult(
         episodes=list(episode_data.values()),
         unassigned=unassigned,

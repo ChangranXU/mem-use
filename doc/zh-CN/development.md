@@ -41,6 +41,8 @@ uv run pytest tests/test_injudge.py -q # 单个文件
 搜索再次显示仍在输入中的条目，以及仅措辞不同的基线。每个用例只固定其构造能够确立的标签。投递列表的用例把其余每个条目
 作为独立目标评分（`case/m2` 等）。
 
+新增控制用例在 gold 补丁匹配且任务结果为已解决时仍保留未知效果，因为没有检查或后续使用证明该改动有益。
+
 ```bash
 uv run -m calibration build calibration-cases/
 uv run -m injudge calibration-cases/ -o output/calibration   # 付费；重复运行以测稳定性

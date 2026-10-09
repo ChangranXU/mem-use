@@ -47,6 +47,9 @@ still in the agent's input, and paraphrased baselines. Each case pins
 only the labels its construction establishes. A case delivering a list scores
 each further entry as its own target (`case/m2`, …).
 
+A new control keeps effect unknown despite a matching gold patch and resolved
+task outcome, because no check or later use shows the change's benefit.
+
 Recorded follow-up cases contain a preview and a separately bound full read.
 Calibration scores both targets (`case` and `case/read`), preserving each
 verdict and marking missing or errored targets unavailable. The controls

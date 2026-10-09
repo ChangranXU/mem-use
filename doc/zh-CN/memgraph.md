@@ -68,7 +68,7 @@ injudge 的输入预算中。recorder 可以省略零值的缓存读取和推理
 |---|---|
 | `-o PATH` | HTML 输出路径（默认 `memory-graph.html`） |
 | `--json PATH` | 同时写出机器可读的图产物 |
-| `--verdicts PATH` | 渲染前合并一份 `injudge.report/v17` 文件 |
+| `--verdicts PATH` | 渲染前合并一份 `injudge.report/v19` 文件 |
 
 ## 判定叠加
 

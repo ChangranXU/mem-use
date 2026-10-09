@@ -44,9 +44,9 @@ npm --prefix agent install    # TS 侧执行一次（需要 PATH 上有 node >= 
 
 | 键 | 默认值 | 用途 |
 |---|---|---|
-| `MAX_ATTEMPTS` | `5` | 每个区间的运行器阶段总数：调查、单调用修复，以及仅在明确请求缺失证据后恢复的调查。修复仍不合法则停止。`--max-attempts` 可覆盖。 |
+| `MAX_ATTEMPTS` | `5` | 每个区间的运行器阶段总数：首次调查、修复与恢复调查。首次答案缺少必读证据时可直接恢复调查；修复也可请求证据。修复仍不合法则停止。`--max-attempts` 可覆盖。 |
 | `TIMEOUT` | `300` | 单次 LLM 调用超时（秒）。`--timeout` 可覆盖。 |
-| `JUDGE_PARALLEL` | `1` | 同一轨迹内并行评判的区间数（上限 32）。每个在飞区间是一条独立的智能体对话。 |
+| `JUDGE_PARALLEL` | `1` | 跨所有输入轨迹并行评判的区间数（上限 32）。每个在飞区间是一条独立的智能体对话。 |
 
 ## 命令行参数
 
@@ -70,7 +70,7 @@ npm --prefix agent install    # TS 侧执行一次（需要 PATH 上有 node >= 
 ### 离线准备
 
 使用 `--prepare-only` 可在不加载 `.env`、Node 或网络的情况下按 bridge
-episode 分区并写出 `injudge.episode-inputs/v2`：
+episode 分区并写出 `injudge.episode-inputs/v3`：
 
 ```bash
 uv run -m injudge <paths> --prepare-only -o output/

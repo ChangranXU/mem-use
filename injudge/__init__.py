@@ -21,14 +21,20 @@ from __future__ import annotations
 # (injudge.report.py) and the reader (memgraph/verdicts.py) so a bump can
 # never land on one side only and surface at read time. Tests pin the
 # literal deliberately — a bump must update them (see AGENTS.md).
-# v17 separates memory misdirection from execution slips, names direct
-# delivery volume separately from residency, and compacts excluded spans.
-# v16 harm judgments are not directly comparable.
-REPORT_SCHEMA = "injudge.report/v17"
+# v19 removes the aggregate headline block and the unused span set-diff
+# fields (new/removed/previous/changed keys). Verdict counts, rates, costs
+# by verdict, and judge labels are unchanged. Summary keeps schema v17.
+# v18 dropped the episode reset/wrapper-rewrite heuristics from boundary
+# provenance and the per-trajectory cost caveat, and rated novelty and
+# accuracy over relevant entries (rubric.relevant_counts). Judge labels are
+# unchanged from v17, which separated memory misdirection from execution
+# slips. v16 harm judgments are not directly comparable.
+REPORT_SCHEMA = "injudge.report/v19"
 
-# v16 keeps compact totals; per-memory evidence stays in report v17.
-SUMMARY_SCHEMA = "injudge.summary/v16"
+# v17 rates novelty and accuracy over relevant entries (relevant_counts);
+# v16 rated them over all entries. Per-memory evidence stays in the report.
+SUMMARY_SCHEMA = "injudge.summary/v17"
 
-# v2 drops episode.md (the manifest describes every file) and stores each
-# message text once: context.json and baseline.md name the file holding it.
-EPISODE_INPUT_SCHEMA = "injudge.episode-inputs/v2"
+# v3 drops the duplicate delivery proof list, raw placement counts, step
+# sources, and the reset/wrapper-rewrite heuristics.
+EPISODE_INPUT_SCHEMA = "injudge.episode-inputs/v3"

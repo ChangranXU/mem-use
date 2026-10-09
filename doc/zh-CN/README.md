@@ -20,7 +20,7 @@ icon: book-open
 | 工具 | 用途 |
 |---|---|
 | **memgraph** | 把每次记忆操作及其关系渲染成自包含的 HTML 图（可选 JSON 产物）。 |
-| **injudge** | 按五信号评分规则为 episode 内的召回区间打分，写出 `injudge.report/v17` 产物；用 `--verdicts` 可将其叠加回图上。 |
+| **injudge** | 按五信号评分规则为 episode 内的召回区间打分，写出 `injudge.report/v19` 产物；用 `--verdicts` 可将其叠加回图上。 |
 
 贯穿两个工具的一条原则：召回注入以其对 agent 的**后续影响**来评判。最终任务结果可以佐证判断，但绝不决定判断。
 
@@ -125,7 +125,7 @@ LLM 从不直接给出区间判定。它为每条投递记忆打五个信号—�
     </tr>
     <tr>
       <td><strong>产物</strong></td>
-      <td>report 与 <code>summary.json</code> 字段说明，含计数规则。</td>
+      <td>report 与 <code>summary.json</code> 字段说明、计数规则及可读摘要 <code>summary.md</code>。</td>
       <td><a href="artifacts.md">artifacts</a></td>
     </tr>
     <tr>

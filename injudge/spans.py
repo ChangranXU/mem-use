@@ -130,7 +130,7 @@ def group_spans(
     bounded at that step, and a copy adding no verified text opens only
     after it — the bound is named."""
     spans, steps_seen = _merge_spans(recall_ops, traj_id, id_offset)
-    entry_idents = _stamp_novelty(spans, steps_seen)
+    entry_idents = _stamp_steps(spans, steps_seen)
     _stamp_windows(spans, entry_idents, warnings)
     for span in spans:
         span.episode_execution_id = episode_execution_id
@@ -214,27 +214,12 @@ def entry_ident(memory: dict) -> str:
             if item is not None else canonical_entry(memory))
 
 
-def _stamp_novelty(
+def _stamp_steps(
     spans: list[InjectionSpan], steps_seen: list[list[int]]
 ) -> list[list[str]]:
-    """Step bounds, membership diffs, and the cumulative novelty baseline.
-
-    The diff compares (namespace, item) identities — a delivery switching
-    stores or another item reusing the key IS a change — then speaks in
-    distinct bare keys. Without an item identity valid across operations,
-    the canonical entry used by fingerprints carries the comparison instead;
-    fresh local ids cannot leave the same content's windows overlapping.
-    A key whose item identity changed lands in BOTH
-    lists. `previous_keys` / `changed_keys` accumulate across ANY earlier
-    span (a gap re-delivery is still content the agent already saw);
-    `changed_keys` compares against the last RECORDED earlier value — a
-    None side records no value, so it is unrecorded, never a change, and a
-    value-less re-delivery never erases the last value an earlier span
-    actually recorded. Returns per-span per-entry identities
-    for the window pass — one window per delivered entry, so
-    identities sharing a display key keep their own bounds."""
-    prev: dict[str, str] = {}
-    seen: dict[str, object] = {}
+    """Stamp each span's step bounds and gaps. Return each span's per-entry
+    item identities for the window pass: one window per delivered entry, so
+    entries that share a display key keep their own bounds."""
     entry_idents: list[list[str]] = []
     for span, steps in zip(spans, steps_seen):
         if steps:
@@ -244,38 +229,7 @@ def _stamp_novelty(
             span.step_gaps = [
                 s for s in range(span.step_first, span.step_last + 1) if s not in delivered
             ]
-        cur: dict[str, str] = {}
-        vals: dict[str, object] = {}
-        idents: list[str] = []
-        for m in span.memories:
-            ident = entry_ident(m)
-            idents.append(ident)
-            label = m.get("key") or grouping_item_key(m)
-            if label:
-                cur.setdefault(ident, label)
-                # last recorded value in this delivery speaks for the span
-                # (several versions of one item is a legal collapse)
-                v = m.get("value")
-                if ident not in vals or v is not None:
-                    vals[ident] = v
-        entry_idents.append(idents)
-        span.new_keys = list(dict.fromkeys(cur[i] for i in cur if i not in prev))
-        span.removed_keys = list(dict.fromkeys(prev[i] for i in prev if i not in cur))
-        redelivered = [i for i in cur if i in seen]
-        span.previous_keys = list(dict.fromkeys(cur[i] for i in redelivered))
-        span.changed_keys = list(
-            dict.fromkeys(
-                cur[i]
-                for i in redelivered
-                if vals[i] is not None
-                and seen[i] is not None
-                and vals[i] != seen[i]
-            )
-        )
-        for ident, v in vals.items():
-            if ident not in seen or v is not None:
-                seen[ident] = v
-        prev = cur
+        entry_idents.append([entry_ident(m) for m in span.memories])
     return entry_idents
 
 

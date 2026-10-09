@@ -14,10 +14,11 @@ conversation's final assistant text, and _strict_parse /
 _verdict_semantics / _assemble_verdict (injudge.judge) decide whether it
 is a verdict, and every cited anchor must name a step file the retained
 conversation actually read (a nonzero read count alone does not ground a
-claim about step N). A violation gets one tool-free repair call over the SAME
-conversation through job.history. Only an explicit needs_evidence request
-reopens investigation; an invalid repair or exhausted phase budget stays
-a visible error verdict, never a silent neutral.
+claim about step N). If the first answer passes shape and semantic checks but
+misses required evidence, one short investigation continues job.history before
+repair, if the phase budget allows. Other violations get one tool-free repair.
+Its explicit needs_evidence reply can reopen investigation. An invalid repair
+or exhausted phase budget stays a visible error verdict, never a silent neutral.
 
 The API key reaches the runner only through the JUDGE_API_KEY environment
 variable; it never rides the job/result temp files. Everything the
@@ -50,7 +51,6 @@ from injudge.judge import (
     _mask_key,
     _masked_head,
     _scoring_system,
-    _prose_warnings,
     _substitute_enums,
     _strict_parse,
     _verdict_semantics,
@@ -58,6 +58,7 @@ from injudge.judge import (
 )
 from injudge.model import EpisodeInput, InjectionSpan
 from injudge.prompts import content_digest, load_prompt
+from memgraph.annotations import is_int
 
 # The checkout's TS half: the pi agent runner the judge spawns per span.
 _AGENT_DIR = Path(__file__).resolve().parents[1] / "agent"
@@ -84,6 +85,8 @@ def _opening_message(span_id: str, files: dict[str, str]) -> str:
     index = json.loads(files["manifest.json"])
     navigation = [f"{entry['path']} ({entry['chars']} chars) — {entry['description']}"
                   for entry in index["files"] if entry.get("kind") != "step"]
+    if missing := [name for name in ("gold.md", "outcome.json") if name not in files]:
+        navigation.append("Optional attachments not provided: " + ", ".join(missing) + ".")
     step_files = [entry["path"] for entry in index["files"] if entry.get("kind") == "step"]
     # name real files: the zero-padded names are not guessable from step numbers
     navigation.append(f"steps/: {len(step_files)} files, "
@@ -557,8 +560,7 @@ def _unread_anchor_error(obj: dict, read: set[int]) -> str | None:
     evidence = obj.get("evidence")
     for entry in evidence if isinstance(evidence, list) else []:
         steps = entry.get("steps") if isinstance(entry, dict) else None
-        unread = sorted({step for step in steps if isinstance(step, int)
-                         and not isinstance(step, bool) and step not in read}) if isinstance(steps, list) else []
+        unread = sorted({step for step in steps if is_int(step) and step not in read}) if isinstance(steps, list) else []
         if unread:
             gaps.append(
                 f"cites evidence step(s) {unread} whose complete text was not read "
@@ -625,6 +627,12 @@ def _mask_trajectory_file(path: Path, api_key: str) -> None:
             raise
 
 
+def _add_known(total: int | None, value: object) -> int | None:
+    """A cumulative count stays known only while every phase reports one;
+    a later phase can never fill an earlier gap."""
+    return total + value if total is not None and is_int(value) and value >= 0 else None
+
+
 def judge_span(
     span: InjectionSpan,
     episode: EpisodeInput,
@@ -637,10 +645,11 @@ def judge_span(
 ) -> dict:
     """Judge one span with the evidence-searching agent.
 
-    Materializes the span's evidence folder, then runs the agent
-    conversation, then one tool-free repair if its answer is invalid.
-    Only a repair's explicit needs_evidence request resumes investigation.
-    All phases continue job.history within the total attempt budget. The runner records each attempt as a pi event-sourced
+    The first answer's evidence gaps get one short investigation before repair
+    if shape and semantic checks pass and the phase budget allows. Other
+    violations get one tool-free repair; its explicit needs_evidence reply
+    can resume investigation. All phases continue job.history within the
+    total attempt budget. The runner records each attempt as a pi event-sourced
     trajectory (every appended message, budget-rollback tombstones, the
     forced-answer injection, per-attempt diagnostics) under
     `transcripts_root` — one JSONL per span, replaced per judging run like
@@ -700,19 +709,12 @@ def judge_span(
             except OSError as e:
                 mask_error = _mask_key(str(e), cfg.api_key)
         if result is not None:
-            # Each total needs a valid value from every phase. Later values cannot fill a gap.
             for key in ("executed_llm_calls", "executed_tool_calls", "context_rollbacks"):
-                value = result.get(key)
-                health[key] = (health[key] + value if health[key] is not None
-                               and isinstance(value, int) and not isinstance(value, bool)
-                               and value >= 0 else None)
+                health[key] = _add_known(health[key], result.get(key))
             usage = result.get("reported_usage")
+            usage = usage if isinstance(usage, dict) else {}
             for key, previous in health["reported_usage"].items():
-                value = usage.get(key) if isinstance(usage, dict) else None
-                health["reported_usage"][key] = (
-                    previous + value if previous is not None
-                    and isinstance(value, (int, float)) and not isinstance(value, bool)
-                    and value >= 0 and (not isinstance(value, float) or math.isfinite(value)) else None)
+                health["reported_usage"][key] = _add_known(previous, usage.get(key))
             health["any_phase_forced"] = health["any_phase_forced"] or bool(result.get("forced"))
             health["retained_llm_calls"] = result.get("llm_calls", 0)
             health["retained_tool_calls"] = result.get("tool_calls", 0)
@@ -753,8 +755,8 @@ def judge_span(
             if (isinstance(request, dict) and set(request) == {"needs_evidence"}
                     and isinstance(request["needs_evidence"], str)
                     and request["needs_evidence"].strip()):
-                # The repair call cannot read files. Only an explicit missing-
-                # evidence request reopens tools, in this same conversation.
+                # A repair cannot read files. Its explicit evidence request
+                # resumes tools in the same conversation.
                 need = request["needs_evidence"].strip()
                 last_text, last_error = text, f"needs evidence: {need}"
                 history = result["messages"]
@@ -783,12 +785,19 @@ def judge_span(
                             _coverage_error(obj, span, {step.step for step in steps}, set(read_steps)),
                             _baseline_error(obj, span, files, read_files)]
                     error = "; ".join(gap for gap in gaps if gap) or None
+                    # Give an otherwise valid first answer one chance to read
+                    # known gaps before a repair answers without evidence tools.
+                    if error is not None and attempt == 1 and attempt < cfg.max_attempts:
+                        last_text, last_error = text, error
+                        history = result["messages"]
+                        message = _RESUME.replace("@max_steps@", str(min(cfg.max_steps, _RESUME_MAX_STEPS)))
+                        message = message.replace("@needs_evidence@", error)
+                        continue
                 if error is not None:
                     obj = None  # a semantic violation is as out-of-contract as a parse one
         if obj is not None:
             verdict = _assemble_verdict(obj, span, warnings, cfg.api_key)
             verdict["input"] = _input_record(gold, attempt, result, transcript, health)
-            _prose_warnings(verdict, span, files, warnings)
             return verdict
         last_text, last_error = text, error
         if repair:

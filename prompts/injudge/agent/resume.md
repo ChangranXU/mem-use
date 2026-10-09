@@ -1,4 +1,4 @@
-The final-answer repair needs additional evidence:
+Additional evidence is needed:
 @needs_evidence@
 
 Continue this same investigation with at most @max_steps@ model calls,

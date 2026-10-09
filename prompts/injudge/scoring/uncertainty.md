@@ -3,10 +3,12 @@ uses the entry's distinctive content but an independent source explains it
 equally, or investigation is incomplete), and positive_effect (influence is
 not acted_on, or the consequence is undetermined). Name the specific limit.
 Use none, referenced, or selected only after reading the complete footprint
-window; otherwise use influence null. Use improved, no_effect, or harmed only
-after reading from the window's start through the episode's end: re-exposure
-bounds action credit, not when its consequences can appear. If acted_on is established but
-effect inspection is incomplete, keep acted_on and use positive_effect null.
+window; otherwise use influence null. While tools remain available, read the
+missing steps instead of answering null for an incomplete reading. Use
+improved, no_effect, or harmed only after reading from the window's start
+through the episode's end: re-exposure bounds action credit, not when its
+consequences can appear. If acted_on is established but effect inspection is
+incomplete, keep acted_on and use positive_effect null.
 A later step can show that apparently wasted work contributed, or that an
 earlier benefit was followed by harm.
 Read task.md, baseline.md, the first consuming step, and its preceding episode

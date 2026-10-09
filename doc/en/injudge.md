@@ -28,8 +28,8 @@ Each run writes its own `<run-stamp>/` folder (`YYYYMMDD-HHMMSS-<hex>`) under `-
 
 | File | Contents |
 |---|---|
-| `injudge-report.json` | The runtime judging record (`injudge.report/v17`), written before paid work with pending spans marked `unjudged`, then checkpointed after each completed span, including parallel completions |
-| `summary.json` | The final statistics (`injudge.summary/v16`): counts, rates, delivery estimates, judge execution totals |
+| `injudge-report.json` | The runtime judging record (`injudge.report/v19`), written before paid work with pending spans marked `unjudged`, then checkpointed after each completed span, including parallel completions |
+| `summary.json` | The final statistics (`injudge.summary/v17`): counts, rates, delivery estimates, judge execution totals |
 | `memgraph-verdicts.html` | Only with `--html`: memgraph with recall nodes colored by verdict |
 | `evidence/` | One folder per span sent to the judge agent (error verdicts from a failed run included): target `span.md` plus only its parent's prepared episode files and optional attachments |
 | `agent-runs/` | One trajectory JSONL per span sent to the judge agent: the pi event-sourced recording of how each verdict was reached |
@@ -44,7 +44,7 @@ Assessable spans are also rejected when the episode has unresolved placement own
 
 ## Offline Preparation
 
-`--prepare-only` writes the offline episode package instead of a judged run: `<run-stamp>/episode-inputs.json` (the `injudge.episode-inputs/v2` index) plus one `<run-stamp>/episodes/<episode-dir>/` folder per materialized episode. It loads no `.env`, needs no Node, and makes no judge calls; the package is written before a nonzero exit when a boundary or assignment needs review. See [Configuration](configuration.md#offline-preparation).
+`--prepare-only` writes the offline episode package instead of a judged run: `<run-stamp>/episode-inputs.json` (the `injudge.episode-inputs/v3` index) plus one `<run-stamp>/episodes/<episode-dir>/` folder per materialized episode. It loads no `.env`, needs no Node, and makes no judge calls; the package is written before a nonzero exit when a boundary or assignment needs review. See [Configuration](configuration.md#offline-preparation).
 
 ## Injection Spans
 

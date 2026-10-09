@@ -241,7 +241,7 @@ def test_proof_cannot_bind_to_future_occurrence_in_reused_slot(tmp_path):
     _proven_delivery(builder, sid, ref, "future body", "future body")
     builder.episode_close("second")
     episode = prepare_trajectory(*_prepare_args(tmp_path, builder)).episodes[0]
-    assert episode.deliveries[0]["delivery_source_proofs"][0]["status"] == "unknown"
+    assert episode.deliveries[0]["placements"][0]["source_resolution"]["status"] == "unknown"
     assert episode.preparation_status == "needs_review"
 
 
@@ -257,7 +257,7 @@ def test_pointer_proof_does_not_claim_an_arbitrary_message(tmp_path):
     }]
     builder.episode_close()
     episode = prepare_trajectory(*_prepare_args(tmp_path, builder)).episodes[0]
-    assert episode.deliveries[0]["delivery_source_proofs"][0]["status"] == "unknown"
+    assert episode.deliveries[0]["placements"][0]["source_resolution"]["status"] == "unknown"
     assert "real task" in build_episode_evidence(episode)["task.md"]
 
 
@@ -318,7 +318,7 @@ def test_request_pointer_excludes_target_from_baseline_and_preserves_task(tmp_pa
     (span,) = group_spans(ops, trajectory.id, last_step=episode.steps[-1].step)
     files = build_span_evidence(span, episode)
     assert episode.preparation_status == "prepared" and evidence_problem(episode) is None
-    assert episode.deliveries[0]["delivery_source_proofs"][0]["status"] == "resolved"
+    assert episode.deliveries[0]["placements"][0]["source_resolution"]["status"] == "resolved"
     assert memory not in files["baseline.md"] and "text in task.md" in files["baseline.md"]
     assert memory not in files["task.md"] and task in files["task.md"]
     assert memory in files["span.md"]
@@ -334,7 +334,7 @@ def test_system_pointer_does_not_resolve_against_user_text(tmp_path):
     builder.write(source)
     trajectory, ops, events = parse_trajectory(source, [])
     episode = prepare_trajectory(trajectory, events, ops).episodes[0]
-    assert episode.deliveries[0]["delivery_source_proofs"][0]["status"] == "unknown"
+    assert episode.deliveries[0]["placements"][0]["source_resolution"]["status"] == "unknown"
     assert evidence_problem(episode) is not None
 
 
@@ -370,7 +370,7 @@ def test_request_proof_failures_remain_unresolved(tmp_path, fault):
     builder.write(source)
     trajectory, ops, events = parse_trajectory(source, [])
     episode = prepare_trajectory(trajectory, events, ops).episodes[0]
-    assert episode.deliveries[0]["delivery_source_proofs"][0]["status"] == "unknown"
+    assert episode.deliveries[0]["placements"][0]["source_resolution"]["status"] == "unknown"
     assert episode.preparation_status == "needs_review"
     assert "ownership" in evidence_problem(episode)
 
@@ -385,7 +385,7 @@ def test_request_tool_id_disambiguates_identical_visible_results(tmp_path):
     episode = prepare_trajectory(trajectory, events, ops).episodes[0]
     (span,) = group_spans(ops, trajectory.id)
     files = build_span_evidence(span, episode)
-    proof = episode.deliveries[0]["delivery_source_proofs"][0]
+    proof = episode.deliveries[0]["placements"][0]["source_resolution"]
     assert proof["status"] == "resolved"
     assert proof["source"]["tool_call_id"] == tool["tool_call_id"]
     assert "result in steps/step_000001.md" in files["baseline.md"]
@@ -443,32 +443,15 @@ def test_session_episode_uses_recorded_benchmark_identity(tmp_path):
     assert episode.benchmark_identity == "benchmark-1"
 
 
-def test_wrapper_removal_is_distinct_from_episode_reset(tmp_path):
+def test_history_reset_keeps_the_earlier_episode_task_out(tmp_path):
     builder = AnnotatedBuilder().episode_open()
     builder._emit("message_end", proxy_source=builder.main, role="system", msg=0, content="system")
     builder.user_message("first task", msg=1).agent_turn().episode_close()
     builder.episode_open("second").history_rewrite(kept=1, dropped=3)
-    reset = builder.events[-1]["seq"]
-    memory = "hint from the earlier episode"
-    ref = cure_ref("hint", memory)
-    sid = builder.search(returned=[ref])
-    builder.user_message("second task", msg=1).user_message(memory, msg=2)
-    builder.agent_turn()
-    # Use the actual recorder layout: assistant and tool follow the wrapper.
-    for event in builder.events[-5:]:
-        if event.get("type") in ("message_end", "tool_execution_end"):
-            event["msg"] += 1
-    delivery = _proven_delivery(builder, sid, ref, memory, memory, slot="outbound_tail")
-    delivery["binding"]["proofs"][0]["msg_index"] = 2
-    builder.history_rewrite(kept=2, dropped=3)
-    removed = builder.events[-1]["seq"]
-    builder.agent_turn().episode_close("second")
+    builder.user_message("second task", msg=1).agent_turn().episode_close("second")
     episode = prepare_trajectory(*_prepare_args(tmp_path, builder)).episodes[1]
-    provenance = episode.boundary_provenance
-    assert provenance["episode_reset"]
-    assert provenance["reset_source"]["seq"] == reset
-    assert provenance["wrapper_removal_rewrite"]["seq"] == removed
-    assert "first task" not in build_episode_evidence(episode)["task.md"]
+    task = build_episode_evidence(episode)["task.md"]
+    assert "second task" in task and "first task" not in task
 
 
 def _attachment_args(**kw):
@@ -501,6 +484,20 @@ def test_conflicting_harness_is_not_overwritten_by_sidecar(tmp_path):
     _prepare_attachment_scope([episode], [trajectory], _attachment_args(harness_report=report), [])
     assert episode.attachments["outcome_status"] == "conflicting_result"
     assert "correctness" not in episode.attachments
+
+
+def test_sidecar_harness_report_keeps_failure_statuses_explicit(tmp_path):
+    from injudge.__main__ import _prepare_attachment_scope
+    builder = AnnotatedBuilder().episode_open().agent_turn(with_task=True).episode_close()
+    trajectory, events, ops = _prepare_args(tmp_path, builder)
+    episode = prepare_trajectory(trajectory, events, ops).episodes[0]
+    (Path(trajectory.path) / "correctness.json").write_text(json.dumps({"error_ids": [episode.episode_id]}))
+    notes = []
+    _prepare_attachment_scope([episode], [trajectory], _attachment_args(), notes)
+    assert episode.attachments["outcome_status"] == "harness_error"
+    assert episode.attachments["outcome_join"] == "trajectory_sidecar"
+    assert "correctness" not in episode.attachments
+    assert any("harness_error" in note["msg"] for note in notes)
 
 
 def test_selected_attachments_skip_unselected_warnings_without_inventing_sidecar_scope(tmp_path):

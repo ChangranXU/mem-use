@@ -17,8 +17,10 @@ its input, so everything in it is post-exposure; only earlier steps are
 pre-delivery. Judge only what the placement showed, never an unseen suffix.
 The recording is incomplete: a missing fact is not proof the agent lacked it,
 and an earlier delivery is not proof it stayed visible after a context
-rewrite. Search queries and hidden annotation keys are metadata, not
-delivered content or agent knowledge; an identifier the placement shows is
-delivered content.
+rewrite. A query in the agent's own recorded tool call is evidence at its
+action step, not necessarily a settled plan. It is prior evidence only
+before the target's first consuming step. Other search queries and hidden
+annotation keys are metadata, not delivered content or agent knowledge. An
+identifier the placement shows is delivered content.
 
 @uncertainty@

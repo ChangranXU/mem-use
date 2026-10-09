@@ -46,7 +46,6 @@ from __future__ import annotations
 import json
 import math
 import re
-import unicodedata
 from dataclasses import dataclass
 from typing import Any
 
@@ -214,86 +213,6 @@ def _cmd_of(args: dict | str) -> str:
     return json.dumps(args or {}, ensure_ascii=False)
 
 
-# A quotation mark claims verbatim text, whichever source the prose names, so
-# any quoted fragment must occur in the evidence the judge could read.
-# Backticks format code, not quotations.
-_QUOTED_TEXT = re.compile(
-    r'"([^"\n]+)"|“([^”\n]+)”|'
-    r"(?<!\w)'([^'\n]+)'(?!\w)|‘([^’\n]+)’"
-)
-_QUOTE_MIN_WORDS = 3  # a shorter fragment is an identifier or label, not a quotation
-_WORD = re.compile(r"\w+")
-# An ellipsis or a bracketed editorial insertion ("[s]", "[...]") marks text
-# the quotation omits or alters; each may fall inside a word.
-_QUOTE_GAP = re.compile(r"\.\.\.|\[[^\]]*\]")
-
-
-def _quote_words(text: str) -> str:
-    """The word sequence a presence comparison uses. Punctuation and quote
-    marks (often dropped when quotations nest), invisible format characters
-    such as an issue tracker's zero-width spaces, compatibility forms, and
-    case decide nothing."""
-    text = "".join(c for c in text if unicodedata.category(c) != "Cf")
-    return " ".join(_WORD.findall(unicodedata.normalize("NFKC", text).casefold()))
-
-
-def _quote_found(fragments: list[str], texts: list[str]) -> bool:
-    """Every fragment, in order, inside ONE evidence file: a gap cannot pool
-    words from different files. The quotation's own ends fall on word
-    boundaries; a fragment's edge at a gap need not."""
-    last = len(fragments) - 1
-    needles = [(" " if i == 0 else "") + fragment + (" " if i == last else "")
-               for i, fragment in enumerate(fragments)]
-    for text in texts:
-        offset = 0
-        for needle in needles:
-            offset = text.find(needle, offset)
-            if offset < 0:
-                break
-            offset += len(needle.rstrip())
-        else:
-            return True
-    return False
-
-
-def _prose_warnings(
-    verdict: dict, span: InjectionSpan, evidence: dict[str, str], warnings: list[str],
-) -> None:
-    """Flag judge prose for review after masking, without retries or label changes.
-
-    A quoted fragment of at least three words must occur in some evidence
-    file; which source the prose credits is not checked. Warning bodies name
-    fields, never copy endpoint text or evidence contents.
-    """
-    fields = [(f"{mid}.{signal}.note", signals[signal]["note"])
-              for mid, signals in verdict["rubric"].items() for signal in _SIGNALS]
-    fields.append(("analysis", verdict["analysis"]))
-    fields.extend((f"evidence[{i}].claim", entry["claim"])
-                  for i, entry in enumerate(verdict["evidence"]))
-    texts: list[str] | None = None
-    for field, text in fields:
-        for match in _QUOTED_TEXT.finditer(text):
-            quote = next(part for part in match.groups() if part is not None)
-            parts = _QUOTE_GAP.split(unicodedata.normalize("NFKC", quote))
-            fragments = [words for words in map(_quote_words, parts) if words]
-            if max((len(words.split()) for words in fragments), default=0) < _QUOTE_MIN_WORDS:
-                continue
-            if texts is None:
-                texts = [f" {_quote_words(t)} " for t in evidence.values()]
-            if not _quote_found(fragments, texts):
-                warnings.append(
-                    f"{span.id}: {field} quotes text absent from the evidence files after "
-                    "normalization (review only; verdict unchanged)"
-                )
-                break
-    words = len(verdict["analysis"].split())
-    if words > 60:
-        warnings.append(
-            f"{span.id}: analysis has {words} words, above the 60-word target "
-            "(review only; verdict unchanged)"
-        )
-
-
 def _render_span_header(span: InjectionSpan, memories_note: str, earlier: str | None = None) -> str:
     """The target and delivered-memories header of the span document the
     judge agent reads first. `earlier` is the episode-checked statement of
@@ -309,17 +228,10 @@ def _render_span_header(span: InjectionSpan, memories_note: str, earlier: str | 
     parts = []
     parts.append(
         f"SPAN TO EVALUATE {span.id} — {span.n_injections} identical injection(s), "
-        f"consumed at {consumed} (seqs {span.seq_first}–{span.seq_last})."
+        f"consumed at {consumed} (annotation seqs {span.seq_first}–{span.seq_last})."
     )
     if span.total:
-        # the span's position in its episode (set by group_spans; 0/0 when the
-        # span was built directly) — k > 1 means earlier spans delivered
-        # memories before this one
-        parts.append(
-            f"This is span {span.position} of {span.total} in the episode"
-            + ("; earlier spans already delivered memories before it."
-               if span.position > 1 else ".")
-        )
+        parts.append(f"This is span {span.position} of {span.total} in the episode.")
     if span.queries:
         # Retrieval provenance is not necessarily part of the main agent's
         # context. Keep every query; the agent reads what it needs.
@@ -338,16 +250,8 @@ def _render_span_header(span: InjectionSpan, memories_note: str, earlier: str | 
         )
     if span.step_gaps:
         parts.append(f"NOTE: the memory was NOT delivered at steps {span.step_gaps}.")
-    if span.new_keys:
-        parts.append(f"New memories vs the previous span: {span.new_keys}.")
     if earlier:
         parts.append(earlier)
-    if span.changed_keys:
-        parts.append(
-            f"Same memory, changed value vs its last earlier delivery: {span.changed_keys}."
-        )
-    if span.removed_keys:
-        parts.append(f"Removed vs the previous span: {span.removed_keys}.")
     if span.step_first is not None:
         # Every entry names its window, including an open-ended one. The
         # last identical delivery is not necessarily the end of influence.
@@ -508,11 +412,7 @@ def _strict_parse(text: str) -> tuple[dict | None, str | None]:
     if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
         return None, "has no numeric confidence"
     if isinstance(confidence, float) and not math.isfinite(confidence):
-        # A 1e999-style overflow literal IS valid JSON, so json.loads reads
-        # it as a non-finite float: out of the contract's 0–1 range, and
-        # clamping to 0/1 would fabricate a bound the judge never
-        # expressed — reject as out of contract. Ints are
-        # arbitrary-precision, always finite (a huge int still clamps later).
+        # a 1e999 literal is valid JSON; clamping its inf would invent a bound
         return None, "has a non-finite confidence"
     return obj, None
 
@@ -655,12 +555,10 @@ def derive_verdict(memory_usage: dict) -> str:
 
 
 def _usage_evidence(signals: dict) -> str:
-    """The most informative note for the derived usage label."""
-    for signal in ("positive_effect", "influence", "novelty"):
-        note = signals[signal].get("note")
-        if note:
-            return note
-    return ""
+    """The note that supports the derived usage label: the effect note for
+    acted-on influence, else the influence note."""
+    signal = "positive_effect" if signals["influence"]["value"] in _ACTED else "influence"
+    return signals[signal].get("note") or signals["influence"].get("note") or ""
 
 
 def _int_list(v: object, span_id: str, field: str, warnings: list[str]) -> list[int]:
@@ -678,15 +576,11 @@ def _int_list(v: object, span_id: str, field: str, warnings: list[str]) -> list[
 
 
 def _clamp_confidence(value: float | int, span_id: str, warnings: list[str]) -> float:
-    """The 0–1 range rule enforced in code: clamp, with a warning.
-    Comparisons stay in the numeric domain — a huge int is range-checkable
-    but float() overflows on it."""
-    if 0.0 <= value <= 1.0:
+    """The 0–1 range rule enforced in code: clamp, with a warning."""
+    if 0 <= value <= 1:
         return float(value)
-    # the raw value is capped like every other interpolated datum here — a
-    # 10**4000 confidence must not write thousands of digits into validation
-    warnings.append(f"{span_id}: confidence {str(value)[:60]} out of range, clamped")
-    return 0.0 if value < 0.0 else 1.0
+    warnings.append(f"{span_id}: confidence out of range, clamped")
+    return 0.0 if value < 0 else 1.0
 
 
 def blank_verdict() -> dict:
@@ -831,19 +725,10 @@ def _assemble_verdict(
             for s in _SIGNALS
         }
         anchors = entry["anchors"]
-        # positive_effect pairs with acted-on influence
+        # positive_effect pairs with acted-on influence. An acted-on null
+        # effect is a valid answer: usage derives unclear, with no warning.
         inf, pe = signals["influence"], signals["positive_effect"]
-        if inf["value"] in _ACTED and pe["value"] is None:
-            # the rubric's sanctioned uncertainty route: acted-on influence
-            # whose direction the evidence could not determine (the contract
-            # invites the null) — usage derives unclear and the occurrence is
-            # logged, but nothing was coerced, so it is NOT a pairing
-            # correction and never counts against judge compliance
-            warnings.append(
-                f"{span.id}: {mid}.positive_effect undetermined while influence is "
-                f"{inf['value']!r}; usage unclear for this memory"
-            )
-        elif inf["value"] not in _ACTED and pe["value"] is not None:
+        if inf["value"] not in _ACTED and pe["value"] is not None:
             warnings.append(
                 f"{span.id}: {mid}.positive_effect set while influence is "
                 f"{inf['value']!r}; coerced to null"
@@ -905,8 +790,7 @@ def auto_verdict_no_subsequent_turn(span: InjectionSpan) -> dict:
     observation missingness, not a measured null effect — the run may be
     censored, the consumer unrecorded, or the delivery never reached an
     agent turn — so the aggregates report these spans apart as
-    unassessable, never inside the directional-effect denominators or the
-    token share without demonstrated benefit. No judge ran, so there is
+    unassessable, outside the judged rate denominators. No judge ran, so there is
     no confidence and the rubric is a null placeholder — the aggregates
     exclude both from the judged stats."""
     verdict = blank_verdict()

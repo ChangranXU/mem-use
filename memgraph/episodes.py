@@ -28,11 +28,6 @@ def _payload(event: dict[str, Any]) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _event_index(event: dict[str, Any], fallback: int) -> int:
-    value = event.get("_event_index")
-    return value if is_int(value) and value >= 0 else fallback
-
-
 def _identity(event: dict[str, Any], event_type: str) -> tuple[object, ...]:
     payload = _payload(event)
     event_id = _as_str(payload.get("event_id")) or _as_str(event.get("annotation_id"))
@@ -70,16 +65,6 @@ class Boundary:
         return self.open_index <= index <= self.end_index
 
 
-def _boundary_payload(event: dict[str, Any]) -> tuple[str | None, str | None, str | None, str | None]:
-    payload = _payload(event)
-    return (
-        _as_str(payload.get("episode_id")),
-        _as_str(payload.get("trace_session_id")),
-        _as_str(payload.get("sequence_id")),
-        _as_str(payload.get("treatment_arm_id")),
-    )
-
-
 def discover_boundaries(events: list[dict[str, Any]], diagnostics: list[str]) -> list[Boundary]:
     """Pair bridge episode events in file order, retaining corrupt scopes."""
     boundaries: list[Boundary] = []
@@ -87,11 +72,10 @@ def discover_boundaries(events: list[dict[str, Any]], diagnostics: list[str]) ->
     closed: dict[tuple[str | None, str | None, str | None], list[Boundary]] = {}
     seen_identity: dict[tuple[object, ...], dict[str, Any]] = {}
 
-    for fallback_index, event in enumerate(events):
+    for index, event in enumerate(events):
         typ = event.get("type")
         if typ not in ("bridge_episode_open", "bridge_episode_close"):
             continue
-        index = _event_index(event, fallback_index)
         ident = _identity(event, typ)
         # The recorder may retry the same lifecycle write.  The event id is
         # the recorded identity; exact repeats must not create another run.
@@ -107,7 +91,7 @@ def discover_boundaries(events: list[dict[str, Any]], diagnostics: list[str]) ->
             continue
         if ident[1] is not None:
             seen_identity[ident] = _payload(event)
-        episode_id, session_id, sequence_id, _arm = _boundary_payload(event)
+        _, _, session_id, sequence_id, episode_id = ident
         key = (session_id, sequence_id, episode_id)
         if typ == "bridge_episode_open":
             if key in active:
@@ -208,16 +192,14 @@ def discover_boundaries(events: list[dict[str, Any]], diagnostics: list[str]) ->
 def session_boundaries(events: list[dict[str, Any]], information: list[str]) -> list[Boundary]:
     """Fallback scope from explicitly episode-scoped memory_session events."""
     sessions: list[tuple[int, dict[str, Any], str | None, str | None]] = []
-    for fallback, event in enumerate(events):
+    for index, event in enumerate(events):
         if event.get("type") != "memory_session":
             continue
         payload = _payload(event)
         episode_id = _as_str(payload.get("episode_id"))
         if episode_id is None and payload.get("session_kind") != "episode":
             continue
-        sessions.append(
-            (_event_index(event, fallback), event, episode_id, _as_str(payload.get("trace_session_id")))
-        )
+        sessions.append((index, event, episode_id, _as_str(payload.get("trace_session_id"))))
     out: list[Boundary] = []
     for i, (idx, event, episode_id, session_id) in enumerate(sessions):
         next_idx = sessions[i + 1][0] if i + 1 < len(sessions) else len(events)
@@ -273,9 +255,9 @@ def episode_rows(events: list[dict[str, Any]], step_of_turn: dict[int, int], ops
     """
     scopes = episode_scopes(events, [], [])
     turn_index: dict[int, int] = {}
-    for fallback, event in enumerate(events):
+    for index, event in enumerate(events):
         if event.get("type") == "turn_start" and is_int(event.get("turn")):
-            turn_index.setdefault(event["turn"], _event_index(event, fallback))
+            turn_index.setdefault(event["turn"], index)
     steps: dict[int, list[int]] = {}
     for turn, step in step_of_turn.items():
         scope = episode_for_index(scopes, turn_index.get(turn))

@@ -28,11 +28,13 @@ compared within each report.
 from __future__ import annotations
 
 import hashlib
+import json
 from collections import Counter
 from pathlib import Path
 
 from injudge.report import _summary_judge
 from tests.annotated_fixtures import AnnotatedBuilder, cure_ref
+from util import atomic_write
 
 _SIGNALS = ("relevance", "accuracy", "novelty", "influence", "positive_effect")
 
@@ -776,6 +778,40 @@ CASES["same_function_different_mechanism"] = {
                "positive_effect": [None], "verdict": ["neutral"]},
 }
 
+# The same query can precede or follow exposure. Its text is a possible
+# remedy; it does not state a settled fact or a chosen plan.
+_QUERY_TIMING = {
+    "task": "decode_payload returns 'OK\\x00\\x00' for a padded frame. Fix the returned text.",
+    "memory": ("frame_padding", "To remove padding in decode_payload, use buffer[:payload_length].decode()."),
+}
+_QUERY_REPRO = ("Reproduce the extra bytes.", "python frame_repro.py",
+                "actual='OK\\x00\\x00'; expected='OK'")
+_QUERY_SEARCH = ("I have not chosen a fix. Search one possible approach.",
+                 "docs-search 'decode_payload buffer[:payload_length].decode()'",
+                 "No documents found.")
+_QUERY_EDIT = ("Try the slice before decoding.", "python trim_payload.py",
+               "return buffer[:payload_length].decode()")
+_QUERY_CHECK = ("Check the padded frame.",
+                "python -c \"from frame import decode_payload; "
+                "assert decode_payload(b'OK\\x00\\x00', 2) == 'OK'\"",
+                "assertion passed: padding removed; payload preserved")
+CASES["query_before_delivery"] = {
+    **_QUERY_TIMING,
+    "before": [_QUERY_REPRO, _QUERY_SEARCH],
+    "consumer": _QUERY_EDIT,
+    "after": [_QUERY_CHECK],
+    "expect": {"novelty": ["confirming"], "influence": [None],
+               "positive_effect": [None], "verdict": ["unresolved"]},
+}
+CASES["query_after_delivery"] = {
+    **_QUERY_TIMING,
+    "before": [_QUERY_REPRO],
+    "consumer": _QUERY_SEARCH,
+    "after": [_QUERY_EDIT, _QUERY_CHECK],
+    "expect": {"novelty": ["novel"], "influence": ["acted_on"],
+               "positive_effect": ["improved"], "verdict": ["positive"]},
+}
+
 # Historical similarity needs an exposed mechanism; an explicit wrong
 # diagnosis of this task remains relevant. These labels do not depend on use.
 CASES["relevance_specificity"] = {
@@ -903,6 +939,22 @@ CASES["list_repeated"] = {
 }
 
 
+# Gold and task success do not replace a check of the changed behavior.
+CASES["unverified_change_gold"] = {
+    **CASES["unverified_change"],
+    "golden": (
+        "diff --git a/src/tags.py b/src/tags.py\n"
+        "--- a/src/tags.py\n"
+        "+++ b/src/tags.py\n"
+        "@@ -10,2 +10,3 @@ def delete_tag(tag_id):\n"
+        "     with db.transaction():\n"
+        '+        db.execute("DELETE FROM tag_links WHERE tag_id = ?", (tag_id,))\n'
+        '         db.execute("DELETE FROM tags WHERE id = ?", (tag_id,))\n'
+    ),
+    "correctness": {"resolved": True},
+}
+
+
 _MEMORY_MSG = 4  # past the builder's task (1), reply (2), and tool-result (3) slots
 
 
@@ -967,7 +1019,12 @@ def build(root: Path, cases: list[str] | None = None) -> list[Path]:
                     "slot": "memory_block", "kind": "canonical_message", "msg_index": 3,
                     "content_sha256": hashlib.sha256(second_text.encode()).hexdigest()}]}
         b.episode_close(ident, treatment_arm_id="arm-a")
-        out.append(b.write(root / ident, run_id=ident, task_preview=case["task"]))
+        directory = b.write(root / ident, run_id=ident, task_preview=case["task"])
+        if "golden" in case:
+            atomic_write(directory / "golden.txt", case["golden"])
+        if "correctness" in case:
+            atomic_write(directory / "correctness.json", json.dumps(case["correctness"]) + "\n")
+        out.append(directory)
     return out
 
 

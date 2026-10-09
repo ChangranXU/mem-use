@@ -13,8 +13,8 @@ The counting rules:
 - auto-neutral spans (no subsequent turn) are UNASSESSABLE, not neutral:
   no downstream footprint is observable in the recording, which is
   observation missingness (a censored run, an unrecorded consumer), never
-  a measured null effect — they stay out of every directional rate and of
-  the benefit share, and are reported apart with their delivery cost.
+  a measured null effect. They stay out of every directional rate and are
+  reported separately with their delivery cost.
 - confidence never weights counts; it is reported as per-class means,
   buckets, and a low-confidence list for triage — LLM-judged spans only:
   rule-judged auto-neutral spans carry no confidence (no judge ran), the
@@ -33,7 +33,10 @@ The counting rules:
   recorded identity (no item_id, no key) has no pair to join on: it tallies
   span-scoped, never merged across spans.
 - rubric signal rates are over judge-scored memory-deliveries (span × entry)
-  of judged spans only; null signals never dilute a rate. Unknown novelty
+  of judged spans only; null signals never dilute a rate. Novelty and
+  accuracy rates cover relevant entries only (`relevant_counts`): an
+  off-topic entry is new and unverifiable by default, so counting it would
+  measure retrieval misses, not what relevant memories add. Unknown novelty
   stays in counts.novelty.null, out of the novelty-rate denominator, and an
   ignored entry with unknown novelty is never tallied as ignored_novel.
   positive_effect is
@@ -46,15 +49,9 @@ The counting rules:
 - delivery cost is deterministic: each span's full injection cost (all
   deliveries, including restated ones — they really cost tokens) is charged
   to its verdict class. Unassessable (auto-neutral) spans charge to their
-  own class — the observation was missing, so their cost is neither
-  benefit nor its absence. The headline names what the judged tokens
-  measure, never "waste": tokens without demonstrated benefit (negative +
-  neutral + unresolved spans) over the judged classes' tokens — the same
-  judged-only rule as rates — with the unresolved part named separately,
-  because an undetermined effect is uncertainty, not an observed lack of
-  benefit. It is a SPAN-LEVEL proxy: a positive span's ignored memories
-  count as benefit-bearing and a mixed bundle is charged wholly to its
-  verdict, so it never reads as per-memory truth or net gain.
+  own class because the observation was missing. A mixed bundle can
+  include both useful and harmful entries. Its cost by verdict cannot
+  measure per-memory token benefit or net gain.
 - footprint windows of one memory can overlap when its deliveries showed
   different text (a preview and a full read); each judge credits only its
   own entry's text, and `rubric.shared_anchors` lists any action step two
@@ -69,8 +66,6 @@ import json
 
 from injudge.judge import _ACCURACY, _ACTED, RUBRIC_SIGNALS
 from injudge.cost import TOKEN_COST_CAVEAT
-from injudge.model import stamped_entry_id
-from injudge.steps import _mixed_sum, _token_share
 from memgraph.annotations import canonical_entry, is_int, item_ident, version_identity
 
 _VERDICTS = ("positive", "negative", "neutral", "unresolved")
@@ -91,43 +86,15 @@ def counted_verdict(op: dict) -> str:
     verdict = op.get("verdict")
     return verdict if verdict in _COUNTED else "error"
 
-# The share without demonstrated benefit is a SPAN-LEVEL proxy, and it must
-# never read as measured waste, harm, or net gain — the caveat rides the
-# headline whenever the share is reported at all (its coarse bundle charging
-# is present at any value).
-BENEFIT_SHARE_CAVEAT = (
-    "share_without_demonstrated_benefit is an estimated span-level proxy, "
-    "not waste, harm, or net gain: it counts judged-class injected tokens in "
-    "spans with no demonstrated benefit — negative (acted on with harm), "
-    "neutral (selection, reference, unproductive use, or no established influence), "
-    "and unresolved (attribution or effect undetermined; named "
-    "separately as unresolved_tokens); a positive span's ignored memories "
-    "count as benefit-bearing and a mixed bundle is charged wholly to its "
-    "verdict"
-)
-
-
 def _entry_records(op: dict) -> dict[str, tuple[tuple[str | None, str] | None, dict]]:
-    """entry id -> (identity, memory record) for one operation: the report's
-    memories list carries each delivered entry stamped with its span-local
-    id, so a rubric entry resolves to exactly the (namespace, item) identity
-    of ITS delivery — never a key-based guess that would conflate two
-    identities sharing one display key. An unstamped entry is skipped (no
-    invented mN); an unresolvable id gets _entry_identity's span-scoped
-    degrade."""
-    mems = op.get("memories") or []
-    if not isinstance(mems, list):
-        mems = []
+    """entry id -> (identity, memory record) for one operation: a rubric
+    entry resolves to exactly the (namespace, item) identity of ITS delivery,
+    never a key-based guess that would conflate two identities sharing one
+    display key."""
     out: dict[str, tuple[tuple[str | None, str] | None, dict]] = {}
-    for m in mems:
-        if not isinstance(m, dict):
-            continue
-        entry_id = stamped_entry_id(m)
-        if entry_id is None:
-            continue
+    for m in op.get("memories") or []:
         ns, item = item_ident(m)
-        ident = (ns, item) if item else None
-        out[entry_id] = (ident, m)
+        out[m["id"]] = ((ns, item) if item else None, m)
     return out
 
 
@@ -174,6 +141,7 @@ def _rubric_rollup(operations: list[dict]) -> dict:
     are excluded before counting.
     """
     counts: dict[str, dict[str, int]] = {s: {} for s in RUBRIC_SIGNALS}
+    relevant: dict[str, dict[str, int]] = {"accuracy": {}, "novelty": {}}
     contradicted: dict[tuple[str | None, str], list[str]] = {}
     irrelevant: dict[tuple[str | None, str], list[str]] = {}
     # identity -> (trajectory, anchor step) -> spans crediting acted-on influence there
@@ -190,6 +158,8 @@ def _rubric_rollup(operations: list[dict]) -> dict:
             for s in RUBRIC_SIGNALS:
                 b = _bucket_value((signals.get(s) or {}).get("value"))
                 counts[s][b] = counts[s].get(b, 0) + 1
+                if s in relevant and (signals.get("relevance") or {}).get("value") is True:
+                    relevant[s][b] = relevant[s].get(b, 0) + 1
             ident = _entry_identity(records, entry_id, op["operation_id"])
             key_of.setdefault(ident, records.get(entry_id, (None, {}))[1].get("key") or entry_id)
             # one delivery may carry several versions of an item (several
@@ -216,15 +186,15 @@ def _rubric_rollup(operations: list[dict]) -> dict:
             if r:
                 reasons[r] = reasons.get(r, 0) + 1
 
-    def rate(s: str, true_vals: tuple, false_vals: tuple) -> float | None:
-        num = sum(counts[s].get(v, 0) for v in true_vals)
-        den = num + sum(counts[s].get(v, 0) for v in false_vals)
+    def rate(values: dict[str, int], true_vals: tuple, false_vals: tuple) -> float | None:
+        num = sum(values.get(v, 0) for v in true_vals)
+        den = num + sum(values.get(v, 0) for v in false_vals)
         return round(num / den, 4) if den else None
 
     # accuracy is NOT projected onto a boolean rate: `uncontradicted` asserts
     # nothing, so the three-way split is reported as separate shares over the
-    # accuracy-judged deliveries (the counts distribution stays as-is)
-    acc = counts["accuracy"]
+    # relevant accuracy-judged deliveries (the counts distribution stays as-is)
+    acc = relevant["accuracy"]
     acc_total = sum(acc.get(v, 0) for v in _ACCURACY)
     accuracy_rates = {
         f"accuracy_{v}": (round(acc.get(v, 0) / acc_total, 4) if acc_total else None)
@@ -234,15 +204,16 @@ def _rubric_rollup(operations: list[dict]) -> dict:
     return {
         "deliveries": deliveries,
         "counts": counts,
+        "relevant_counts": relevant,
         "rates": {
-            "relevance": rate("relevance", ("true",), ("false",)),
-            "novelty": rate("novelty", ("novel", "confirming"), ("redundant",)),
+            "relevance": rate(counts["relevance"], ("true",), ("false",)),
+            "novelty": rate(relevant["novelty"], ("novel", "confirming"), ("redundant",)),
             **accuracy_rates,
             "influence": rate(
-                "influence", ("referenced", "selected", "acted_on"), ("none",)
+                counts["influence"], ("referenced", "selected", "acted_on"), ("none",)
             ),
             "positive_effect": rate(
-                "positive_effect", ("improved",), ("no_effect", "harmed")
+                counts["positive_effect"], ("improved",), ("no_effect", "harmed")
             ),
         },
         "no_footprint_reasons": reasons,
@@ -360,7 +331,7 @@ def aggregate(operations: list[dict], n_injections: int, n_trajectories: int | N
         # delivery never showed (and could fabricate or mask a value drift)
         first_values: dict[tuple[str | None, str], object] = {}
         last_values: dict[tuple[str | None, str], object] = {}
-        for entry_id, (ident, m) in records.items():
+        for ident, m in records.values():
             if ident is not None:
                 first_values.setdefault(ident, m.get("value"))
                 last_values[ident] = m.get("value")
@@ -436,75 +407,21 @@ def aggregate(operations: list[dict], n_injections: int, n_trajectories: int | N
             "llm_judged_spans": llm_judged,
             "pe_pairing_correction_rate": round(pe_corrected / llm_judged, 4),
         }
-    # headline: the pre-registered numbers for cross-system claims; the
-    # benefit share follows the same judged-only rule as the rates —
-    # error/unjudged/unassessable cost is a count, never a denominator. The
-    # share's numerator and denominator ride along named, and its unresolved
-    # part is named apart: an undetermined effect is uncertainty, not an
-    # observed lack of benefit
-    byv = out["cost"]["approx_tokens_by_verdict"]
-    judged_tok = sum(byv[v] for v in _VERDICTS)
-    no_benefit = byv["negative"] + byv["neutral"] + byv["unresolved"]
-    out["headline"] = {
-        "judged_spans": denom,
-        "positive_span_rate": out["rates"]["positive"],
-        "negative_span_rate": out["rates"]["negative"],
-        "unresolved_span_rate": out["rates"]["unresolved"],
-        "tokens_without_demonstrated_benefit": no_benefit,
-        "unresolved_tokens": byv["unresolved"],
-        "judged_tokens": judged_tok,
-        "share_without_demonstrated_benefit": _token_share(no_benefit, judged_tok),
-    }
-    if counts["unassessable"]:
-        # the assessable fraction is a headline property: these spans'
-        # delivery cost really spent but no directional rate covers them
-        # (the runs held no observable downstream to judge)
-        out["headline"]["unassessable_spans"] = counts["unassessable"]
-        if byv["unassessable"]:
-            out["headline"]["unassessable_tokens"] = byv["unassessable"]
-    other_tok = byv["error"] + byv["unjudged"]
-    if other_tok:
-        # the share's missing class, visible beside it: error/unjudged spans
-        # really spent these tokens and no rate counts them
-        out["headline"]["error_unjudged_tokens"] = other_tok
-    if out["headline"]["share_without_demonstrated_benefit"] is not None:
-        # the proxy's limitations do not vanish when the share is low or a
-        # few negative spans exist — the caveat rides every reported share
-        # (see BENEFIT_SHARE_CAVEAT), never only a high one
-        out["headline"]["caveat"] = BENEFIT_SHARE_CAVEAT
     return out
 
 
-def policy_rollup(trajectories: list[dict], validation: list[dict] | None = None) -> dict:
-    """Overall delivery-policy metrics from per-trajectory records.
-    `validation` collects the mixed-overflow note (the artifact path passes
-    its log; a direct caller without one gets the same degraded totals)."""
+def policy_rollup(trajectories: list[dict]) -> dict:
+    """Overall delivery-policy metrics from per-trajectory records."""
     blocks = [t.get("policy") or {} for t in trajectories]
     n_inj = sum(b.get("n_injections") or 0 for b in blocks)
     n_steps = sum(b.get("n_steps") or 0 for b in blocks)
     n_spans = sum(t.get("n_spans") or 0 for t in trajectories)
-    est, est_mixed = _mixed_sum(b.get("est_injected_tokens") or 0 for b in blocks)
+    est = sum(b.get("est_injected_tokens") or 0 for b in blocks)
     billed = [b for b in blocks if b.get("prompt_tokens_total")]
-    est_billed, est_billed_mixed = _mixed_sum(
-        b.get("est_injected_tokens") or 0 for b in billed
-    )
-    prompt, prompt_mixed = _mixed_sum(b["prompt_tokens_total"] for b in billed)
-    if (est_mixed or est_billed_mixed or prompt_mixed) and validation is not None:
-        # the per-trajectory mixed-overflow warning only fires on a
-        # WITHIN-trajectory mix, so an all-int total reaching this
-        # cross-trajectory mix would drop the float part silently: note it
-        # here like every other silent-by-default correction
-        msg = (
-            "a trajectory token total past the float range cannot sum with "
-            "float totals; the float part counts 0, so an overall token "
-            "total may undercount"
-        )
-        # build_artifact re-runs the rollup on every incremental flush against
-        # the SAME validation list: the note must not duplicate per rewrite
-        if not any(v.get("msg") == msg for v in validation):
-            validation.append({"level": "warn", "msg": msg})
+    est_billed = sum(b.get("est_injected_tokens") or 0 for b in billed)
+    prompt = sum(b["prompt_tokens_total"] for b in billed)
     n_searches = sum(b.get("n_searches") or 0 for b in blocks)
-    share = _token_share(est_billed, prompt)
+    share = round(est_billed / prompt, 4) if prompt else None
     n_extractions = sum(b.get("n_extractions") or 0 for b in blocks)
     out = {
         "n_injections": n_inj,

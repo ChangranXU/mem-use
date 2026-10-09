@@ -32,11 +32,10 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 try:
@@ -51,7 +50,7 @@ except ImportError as e:
 
 from util import atomic_write, check_writable, print_safe, print_validation
 from injudge import EPISODE_INPUT_SCHEMA
-from injudge.cost import TOKEN_COST_CAVEAT, residency_cost
+from injudge.cost import residency_cost
 from injudge.agent import (
     MAX_PARALLEL,
     AgentConfig,
@@ -64,9 +63,11 @@ from injudge.agent import (
 from injudge.evidence import build_episode_evidence, episode_dir_name, write_evidence
 from injudge.episodes import evidence_problem, prepare_trajectory
 from injudge.gold import (
+    harness_outcome,
     load_gold_patches,
     load_harness_report,
     load_sidecar,
+    outcome_correctness,
 )
 from injudge.judge import GoldInput, _mask_key, auto_verdict_empty, auto_verdict_no_subsequent_turn, blank_verdict
 from injudge.model import EpisodeInput, InjectionSpan
@@ -79,9 +80,10 @@ from injudge.report import (
     injection_rollup,
     operation_record,
     print_summary,
+    render_summary,
 )
 from injudge.spans import group_spans
-from injudge.steps import _token_share, prompt_tokens_total
+from injudge.steps import prompt_tokens_total
 from memgraph.graph import build_graph, load_trajectories
 from memgraph.html import render_html
 from memgraph.model import MemoryOp, Trajectory
@@ -89,30 +91,11 @@ from memgraph.verdicts import apply_verdicts
 
 
 def _safe_endpoint(url: str) -> str:
-    """A shareable spelling of an endpoint URL: scheme://host[:port][/path].
-    Query strings and userinfo are dropped — either can carry a secret (a
-    proxy token in ?key=, credentials in user@host), and the manifest
-    exists to make the run reproducible, never to leak them. An unparseable
-    or non-HTTP(S) value reads as "(unparsed)". resolve_config rejects these
-    before paid calls; directly constructed configs still need this guard."""
-    try:
-        parts = urlsplit(url)
-        port = parts.port
-    except ValueError:
-        return "(unparsed)"
-    if parts.scheme not in ("http", "https") or not parts.hostname:
-        return "(unparsed)"
-    host = parts.hostname
-    # an IPv6 host needs its brackets back (urlsplit strips them)
-    if ":" in host and port:
-        netloc = f"[{host}]:{port}"
-    elif ":" in host:
-        netloc = f"[{host}]"
-    elif port:
-        netloc = f"{host}:{port}"
-    else:
-        netloc = host
-    return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+    """A shareable endpoint spelling for the run manifest: userinfo, query,
+    and fragment dropped — each can carry a secret (credentials in
+    user@host, a proxy token in ?key=)."""
+    parts = urlsplit(url)
+    return parts._replace(netloc=parts.netloc.rpartition("@")[2], query="", fragment="").geturl()
 
 
 def _run_stamp() -> str:
@@ -248,9 +231,6 @@ def _prepare_attachment_scope(
     harness = load_harness_report(args.harness_report) if args.harness_report is not None else None
 
     if harness is not None:
-        for name in ("resolved_ids", "unresolved_ids", "error_ids", "incomplete_ids", "empty_patch_ids"):
-            if name in harness and not isinstance(harness[name], list):
-                validation.append({"level": "error", "msg": f"harness report has a corrupt non-list {name}"})
         # A conventional harness report is keyed only by benchmark instance.
         # It cannot distinguish repeated executions or arms, and correctness
         # belongs to one execution. Reject that ambiguity before --limit can
@@ -295,37 +275,11 @@ def _prepare_attachment_scope(
                 validation.append({"level": "warn", "msg": f"{warn_prefix}: gold metadata has no patch for {benchmark}"})
 
         if harness is not None and args.correctness is None:
-            # The harness lists are exact benchmark keys. Preserve distinct
-            # error/missing/conflicting states instead of collapsing them into
-            # an unresolved boolean.
-            lists = {
-                name: value if isinstance(value, list) else []
-                for name, value in (
-                    ("resolved", harness.get("resolved_ids")),
-                    ("unresolved", harness.get("unresolved_ids")),
-                    ("error", harness.get("error_ids")),
-                    ("incomplete", harness.get("incomplete_ids")),
-                    ("empty_patch", harness.get("empty_patch_ids")),
-                )
-            }
-            hits = [name for name, values in lists.items() if benchmark is not None and benchmark in values]
-            if len(hits) > 1:
-                outcome_status = "conflicting_result"
-                validation.append({"level": "warn", "msg": f"{warn_prefix}: harness report lists {benchmark} in {'/'.join(hits)}"})
-            elif hits == ["resolved"]:
-                outcome_status = "resolved"
-                episode.attachments["correctness"] = {"resolved": True}
-            elif hits == ["unresolved"]:
-                outcome_status = "unresolved"
-                episode.attachments["correctness"] = {"resolved": False}
-            elif hits:
-                outcome_status = "harness_error" if hits[0] == "error" else "incomplete_evaluation"
-                if hits[0] == "empty_patch":
-                    outcome_status = "empty_patch_submission"
-                validation.append({"level": "warn", "msg": f"{warn_prefix}: harness reports {benchmark} as {hits[0]}"})
-            else:
-                outcome_status = "missing_result"
-                validation.append({"level": "warn", "msg": f"{warn_prefix}: harness has no result for {benchmark or '(unknown)'}"})
+            outcome_status, note = harness_outcome(harness, benchmark)
+            if note:
+                validation.append({"level": "warn", "msg": f"{warn_prefix}: {note}"})
+            if correctness := outcome_correctness(outcome_status):
+                episode.attachments["correctness"] = correctness
             episode.attachments.update({"outcome_status": outcome_status, "outcome_join": "harness_report"})
 
         # A trajectory sidecar has no execution key. It is valid only when
@@ -333,16 +287,14 @@ def _prepare_attachment_scope(
         if trajectory is not None and len(episodes_by_trajectory.get(trajectory.id, [])) == 1:
             def _warn(note: str) -> None:
                 validation.append({"level": "warn", "msg": f"{warn_prefix}: {note}"})
-            sidecar = load_sidecar(Path(trajectory.path), benchmark, _warn)
-            if "golden" not in episode.attachments and sidecar.golden is not None:
-                episode.attachments.update({"golden": sidecar.golden, "gold_join": "trajectory_sidecar"})
-            if harness is None and "correctness" not in episode.attachments and sidecar.correctness is not None:
-                resolved = bool(sidecar.correctness.get("resolved"))
-                episode.attachments.update({
-                    "correctness": sidecar.correctness,
-                    "outcome_status": "resolved" if resolved else "unresolved",
-                    "outcome_join": "trajectory_sidecar",
-                })
+            golden, correctness, outcome_status = load_sidecar(Path(trajectory.path), benchmark, _warn)
+            if "golden" not in episode.attachments and golden is not None:
+                episode.attachments.update({"golden": golden, "gold_join": "trajectory_sidecar"})
+            if harness is None and "outcome_status" not in episode.attachments and outcome_status is not None:
+                if correctness is not None:
+                    episode.attachments["correctness"] = correctness
+                episode.attachments.update({"outcome_status": outcome_status,
+                                            "outcome_join": "trajectory_sidecar"})
         elif trajectory is not None:
             # Do not even read an unkeyed sidecar for a multi-episode stream:
             # doing so would make --limit appear to disambiguate it.
@@ -373,20 +325,6 @@ def _prepare_only_main(args: argparse.Namespace) -> int:
         scope_needs_review |= prepared.scope_needs_review
         validation.extend({"level": "warn", "msg": note} for note in prepared.diagnostics)
         validation.extend({"level": "info", "msg": note} for note in prepared.information)
-        reset_count = sum(
-            1 for episode in prepared.episodes
-            if episode.boundary_provenance.get("episode_reset")
-        )
-        rewrite_count = sum(
-            1 for episode in prepared.episodes
-            if episode.boundary_provenance.get("wrapper_removal_rewrite") is not None
-        )
-        if reset_count or rewrite_count:
-            validation.append({
-                "level": "info",
-                "msg": f"{trajectory.run_id}: episode resets={reset_count}; "
-                       f"main-lane wrapper-removal rewrites={rewrite_count}",
-            })
         for item in prepared.unassigned:
             validation.append({"level": "error", "msg": f"{trajectory.run_id}: unassigned {item}"})
 
@@ -451,13 +389,6 @@ def _prepare_only_main(args: argparse.Namespace) -> int:
             "searches": sum(len(episode.searches) for episode in materialized),
             "deliveries": sum(len(episode.deliveries) for episode in materialized),
             "needs_review": sum(1 for episode in all_episodes if episode.preparation_status in ("needs_review", "incomplete")),
-            "episode_resets": sum(
-                1 for episode in all_episodes if episode.boundary_provenance.get("episode_reset")
-            ),
-            "wrapper_removal_rewrites": sum(
-                1 for episode in all_episodes
-                if episode.boundary_provenance.get("wrapper_removal_rewrite") is not None
-            ),
         },
     }
     atomic_write(index_path, json.dumps(package, ensure_ascii=False, indent=2) + "\n")
@@ -477,70 +408,25 @@ def _prepare_only_main(args: argparse.Namespace) -> int:
 
 
 class _Progress:
-    """Running evaluation progress on stderr, rendered with tqdm: a
-    trajectories bar plus a per-trajectory spans bar on a TTY, and one
-    checkpoint line per completed trajectory when piped (bars disabled).
-    Kept off stdout — the dry-run print and the final summary live there —
-    and off entirely in dry runs."""
+    """Judge progress on stderr. It counts only the spans that the agent
+    judges. A terminal gets a tqdm bar. A piped run gets one line for each
+    completed span. Stdout keeps the dry-run print and the final summary."""
 
-    def __init__(self, total_trajs: int, enabled: bool = True):
-        self._enabled = enabled
-        self._total_trajs = total_trajs
-        # decided here, not delegated to tqdm: the bars only make sense on an
-        # interactive terminal — a piped run gets the checkpoint lines
-        # (finish_trajectory), never an inert bar each span update locks into
-        self._tty = sys.stderr.isatty()
-        # mininterval=0 renders every update (spans move at agent-run pace —
-        # seconds, not frames)
-        self._traj_bar = (
-            tqdm(total=total_trajs, desc="trajectories", unit="traj", mininterval=0)
-            if enabled and self._tty
-            else None
-        )
-        self._span_bar: tqdm | None = None
-        self._span_lock = threading.Lock()
-        self._traj = ""
-        self._n_spans = 0
-        self._done_trajs = 0
+    def __init__(self, total: int):
+        self._total = total
+        self._done = 0
+        self._bar = tqdm(total=total, desc="spans", unit="span", mininterval=0) if sys.stderr.isatty() else None
 
-    def start_trajectory(self, name: str, n_spans: int) -> None:
-        self._traj = name
-        self._n_spans = n_spans
-        if self._traj_bar is not None:
-            self._span_bar = tqdm(
-                total=n_spans, desc=name, unit="span", position=1,
-                leave=False, mininterval=0,
-            )
-
-    def advance_span(self) -> None:
-        # called from JUDGE_PARALLEL pool workers: tqdm's update() adds to the
-        # bar's counter without a lock (only the display refresh is locked),
-        # so concurrent updates could lose an increment
-        bar = self._span_bar
-        if bar is not None:
-            with self._span_lock:
-                bar.update(1)
-
-    def finish_trajectory(self) -> None:
-        self._done_trajs += 1
-        if self._span_bar is not None:
-            self._span_bar.close()
-            self._span_bar = None
-        if self._traj_bar is not None:
-            self._traj_bar.update(1)
-        # the bars are off when piped — one checkpoint line instead; the span
-        # total is the trajectory's span count (finish runs once per
-        # trajectory, so a done/total fraction would always read 1)
-        if self._enabled and not self._tty:
-            print_safe(
-                f"[{self._done_trajs}/{self._total_trajs} traj] {self._traj}: "
-                f"{self._n_spans} spans done",
-                err=True,
-            )
+    def advance(self, span_id: str, verdict: str) -> None:
+        self._done += 1
+        if self._bar is not None:
+            self._bar.update(1)
+        else:
+            print_safe(f"[{self._done}/{self._total} spans] {span_id}: {verdict}", err=True)
 
     def close(self) -> None:
-        if self._traj_bar is not None:
-            self._traj_bar.close()
+        if self._bar is not None:
+            self._bar.close()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -633,8 +519,9 @@ def main(argv: list[str] | None = None) -> int:
         default=Path("output"),
         help="output container for the artifacts (default: output/) — each "
         "run writes its own <run-stamp>/ subfolder holding "
-        "injudge-report.json (the runtime report) and summary.json (the "
-        "rubric statistics); spans sent to the agent add evidence/ folders "
+        "injudge-report.json (the runtime report), summary.json (the "
+        "rubric statistics), and summary.md (the readable summary); "
+        "spans sent to the agent add evidence/ folders "
         "and agent-runs/ transcript JSONL files; "
         "memgraph-verdicts.html with --html",
     )
@@ -727,6 +614,7 @@ def main(argv: list[str] | None = None) -> int:
     run_dir = args.output / _run_stamp()
     report_path = run_dir / "injudge-report.json"
     summary_path = run_dir / "summary.json"
+    readable_summary_path = run_dir / "summary.md"
     html_path = run_dir / "memgraph-verdicts.html"
     evidence_root = run_dir / "evidence"
     transcripts_root = run_dir / "agent-runs"
@@ -741,9 +629,7 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit(
                 f"error: cannot create output folder {run_dir}: {e}"
             ) from e
-        if not run_dir.is_dir():
-            raise SystemExit(f"error: output path {run_dir} is not a directory")
-        out_paths = [report_path, summary_path] + ([html_path] if args.html else [])
+        out_paths = [report_path, summary_path, readable_summary_path] + ([html_path] if args.html else [])
         for out_path in out_paths:
             check_writable(out_path)
 
@@ -781,16 +667,24 @@ def main(argv: list[str] | None = None) -> int:
                if selected is not None else {}),
         }
 
-    progress = _Progress(len(trajs), enabled=not args.dry_run)
+    # Op and span ids carry their trajectory id, so these maps are run-wide.
+    # One pool judges the pending spans of every trajectory.
+    ops_by_id: dict[str, MemoryOp] = {}
+    content_chars: dict[str, int] = {}
+    span_costs: dict[str, dict] = {}
+    episode_by_span: dict[str, EpisodeInput] = {}
+    verdict_by_span: dict[str, dict] = {}
+    operation_index: dict[str, int] = {}
+    injection_index: dict[str, int] = {}
+    pending: list[InjectionSpan] = []
     for t in trajs:
         run_id = t.run_id
         ops = ops_by_traj[t.id]
         events = events_by_traj[t.id]
         recall_ops = [op for op in ops if op.kind == "recall"]
-        ops_by_id = {op.id: op for op in recall_ops}
+        ops_by_id.update({op.id: op for op in recall_ops})
         span_warnings: list[str] = []
         spans: list[InjectionSpan] = []
-        episode_by_span: dict[str, EpisodeInput] = {}
         assigned: set[str] = set()
         episode_rows: list[dict] = []
         for episode in episodes_by_traj[t.id]:
@@ -827,15 +721,14 @@ def main(argv: list[str] | None = None) -> int:
         for op in recall_ops:
             if op.id not in assigned:
                 spans.extend(group_spans([op], t.id, span_warnings, id_offset=len(spans)))
-        # the span pass's notes (same-step delivery collisions bounding
-        # footprint windows) surface like every other structural finding
+        # Same-step collisions bound footprint windows. Parallel tool calls
+        # cause them, so they are notes, not data problems.
         for w in span_warnings:
-            validation.append({"level": "warn", "msg": f"{run_id}: {w}"})
+            validation.append({"level": "info", "msg": f"{run_id}: {w}"})
         validation.extend(_exposure_notes(run_id, spans))
-        progress.start_trajectory(t.instance_id or run_id, len(spans))
         # delivery cost per span: the exact placement content size recorded
         # on each op, summed over the span (chars/4: documented estimate)
-        content_chars = {op.id: op.content_chars or 0 for op in recall_ops}
+        content_chars.update({op.id: op.content_chars or 0 for op in recall_ops})
         n_unsized = sum(1 for op in recall_ops if op.content_chars is None)
         if n_unsized:
             # a redacted/locator placement records no content size: its cost
@@ -848,7 +741,6 @@ def main(argv: list[str] | None = None) -> int:
                            "placement content size; their delivery cost counts 0 tokens",
                 }
             )
-        span_costs = {}
         for span in spans:
             chars = sum(content_chars[op_id] for op_id in span.op_ids)
             span_costs[span.id] = {
@@ -872,24 +764,9 @@ def main(argv: list[str] | None = None) -> int:
         n_extract = len(extracts)
         n_extract_fail = sum(1 for op in extracts if op.flagged)
         # same per-span rounding the cost rollup uses: one artifact, one total
-        est_injected_tokens = sum(c["approx_tokens_total"] for c in span_costs.values())
-        # the share degrades to None when the recorded sizes make it
-        # unrepresentable (_token_share: a hand-edited >308-digit chars
-        # literal, valid JSON, overflows the division) — the exact totals
-        # stay recorded, and the drop is warned about like every other
-        # silent-by-default correction, never aborting the run
-        share = _token_share(est_injected_tokens, prompt_total)
-        if prompt_total and share is None:
-            validation.append(
-                {
-                    "level": "warn",
-                    "msg": f"{run_id}: recorded content size past the float range; "
-                           "the injected-token share is unrepresentable (the exact "
-                           "totals stay recorded)",
-                }
-            )
+        est_injected_tokens = sum(span_costs[span.id]["approx_tokens_total"] for span in spans)
+        share = round(est_injected_tokens / prompt_total, 4) if prompt_total else None
         policy = {
-            "cost_caveat": TOKEN_COST_CAVEAT,
             "residency": residency_cost(episodes_by_traj[t.id]),
             "n_steps": t.n_steps,
             "n_injections": len(recall_ops),
@@ -930,19 +807,16 @@ def main(argv: list[str] | None = None) -> int:
             }
         )
 
-        verdict_by_span: dict[str, dict] = {}
         # per-span routing is decided serially — rule-judged auto-neutral,
         # --limit-cutoff and dry-run spans are instant and order-fixed; only
         # the judge_span calls (each independent: its own evidence folder,
         # its own agent conversation) go to the pool when JUDGE_PARALLEL > 1
-        judged: list[tuple[int, InjectionSpan]] = []
         verdicts: dict[int, dict] = {}
         for i, span in enumerate(spans):
             episode = episode_by_span.get(span.id)
             problem = None
             if selected is not None and (episode is None or episode.execution_id not in selected):
                 verdicts[i] = _unjudged(OUTSIDE_SELECTION)
-                progress.advance_span()
                 continue
             if episode is None or episode.boundary_provenance.get("status") != "prepared":
                 problem = "ambiguous or missing episode boundary/assignment"
@@ -952,21 +826,16 @@ def main(argv: list[str] | None = None) -> int:
                 verdicts[i] = blank_verdict()
                 verdicts[i]["error"] = f"unsafe episode evidence: {problem}"
                 validation.append({"level": "error", "msg": f"{span.id}: {verdicts[i]['error']}"})
-                progress.advance_span()
             elif not span.memories:
                 verdicts[i] = auto_verdict_empty(span)
-                progress.advance_span()
             elif span.step_first is None:
                 verdicts[i] = auto_verdict_no_subsequent_turn(span)
-                progress.advance_span()
             elif problem := evidence_problem(episode):
                 verdicts[i] = blank_verdict()
                 verdicts[i]["error"] = f"unsafe episode evidence: {problem}"
                 validation.append({"level": "error", "msg": f"{span.id}: {verdicts[i]['error']}"})
-                progress.advance_span()
             elif args.limit is not None and taken >= args.limit:
                 verdicts[i] = _unjudged("beyond --limit")
-                progress.advance_span()
             elif args.dry_run:
                 taken += 1
                 # the evidence embeds recorded memory values: print it
@@ -974,94 +843,92 @@ def main(argv: list[str] | None = None) -> int:
                 # delivered memory must not abort the dry run)
                 dry_run_print(span, episode)
                 verdicts[i] = _unjudged("dry run")
-                progress.advance_span()
             else:
                 taken += 1
-                judged.append((i, span))
-
-        def _judge(item: tuple[int, InjectionSpan]) -> tuple[int, dict, list[str], str | None]:
-            """One span's judging on a pool worker: its own evidence folder
-            and agent conversation, sharing nothing mutable with siblings."""
-            i, span = item
-            episode = episode_by_span[span.id]
-            gold = GoldInput(golden=episode.attachments.get("golden"),
-                             correctness=episode.attachments.get("correctness"))
-            span_warnings: list[str] = []
-            error_note = None
-            try:
-                verdict = judge_span(
-                    span, episode, cfg, span_warnings, gold=gold,
-                    evidence_root=evidence_root, transcripts_root=transcripts_root,
-                )
-            except Exception as e:
-                # a bug or an unguarded corrupt shape: it must still degrade
-                # to one span's error verdict — one bad span never takes the
-                # run down with every un-flushed trajectory. judge_span keeps
-                # its own failure records; reaching here is a code fault, so
-                # the record is deliberately bare.
-                verdict = blank_verdict()
-                verdict["error"] = (
-                    "judging failed unexpectedly: "
-                    + _mask_key(f"{type(e).__name__}: {e}", cfg.api_key)[:2000]
-                )
-                error_note = f"{span.id}: {verdict['error']}"
-            progress.advance_span()
-            return i, verdict, span_warnings, error_note
+                pending.append(span)
 
         # Persist pending entries before paid work, then replace them as each
         # result arrives. One recorder trajectory can contain an entire benchmark.
-        operation_start = len(operations)
         for i, span in enumerate(spans):
-            verdict = verdicts.get(i, _unjudged("pending judge"))
-            verdict_by_span[span.id] = verdict
-            operations.append(operation_record(span, verdict, span_costs[span.id]))
-        injection_start = len(injections)
-        injections.extend(injection_rollup(spans, ops_by_id, verdict_by_span, content_chars))
-        injection_positions = {row["op_id"]: j for j, row in enumerate(injections[injection_start:], injection_start)}
+            verdict_by_span[span.id] = verdicts.get(i, _unjudged("pending judge"))
+            operation_index[span.id] = len(operations)
+            operations.append(operation_record(span, verdict_by_span[span.id], span_costs[span.id]))
+        for row in injection_rollup(spans, ops_by_id, verdict_by_span, content_chars):
+            injection_index[row["op_id"]] = len(injections)
+            injections.append(row)
+    flush()
+
+    def _judge(span: InjectionSpan) -> tuple[dict, list[str], str | None]:
+        """One span's judging on a pool worker: its own evidence folder
+        and agent conversation, sharing nothing mutable with siblings."""
+        episode = episode_by_span[span.id]
+        gold = GoldInput(golden=episode.attachments.get("golden"),
+                         correctness=episode.attachments.get("correctness"))
+        span_warnings: list[str] = []
+        error_note = None
+        try:
+            verdict = judge_span(
+                span, episode, cfg, span_warnings, gold=gold,
+                evidence_root=evidence_root, transcripts_root=transcripts_root,
+            )
+        except Exception as e:
+            # a bug or an unguarded corrupt shape: it must still degrade
+            # to one span's error verdict — one bad span never takes the
+            # run down with every un-flushed trajectory. judge_span keeps
+            # its own failure records; reaching here is a code fault, so
+            # the record is deliberately bare.
+            verdict = blank_verdict()
+            verdict["error"] = (
+                "judging failed unexpectedly: "
+                + _mask_key(f"{type(e).__name__}: {e}", cfg.api_key)[:2000]
+            )
+            error_note = f"{span.id}: {verdict['error']}"
+        return verdict, span_warnings, error_note
+
+    validation_start = len(validation)
+    outcome_notes: dict[int, list[dict]] = {}
+    progress = _Progress(len(pending)) if pending else None
+
+    def retain(k: int, outcome: tuple[dict, list[str], str | None]) -> None:
+        verdict, span_warnings, error_note = outcome
+        outcome_notes[k] = ([{"level": "error", "msg": error_note}] if error_note is not None else [])
+        outcome_notes[k].extend({"level": "warn", "msg": w} for w in span_warnings)
+        # Persist completions immediately, but keep diagnostics in source
+        # span order regardless of worker scheduling.
+        validation[validation_start:] = [note for j in sorted(outcome_notes) for note in outcome_notes[j]]
+        span = pending[k]
+        verdict_by_span[span.id] = verdict
+        operations[operation_index[span.id]] = operation_record(span, verdict, span_costs[span.id])
+        for row in injection_rollup([span], ops_by_id, verdict_by_span, content_chars):
+            injections[injection_index[row["op_id"]]] = row
         flush()
-        validation_start = len(validation)
-        outcome_notes: dict[int, list[dict]] = {}
+        progress.advance(span.id, verdict["verdict"])
 
-        def retain(outcome: tuple[int, dict, list[str], str | None]) -> None:
-            i, verdict, span_warnings, error_note = outcome
-            outcome_notes[i] = ([{"level": "error", "msg": error_note}] if error_note is not None else [])
-            outcome_notes[i].extend({"level": "warn", "msg": w} for w in span_warnings)
-            # Persist completions immediately, but keep diagnostics in source
-            # span order regardless of worker scheduling.
-            validation[validation_start:] = [note for j in sorted(outcome_notes) for note in outcome_notes[j]]
-            span = spans[i]
-            verdict_by_span[span.id] = verdict
-            operations[operation_start + i] = operation_record(span, verdict, span_costs[span.id])
-            for row in injection_rollup([span], ops_by_id, verdict_by_span, content_chars):
-                injections[injection_positions[row["op_id"]]] = row
-            flush()
-
-        if judged:
-            if judge_parallel <= 1 or len(judged) <= 1:
-                for item in judged:
-                    retain(_judge(item))
-            else:
-                pool = ThreadPoolExecutor(max_workers=judge_parallel)
-                try:
-                    futures = [pool.submit(_judge, item) for item in judged]
-                    for future in as_completed(futures):
-                        retain(future.result())
-                except BaseException:
-                    # A context manager would wait and drain the paid queue on
-                    # Ctrl-C. Running jobs may finish; queued jobs must not start.
-                    pool.shutdown(wait=False, cancel_futures=True)
-                    raise
-                else:
-                    pool.shutdown(wait=True)
-        progress.finish_trajectory()
-    progress.close()
+    if judge_parallel <= 1 or len(pending) <= 1:
+        for k, span in enumerate(pending):
+            retain(k, _judge(span))
+    else:
+        pool = ThreadPoolExecutor(max_workers=judge_parallel)
+        try:
+            futures = {pool.submit(_judge, span): k for k, span in enumerate(pending)}
+            for future in as_completed(futures):
+                retain(futures[future], future.result())
+        except BaseException:
+            # A context manager would wait and drain the paid queue on
+            # Ctrl-C. Running jobs may finish; queued jobs must not start.
+            pool.shutdown(wait=False, cancel_futures=True)
+            raise
+        else:
+            pool.shutdown(wait=True)
+    if progress is not None:
+        progress.close()
 
     if args.dry_run:
         scoped = [op for op in operations if not _outside_selection(op)]
         # the span count describes the workload found; only the spans an
         # agent run would take were printed (a --limit cap, or rule-judged
         # auto-neutral spans that cost no run) — name that count when it
-        # differs, so the headline never overstates what was printed
+        # differs, so the summary never overstates what was printed
         printed = (
             f" ({taken} printed)" if taken != len(scoped) else ""
         )
@@ -1073,12 +940,6 @@ def main(argv: list[str] | None = None) -> int:
         print_validation([item for item in validation if item.get("level") == "error"])
         return 2 if any(item.get("level") == "error" for item in validation) else 0
 
-    # the final statistics set, projected from the final report in one pass
-    # (per-trajectory rewrites would re-walk every operation per trajectory)
-    atomic_write(
-        summary_path,
-        json.dumps(build_summary(artifact), indent=2, ensure_ascii=False) + "\n",
-    )
     if args.html:
         # the memgraph visualization with the verdicts merged onto the graph
         # built at load time — the graph and verdict content of a
@@ -1095,9 +956,17 @@ def main(argv: list[str] | None = None) -> int:
         validation.extend(merge_notes)
         atomic_write(report_path, json.dumps(artifact, indent=1, ensure_ascii=False) + "\n")
         atomic_write(html_path, render_html(graph))
+    # The HTML merge can add validation notes. Build the summary from
+    # the final list so its counts match the report.
+    atomic_write(
+        summary_path,
+        json.dumps(build_summary(artifact), indent=2, ensure_ascii=False) + "\n",
+    )
+    atomic_write(readable_summary_path, render_summary(artifact))
     n_error = print_summary(artifact)
     print_safe(f"wrote {report_path}")
     print_safe(f"wrote {summary_path}")
+    print_safe(f"wrote {readable_summary_path}")
     if args.html:
         print_safe(f"wrote {html_path}")
     return 2 if n_error or any(item.get("level") == "error" for item in validation) else 0

@@ -75,7 +75,7 @@ agent 步骤的区间不送评审，计为 **unassessable**。
 - [memgraph 指南](doc/zh-CN/memgraph.md) · [injudge 指南](doc/zh-CN/injudge.md)
 - [判定推导](doc/zh-CN/verdict-derivation.md)——使用标签、区间判定与比率
 - [配置参考](doc/zh-CN/configuration.md)——`.env` 键与 CLI 参数
-- [产物](doc/zh-CN/artifacts.md)——report 与 `summary.json` 格式
+- [产物](doc/zh-CN/artifacts.md)——report、`summary.json` 与可读摘要 `summary.md`
 - [开发](doc/zh-CN/development.md)——目录结构、测试、风格规则
 
 ## 测试

@@ -32,11 +32,11 @@ coexist with task failure, and an execution without a recorded result proves
 only an attempt.
 
 Gold is one reference solution, not the only valid approach. The same signal
-definitions apply with or without gold; the gold regime adds one rule: gold
-informs relevance and effect, verification, environment repair, or an avoided
-dead end can matter even when the gold patch omits them, and matching the patch
-does not prove the memory caused the action. Outcome attachments corroborate
-but do not determine a signal.
+definitions apply with or without gold. Gold can inform relevance and accuracy;
+influence and benefit still require recorded actions and checks. Verification,
+environment repair, or an avoided dead end can matter even when the gold patch
+omits them. Matching the patch does not prove the memory caused the action.
+Outcome attachments corroborate but do not determine a signal.
 
 ## Influence and action scope
 
@@ -122,13 +122,10 @@ is incomplete, keep `acted_on` and use `positive_effect: null`. Unassessed
 attribution uses influence null; do not invent neutrality or benefit to finish
 a budget-limited investigation.
 
-A violation takes one tool-free repair over the same history. Only a
-`needs_evidence` reply reopens tools. Invalid repair or exhaustion is `error`,
-never neutral. Prose warnings are advisory and do not rewrite labels: a quoted
-fragment of three or more words must occur, word for word, in some evidence
-file (punctuation, quote marks, invisible format characters, and case are
-ignored; ellipses and bracketed insertions mark gaps), and an analysis over 60
-words is noted.
+Missing required evidence in an otherwise valid first answer gets one short
+investigation before repair, if phases remain. Other violations take one
+tool-free repair over the same history; its `needs_evidence` reply can reopen
+tools. Invalid repair or exhaustion is `error`, never neutral.
 
 ## Usage and span verdicts
 

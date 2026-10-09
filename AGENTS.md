@@ -7,7 +7,7 @@ mem-eval scores memory-system quality from schema-v10 gate trajectories
   self-contained HTML/JSON graph.
 - **injudge** scores each episode-scoped recall span's subsequent influence
   with an agentic LLM rubric (a pi agent searching one evidence folder per
-  span) and writes `injudge.report/v17`, which memgraph can overlay with
+  span) and writes `injudge.report/v19`, which memgraph can overlay with
   `--verdicts`.
 
 An injection is judged by its influence on later agent turns. The final
@@ -38,7 +38,7 @@ npm --prefix agent install              # once: the pi agent packages (node >= 2
 uv run pytest tests -q                  # full suite (offline; also runs node --test)
 uv run pytest tests/test_injudge.py -q  # one file
 uv run -m memgraph <paths> -o memgraph.html --json memgraph.json
-uv run -m injudge <paths> -o output/    # one run folder: report + summary; judged-span evidence/transcripts
+uv run -m injudge <paths> -o output/    # one run folder: report + summary.json + summary.md; judged-span evidence/transcripts
 uv run -m injudge <paths> --html        # also memgraph-verdicts.html
 uv run -m injudge <paths> --dry-run     # preview spans that use the agent; no calls or files
 uv run -m injudge <paths> --prepare-only -o output/  # offline episode evidence; no .env/Node/judge
@@ -71,7 +71,7 @@ Policy totals explicitly cover whole input recordings.
 
 `--prepare-only` is a staged offline path. It uses bridge episode lifecycle
 events only for scope/provenance, keeps memory operations annotation-only, and
-writes `injudge.episode-inputs/v2` (`episode-inputs.json` plus one inspectable
+writes `injudge.episode-inputs/v3` (`episode-inputs.json` plus one inspectable
 folder per episode). It loads no `.env`, Node runtime, network client, or
 judge runner. Scope/assignment ambiguity is preserved in diagnostics; the
 package is written before the command returns status 2 for review.
@@ -106,7 +106,7 @@ memgraph/parse_trajectory.py  # trajectory.jsonl → ops; shared step rule
 memgraph/episodes.py       # shared episode-scope rule (bridge boundaries) + graph episode rows
 memgraph/graph.py          # path discovery, cross-trajectory linking, validation
 memgraph/html.py           # self-contained HTML (template + embedded graph JSON)
-memgraph/verdicts.py       # merge injudge.report/v17 onto recall ops
+memgraph/verdicts.py       # merge injudge.report/v19 onto recall ops
 memgraph/__main__.py       # python3 -m memgraph
 injudge/__init__.py        # REPORT_SCHEMA / SUMMARY_SCHEMA (writer + memgraph reader)
 injudge/model.py           # AgentStep / ToolExec / InjectionSpan
@@ -120,7 +120,7 @@ injudge/agent.py           # .env → AgentConfig, runner subprocess, corrective
 injudge/gold.py            # golden-answer / correctness sidecars and CLI joins
 injudge/prompts.py         # loads prompts/ (never inline prompts in code)
 injudge/aggregate.py       # verdict counts/rates, per-memory usage roll-ups
-injudge/report.py          # injudge.report/v17 + injudge.summary/v16 + stdout
+injudge/report.py          # injudge.report/v19 + injudge.summary/v17 + summary.md + stdout
 injudge/__main__.py        # python3 -m injudge
 agent/                     # TS judge agent: runner.ts (pi Agent + budgets),
                            # evidence-tools.ts (scoped read-only tools),
@@ -186,7 +186,7 @@ operation-local ids compare through content digests only.
 Identity and grouping use the recorder's portable MemoryRef fields, never
 adapter vocabulary.
 
-- **Item grouping** (graph registry, span set-diffs, injudge usage rollups,
+- **Item grouping** (graph registry, injudge usage rollups,
   footprint windows)
   is `(namespace, item_id)`, stable across versions of one item. Fall back
   to a stable display key when `item_id` was not recorded. An operation-local
@@ -206,7 +206,7 @@ adapter vocabulary.
     When the display "key" IS that local id (no `item_id`, no real key
     recorded), it is no item identity either, and the item half reads
     as absent.
-    Set-diffs and footprint windows follow the same content identity when
+    Footprint windows follow the same content identity when
     no stable item is known: a fresh local id does not reopen the earlier
     treatment's window or fabricate a new memory.
   - With neither a withheld-adjusted version_id nor a digest, the
@@ -403,10 +403,12 @@ Easy to get wrong:
   footprint window; a non-null acted-on effect requires reading from its start
   through the episode end, since consequences can outlive action credit. Incomplete investigation must use
   influence (or effect) null, not fabricate neutrality or benefit. Harm in any
-  of an entry's shaped actions makes its effect harmed. A violation takes the
-  single-call repair with no evidence tools, continuing job.history. Only
-  an explicit `needs_evidence` repair reply reopens investigation, with a
-  follow-up prompt over that same history. Each resumed investigation gets
+  of an entry's shaped actions makes its effect harmed. If the first answer
+  passes shape and semantic checks but lacks required evidence, resume
+  investigation once before repair if MAX_ATTEMPTS allows. Other violations
+  take the single-call repair with no evidence tools, continuing job.history.
+  A repair can reopen investigation only through an explicit `needs_evidence`
+  reply, with a follow-up prompt over that same history. Each resumed investigation gets
   min(MAX_STEPS, 4) calls including its forced final answer; the initial
   investigation keeps MAX_STEPS. MAX_ATTEMPTS bounds all phases;
   an invalid repair or exhaustion is a visible `error` with text kept (masked),
@@ -438,8 +440,8 @@ Easy to get wrong:
   retry; a missing node, runner, or agent-package tree is setup misuse
   that fails fast with a targeted SystemExit before any paid call
   (`_check_runner`).
-- Out-of-contract answers, empty final texts, and output-budget cuts all
-  take the same corrective retry.
+- Shape and semantic violations, empty final texts, and output-budget cuts
+  take the tool-free repair.
 
 ## Style
 
@@ -552,7 +554,7 @@ The HTML colors rewrite markers by each marker's own `on_memory_lane` flag,
 computed at parse time against the final lane set. Do not prune a field
 from one consumer only.
 
-**injudge** writes `injudge.report/v17` (`{tool, generated_at, trajectories,
+**injudge** writes `injudge.report/v19` (`{tool, generated_at, trajectories,
 operations, injections, aggregates, validation}`), checkpointed after every
 completed span (including parallel completions), with pending spans explicitly
 `unjudged`, so interruption within a multi-episode trajectory keeps completed
@@ -572,8 +574,7 @@ to its run.
   `memory_exposure` records per entry what the placement showed (`full` /
   `full_normalized` / clipped prefix length / `unknown`). Canonical values
   and digests are
-  never overwritten. Span set-diffs also carry `new_keys` / `removed_keys`
-  / `previous_keys` / `changed_keys`.
+  never overwritten.
 - Trajectory episode rows carry execution/boundary identity, task and attachment
   provenance, global step bounds, and their span ids. Operations carry parent
   `episode_execution_id` and `episode_last_step`; memgraph keeps these links.
@@ -593,8 +594,8 @@ to its run.
   `read_steps` lists global steps whose complete text remains in
   the retained conversation (`retained_evidence` is the runner's read
   count); reading headers or navigation cannot validate a judgment,
-  and an anchor or structured evidence step outside `read_steps` takes the
-  repair. Tool-result metadata records the actual returned line range and
+  and every cited anchor or structured evidence step must be in `read_steps`.
+  Tool-result metadata records the actual returned line range and
   truncation; a partial read is not proof that the whole step was inspected.
   A limit-bounded read ending before the file's last non-blank line says how
   many lines remain and where to continue.
@@ -618,14 +619,23 @@ to its run.
   (non-`[A-Za-z0-9._-]` replaced by `_`, capped at 80 chars) plus an
   8-char digest suffix — `evidence.span_dir_name`.
 
-The companion `summary.json` (`injudge.summary/v16`) contains compact final
-statistics. `overall` holds counts, verdict counts/rates with `judged_spans`,
+The companion `summary.json` (`injudge.summary/v17`) contains compact final
+statistics. Every completed run also writes `summary.md`, a short readable view
+of those same totals: run date and judge model, the verdict table, entry
+influence and acted-on effect counts, accuracy and novelty counts for relevant
+entries (including unknown novelty), up to ten non-neutral or error spans to
+inspect (episode id and the judge analysis or error), judge counters, diagnostic
+counts with up to three unique warning/error messages, delivery estimates, and
+links to the JSON files. Input diagnostics cover whole recordings.
+`overall` holds counts, verdict counts/rates with `judged_spans`,
 five-signal rubric counts/rates with `judged_entries`, estimated tokens for nonzero
 recorded delivery sizes, and judge execution counters. Judge counters cover attempted
-spans, gold-scored spans, repairs, any-phase forced rounds, context rollbacks,
-executed calls, and reported usage; unknown counters are null. Nonzero effect
+spans, gold-scored spans, spans with follow-up phases, any-phase forced rounds,
+context rollbacks, executed calls, and reported usage; unknown counters are null. Nonzero effect
 pairing correction and low-confidence counts are optional. Rubric reason counts
 and shared-action group counts are optional.
+`spans_with_repairs` retains its name and counts spans with `attempts > 1`,
+including direct evidence continuation. A tool-free repair is not required.
 `trajectories` contains compact identity/count/verdict rows and delivery token
 totals when delivery size is nonzero. `recording_policy` explicitly covers `whole_input_recordings`,
 including episodes outside the judge selection. It retains policy metrics and
@@ -637,8 +647,12 @@ source_report_schema, and judge_model. `notes` states that delivery/residency
 estimates use chars divided by four and are not billing or overhead relative
 to a no-memory run. Span verdicts measure
 memory influence, not benchmark task success.
-Summary has no repeated headline, span or episode index, memory lists, confidence
-means/buckets, configuration, or provenance. Those details remain in report v17.
+Report v19 removes the aggregate `headline` block. It keeps verdict counts,
+rates, costs by verdict, and the same judge labels. A mixed bundle can contain
+useful and harmful entries, so costs by verdict do not measure per-memory token
+benefit. Summary v17 is unchanged.
+Summary has no span or episode index, memory lists, confidence
+means/buckets, configuration, or provenance. Those details remain in report v19.
 Empty/unassessable/error/unjudged spans stay outside verdict-rate denominators.
 Rates are omitted when no spans were judged; rubric is omitted without judged
 entries, and judge counters without agent runs. JSON uses two-space indentation.

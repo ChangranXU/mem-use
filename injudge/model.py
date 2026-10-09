@@ -27,16 +27,6 @@ def memory_id(index: int) -> str:
     return f"m{index + 1}"
 
 
-def stamped_entry_id(memory: object) -> str | None:
-    """The span-local id the report stamps on each delivered memories entry.
-    Absent or non-string is no id — never reconstructed from list position
-    or guessed from a display key (the writer always stamps; a missing
-    stamp is corrupt, not an older artifact shape to repair). Shared by
-    injudge's usage rollups and memgraph's verdict merge."""
-    entry_id = memory.get("id") if isinstance(memory, dict) else None
-    return entry_id if isinstance(entry_id, str) and entry_id else None
-
-
 @dataclass
 class ToolExec:
     """One tool execution inside an agent step.
@@ -161,9 +151,8 @@ class EpisodeInput:
     preparation_status: str = "prepared"
     diagnostics: list[str] = field(default_factory=list)
     source_refs: list[SourceRef] = field(default_factory=list)
-    # Internal references used by the renderer; never emitted as a second
+    # Internal: step provenance for the renderer; never emitted as a second
     # public input contract or mixed into the judge's evidence root.
-    _events: list[dict[str, Any]] = field(default_factory=list, repr=False)
     _step_sources: dict[int, SourceRef] = field(default_factory=dict, repr=False)
 
     @property
@@ -263,21 +252,9 @@ class InjectionSpan:
     agent turn ever classified in the run — a memory-only or pre-first-response
     recording).
     `step_gaps` lists steps inside [step_first, step_last] where the memory
-    was NOT delivered. `new_keys`/`removed_keys` diff against the previous
-    span in the same episode (first span: all keys are new). The diff
-    compares (namespace, item) identities — memory identity is the pair, so
-    a delivery switching stores or items is a change — but speaks in
-    distinct bare keys (labels): a key whose item identity changed appears
-    in BOTH lists (its old identity left, its new one arrived).
-    `previous_keys` labels the identities delivered in an earlier span —
-    ANY earlier span in the episode, not only the immediately previous one;
-    recorded delivery is not proof of current visibility, so the judge's
-    span.md states, per entry, where each earlier delivery stands in the
-    consumer's recorded input (injudge.evidence).
-    `changed_keys` labels
-    identities whose RECORDED VALUE drifted against their last recorded
-    earlier delivery — membership alone would hide a same-identity value
-    change. `memory_exposure` carries, per delivered entry, what the
+    was NOT delivered. Earlier deliveries of the same items are stated per
+    entry in the judge's span.md, checked against the consumer's recorded
+    input (injudge.evidence). `memory_exposure` carries, per delivered entry, what the
     placement actually showed of the canonical value (full /
     whitespace-normalized full (prose-safe values only) / clipped with the
     exposed prefix length / unknown — memgraph.annotations.exposure_state),
@@ -342,10 +319,6 @@ class InjectionSpan:
     memories: list[dict] = field(default_factory=list)  # shared delivered set
     memory_exposure: list[dict] = field(default_factory=list)  # per entry, exposure_state
     step_gaps: list[int] = field(default_factory=list)
-    new_keys: list[str] = field(default_factory=list)
-    removed_keys: list[str] = field(default_factory=list)
-    previous_keys: list[str] = field(default_factory=list)
-    changed_keys: list[str] = field(default_factory=list)
     queries: list[str] = field(default_factory=list)
     placements: list[dict] = field(default_factory=list)
     position: int = 0

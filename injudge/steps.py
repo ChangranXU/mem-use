@@ -41,18 +41,11 @@ The module also owns the run's billed prompt-token accounting
 (`prompt_tokens_total`) — run.json totals include every lane's spend,
 including embeddings with no chat events. agent_end is the snapshot at seal
 time; live message usage is the lower bound when neither total is available.
-For that lower bound, the recorder lets exactly one LIVE
-message_end carry a call's billed usage (a message_retracted annuls the
-record it replaces, and only a recovery re-record carries usage turn-less),
-so summing only turn-bearing records would bill the retracted and miss the
-recovered.
 """
 
 from __future__ import annotations
 
 import json
-import math
-from collections.abc import Iterable
 
 from injudge.model import AgentStep, ToolExec
 from memgraph.annotations import is_int, message_text
@@ -331,216 +324,78 @@ def build_step_stream(
 
 
 def _usage_key(e: dict) -> tuple[str | None, int] | None:
-    """The (proxy_source, msg) key a usage record or retraction keys by; None
-    on a corrupt shape — a hand-edited artifact can carry anything there: an
-    unhashable value would crash the live map, and a bool/float msg would
-    collide with a real int index (True == 1)."""
+    """The (proxy_source, msg) slot a usage record or retraction keys by;
+    None on a corrupt shape (a bool msg would collide with a real index)."""
     src, msg = e.get("proxy_source"), e.get("msg")
-    if src is not None and not isinstance(src, str):
-        return None
-    if not is_int(msg):
+    if (src is not None and not isinstance(src, str)) or not is_int(msg):
         return None
     return (src, msg)
 
 
-def _mixed_sum(values: Iterable[int | float]) -> tuple[int | float, bool]:
-    """A token-total sum over possibly hand-edited records (every one finite
-    and JSON-valid — the per-record reads filter NaN/Infinity spellings to
-    0), keeping the artifacts free of the RFC-8259-invalid `Infinity`
-    spelling:
-
-    - a finite float past 2**53 has no fractional part, so it adds as its
-      exact integer: two such records would otherwise overflow the double
-      range mid-sum (each alone passed the finiteness check), leaking
-      `Infinity` into the artifacts and silently zeroing the derived
-      injected-token share;
-    - an arbitrary-precision int past the float range cannot add to a float
-      (OverflowError) — keep the exact int side (the dropped float part is
-      below its precision) and report the mix.
-    """
-    total: int | float = 0
-    mixed = False
-    for v in values:
-        if isinstance(v, float) and abs(v) >= 2**53:
-            v = int(v)  # exact: a double this large has no fractional part
-        try:
-            total += v
-        except OverflowError:
-            if isinstance(v, int):
-                total = v
-            mixed = True
-    return total, mixed
-
-
-def _token_share(part: int | float, whole: int | float) -> float | None:
-    """A derived share of recorded token totals, rounded like every rate
-    here; None when `whole` is 0 or the quotient is unrepresentable — a
-    hand-edited recorded size past the float range (a >308-digit literal,
-    valid JSON) raises OverflowError on the int conversion, and a finite
-    hand-edited divisor near zero overflows the IEEE division SILENTLY
-    (1e16 / 1e-308 is inf, never an exception) — either spelling would write
-    the RFC-8259-invalid `Infinity` into the artifacts. The exact totals stay
-    recorded; the derived share degrades, never raises — the one rule the
-    headline's share without demonstrated benefit and both injected-token shares divide by."""
-    if not whole:
-        return None
-    try:
-        share = round(part / whole, 4)
-    except OverflowError:
-        return None
-    # the float-division overflow returns inf instead of raising, so the
-    # except above never sees it — the quotient itself must be checked
-    return share if math.isfinite(share) else None
+def _valid_tokens(value: object) -> bool:
+    """Token counts are non-negative integers; anything else is corrupt."""
+    return is_int(value) and value >= 0
 
 
 def prompt_tokens_total(
     events: list[dict], warnings: list[str], run_usage: dict[str, object] | None = None,
-) -> int | float:
+) -> int:
     """All-lane billed prompt budget: the largest valid run.json, agent_end,
     or live-message total. Embeddings have no message events; snapshots can
     lag each other. These totals replace the message sum, never add to it.
     Invalid or smaller snapshots warn so corruption cannot erase known spend.
 
     The recorder lets exactly one LIVE message_end carry a call's billed
-    usage: a message_retracted annuls the record it replaces (the billed
-    fields move onto the replacement), and a turn-less origin=history
-    re-record carries no usage — except a recovery re-record, which carries
-    the usage of the original failed recording. Summing only turn-bearing
-    records would bill the retracted and miss the recovered. A record whose
-    turn is a corrupt non-integer (a JSON `true` is not a turn number) is
-    excluded like any other corrupt shape — and every exclusion is warned
-    about, never silent: the total undercounts otherwise. A retraction
-    matching no live record is out-of-order or duplicated corruption —
-    warned about too, since an out-of-order one leaves its record billed.
-    "No live record" reads the slot's own record order: none un-annulled at
-    the slot, or the previous record/retraction event itself a retraction —
-    the recorder's stream alternates record/retraction at a slot (only a new
-    record re-arms it), so a retraction following a retraction is a
-    duplicated hand-edit; letting it pop the record beneath the first copy's
-    target would underbill the budget silently (two records go live at one
-    slot without an intervening retraction only across a history_rewritten
-    epoch — still billed exactly once — and the older one is no current
-    retraction's target).
+    usage: a message_retracted annuls the record it replaces, and a turn-less
+    recovery re-record carries the usage of the failed original, so summing
+    only turn-bearing records would bill the retracted and miss the
+    recovered. The stream alternates record/retraction per slot, so a
+    retraction following a retraction annuls nothing.
     """
     live: dict[tuple, list[dict]] = {}  # (proxy_source, msg) -> unannulled records
-    last: dict[tuple, str] = {}  # slot key -> its latest usage-stream event type
-    dropped_records = 0
-    dropped_retractions = 0
-    unmatched_retractions = 0
-    nonfinite = 0  # records whose prompt_tokens is a NaN/Infinity spelling or a 1e999 literal
-    corrupt_tokens = 0  # records whose prompt_tokens is present but not a number
-    negative_tokens = 0
+    last: dict[tuple, str] = {}  # slot -> its latest record/retraction type
+    corrupt = unmatched = 0
     for e in events:
-        usage_record = e.get("type") == "message_end" and e.get("role") == "assistant"
-        if not usage_record and e.get("type") != "message_retracted":
+        record = e.get("type") == "message_end" and e.get("role") == "assistant"
+        if not record and e.get("type") != "message_retracted":
             continue
         key = _usage_key(e)
         if key is None:
-            # records and retractions are different populations with opposite
-            # accounting effects — tally them apart, never under one label
-            if usage_record:
-                dropped_records += 1
-            else:
-                dropped_retractions += 1
-            continue
-        if usage_record:
+            corrupt += 1
+        elif record:
             live.setdefault(key, []).append(e)
             last[key] = "message_end"
         else:
             if last.get(key) == "message_end":
                 live[key].pop()
             else:
-                unmatched_retractions += 1
+                unmatched += 1
             last[key] = "message_retracted"
-    values: list[int | float] = []
-    for stack in live.values():
-        for e in stack:
-            t = e.get("turn")
-            if t is not None and not is_int(t):
-                dropped_records += 1
-                continue
-            usage = e.get("usage")
-            tokens = usage.get("prompt_tokens") if isinstance(usage, dict) else None
-            # one classification decides the tally AND the counted value —
-            # two spellings of it would drift apart. Every corrupt shape
-            # bills 0 (a hand-edited artifact must degrade, never crash the
-            # policy accounting) and is warned about below, never silent:
-            # the total undercounts otherwise.
-            if isinstance(tokens, bool) or not isinstance(tokens, (int, float)):
-                # a present-but-corrupt prompt_tokens (a JSON true, a string,
-                # a list); an absent one is the normal no-usage record
-                if tokens is not None:
-                    corrupt_tokens += 1
-                tokens = 0
-            elif isinstance(tokens, float) and not math.isfinite(tokens):
-                # a NaN/Infinity spelling or a 1e999 literal (valid JSON,
-                # reads as inf) has no finite billing meaning — and summing
-                # one would write the non-JSON spellings into the artifacts.
-                # The finiteness check reaches floats only (the corrupt
-                # branch above took everything else): an int is
-                # arbitrary-precision (always finite), and math.isfinite
-                # float-converts it — a >308-digit literal (valid JSON,
-                # parses under the digit limit) would raise OverflowError and
-                # take the run down. The summation (_mixed_sum) guards the
-                # conversions that remain: such an int summing with a float
-                # record, and two finite floats overflowing the double range.
-                nonfinite += 1
-                tokens = 0
-            elif tokens < 0:
-                negative_tokens += 1
-                tokens = 0
-            values.append(tokens)
-    total, mixed_overflow = _mixed_sum(values)
-    if dropped_records:
+    total = 0
+    for e in (e for stack in live.values() for e in stack):
+        usage = e.get("usage")
+        tokens = usage.get("prompt_tokens") if isinstance(usage, dict) else None
+        if _valid_tokens(tokens):
+            total += tokens
+        elif tokens is not None:
+            corrupt += 1
+    if corrupt:
         warnings.append(
-            f"{dropped_records} usage record(s) carry a corrupt key/turn shape; "
-            "excluded, so the prompt-token total undercounts"
+            f"{corrupt} usage record(s) or retraction(s) carry a corrupt slot or "
+            "prompt_tokens value; excluded, so the prompt-token total may be inexact"
         )
-    if nonfinite:
+    if unmatched:
         warnings.append(
-            f"{nonfinite} usage record(s) carry a non-finite prompt_tokens value "
-            "(no finite billing meaning); counted 0, so the prompt-token total "
-            "undercounts"
-        )
-    if corrupt_tokens:
-        warnings.append(
-            f"{corrupt_tokens} usage record(s) carry a corrupt non-numeric "
-            "prompt_tokens value; counted 0, so the prompt-token total "
-            "undercounts"
-        )
-    if dropped_retractions:
-        warnings.append(
-            f"{dropped_retractions} message_retracted event(s) carry a corrupt key "
-            "shape; excluded, so the record they annul stays billed and the "
-            "prompt-token total may overcount"
-        )
-    if negative_tokens:
-        warnings.append(
-            f"{negative_tokens} usage record(s) carry a negative prompt_tokens value; "
-            "counted 0 so corrupt usage cannot cancel observed spend"
-        )
-    if unmatched_retractions:
-        warnings.append(
-            f"{unmatched_retractions} message_retracted event(s) matched no live "
-            "usage record (out-of-order or duplicate); the prompt-token total "
-            "may overcount"
-        )
-    if mixed_overflow:
-        warnings.append(
-            "an integer usage record past the float range cannot sum with float "
-            "records; the float part counts 0, so the prompt-token total may "
-            "undercount"
+            f"{unmatched} message_retracted event(s) matched no live usage record "
+            "(out-of-order or duplicate); the prompt-token total may overcount"
         )
     ended = next((e.get("usage") for e in reversed(events) if e.get("type") == "agent_end"), None)
-    snapshots: dict[str, int | float] = {}
+    snapshots: dict[str, int] = {}
     for source, usage in (("run.json", run_usage), ("agent_end", ended)):
         if usage is None or (isinstance(usage, dict) and "prompt_tokens" not in usage):
             continue
         tokens = usage.get("prompt_tokens") if isinstance(usage, dict) else None
-        if (
-            isinstance(tokens, bool) or not isinstance(tokens, (int, float))
-            or (isinstance(tokens, float) and not math.isfinite(tokens)) or tokens < 0
-        ):
+        if not _valid_tokens(tokens):
             warnings.append(f"{source}: invalid usage.prompt_tokens total; ignoring billing snapshot")
         elif tokens < total:
             warnings.append(f"{source}: prompt-token total is below live message usage; ignoring billing snapshot")

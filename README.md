@@ -84,7 +84,7 @@ layout) — start at the [English book](doc/en/README.md) or the
 - [memgraph guide](doc/en/memgraph.md) · [injudge guide](doc/en/injudge.md)
 - [Verdict derivation](doc/en/verdict-derivation.md) — usage labels, span verdicts, and rates
 - [Configuration](doc/en/configuration.md) — `.env` keys and CLI flags
-- [Artifacts](doc/en/artifacts.md) — report and `summary.json` formats
+- [Artifacts](doc/en/artifacts.md) — report, `summary.json`, and readable `summary.md`
 - [Development](doc/en/development.md) — layout, tests, style rules
 
 ## Tests

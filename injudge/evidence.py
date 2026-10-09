@@ -128,8 +128,10 @@ def _episode_step_text(episode: EpisodeInput, step: AgentStep, targets: set[str]
     lines = [f"[step {step.step}, turn {step.turn}, seqs {step.seq_start}–{seq_end}]"]
     if step.reasoning:
         lines.append(f"reasoning: {step.reasoning}")
-    if step.content:
-        lines.append(f"content: {step.content}")
+    if step.content or not step.reasoning:
+        # Say so when a step has only tool calls: a reader must not search
+        # for text that the recording does not have.
+        lines.append(f"content: {step.content or '(no assistant text recorded)'}")
     occurrences = {item["source"]["event_index"]: item for item in episode.message_occurrences}
     close_index = episode.recorded_episode_identity.get("close_event_index")
     for tool in step.tools:
@@ -138,7 +140,7 @@ def _episode_step_text(episode: EpisodeInput, step: AgentStep, targets: set[str]
         # A step may hold several results while only one survives in the
         # consumer's input. Match its baseline/context occurrence exactly.
         if is_int(index):
-            lines.append(f"tool result [event:{index}]")
+            lines.append(f"tool result [event:{index}], seq {tool.seq_end if tool.seq_end is not None else '?'}")
         late = tool.seq_end is not None and step.seq_end is not None and tool.seq_end > step.seq_end
         avail = f", available from seq {tool.seq_end} — after this turn's end" if late else ""
         if index is not None and isinstance(close_index, int) and index > close_index:
@@ -152,7 +154,11 @@ def _episode_step_text(episode: EpisodeInput, step: AgentStep, targets: set[str]
         refs = projected.get("memory_delivery_refs", [])
         if refs:
             where = "span.md" if set(refs) <= targets else "deliveries.md"
-            lines.append(f"result ({tool.status or '?'}{avail}): [memory delivery {', '.join(refs)}; see {where}]")
+            # A step file keeps a tool call with its result. The result can
+            # reach its consumer after the action step. Name both times.
+            labels = [f"{delivery['entry_prefix']} (consumed at global step {delivery.get('step') or '?'})"
+                      for delivery in episode.deliveries if delivery["entry_prefix"] in refs]
+            lines.append(f"result ({tool.status or '?'}{avail}): [memory delivery {', '.join(labels)}; see {where}]")
             if projected.get("content"):
                 lines.append(projected["content"])
         elif tool.result is not None:
@@ -189,6 +195,7 @@ def span_baseline(episode: EpisodeInput, span: InjectionSpan,
     # would turn an already visible plan into novel advice.
     independent = [item for item in visible if _visible_text(item)]
     step_files = {step.turn: f"steps/step_{step.step:06d}.md" for step in episode.steps}
+    reasoning_turns = {step.turn for step in episode.steps if step.reasoning}
     targets = {item["entry_prefix"] for item in episode.deliveries if item["op_id"] in span.op_ids}
     blocks = []
     for item in visible:
@@ -204,7 +211,9 @@ def span_baseline(episode: EpisodeInput, span: InjectionSpan,
         elif home is not None and item.get("kind") == "tool_result":
             notes.append(f"result in {home}")
         elif home is not None:
-            notes.append(f"content and commands in {home}; that file's reasoning line is not part of this message")
+            notes.append(f"content and commands in {home}" + (
+                "; separate reasoning in that file is not part of this message"
+                if item.get("turn") in reasoning_turns else ""))
         if notes or text:
             head = " ".join([f"[{item['role']} {item['occurrence_id']}]", "; ".join(notes)]).rstrip()
             blocks.append(head if home or not text else head + "\n" + "\n".join(text))
@@ -322,6 +331,15 @@ def _file_entry(path: str, kind: str, files: dict[str, str]) -> dict:
     return {"path": path, "kind": kind, "chars": len(files[path]), "description": _FILE_GUIDE[kind]}
 
 
+def _delivery_location(delivery: dict) -> str:
+    source = delivery.get("source") or {}
+    hosts = dict.fromkeys((placement.get("source_resolution") or {}).get("occurrence_id") or "unresolved"
+                          for placement in delivery.get("placements", []))
+    return (f"annotation event: {source.get('event_index', '?')}, seq {source.get('seq', '?')}; "
+            f"host message: {', '.join(hosts) or '(no placements)'}; "
+            f"consumed at global step {delivery.get('step') or '?'}")
+
+
 def build_span_evidence(span: InjectionSpan, episode: EpisodeInput) -> dict[str, str]:
     """The span folder, with visible-input provenance in context.json."""
     files = build_episode_evidence(episode, set(span.op_ids))
@@ -336,7 +354,8 @@ def build_span_evidence(span: InjectionSpan, episode: EpisodeInput) -> dict[str,
             path = f"steps/step_{step.step:06d}.md"
             files[path] = (f"Action timing relative to target span {span.id}: {phase}; "
                            f"first consuming step {span.step_first}. "
-                           "Tool results follow their own recorded availability.\n" + files[path])
+                           "This label applies to the action. A tool result listed here can become "
+                           "visible at a later step.\n" + files[path])
     context = json.loads(files["context.json"])
     visible = set(baseline["visible_occurrence_ids"])
     for record in context["message_occurrences"]:
@@ -350,7 +369,8 @@ def build_span_evidence(span: InjectionSpan, episode: EpisodeInput) -> dict[str,
     header = _render_span_header(span, MEMORIES_NOTE, _earlier_deliveries(span, episode, baseline))
     delivery_refs = [item for item in episode.deliveries if item["op_id"] in span.op_ids]
     files["span.md"] = (f"# Target span in parent episode {episode.execution_id}\n\n"
-                        f"Delivery provenance: {json.dumps([{'op_id': item['op_id'], 'source': _compact(item['source']), 'consumer': item['consumer']} for item in delivery_refs], ensure_ascii=False)}\n\n"
+                        + "\n".join(f"Delivery {item['entry_prefix']}: {_delivery_location(item)}."
+                                    for item in delivery_refs) + "\n\n"
                         + header + "\n\n" + _SPAN_CONTEXT + "\n")
     manifest = json.loads(files["manifest.json"])
     manifest["span_id"] = span.id
@@ -429,7 +449,7 @@ def build_episode_evidence(episode: EpisodeInput, target_ops: set[str] | None = 
         delivery_lines.extend([
             f"## {prefix} — {delivery.get('delivery_id') or '(unidentified delivery)'}"
             + (" (target of this span)" if target else ""),
-            f"source event: {(delivery.get('source') or {}).get('event_index', '?')}, seq {(delivery.get('source') or {}).get('seq', '?')}",
+            _delivery_location(delivery),
             f"consumer: {consumer.get('status', 'unknown')} (global step {consumer.get('step') or '?'}, turn {consumer.get('turn') or '?'})",
             f"status: {delivery.get('status') or '(unknown)'}; binding: {delivery.get('binding_status') or '(unknown)'}",
         ])

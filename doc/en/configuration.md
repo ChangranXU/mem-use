@@ -44,9 +44,9 @@ A verdict cut mid-answer is not a failure class: the answer simply fails the con
 
 | Key | Default | Purpose |
 |---|---|---|
-| `MAX_ATTEMPTS` | `5` | Total runner phases per span: investigation, single-call repair, and investigation resumed only for an explicit missing-evidence request. An invalid repair stops. `--max-attempts` overrides. |
+| `MAX_ATTEMPTS` | `5` | Total runner phases per span: initial investigation, repair, and resumed investigation. The first answer can resume directly for missing evidence; a repair can also request evidence. An invalid repair stops. `--max-attempts` overrides. |
 | `TIMEOUT` | `300` | Per-LLM-call timeout seconds. `--timeout` overrides. |
-| `JUDGE_PARALLEL` | `1` | Spans of one trajectory judged in parallel (cap 32). Each in-flight span is one agent conversation. |
+| `JUDGE_PARALLEL` | `1` | Spans judged in parallel across all input trajectories (cap 32). Each in-flight span is one agent conversation. |
 
 ## CLI Flags
 
@@ -70,7 +70,7 @@ A verdict cut mid-answer is not a failure class: the answer simply fails the con
 ### Offline preparation
 
 Use `--prepare-only` to partition recordings into bridge-delimited episodes and
-write inspectable `injudge.episode-inputs/v2` evidence without loading `.env`,
+write inspectable `injudge.episode-inputs/v3` evidence without loading `.env`,
 Node, or contacting a judge:
 
 ```bash

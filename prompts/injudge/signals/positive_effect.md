@@ -31,5 +31,7 @@
    cannot be established, use null.
    A check must test or use the actual memory-shaped output or property.
    An assertion about other data cannot verify it, and passing checks do
-   not cover untested cases. Local improvement can coexist with task
-   failure. Mere selection gets no effect score.
+   not cover untested cases: a passing test run counts only when the record
+   shows that it tests that property, for example it failed before the
+   change or its output shows the property. Local improvement can coexist
+   with task failure. Mere selection gets no effect score.

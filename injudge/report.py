@@ -1,4 +1,4 @@
-"""Detailed report v17, compact summary v16, and stdout statistics.
+"""Detailed report v19, compact summary v17, and stdout statistics.
 
 The report keeps each span's judgments, evidence, costs, and judge execution
 record. The summary keeps population totals for comparison and points to the
@@ -107,10 +107,6 @@ def operation_record(span: InjectionSpan, verdict: dict, delivery_cost: dict) ->
         **({"memory_followups": span.memory_followups}
            if span.step_first is not None and span.memory_followups else {}),
         "step_gaps": span.step_gaps,
-        "new_keys": span.new_keys,
-        "removed_keys": span.removed_keys,
-        "previous_keys": span.previous_keys,
-        "changed_keys": span.changed_keys,
         "verdict": verdict.get("verdict"),
         "confidence": verdict.get("confidence"),
         "rubric": verdict.get("rubric") or {},
@@ -182,7 +178,7 @@ def build_artifact(
         per_traj[t["id"]]["n_episodes"] = len(t.get("episodes", []))
     overall = aggregate(scoped, sum(o.get("n_injections") or 0 for o in scoped), len(trajectories))
     overall["n_episodes"] = sum(stats["n_episodes"] for stats in per_traj.values())
-    overall["policy"] = policy_rollup(trajectories, validation)
+    overall["policy"] = policy_rollup(trajectories)
     return {
         "tool": {"name": "injudge", "schema": REPORT_SCHEMA, **tool_cfg},
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -217,11 +213,11 @@ def _rubric_line(rub: dict) -> str | None:
         if rates.get(f"accuracy_{v}") is not None
     )
     if acc:
-        parts.append(f"accuracy: {acc}")
+        parts.append(f"accuracy of relevant: {acc}")
     txt = ", ".join(parts)
-    # the novelty rate flattens the headline three-tier signal — surface the
-    # distribution itself
-    nov = (rub.get("counts") or {}).get("novelty") or {}
+    # the novelty rate flattens the three-tier signal — surface the
+    # distribution itself, over relevant entries like the rates
+    nov = (rub.get("relevant_counts") or {}).get("novelty") or {}
     n_nov = sum(nov.get(v, 0) for v in _NOVELTY)
     if n_nov or nov.get("null"):
         novelty = ", ".join(
@@ -231,7 +227,7 @@ def _rubric_line(rub: dict) -> str | None:
             if novelty:
                 novelty += f" (of {n_nov} assessed); "
             novelty += f"undetermined {nov['null']}/{n_nov + nov['null']}"
-        txt += "; novelty: " + novelty
+        txt += "; novelty of relevant: " + novelty
     if rates.get("positive_effect") is not None:
         # the exact population, never a bare percentage: "of the influential"
         # has read as every referenced entry when the rate is judged effects
@@ -243,44 +239,6 @@ def _rubric_line(rub: dict) -> str | None:
             f"; positive_effect improved {rates['positive_effect']:.0%} "
             f"({improved} of {judged_effects} judged effects)"
         )
-    return txt
-
-
-def _headline_line(headline: dict, rates: dict) -> str | None:
-    """The one-line headline summary for the stdout summary; None when no
-    spans were judged. The judged-span count leads: every rate is over it.
-    Neutral and unresolved are spelled out: neither is a measured absence
-    of effect."""
-    if headline.get("negative_span_rate") is None:
-        return None
-    txt = (
-        f"headline: {headline['judged_spans']} judged spans — "
-        f"positive {rates['positive']:.0%}, negative {rates['negative']:.0%}, "
-        f"unresolved (attribution or effect undetermined) {rates['unresolved']:.0%}, "
-        f"neutral (no established benefit or harm) {rates['neutral']:.0%}"
-    )
-    if headline.get("unassessable_spans"):
-        # assessability is a headline property: these spans held no
-        # observable downstream and sit in no directional denominator
-        txt += f", {headline['unassessable_spans']} unassessable (no subsequent turn)"
-    if headline.get("share_without_demonstrated_benefit") is not None:
-        # the denominator is the judged classes' injected tokens, not the
-        # all-class total printed above — label both sides so the share
-        # never reads as per-memory truth
-        txt += (
-            f"; span-level share without demonstrated benefit "
-            f"{headline['share_without_demonstrated_benefit']:.0%} "
-            f"(≈{headline.get('tokens_without_demonstrated_benefit', 0):,} of "
-            f"≈{headline.get('judged_tokens', 0):,} judged-class injected tokens, "
-            f"≈{headline.get('unresolved_tokens', 0):,} of them unresolved)"
-        )
-        excluded = []
-        if headline.get("error_unjudged_tokens"):
-            excluded.append(f"≈{headline['error_unjudged_tokens']:,} error/unjudged")
-        if headline.get("unassessable_tokens"):
-            excluded.append(f"≈{headline['unassessable_tokens']:,} unassessable")
-        if excluded:
-            txt += f"; {' + '.join(excluded)} tokens in no denominator"
     return txt
 
 
@@ -349,6 +307,7 @@ def _slim_aggregate(a: dict) -> dict:
         out["rubric"] = {
             "judged_entries": rub["deliveries"],
             "counts": rub["counts"],
+            "relevant_counts": rub["relevant_counts"],
             "rates": rub["rates"],
         }
         if rub.get("no_footprint_reasons"):
@@ -436,6 +395,133 @@ def build_summary(artifact: dict) -> dict:
     }
 
 
+def _short(text: object, cap: int) -> str:
+    """One Markdown-safe line: whitespace collapsed, angle brackets escaped."""
+    line = " ".join(str(text).split())
+    line = line[:cap - 3] + "..." if len(line) > cap else line
+    return line.replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _counts(values: dict, labels: tuple[tuple[str, str], ...]) -> str:
+    return ", ".join(f"{label} {values.get(key, 0):,}" for key, label in labels)
+
+
+def render_summary(artifact: dict, inspect_cap: int = 10) -> str:
+    """The readable run summary: selected results, the spans to inspect
+    first, and the judge run identity. It copies no memory bodies, but the
+    judge analysis of a listed span can quote short parts of them."""
+    summary = build_summary(artifact)
+    overall = summary["overall"]
+    counts = overall["counts"]
+    verdicts = overall["verdicts"]
+    tally = verdicts["counts"]
+    lines = [
+        "# Memory influence summary", "",
+        f"Run: {summary['generated_at']}. "
+        f"Judge model: {summary['tool'].get('judge_model') or 'not recorded'}.",
+        f"Scope: {counts.get('n_episodes', 0):,} episodes, "
+        f"{counts['n_injections']:,} deliveries, {counts['n_spans']:,} spans.",
+        f"Judged: {verdicts['judged_spans']:,} of {counts['n_spans']:,} spans. " + _counts(tally, (
+            ("error", "Errors"), ("unjudged", "unjudged"),
+            ("unassessable", "unassessable (no consuming turn)"), ("empty", "empty"))) + ".",
+        "", "| Verdict | Spans | Meaning |", "|---|---:|---|",
+    ]
+    for label, meaning in (
+        ("positive", "Benefit established"),
+        ("negative", "Harm established"),
+        ("neutral", "No established benefit or harm"),
+        ("unresolved", "Influence or effect unknown"),
+    ):
+        lines.append(f"| {label} | {tally[label]:,} | {meaning} |")
+    lines += ["", SUMMARY_NOTES[1]]
+    if rubric := overall.get("rubric"):
+        signals = rubric["counts"]
+        influence = signals.get("influence") or {}
+        effect = signals.get("positive_effect") or {}
+        # An effect is recorded only for acted-on entries; the rest is unknown.
+        unknown = influence.get("acted_on", 0) - sum(effect.get(k, 0) for k in ("improved", "no_effect", "harmed"))
+        lines += [
+            "", "## Entries", "",
+            f"Judged entries: {rubric['judged_entries']:,}. "
+            f"Relevant: {(signals.get('relevance') or {}).get('true', 0):,}.",
+        ]
+        if (signals.get("relevance") or {}).get("true"):
+            relevant = rubric["relevant_counts"]
+            lines += [
+                "Accuracy of relevant entries: " + _counts(relevant.get("accuracy") or {},
+                    tuple((value, value) for value in _ACCURACY)) + ".",
+                "Novelty of relevant entries: " + _counts(relevant.get("novelty") or {},
+                    tuple((value, value) for value in _NOVELTY) + (("null", "unknown"),)) + ".",
+            ]
+        lines += [
+            "Influence: " + _counts(influence, (
+                ("acted_on", "acted on"), ("selected", "selected"),
+                ("referenced", "referenced"), ("none", "none"), ("null", "unknown"))) + ".",
+            "Effect of acted-on entries: " + _counts(effect, (
+                ("improved", "improved"), ("no_effect", "no effect"), ("harmed", "harmed")))
+            + f", unknown {unknown:,}.",
+        ]
+    episode_of = {span_id: (episode.get("execution_identity") or {}).get("episode_id")
+                  for t in artifact["trajectories"] for episode in t.get("episodes") or []
+                  for span_id in episode.get("span_ids") or []}
+    # Errors first (no result), then harm, benefit, and unknown influence.
+    rank = {"error": 0, "negative": 1, "positive": 2, "unresolved": 3}
+    inspect = sorted((op for op in artifact["operations"] if op.get("verdict") in rank),
+                     key=lambda op: rank[op["verdict"]])
+    if inspect:
+        lines += ["", f"## Spans to inspect ({min(len(inspect), inspect_cap)} of {len(inspect)})", "",
+                  "Error, negative, positive, then unresolved spans. Full records are in "
+                  "injudge-report.json.", ""]
+        for op in inspect[:inspect_cap]:
+            why = op.get("error") if op["verdict"] == "error" else op.get("analysis")
+            lines.append(f"- {op['operation_id']} ({episode_of.get(op['operation_id']) or 'no episode'}): "
+                         f"**{op['verdict']}**. {_short(why or 'No analysis recorded.', 500)}")
+    if judge := overall.get("judge"):
+        def count(key: str) -> str:
+            value = judge.get(key)
+            return f"{value:,}" if value is not None else "unknown"
+
+        lines += [
+            "", "## Judge", "",
+            f"Model calls {count('executed_llm_calls')}, tool calls {count('executed_tool_calls')}. "
+            f"Spans with follow-up phases {count('spans_with_repairs')}, with a forced final round "
+            f"{count('forced_spans')}. Context rollbacks {count('context_rollbacks')}.",
+        ]
+    diagnostics = summary["diagnostics"]
+    lines += [
+        "", "## Diagnostics", "",
+        f"Errors {diagnostics['error']:,}, warnings {diagnostics['warn']:,}, "
+        f"notes {diagnostics['info']:,}. Input diagnostics cover whole recordings. "
+        "Span errors are counted above, separately.",
+    ]
+    # A leading trajectory path or run id adds nothing here: it is the same
+    # for every note of a recording. Other prefixes (span ids) stay.
+    sources = tuple(str(t[k]) for t in artifact["trajectories"] for k in ("path", "run_id") if t.get(k))
+    messages = list(dict.fromkeys(
+        _short(msg.split(": ", 1)[-1] if msg.startswith(sources) else msg, 300)
+        for note in artifact.get("validation") or []
+        if note.get("level") in ("error", "warn") and isinstance(msg := note.get("msg"), str) and msg
+    ))
+    if messages:
+        lines += ["", f"Errors and warnings ({min(len(messages), 3)} of {len(messages)} unique):", ""]
+        lines += [f"- {message}" for message in messages[:3]]
+    lines += [
+        "", "## Delivery cost", "",
+        f"Selected scope: ≈{(overall.get('delivery') or {}).get('approx_tokens_total', 0):,} tokens.",
+    ]
+    policy = summary.get("recording_policy") or {}
+    if policy.get("n_injections") and policy["n_injections"] != counts["n_injections"]:
+        lines.append(
+            f"Whole input recordings: {policy['n_injections']:,} deliveries over "
+            f"{policy.get('n_steps', 0):,} steps, ≈{policy.get('est_injected_tokens', 0):,} tokens."
+        )
+    lines += [
+        SUMMARY_NOTES[0], "",
+        "Details: [summary.json](summary.json) · [injudge-report.json](injudge-report.json).", "",
+    ]
+    return "\n".join(lines)
+
+
 def print_summary(artifact: dict) -> int:
     """memgraph-style stdout summary; returns the number of error verdicts."""
     agg = artifact["aggregates"]["overall"]
@@ -471,18 +557,10 @@ def print_summary(artifact: dict) -> int:
             f"({judged} judged-class"
         )
         if extra:
-            # the buckets the rates and shares exclude stay visible beside
-            # them — an all-class total minus a judged-class denominator has
-            # read as though every token were judged
-            line += f"; {' '.join(extra)} in no rate or share"
+            # Keep excluded costs visible so the total cannot read as the
+            # judged population's denominator.
+            line += f"; {' '.join(extra)} outside verdict rates"
         print_safe(line + ")")
-    if (txt := _headline_line(agg.get("headline") or {}, rates)) is not None:
-        print_safe(f"  {txt}")
-        # the benefit share never reads alone: every reported share
-        # carries its proxy caveat stated outright
-        caveat = (agg.get("headline") or {}).get("caveat")
-        if caveat:
-            print_safe(f"  caveat: {caveat}")
     if (txt := _policy_line(agg.get("policy") or {})) is not None:
         # the policy block covers whole recordings, also under --episode
         scope = " [whole recordings]" if (artifact.get("tool") or {}).get("selection") else ""
@@ -493,13 +571,13 @@ def print_summary(artifact: dict) -> int:
     for t in artifact["trajectories"]:
         ta = artifact["aggregates"]["per_trajectory"][t["id"]]
         name = t.get("instance_id") or t.get("run_id")
-        searches = (t.get("policy") or {}).get("n_searches")
-        search_txt = f"{searches} searches, " if searches is not None else ""
+        # Search totals cover the whole recording (the policy line); this
+        # line covers the judged scope only.
         if ta["n_spans"] == 0 and ta["n_injections"] == 0:
-            print_safe(f"  {t['id']} {name}: {search_txt}0 injections (empty verdict set)")
+            print_safe(f"  {t['id']} {name}: 0 injections (empty verdict set)")
             continue
         print_safe(
-            f"  {t['id']} {name}: {search_txt}{ta['n_injections']} inj, {ta['n_spans']} spans — "
+            f"  {t['id']} {name}: {ta['n_injections']} inj, {ta['n_spans']} spans — "
             f"{_verdict_tally(ta)}"
         )
     judge = _summary_judge(artifact["operations"], agg)

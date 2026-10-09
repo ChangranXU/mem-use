@@ -1666,8 +1666,7 @@ def test_apply_verdicts_joins_by_run_id_and_seq(tmp_path):
 def test_apply_verdicts_carries_memory_labels(tmp_path):
     """Rubric/usage key on span-local entry ids: the merge carries the
     id → display-key map off the report's stamped memories so the popover
-    renders "m1 (key_a)", never a bare id; an unkeyed entry labels itself,
-    an unstamped entry is skipped (no invented positional id)."""
+    renders "m1 (key_a)", never a bare id; an unkeyed entry labels itself."""
     from memgraph.verdicts import apply_verdicts
 
     b = (TrajBuilder().agent_turn(with_task=True).agent_turn()
@@ -1681,13 +1680,10 @@ def test_apply_verdicts_carries_memory_labels(tmp_path):
     report["operations"][0]["memories"] = [
         {"key": "key_a", "id": "m1"},
         {"id": "m2"},          # no key: labels itself by id
-        {"key": "key_c"},      # no stamp: skipped, not invented as m3
     ]
     apply_verdicts(graph, report)
     detail = recalls[0]["verdict_detail"]
     assert detail["memory_labels"] == {"m1": "key_a", "m2": "m2"}
-    assert any("unstamped memories entry on 'T99:S1' skipped" in v["msg"]
-               for v in graph["validation"])
 
 
 def test_render_html_verdict_detail_resolves_memory_labels():
@@ -1773,26 +1769,6 @@ def test_apply_verdicts_shared_unmatched_seq_named_once(tmp_path):
     assert len(notes) == 1 and str(shared) in notes[0]
 
 
-def test_apply_verdicts_corrupt_entries_warn(tmp_path):
-    """A hand-edited report can carry operation/trajectory entries without
-    usable ids: they can never join — validation notes, never silent drops."""
-    from memgraph.verdicts import apply_verdicts
-
-    b = TrajBuilder().agent_turn(with_task=True).recall()
-    b.write(tmp_path / "t1", run_id="run-1")
-    graph = load_and_build([tmp_path])
-    (recall,) = [o for o in graph["ops"] if o["kind"] == "recall"]
-    report = verdict_report("run-1", "T99:S1", [(recall["seq"], recall["step"], "first")])
-    report["operations"].append({"kind": "recall_injection_span"})  # no operation_id
-    report["trajectories"].append({"id": "T98"})  # no run_id
-    apply_verdicts(graph, report)
-    assert recall["verdict"] == "neutral"  # the well-formed entry still joined
-    assert any("operation entry without a string operation_id" in v["msg"]
-               for v in graph["validation"])
-    assert any("trajectory entry without a string id/run_id" in v["msg"]
-               for v in graph["validation"])
-
-
 def test_apply_verdicts_unmatched_report_injection_warns(tmp_path):
     """The (run_id, op seq) join cuts both ways: a report injection whose seq
     matches no loaded recall op means the report and the graph disagree (a
@@ -1812,64 +1788,6 @@ def test_apply_verdicts_unmatched_report_injection_warns(tmp_path):
     apply_verdicts(graph, report)
     assert recall["verdict"] == "neutral"  # the real join still landed
     assert any("matched no recall op" in v["msg"] for v in graph["validation"])
-
-
-def test_apply_verdicts_dangling_span_id_is_noted_not_silent(tmp_path):
-    """A stale/hand-edited report can name a span no operation record
-    defines: the injection can never join (its run is derived through the
-    span) — a validation note, never a silent drop."""
-    from memgraph.verdicts import apply_verdicts
-
-    b = TrajBuilder().agent_turn(with_task=True).recall()
-    b.write(tmp_path / "t1", run_id="run-1")
-    graph = load_and_build([tmp_path])
-    recall = next(o for o in graph["ops"] if o["kind"] == "recall")
-    report = verdict_report("run-1", "T99:S1", [(recall["seq"], 2, "first")])
-    report["injections"][0]["span_id"] = "T99:S404"  # no such operation
-    apply_verdicts(graph, report)
-    assert "verdict" not in recall  # the dangling entry never joined
-    assert any("unknown span 'T99:S404'" in v["msg"] for v in graph["validation"])
-
-
-def test_apply_verdicts_bool_seq_is_not_seq_1():
-    """A JSON `true` seq is not seq 1: True == 1 collides in the seq map, so a
-    corrupt injection entry must never join the recall op carrying seq 1 —
-    and the drop is a validation note, never silent."""
-    from memgraph.verdicts import apply_verdicts
-
-    graph = {
-        "trajectories": [{"id": "T1", "run_id": "run-1"}],
-        "ops": [{"id": "T1:R1", "kind": "recall", "traj": "T1", "seq": 1}],
-    }
-    report = verdict_report("run-1", "T99:S1", [(6, 2, "first")])
-    report["injections"][0]["seq"] = True  # artifact corruption
-    apply_verdicts(graph, report)
-    assert "verdict" not in graph["ops"][0]
-    assert "verdicts" not in graph.get("tool", {})
-    assert any("no verdicts in the report for this trajectory" in v["msg"]
-               for v in graph["validation"])
-    assert any(v["level"] == "warn" and "no joinable (run_id, seq) key" in v["msg"]
-               for v in graph["validation"])
-
-
-def test_apply_verdicts_corrupt_report_entries_are_notes_not_crashes():
-    """A hand-edited artifact can put a non-object entry in any report list:
-    like every other input mismatch here that is a validation note, never an
-    AttributeError — and the well-formed entries still join."""
-    from memgraph.verdicts import apply_verdicts
-
-    graph = {
-        "trajectories": [{"id": "T1", "run_id": "run-1"}],
-        "ops": [{"id": "T1:R1", "kind": "recall", "traj": "T1", "seq": 6}],
-    }
-    report = verdict_report("run-1", "T99:S1", [(6, 2, "first")])
-    report["operations"].insert(0, "junk")
-    report["trajectories"].append(42)
-    report["injections"].insert(0, None)
-    apply_verdicts(graph, report)
-    assert graph["ops"][0]["verdict"] == "neutral"  # the good entries still joined
-    assert graph["ops"][0]["verdict_span"] == "T99:S1"
-    assert sum("non-object" in v["msg"] for v in graph["validation"]) == 3
 
 
 def test_apply_verdicts_duplicate_run_id_is_ambiguous_not_contaminating(tmp_path):
@@ -1898,7 +1816,7 @@ def test_apply_verdicts_duplicate_report_run_id_merges_with_warning(tmp_path):
     injections makes the (run_id, seq) join ambiguous, and an ambiguous key
     annotates neither op (never one judging's verdict onto the other),
     while non-colliding seqs merge through. Both the merge and the
-    ambiguity are warned about, never silent."""
+    ambiguity is warned about, never silent."""
     from memgraph.verdicts import apply_verdicts
 
     b = TrajBuilder().agent_turn(with_task=True).recall().recall()
@@ -1922,7 +1840,6 @@ def test_apply_verdicts_duplicate_report_run_id_merges_with_warning(tmp_path):
     assert recalls[1]["verdict"] == "restated"  # non-colliding seqs merge through
     assert recalls[1]["span_verdict"] == "positive"
     msgs = [v["msg"] for v in graph["validation"]]
-    assert any("more than once" in m for m in msgs)
     assert any(
         "two injections at seq" in m and "ambiguous" in m and str(seqs[0]) in m
         for m in msgs
@@ -1959,104 +1876,6 @@ def test_apply_verdicts_graph_side_seq_collision_annotates_neither(tmp_path):
     assert not any("matched no recall op" in m for m in msgs)
 
 
-def test_apply_verdicts_duplicate_operation_id_warns(tmp_path):
-    """One operation_id twice in a (hand-edited) report: the later entry wins
-    the span lookup — same collision rule as the seq maps — and the overwrite
-    is warned about like every other corruption apply_verdicts reports."""
-    from memgraph.verdicts import apply_verdicts
-
-    b = TrajBuilder().agent_turn(with_task=True).recall()
-    b.write(tmp_path / "t1", run_id="run-1")
-    graph = load_and_build([tmp_path])
-    (recall,) = [o for o in graph["ops"] if o["kind"] == "recall"]
-    entry = [(recall["seq"], recall["step"], "first")]
-    report = verdict_report("run-1", "T99:S1", entry)
-    later = verdict_report("run-1", "T99:S1", entry, verdict="positive")
-    report["operations"] += later["operations"]  # the same operation_id twice
-    apply_verdicts(graph, report)
-    assert recall["verdict"] == "neutral"  # the injection entry's own verdict
-    assert recall["span_verdict"] == "positive"  # span lookup: the later entry won
-    msgs = [v["msg"] for v in graph["validation"]]
-    assert any("duplicate operation_id" in m and "T99:S1" in m for m in msgs)
-
-
-def test_apply_verdicts_duplicate_trajectory_id_warns(tmp_path):
-    """One trajectory id twice in a (hand-edited) report: the later run_id
-    mapping wins — the same collision rule as duplicate operation_ids and
-    seq maps — and the overwrite is warned about, never silent."""
-    from memgraph.verdicts import apply_verdicts
-
-    b = TrajBuilder().agent_turn(with_task=True).recall()
-    b.write(tmp_path / "t1", run_id="run-1")
-    graph = load_and_build([tmp_path])
-    (recall,) = [o for o in graph["ops"] if o["kind"] == "recall"]
-    report = verdict_report("run-1", "T99:S1", [(recall["seq"], 2, "first")])
-    report["trajectories"].append({"id": "T99", "run_id": "some-other-run"})
-    apply_verdicts(graph, report)
-    assert "verdict" not in recall  # remapped away: the injections no longer join
-    msgs = [v["msg"] for v in graph["validation"]]
-    assert any("duplicate trajectory id" in m and "T99" in m for m in msgs)
-
-
-def test_apply_verdicts_missing_run_ids_are_not_ambiguous(tmp_path):
-    """Trajectories without a run_id can never join (the report side keys on
-    truthy run_ids only) — two runless trajectories are unjoinable, not
-    "shared", and must not trip the ambiguity warning (or crash sorted()
-    when a genuinely duplicated run_id is also present)."""
-    from memgraph.verdicts import apply_verdicts
-
-    graph = {
-        "trajectories": [
-            {"id": "T1", "run_id": None},
-            {"id": "T2", "run_id": None},
-            {"id": "T3", "run_id": "dup"},
-            {"id": "T4", "run_id": "dup"},
-        ],
-        "ops": [],
-    }
-    apply_verdicts(graph, {"tool": {"schema": REPORT_SCHEMA}})
-    msgs = [v["msg"] for v in graph["validation"]]
-    assert not any(m.startswith("None:") for m in msgs)
-    assert sum("ambiguous" in m for m in msgs) == 1  # the real duplicate only
-
-
-def test_apply_verdicts_non_string_run_ids_never_crash():
-    """A corrupt run.json can put anything into the graph's run_id: mixed
-    types crash sorted() and unhashable values crash the dict/set lookups.
-    Only string run_ids can ever join (the report side's keys are strings) —
-    the rest are simply unjoinable, never a crash."""
-    from memgraph.verdicts import apply_verdicts
-
-    graph = {
-        "trajectories": [
-            {"id": "T1", "run_id": 123},
-            {"id": "T2", "run_id": 123},
-            {"id": "T3", "run_id": "dup"},
-            {"id": "T4", "run_id": "dup"},
-            {"id": "T5", "run_id": ["unhashable"]},
-        ],
-        "ops": [],
-    }
-    apply_verdicts(graph, verdict_report("dup", "T99:S1", [(1, 1, "first")]))
-    msgs = [v["msg"] for v in graph["validation"]]
-    assert sum("run_id shared by multiple" in m for m in msgs) == 1  # 'dup' only
-
-
-def test_apply_verdicts_runless_trajectory_note_names_the_trajectory():
-    """A runless trajectory never joins the report; when it has recall ops
-    the info note still names it — by its graph id, not a literal None."""
-    from memgraph.verdicts import apply_verdicts
-
-    graph = {
-        "trajectories": [{"id": "T1", "run_id": None}],
-        "ops": [{"id": "T1:R1", "kind": "recall", "traj": "T1", "seq": 1}],
-    }
-    apply_verdicts(graph, {"tool": {"schema": REPORT_SCHEMA}})
-    msgs = [v["msg"] for v in graph["validation"]]
-    assert any(m.startswith("T1: no verdicts in the report") for m in msgs)
-    assert not any(m.startswith("None:") for m in msgs)
-
-
 def test_apply_verdicts_run_without_report_coverage_notes_info(tmp_path):
     from memgraph.verdicts import apply_verdicts
 
@@ -2090,6 +1909,27 @@ def test_load_verdict_report_requires_injudge_schema(tmp_path):
     good = tmp_path / "good.json"
     good.write_text(json.dumps({"tool": {"schema": REPORT_SCHEMA}}), encoding="utf-8")
     assert load_verdict_report(good)["tool"]["schema"] == REPORT_SCHEMA
+
+
+@pytest.mark.parametrize("fault", ["unknown_span", "duplicate_span", "bad_seq", "bad_memories", "bad_rows"])
+def test_load_verdict_report_rejects_broken_links_before_merge(tmp_path, fault):
+    from memgraph.verdicts import load_verdict_report
+
+    report = verdict_report("run-1", "T99:S1", [(6, 2, "first")])
+    if fault == "unknown_span":
+        report["injections"][0]["span_id"] = "missing"
+    elif fault == "duplicate_span":
+        report["operations"].append(dict(report["operations"][0]))
+    elif fault == "bad_seq":
+        report["injections"][0]["seq"] = True
+    elif fault == "bad_memories":
+        report["operations"][0]["memories"] = [None]
+    else:
+        report["operations"] = None
+    path = tmp_path / "verdicts.json"
+    path.write_text(json.dumps(report), encoding="utf-8")
+    with pytest.raises(SystemExit, match="invalid verdicts report"):
+        load_verdict_report(path)
 
 
 def test_render_html_with_verdicts_embeds_them(tmp_path):

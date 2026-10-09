@@ -51,7 +51,7 @@ def test_header_only_cannot_ground_a_verdict(monkeypatch, tmp_path, neutral):
             entry["anchors"] = []
     path = f"steps/step_{1 if neutral else 2:06d}.md"
     messages = [_read(files, path, end=1)]
-    stub_runner(monkeypatch, [_result(json.dumps(answer), messages=messages)] * 2)
+    stub_runner(monkeypatch, [_result(json.dumps(answer), messages=messages)] * 3)
     verdict = judge_span(span, steps, _agent_cfg(), [], evidence_root=tmp_path / "evidence",
                          transcripts_root=tmp_path / "runs")
     assert verdict["verdict"] == "error"
@@ -113,31 +113,29 @@ def test_missing_baseline_evidence_resumes_instead_of_accepting_a_verdict(monkey
     partial = [_read(files, path) for path in paths if path != missing]
     calls = stub_runner(monkeypatch, [
         _result(GOOD, messages=partial),
-        _result(json.dumps({"needs_evidence": f"Read {missing}"}), messages=partial),
         _result(GOOD, messages=[*partial, _read(files, missing)]),
     ])
     result = judge_episode_span(span, episode, _agent_cfg(), [],
                                 evidence_root=tmp_path / "evidence", transcripts_root=tmp_path / "runs")
-    assert [call["repair"] for call in calls] == [False, True, False]
+    assert [call["repair"] for call in calls] == [False, False]
     assert missing in calls[1]["message"]
-    assert calls[2]["history"] == partial
+    assert calls[1]["history"] == partial
     assert result["verdict"] == "positive"
     assert result["input"]["read_steps"] == [1, 2]
 
 
-def test_one_repair_names_every_unread_requirement(monkeypatch, tmp_path):
-    # Each repair and resumed investigation spends an attempt; naming one gap
-    # per round could exhaust MAX_ATTEMPTS on a span that missed two files.
+def test_resume_names_every_unread_requirement(monkeypatch, tmp_path):
+    # The first continuation must name every gap; one file per phase could
+    # exhaust MAX_ATTEMPTS before the judge finishes reading.
     span, steps = _judge_input_fixture()
     span.step_first = span.step_last = 2
     episode = _test_episode(span, steps, "Fix the parser.")
     files = build_span_evidence(span, episode)
     partial = [_read(files, path) for path in ("baseline.md", "steps/step_000001.md")]
-    calls = stub_runner(monkeypatch, [_result(GOOD, messages=partial),
-                                      _result(GOOD, messages=partial)])
+    calls = stub_runner(monkeypatch, [_result(GOOD, messages=partial)] * 3)
     judge_episode_span(span, episode, _agent_cfg(), [],
                        evidence_root=tmp_path / "evidence", transcripts_root=tmp_path / "runs")
-    assert calls[1]["repair"]
+    assert [call["repair"] for call in calls] == [False, False, True]
     assert "first consuming step 2" in calls[1]["message"] and "task.md" in calls[1]["message"]
 
 
@@ -147,11 +145,40 @@ def test_partial_baseline_read_cannot_pass_as_complete(monkeypatch, tmp_path):
     files = build_span_evidence(span, episode)
     messages = [_read(files, path) for path in files if path != "baseline.md"]
     messages.append(_read(files, "baseline.md", end=1))
-    stub_runner(monkeypatch, [_result(GOOD, messages=messages)] * 2)
+    stub_runner(monkeypatch, [_result(GOOD, messages=messages)] * 3)
     result = judge_episode_span(span, episode, _agent_cfg(), [],
                                 evidence_root=tmp_path / "evidence", transcripts_root=tmp_path / "runs")
     assert result["verdict"] == "error"
     assert "baseline.md" in result["error"]
+
+
+@pytest.mark.parametrize("max_attempts", [1, 2])
+def test_evidence_continuation_respects_remaining_attempts(monkeypatch, tmp_path, max_attempts):
+    span, steps = _judge_input_fixture()
+    episode = _test_episode(span, steps)
+    files = build_span_evidence(span, episode)
+    partial = [_read(files, path) for path in files if path != "task.md"]
+    calls = stub_runner(monkeypatch, [_result(GOOD, messages=partial)] * max_attempts)
+    result = judge_episode_span(span, episode, _agent_cfg(max_attempts=max_attempts), [],
+                                evidence_root=tmp_path / "evidence", transcripts_root=tmp_path / "runs")
+    assert len(calls) == max_attempts
+    assert all(not call["repair"] for call in calls)
+    assert result["verdict"] == "error"
+    assert "task.md" in result["error"]
+
+
+def test_repair_with_missing_evidence_cannot_restart_investigation_automatically(monkeypatch, tmp_path):
+    span, steps = _judge_input_fixture()
+    episode = _test_episode(span, steps)
+    files = build_span_evidence(span, episode)
+    partial = [_read(files, path) for path in files if path != "task.md"]
+    calls = stub_runner(monkeypatch, [_result("not json", messages=partial),
+                                      _result(GOOD, messages=partial)])
+    result = judge_episode_span(span, episode, _agent_cfg(), [],
+                                evidence_root=tmp_path / "evidence", transcripts_root=tmp_path / "runs")
+    assert [call["repair"] for call in calls] == [False, True]
+    assert result["verdict"] == "error"
+    assert "task.md" in result["error"]
 
 
 @pytest.mark.parametrize("path", ["task.md", "baseline.md"])
@@ -241,14 +268,13 @@ def test_missing_task_does_not_hide_unread_visible_sources(monkeypatch, tmp_path
     complete = [*partial, _read(files, "task.md"), _read(files, "steps/step_000001.md")]
     calls = stub_runner(monkeypatch, [
         _result(json.dumps(answer), messages=partial),
-        _result(json.dumps({"needs_evidence": "Read task.md and steps/step_000001.md"}), messages=partial),
         _result(json.dumps(answer), messages=complete),
     ])
     result = judge_episode_span(span, episode, _agent_cfg(max_attempts=3), [],
                                 evidence_root=tmp_path / "evidence", transcripts_root=tmp_path / "runs")
     assert "task.md" in calls[1]["message"]
     assert "steps/step_000001.md" in calls[1]["message"]
-    assert [call["repair"] for call in calls] == [False, True, False]
+    assert [call["repair"] for call in calls] == [False, False]
     assert result["verdict"] == "positive"
 
 
@@ -330,9 +356,9 @@ def test_known_effect_requires_later_consequences_without_extending_action_ancho
 
 
 def test_early_benefit_with_unread_later_harm_is_not_accepted_as_positive(monkeypatch, tmp_path):
-    # In this calibration episode step 2 helps and step 3 harms. An answer
-    # that read only steps 1-2 used to pass as positive; the repair now keeps
-    # acted_on with an unknown effect. Canned answers test routing, not judgment.
+    # Step 2 helps and step 3 harms in this offline fixture. The first answer
+    # misses step 3, so investigation resumes. Its canned reply keeps acted_on
+    # with an unknown effect. This test checks routing, not judgment quality.
     build(tmp_path / "cases")
     trajectories, ops, events, _ = load_trajectories([tmp_path / "cases" / case_id("benefit_then_harm")])
     trajectory, = trajectories
@@ -351,7 +377,7 @@ def test_early_benefit_with_unread_later_harm_is_not_accepted_as_positive(monkey
     verdict = judge_episode_span(span, episode, _agent_cfg(), [],
                                  evidence_root=tmp_path / "evidence", transcripts_root=tmp_path / "runs")
     assert "positive_effect 'improved' without complete window coverage" in calls[1]["message"]
-    assert [call["repair"] for call in calls] == [False, True]
+    assert [call["repair"] for call in calls] == [False, False]
     assert verdict["input"]["read_steps"] == [1, 2]
     assert verdict["rubric"]["m1"]["influence"]["value"] == "acted_on"
     assert verdict["verdict"] == "unresolved"
@@ -380,7 +406,7 @@ def test_apparent_waste_with_unread_later_use_is_not_accepted_as_harm(monkeypatc
     verdict = judge_episode_span(span, episode, _agent_cfg(), [],
                                  evidence_root=tmp_path / "evidence", transcripts_root=tmp_path / "runs")
     assert "positive_effect 'harmed' without complete window coverage" in calls[1]["message"]
-    assert [call["repair"] for call in calls] == [False, True]
+    assert [call["repair"] for call in calls] == [False, False]
     assert verdict["input"]["read_steps"] == [1, 2]
     assert verdict["rubric"]["m1"]["influence"]["value"] == "acted_on"
     assert verdict["verdict"] == "unresolved"

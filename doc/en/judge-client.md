@@ -42,15 +42,17 @@ smaller of `MAX_OUTPUT_TOKENS` and the context room the prior answer left,
 keeping the evidence history intact. Out-of-range or empty step-file reads do
 not count as retained evidence.
 
-A forced answer can be a valid verdict after retained investigation. Without a successful step-file read still in the conversation, even syntactically valid JSON goes to repair rather than becoming an ordinary neutral verdict; reading only navigation files is insufficient. The operation's `input` carries `"forced": true` only when the final answer was forced, while `any_phase_forced` preserves earlier forced phases across repair.
+A forced answer can be a valid verdict after retained investigation. Without a successful step-file read still in the conversation, even syntactically valid JSON fails the evidence checks; reading only navigation files is insufficient. The operation's `input` carries `"forced": true` only when the final answer was forced, while `any_phase_forced` preserves earlier forced phases across repair.
 
 ## Corrective Retries
 
-Python checks strict JSON shape and span-relative semantics (exact id coverage, action-anchor windows, anchors empty for `none`), and that every cited anchor and structured `evidence[].steps` citation names a step whose complete text the retained conversation actually read (from its step file) (`read_steps` in the operation's `input`); an anchor resting on an unread step takes the repair, which can request the file with `needs_evidence`. A valid answer needs no additional model call.
+Python checks strict JSON shape and span-relative semantics (exact id coverage, action-anchor windows, anchors empty for `none`). It also checks that every cited anchor and structured `evidence[].steps` citation names a step whose complete text was read in the retained conversation (`read_steps` in the operation's `input`). An answer that passes all checks needs no additional model call.
 
-An invalid answer gets **one repair call with no evidence tools**, using the full transcript and the validation error. The repair preserves supported assessments and only fixes the contract violation. Python validates the result again; another invalid answer becomes a visible `error`, not another blind rewrite.
+If the first answer passes shape and semantic checks but lacks required evidence, Python resumes investigation once before repair. It keeps the same history and enables evidence tools for at most `min(MAX_STEPS, 4)` calls. This requires a remaining phase under `MAX_ATTEMPTS`.
 
-Only an explicit repair control reply, `{"needs_evidence": "specific missing fact and step/file"}`, reopens investigation. It is not a verdict. The next runner restores the complete `job.history`, enables the evidence tools, and adds the targeted follow-up with `agent.prompt(...)`. This is pi's native continuation with a new instruction: it preserves existing messages.
+Other invalid answers get **one repair call with no evidence tools**, using the full transcript and the validation error. The repair preserves supported assessments and only fixes the contract violation. Python validates the result again; another invalid answer becomes a visible `error`, not another blind rewrite.
+
+An explicit repair control reply, `{"needs_evidence": "specific missing fact and step/file"}`, can also reopen investigation. It is not a verdict. The next runner restores the complete `job.history`, enables the evidence tools, and adds the targeted follow-up with `agent.prompt(...)`. This preserves existing messages.
 
 `MAX_ATTEMPTS` bounds all runner phases (initial investigation, repairs, and resumed investigations). Exhaustion keeps a visible error and the masked answer text. The parser is strict: no format-stripping fallback, and a valid answer is not sent back to the model.
 
