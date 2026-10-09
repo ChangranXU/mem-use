@@ -77,7 +77,7 @@ def test_three_spans_in_one_episode_have_independent_judges_and_graph_links(tmp_
     assert {op["verdict_span"] for op in recalls} == {op["operation_id"] for op in operations}
 
 
-def test_episode_selector_judges_only_the_named_episode(tmp_path, monkeypatch):
+def test_episode_selector_judges_only_the_named_episode(tmp_path, monkeypatch, capsys):
     """--episode judges one episode of a multi-episode recording without a
     custom driver; every other span is unjudged (outside every rate), and a
     selector naming nothing fails before any judge call."""
@@ -90,7 +90,23 @@ def test_episode_selector_judges_only_the_named_episode(tmp_path, monkeypatch):
         tmp_path, monkeypatch, builder, [_result(_answer())], ["--episode", "episode-2"])
     assert status == 0 and len(calls) == 1
     assert [op["verdict"] for op in report["operations"]] == ["unjudged", "neutral"]
-    assert report["aggregates"]["overall"]["rates"]["neutral"] == 1.0
+    assert "memories" not in report["operations"][0]
+    assert report["operations"][0]["delivery_cost"]["approx_tokens_total"] > 0
+    assert report["operations"][1]["operation_id"] == "T1:S2"
+    assert report["tool"]["selection"]["episodes_selected"] == 1
+    overall = report["aggregates"]["overall"]
+    assert overall["rates"]["neutral"] == 1.0
+    # statistics describe the selection: the excluded span is in no count or cost
+    assert (overall["n_spans"], overall["n_injections"], overall["unjudged"]) == (1, 1, 0)
+    assert overall["n_episodes"] == 1 and "error_unjudged_tokens" not in overall["headline"]
+    assert overall["cost"]["approx_tokens_total"] == report["operations"][1]["delivery_cost"]["approx_tokens_total"]
+    summary = json.loads((_run_dir / "summary.json").read_text())
+    assert summary["overall"]["counts"]["n_spans"] == 1
+    assert summary["selection"]["episode_ids"] == ["episode-2"]
+    assert summary["recording_policy"]["scope"] == "whole_input_recordings"
+    capsys.readouterr()
+    assert main([str(source), "--dry-run", "--episode", "episode-2"]) == 0
+    assert "1 injections, 1 spans (no judge calls made)" in capsys.readouterr().out
     with pytest.raises(SystemExit, match="--episode 'episode-9' matches no prepared episode"):
         main([str(source), "--env", str(tmp_path / ".env"), "-o", str(tmp_path / "out2"),
               "--episode", "episode-9"])
@@ -122,6 +138,25 @@ def test_identical_delivery_is_partitioned_then_merged_within_each_episode(tmp_p
     assert spans[1].step_first > 1
     assert spans[0].memory_windows["m1"] == prepared.episodes[0].steps[-1].step
     assert spans[1].memory_windows["m1"] == prepared.episodes[1].steps[-1].step
+
+
+def test_step_evidence_marks_exposure_timing_by_global_step(tmp_path):
+    builder = AnnotatedBuilder().episode_open("earlier").agent_turn(with_task=True).episode_close("earlier")
+    builder.episode_open("target").agent_turn(with_task=True)
+    builder.recall(cure_ref("hint", "Use the missing guard.")).agent_turn().episode_close("target")
+    source = builder.write(tmp_path / "trajectory")
+    trajectories, operations, events, _ = load_trajectories([source])
+    trajectory, = trajectories
+    episode = prepare_trajectory(trajectory, events[trajectory.id], operations[trajectory.id]).episodes[1]
+    span, = group_spans(operations[trajectory.id], trajectory.id, episode=episode,
+                       last_step=episode.steps[-1].step)
+    assert span.step_first == 3
+    files = build_span_evidence(span, episode)
+    assert "PRE-EXPOSURE" in files["steps/step_000002.md"].splitlines()[0]
+    assert "FIRST CONSUMING STEP (POST-EXPOSURE)" in files["steps/step_000003.md"].splitlines()[0]
+    assert "POST-EXPOSURE" in files["steps/step_000004.md"].splitlines()[0]
+    manifest = json.loads(files["manifest.json"])
+    assert all(entry["chars"] == len(files[entry["path"]]) for entry in manifest["files"])
 
 
 def test_later_episode_baseline_uses_global_steps_and_rejects_foreign_anchor(tmp_path):

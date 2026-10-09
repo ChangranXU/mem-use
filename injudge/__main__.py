@@ -51,6 +51,7 @@ except ImportError as e:
 
 from util import atomic_write, check_writable, print_safe, print_validation
 from injudge import EPISODE_INPUT_SCHEMA
+from injudge.cost import TOKEN_COST_CAVEAT, residency_cost
 from injudge.agent import (
     MAX_PARALLEL,
     AgentConfig,
@@ -71,6 +72,8 @@ from injudge.judge import GoldInput, _mask_key, auto_verdict_empty, auto_verdict
 from injudge.model import EpisodeInput, InjectionSpan
 from injudge.prompts import implementation_digest
 from injudge.report import (
+    OUTSIDE_SELECTION,
+    _outside_selection,
     build_artifact,
     build_summary,
     injection_rollup,
@@ -209,6 +212,7 @@ def _prepare_attachment_scope(
     trajectories: list[Trajectory],
     args: argparse.Namespace,
     validation: list[dict],
+    selected: set[str | None] | None = None,
 ) -> None:
     """Join evaluator-only attachments after episode partitioning.
 
@@ -275,6 +279,8 @@ def _prepare_attachment_scope(
     trajectory_map = {trajectory.id: trajectory for trajectory in trajectories}
 
     for episode in episodes:
+        if selected is not None and episode.execution_id not in selected:
+            continue
         benchmark = episode.benchmark_identity
         trajectory_id = episode.execution_identity.get("trajectory_id")
         trajectory = trajectory_map.get(trajectory_id)
@@ -569,7 +575,7 @@ def main(argv: list[str] | None = None) -> int:
                     "(default: MAX_ATTEMPTS from .env, else 5)")
     ap.add_argument("--judge-max-tokens", type=int, default=None,
                     help="max output tokens per LLM call (default: "
-                    "MAX_OUTPUT_TOKENS from .env, else 65536)")
+                    "MAX_OUTPUT_TOKENS from .env, else 32768)")
     ap.add_argument(
         "--dry-run",
         action="store_true",
@@ -702,7 +708,6 @@ def main(argv: list[str] | None = None) -> int:
             validation.extend({"level": "warn", "msg": f"{episode.execution_id}: {note}"}
                               for note in episode.diagnostics)
     all_episodes = [episode for trajectory in trajs for episode in episodes_by_traj[trajectory.id]]
-    _prepare_attachment_scope(all_episodes, trajs, args, validation)
     selected: set[str | None] | None = None
     if args.episode:
         # a selector naming nothing is misuse, caught before any paid call
@@ -713,6 +718,7 @@ def main(argv: list[str] | None = None) -> int:
             if not hits:
                 raise SystemExit(f"error: --episode {wanted!r} matches no prepared episode")
             selected |= hits
+    _prepare_attachment_scope(all_episodes, trajs, args, validation, selected)
 
     provenance = implementation_digest()
     # run isolation: every artifact of this run lands in its own folder
@@ -744,7 +750,6 @@ def main(argv: list[str] | None = None) -> int:
     trajectories: list[dict] = []
     operations: list[dict] = []
     injections: list[dict] = []
-    n_injections_by_traj: dict[str, int] = {}
     taken = 0  # spans that consumed the --limit budget (judged; printed in dry-run)
     artifact: dict = {}
 
@@ -756,9 +761,7 @@ def main(argv: list[str] | None = None) -> int:
         nonlocal artifact
         if args.dry_run:
             return
-        artifact = build_artifact(
-            tool_cfg(), trajectories, operations, injections, n_injections_by_traj, validation
-        )
+        artifact = build_artifact(tool_cfg(), trajectories, operations, injections, validation)
         atomic_write(report_path, json.dumps(artifact, indent=1, ensure_ascii=False) + "\n")
 
     def tool_cfg() -> dict:
@@ -771,6 +774,11 @@ def main(argv: list[str] | None = None) -> int:
             # recoverable from it (see _run_manifest)
             "config": _run_manifest(cfg, judge_parallel),
             "provenance": provenance,
+            **({"selection": {"episode_ids": args.episode,
+                               "episodes_selected": len(selected),
+                               "episodes_discovered": len(all_episodes),
+                               "policy_scope": "whole_recordings"}}
+               if selected is not None else {}),
         }
 
     progress = _Progress(len(trajs), enabled=not args.dry_run)
@@ -789,13 +797,18 @@ def main(argv: list[str] | None = None) -> int:
             episode_ops = [ops_by_id[item["op_id"]] for item in episode.deliveries
                            if item["op_id"] in ops_by_id and item["op_id"] not in assigned]
             assigned.update(op.id for op in episode_ops)
-            scoped = group_spans(episode_ops, t.id, span_warnings,
+            # Span ids count every episode. Rows and window notes cover only
+            # the selected episodes, so that a run reports what it judged.
+            chosen = selected is None or episode.execution_id in selected
+            scoped = group_spans(episode_ops, t.id, span_warnings if chosen else None,
                                  episode_execution_id=episode.execution_id,
                                  id_offset=len(spans),
                                  last_step=episode.steps[-1].step if episode.steps else None,
                                  episode=episode)
             spans.extend(scoped)
             episode_by_span.update({span.id: episode for span in scoped})
+            if not chosen:
+                continue
             episode_rows.append({
                 "execution_identity": episode.execution_identity,
                 "recorded_episode_identity": episode.recorded_episode_identity,
@@ -820,7 +833,6 @@ def main(argv: list[str] | None = None) -> int:
             validation.append({"level": "warn", "msg": f"{run_id}: {w}"})
         validation.extend(_exposure_notes(run_id, spans))
         progress.start_trajectory(t.instance_id or run_id, len(spans))
-        n_injections_by_traj[t.id] = len(recall_ops)
         # delivery cost per span: the exact placement content size recorded
         # on each op, summed over the span (chars/4: documented estimate)
         content_chars = {op.id: op.content_chars or 0 for op in recall_ops}
@@ -877,6 +889,8 @@ def main(argv: list[str] | None = None) -> int:
                 }
             )
         policy = {
+            "cost_caveat": TOKEN_COST_CAVEAT,
+            "residency": residency_cost(episodes_by_traj[t.id]),
             "n_steps": t.n_steps,
             "n_injections": len(recall_ops),
             # searches are explicit: how often the memory system was queried,
@@ -898,7 +912,7 @@ def main(argv: list[str] | None = None) -> int:
             ),
             "est_injected_tokens": est_injected_tokens,
             "prompt_tokens_total": prompt_total or None,
-            "injected_token_share": share,
+            "delivery_token_ratio": share,
         }
         trajectories.append(
             {
@@ -927,7 +941,7 @@ def main(argv: list[str] | None = None) -> int:
             episode = episode_by_span.get(span.id)
             problem = None
             if selected is not None and (episode is None or episode.execution_id not in selected):
-                verdicts[i] = _unjudged("outside --episode")
+                verdicts[i] = _unjudged(OUTSIDE_SELECTION)
                 progress.advance_span()
                 continue
             if episode is None or episode.boundary_provenance.get("status") != "prepared":
@@ -1043,17 +1057,18 @@ def main(argv: list[str] | None = None) -> int:
     progress.close()
 
     if args.dry_run:
+        scoped = [op for op in operations if not _outside_selection(op)]
         # the span count describes the workload found; only the spans an
         # agent run would take were printed (a --limit cap, or rule-judged
         # auto-neutral spans that cost no run) — name that count when it
         # differs, so the headline never overstates what was printed
         printed = (
-            f" ({taken} printed)" if taken != len(operations) else ""
+            f" ({taken} printed)" if taken != len(scoped) else ""
         )
         print_safe(
             f"injudge --dry-run: {len(trajectories)} trajectories, "
-            f"{sum(n_injections_by_traj.values())} injections, "
-            f"{len(operations)} spans{printed} (no judge calls made)"
+            f"{sum(op['n_injections'] for op in scoped)} injections, "
+            f"{len(scoped)} spans{printed} (no judge calls made)"
         )
         print_validation([item for item in validation if item.get("level") == "error"])
         return 2 if any(item.get("level") == "error" for item in validation) else 0

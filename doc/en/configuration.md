@@ -36,7 +36,7 @@ Both budgets end in a **forced final answer** — the agent is told to stop call
 |---|---|---|
 | `MAX_STEPS` | `40` | Initial investigation’s LLM-call cap, forced final round included. Each resumed investigation gets `min(MAX_STEPS, 4)` calls; repair gets one. |
 | `CONTEXT_WINDOW` | `131072` | The judge model's context window in tokens. The watermark (context window minus `MAX_OUTPUT_TOKENS` and the forced message estimate) trips the forced answer before the context overflows. |
-| `MAX_OUTPUT_TOKENS` | `65536` | Max output tokens per LLM call. The context watermark reserves this space for output, leaving less room for input evidence; billing is on tokens actually generated. Together with the forced message estimate, must leave input room inside `CONTEXT_WINDOW`; invalid configurations fail before trajectory loading. `--judge-max-tokens` overrides. |
+| `MAX_OUTPUT_TOKENS` | `32768` | Max output tokens per LLM call. The context watermark reserves this space for output, leaving less room for input evidence; billing is on tokens actually generated. Together with the forced message estimate, must leave input room inside `CONTEXT_WINDOW`; invalid configurations fail before trajectory loading. `--judge-max-tokens` overrides. |
 
 A verdict cut mid-answer is not a failure class: the answer simply fails the contract parse and the corrective retry answers again, continuing the same conversation.
 
@@ -57,7 +57,7 @@ A verdict cut mid-answer is not a failure class: the answer simply fails the con
 | `--timeout` | `300` | Per-LLM-call timeout seconds |
 | `--max-attempts` | `MAX_ATTEMPTS` | Total judge/repair phases per span |
 | `--judge-max-tokens` | `MAX_OUTPUT_TOKENS` | Per-call output cap |
-| `--episode ID` | unset | Judge only episodes whose recorded episode id, benchmark identity, or execution id equals *ID* (repeatable); every other span is `unjudged`. An unmatched *ID* fails fast before any call. Not combinable with `--prepare-only`. |
+| `--episode ID` | unset | Judge only episodes whose recorded episode id, benchmark identity, or execution id equals *ID* (repeatable). Other spans retain compact `unjudged` audit records and are excluded from aggregate statistics, summary counts, and dry-run span counts. Policy totals cover whole recordings. An unmatched *ID* fails fast before any call. Not combinable with `--prepare-only`. |
 | `--limit N` | unset | Judge at most *N* episode-scoped, nonempty spans with the agent; validate all episode and attachment scopes first. `--prepare-only` instead limits materialized episodes. A value below 1 fails fast. |
 | `--dry-run` | off | Print each paid span job's target document, file index, and opening message; no calls or files |
 | `--golden PATH` | unset | Golden answer for exactly one episode; use keyed metadata otherwise |

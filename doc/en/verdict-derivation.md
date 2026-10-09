@@ -17,7 +17,13 @@ usage and span verdicts. Task success never decides a memory verdict.
 | `accuracy` | `corroborated` / `uncontradicted` / `contradicted`, within the claim's own repository/version/situation. Uncontradicted means neither confirmed nor refuted. |
 | `novelty` | `novel` / `confirming` / `redundant` / `null`, relative to the recorded pre-exposure input. Confirming settles a voiced doubt; redundant requires already-established substance. Expected task outputs do not automatically supply the solution mechanism. Mixed entries are redundant only when every material claim was established. An earlier delivery counts as baseline only while still in the consuming input, as `span.md` states; a copy arriving in the same input is not earlier. |
 | `influence` | `none` / `referenced` / `selected` / `acted_on` / `null`, defined below. |
-| `positive_effect` | `improved` / `no_effect` / `harmed` / `null`. Non-null only for `acted_on`; judge observed consequences of the anchored action. Keeping or submitting a change is not itself a benefit. `harmed` includes added work that contributed nothing to the outcome or process: a memory-caused command, edit, or run that was discarded, undone, or corrected, even quickly. This includes the memory-caused part of a useful change that a later step had to correct. Reading memory content is delivery cost, not added work. `no_effect` requires an acted-on action that made no difference and added no work. Any harm among the entry's actions makes it `harmed`, even after an earlier benefit. Unknown direction remains null. |
+| `positive_effect` | `improved` / `no_effect` / `harmed` / `null`. Non-null only for `acted_on`; judge observed consequences of the anchored action. Keeping or submitting a change is not itself a benefit. `harmed` requires misdirection from the memory’s exposed guidance, including abandoned or corrected detours without a used finding. Agent typos, unavailable tools, or unrelated environment failures alone do not establish memory harm; follow corrected attempts to their result. A blocked attempt without a finding has unknown effect. Reading memory content is delivery cost, not added work. `no_effect` requires an acted-on action that made no difference and added no work. Any harm among the entry's actions makes it `harmed`, even after an earlier benefit. Unknown direction remains null. |
+
+A historical result retrieved for the task is not automatically a diagnosis of
+that task. Its exposed text must supply the connecting mechanism or applicable
+action; the query, later diagnosis, gold and a fuller read cannot fill a preview’s
+missing mechanism. A feature-introduction history alone does not diagnose a
+defect in an already implemented feature.
 
 Novelty, correctness, influence and effect are independent. A redundant reminder
 can shape an action; an inaccurate claim can trigger a useful diagnostic. A
@@ -79,7 +85,8 @@ The first consuming step already had the memory in its input. Only earlier
 steps or pre-exposure input can establish a prior plan. Per-entry windows bound
 action anchors; later results within the parent episode can establish an
 anchored action's consequence without becoming out-of-window action anchors.
-Different or narrower later exposures may share a window; identical re-exposure
+Different or narrower later exposures of the same item can have overlapping
+windows. Judge each entry by its own window and exposed text. Identical re-exposure
 bounds the earlier window by convention, not proof that its influence vanished.
 
 Selection and content use are separate stages. Their counts are diagnostics,
@@ -137,11 +144,11 @@ words is noted.
 | `null` | `null` | `unclear` |
 
 Unproductive use requires evidence that an acted-on action made no difference
-and added no work; it is not harm. Memory-caused
+and added no work; it is not harm. Memory-misdirected
 work that contributed nothing is `harmed`. A diagnostic experiment improves work
 only when later actions demonstrably use its finding, such as ruling out a live
 hypothesis to direct the next check. Removing a completed temporary probe is not
-harm; an abandoned attempt without a used finding is harm. An unproven
+harm; a memory-misdirected detour without a used finding is harm. An unproven
 contribution stays null, and separate harmful actions still dominate.
 Costs are recorded separately. `misused` is reserved for harmful acted-on influence.
 
@@ -167,3 +174,15 @@ Report v16 and summary v14 distinguish memory-caused work without a contribution
 from no-effect use. Complete `read_steps` now certifies the step files themselves;
 baseline references do not count as reading those files. Older reports are not silently reinterpreted. See
 [Artifacts](artifacts.md) and [Judge evidence](scoring-input.md).
+
+A prior code read is not a precommitted plan. If a later action uses an exact
+location or mechanism from memory and earlier code supports that same action
+equally, attribution remains null unless the record distinguishes the sources.
+Exact same-item, same-text copies in one consuming input are one memory source.
+Distinct framing and later actions still need judgment.
+
+An explicit task instruction specifying the same concrete action supports none
+when memory adds nothing and there is no credit, reminder or changed direction.
+A symptom or desired outcome does not specify the implementation action.
+Narrative analysis must preserve a null attribution instead of naming either
+competing source as the established cause.

@@ -501,7 +501,9 @@ def _strict_parse(text: str) -> tuple[dict | None, str | None]:
             if not isinstance(sig, dict) or "value" not in sig:
                 return None, f"has {entry_id}.{signal} not as a value/note object"
             if not _valid_value(signal, sig["value"]):
-                return None, f"has {entry_id}.{signal} value {sig['value']!r} outside the contract"
+                kind = "string" if isinstance(sig["value"], str) else "value"
+                literal = json.dumps(sig["value"], ensure_ascii=True)
+                return None, f"has {entry_id}.{signal} JSON {kind} {literal} outside the contract"
     confidence = obj.get("confidence")
     if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
         return None, "has no numeric confidence"

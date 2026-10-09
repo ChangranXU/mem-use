@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 
 from util import print_safe
-from calibration import build, score
+from calibration import CASES, build, score
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -22,9 +22,12 @@ def main(argv: list[str] | None = None) -> int:
     builder.add_argument("dir", type=Path)
     scorer = sub.add_parser("score", help="compare injudge reports with the expected labels")
     scorer.add_argument("reports", type=Path, nargs="+")
+    for command in (builder, scorer):
+        command.add_argument("--case", choices=sorted(CASES), action="append",
+                             help="include this case and its follow-ups (repeatable; default all)")
     args = ap.parse_args(argv)
     if args.cmd == "build":
-        for path in build(args.dir):
+        for path in build(args.dir, args.case):
             print_safe(f"wrote {path}")
         return 0
     reports = []
@@ -33,7 +36,7 @@ def main(argv: list[str] | None = None) -> int:
             reports.append(json.loads(path.read_text(encoding="utf-8")))
         except (OSError, ValueError) as e:
             raise SystemExit(f"error: cannot read report {path}: {e}") from e
-    for line in score(reports):
+    for line in score(reports, args.case):
         print_safe(line)
     return 0
 

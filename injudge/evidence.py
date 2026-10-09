@@ -326,6 +326,17 @@ def build_span_evidence(span: InjectionSpan, episode: EpisodeInput) -> dict[str,
     """The span folder, with visible-input provenance in context.json."""
     files = build_episode_evidence(episode, set(span.op_ids))
     baseline, files["baseline.md"] = span_baseline(episode, span, files)
+    # Mark action timing; existing source code is not proof of an earlier read.
+    # A result can arrive after its turn ends. Use its recorded availability.
+    if span.step_first is not None:
+        for step in episode.steps:
+            phase = ("PRE-EXPOSURE" if step.step < span.step_first else
+                     "FIRST CONSUMING STEP (POST-EXPOSURE)" if step.step == span.step_first else
+                     "POST-EXPOSURE")
+            path = f"steps/step_{step.step:06d}.md"
+            files[path] = (f"Action timing relative to target span {span.id}: {phase}; "
+                           f"first consuming step {span.step_first}. "
+                           "Tool results follow their own recorded availability.\n" + files[path])
     context = json.loads(files["context.json"])
     visible = set(baseline["visible_occurrence_ids"])
     for record in context["message_occurrences"]:

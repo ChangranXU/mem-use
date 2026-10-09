@@ -149,6 +149,56 @@ def _prepare_args(tmp_path, builder):
     return trajectory, events, operations
 
 
+@pytest.mark.parametrize("placements", [
+    ["abcdef", "defgh"],
+    ["defgh", "abcdef"],
+    ["abcdefgh", "cde"],
+    ["cde", "abcdefgh"],
+    ["abcdefgh", "abcdefgh"],
+    ["abcdefgh", ""],
+])
+def test_proven_overlapping_placements_preserve_nonmemory_task(tmp_path, placements):
+    builder = AnnotatedBuilder().episode_open()
+    host = "abcdefgh\nRepair the parser."
+    ref = cure_ref("hint", "abcdefgh")
+    search = builder.search(returned=[ref])
+    builder.user_message(host).agent_turn()
+    for index, text in enumerate(placements):
+        _proven_delivery(builder, search, ref, text, host, slot=f"slot-{index}")
+    builder.episode_close()
+    episode = prepare_trajectory(*_prepare_args(tmp_path, builder)).episodes[0]
+    files = build_episode_evidence(episode)
+    assert episode.preparation_status == "prepared"
+    assert evidence_problem(episode) is None
+    assert "Repair the parser." in files["task.md"]
+    assert "abcdefgh" not in files["task.md"]
+    occurrence = next(item for item in json.loads(files["context.json"])["message_occurrences"]
+                      if item["role"] == "user")
+    assert occurrence["memory_delivery_refs"] == ["D1", "D2"]
+    assert occurrence["source_ownership"] == "memory_delivery"
+
+
+@pytest.mark.parametrize("host,placements", [
+    ("abXXcd", ["XX", "abcd"]),
+    ("abcXabc", ["abcX", "abc"]),
+    ("ababa", ["aba"]),
+    ("aaaa", ["aaa"]),
+])
+def test_placement_removal_cannot_create_proof_for_another_placement(tmp_path, host, placements):
+    builder = AnnotatedBuilder().episode_open()
+    ref = cure_ref("hint", host)
+    search = builder.search(returned=[ref])
+    builder.user_message(host).agent_turn()
+    for index, text in enumerate(placements):
+        _proven_delivery(builder, search, ref, text, host, slot=f"slot-{index}")
+    builder.episode_close()
+    episode = prepare_trajectory(*_prepare_args(tmp_path, builder)).episodes[0]
+    assert evidence_problem(episode) == "memory placement cannot be separated from its host message"
+    occurrence = next(item for item in json.loads(build_episode_evidence(episode)["context.json"])
+                      ["message_occurrences"] if item["role"] == "user")
+    assert occurrence["source_ownership"] == "memory_delivery_unknown"
+
+
 @pytest.mark.parametrize("proof_slots", [["other-slot"], ["input_prefix", "input_prefix"], [None]])
 def test_placement_requires_one_proof_for_its_named_slot(tmp_path, proof_slots):
     builder = AnnotatedBuilder().episode_open()
@@ -451,6 +501,26 @@ def test_conflicting_harness_is_not_overwritten_by_sidecar(tmp_path):
     _prepare_attachment_scope([episode], [trajectory], _attachment_args(harness_report=report), [])
     assert episode.attachments["outcome_status"] == "conflicting_result"
     assert "correctness" not in episode.attachments
+
+
+def test_selected_attachments_skip_unselected_warnings_without_inventing_sidecar_scope(tmp_path):
+    from injudge.__main__ import _prepare_attachment_scope
+    builder = AnnotatedBuilder()
+    for name in ("one", "two"):
+        builder.episode_open(name).agent_turn(with_task=True).episode_close(name)
+    trajectory, events, ops = _prepare_args(tmp_path, builder)
+    episodes = prepare_trajectory(trajectory, events, ops).episodes
+    (Path(trajectory.path) / "golden.txt").write_text("unkeyed and ambiguous")
+    harness = tmp_path / "harness.json"
+    harness.write_text(json.dumps({"resolved_ids": ["two"]}))
+    notes = []
+    _prepare_attachment_scope(episodes, [trajectory], _attachment_args(harness_report=harness),
+                              notes, {episodes[1].execution_id})
+    assert episodes[0].attachments == {}
+    assert episodes[1].attachments["outcome_status"] == "resolved"
+    assert "golden" not in episodes[1].attachments
+    assert not any("no result" in n["msg"] for n in notes)
+    assert any("trajectory contains 2 episodes" in n["msg"] for n in notes)
 
 
 def test_prepare_cli_is_offline_and_writes_review_package(tmp_path, monkeypatch):

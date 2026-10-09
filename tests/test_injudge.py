@@ -35,8 +35,6 @@ from injudge import SUMMARY_SCHEMA
 from injudge.report import (
     _policy_line,
     _rubric_line,
-    _slim_aggregate,
-    _slim_usage_rollup,
     build_artifact,
     build_summary,
     operation_record,
@@ -775,9 +773,11 @@ def test_spans_window_same_step_collision_opens_later_span_despite_finite_bound(
     b.agent_turn()
     b.agent_turn()  # step 3 exists for the declared same-step deliveries
     sid_ab = b.search(returned=[REF_A, REF_B])
-    b.delivery(sid_ab, memories=[REF_A, REF_B], main_step=3)
+    b.delivery(sid_ab, memories=[REF_A, REF_B], main_step=3,
+               content=REF_A["content"]["text"] + "\n" + REF_B["content"]["text"])
     sid_ba = b.search(returned=[REF_B, REF_A])
-    b.delivery(sid_ba, memories=[REF_B, REF_A], main_step=3)  # re-ranked @3
+    b.delivery(sid_ba, memories=[REF_B, REF_A], main_step=3,
+               content=REF_B["content"]["text"] + "\n" + REF_A["content"]["text"])  # re-ranked @3
     b.agent_turn()
     b.agent_turn()  # steps 4-5 (declared step 4 in observed range)
     sid_a = b.search(returned=[REF_A])
@@ -1717,9 +1717,31 @@ def test_aggregate_memory_value_drift():
     assert roll["tallies"]["used"] == 1 and roll["tallies"]["ignored"] == 1
 
 
+def test_reverse_usage_separates_versions_exposures_and_independent_episodes():
+    ops = []
+    for n, (value, exposure, episode, influence, effect) in enumerate([
+        ("v1", {"state": "clipped", "exposed_chars": 1}, "ep1", "none", None),
+        ("v1", {"state": "full"}, "ep1", "acted_on", "improved"),
+        ("v2", {"state": "full"}, "ep2", "acted_on", "harmed"),
+        ("v2", {"state": "full"}, "ep2", "acted_on", "harmed"),
+    ], 1):
+        op = _op(f"T1:S{n}", "neutral", usage={"m1": {"usage": "ignored"}},
+                 memories=[{"id": "m1", "key": "label", "item_id": "item", "value": value}],
+                 rubric={"m1": {"influence": {"value": influence},
+                                "positive_effect": {"value": effect}}})
+        op.update(episode_execution_id=episode, memory_exposure=[exposure])
+        ops.append(op)
+    roll, = aggregate(ops, 4)["memory_usage"]
+    assert roll["episodes"] == ["ep1", "ep2"]
+    assert len(roll["exposures"]) == 3
+    assert [e["judged_entries"] for e in roll["exposures"]] == [1, 1, 2]
+    assert [e["signals"]["positive_effect"] for e in roll["exposures"]] == [
+        {"null": 1}, {"improved": 1}, {"harmed": 2}]
+    assert all(len(e["spans"]) == e["judged_entries"] for e in roll["exposures"])
+
+
 def _assert_stats_only(obj):
-    """Walk a summary value: judging-narrative field names must not appear
-    as keys. The usage label `noted` is a statistic, not a rubric `note`."""
+    """Keep judging narratives and recorded memory text in the report."""
     if isinstance(obj, dict):
         for forbidden in ("note", "evidence", "analysis", "judge_raw",
                           "payload_summary", "first_value", "last_value"):
@@ -1732,184 +1754,133 @@ def _assert_stats_only(obj):
 
 
 def test_summary_is_statistics_only():
-    """The summary is the final statistics set, not a second copy of the
-    judging narrative: no notes, no recorded memory text, no namespace
-    hashes, no validation log, no empty triage placeholders; the headline
-    binds the span rates to the benefit share; a value drift earns a
-    one-line marker; two identities sharing a key get a short item_id
-    suffix."""
-    ops = [
-        _op("T1:S1", "positive", 0.9,
-            {"m1": {"usage": "used", "evidence": "dup"},
-             "m2": {"usage": "used", "evidence": "dup"}},
-            memories=[{"key": "k", "value": "v1", "item_id": "aaaaaaaaaaaa",
-                       "id": "m1"},
-                      {"key": "k", "value": "w", "item_id": "bbbbbbbbbbbb",
-                       "id": "m2"}],
-            rubric={"m1": _signals(inf="acted_on", pe="improved"),
-                    "m2": _signals(inf="acted_on", pe="improved")},
-            cost={"content_chars_total": 8, "approx_tokens_total": 2}),
-        # `noted` must not trip a substring check for rubric `note`
-        _op("T1:S2", "neutral", 0.4, {"m1": {"usage": "noted", "evidence": "dup2"}},
-            memories=[{"key": "k", "value": "v2", "item_id": "aaaaaaaaaaaa",
-                       "id": "m1"}],
-            rubric={"m1": _signals(rel=False, nov="redundant")},
-            cost={"content_chars_total": 8, "approx_tokens_total": 2}),
-    ]
-    ops[0]["n_injections"] = 2
-    ops[0]["steps"] = [1, 3]
-    ops[1]["n_injections"] = 2
-    ops[1]["steps"] = [4, 5]
+    op = _op("T1:S1", "positive", 0.4,
+             {"m1": {"usage": "used", "evidence": "REPORT ONLY"}},
+             memories=[{"id": "m1", "key": "PRIVATE KEY", "namespace": "STORE",
+                        "value": "REPORT ONLY"}],
+             rubric={"m1": _signals(inf="acted_on", pe="improved")},
+             cost={"content_chars_total": 40, "approx_tokens_total": 10})
+    op["n_injections"] = 2
     artifact = build_artifact(
-        {},
-        [{"id": "T1", "run_id": "r", "instance_id": "inst",
-          "model": "m", "adapter": "cure@0.1.0"}],
-        ops, [], {"T1": 4},
-        [{"level": "warn", "msg": "process note"}],
-    )
+        {"judge_model": "judge", "config": {"base_url": "https://judge.invalid"},
+         "provenance": {"implementation_sha256": "HASH"}},
+        [{"id": "T1", "run_id": "run", "model": "agent", "adapter": "memory"}],
+        [op], [], [{"level": "warn", "msg": "REPORT ONLY"}])
+    before = json.dumps(artifact)
     summary = build_summary(artifact)
-    assert summary["tool"]["schema"] == SUMMARY_SCHEMA
-    assert "validation" not in summary
-    _assert_stats_only(summary)
+    assert summary["tool"] == {"name": "injudge", "schema": "injudge.summary/v16",
+                               "source_report_schema": "injudge.report/v17", "judge_model": "judge"}
+    assert summary["report"] == "injudge-report.json"
+    assert summary["generated_at"] == artifact["generated_at"]
+    assert summary["diagnostics"] == {"error": 0, "warn": 1, "info": 0}
+    assert summary["overall"]["verdicts"]["judged_spans"] == 1
+    assert summary["overall"]["rubric"]["judged_entries"] == 1
+    assert summary["overall"]["rubric"]["counts"] == artifact["aggregates"]["overall"]["rubric"]["counts"]
+    assert summary["trajectories"][0]["approx_delivery_tokens"] == 10
+    assert summary["trajectories"][0]["run_id"] == "run"
     blob = json.dumps(summary)
-    assert '"v1"' not in blob and '"v2"' not in blob  # no recorded memory text
-    ov = summary["overall"]
-    assert set(ov["headline"]) == {"judged_spans", "positive_span_rate",
-                                   "negative_span_rate", "unresolved_span_rate",
-                                   "share_without_demonstrated_benefit",
-                                   "tokens_without_demonstrated_benefit", "unresolved_tokens",
-                                   "judged_tokens", "caveat"}
-    assert ov["judge"]["low_confidence"] == ["T1:S2"]
-    # memory usage: bare tallies keyed by display key, drift marked, the two
-    # identities sharing key "k" disambiguated with a short item_id suffix
-    usage = summary["details"]["overall"]["memory_usage"]
-    keys = {u["key"] for u in usage}
-    assert keys == {"k#aaaaaaaa", "k#bbbbbbbb"}
-    drift = {u["key"]: u.get("value_drift") for u in usage}
-    assert drift == {"k#aaaaaaaa": True, "k#bbbbbbbb": None}
-    for u in usage:
-        assert "namespace" not in u and "spans" not in u and "first_value" not in u
-    t1 = summary["trajectories"][0]
-    assert t1["instance_id"] == "inst" and t1["model"] == "m"
-    assert t1["adapter"] == "cure@0.1.0"
-    detail = summary["details"]["trajectories"][t1["id"]]
-    # span index: labels only; `noted` is a usage statistic
-    (s1,) = [s for s in detail["spans"] if s["operation_id"] == "T1:S1"]
-    assert s1 == {"operation_id": "T1:S1", "verdict": "positive",
-                  "confidence": 0.9, "steps": [1, 3], "n_injections": 2,
-                  "usage": {"m1": "used", "m2": "used"}}
-    (s2,) = [s for s in detail["spans"] if s["operation_id"] == "T1:S2"]
-    assert s2["usage"] == {"m1": "noted"}
-    # the full aggregate keeps its narrative/identity detail in the report
-    op1 = artifact["operations"][0]
-    assert op1["memory_usage"]["m1"]["evidence"] == "dup"
-    assert artifact["validation"]
+    for text in ("REPORT ONLY", "PRIVATE KEY", "STORE", "HASH", "https://judge.invalid",
+                 '"details"', '"headline"', '"memory_usage"', '"spans"'):
+        assert text not in blob
+    _assert_stats_only(summary)
+    assert json.dumps(artifact) == before
+    assert artifact["operations"][0]["memory_usage"]["m1"]["evidence"] == "REPORT ONLY"
+
+
+@pytest.mark.parametrize("verdict", ["positive", "neutral", "negative", "unresolved", "error"])
+def test_selected_statistics_do_not_treat_judge_prose_as_an_exclusion(verdict):
+    op = _op("T1:S1", verdict)
+    op.update(analysis="outside --episode", n_injections=1)
+    excluded = _op("T1:S2", "unjudged")
+    excluded.update(analysis="outside --episode", n_injections=1)
+    limited = _op("T1:S3", "unjudged")
+    limited.update(analysis="--limit", n_injections=1)
+    artifact = build_artifact({}, [{"id": "T1"}], [op, excluded, limited], [], [])
+    overall = artifact["aggregates"]["overall"]
+    assert overall[verdict] == 1
+    assert overall["unjudged"] == 1
+    assert overall["n_spans"] == overall["n_injections"] == 2
+    summary = build_summary(artifact)
+    assert summary["overall"]["counts"]["n_spans"] == 2
+    assert summary["overall"]["verdicts"]["counts"]["unjudged"] == 1
 
 
 def test_summary_omits_empty_stat_shells():
-    """A trajectory with no judged spans keeps the verdict tally and cost,
-    and drops the all-null rates / headline / rubric / confidence shells.
-    Failed spans omit null confidence and empty usage."""
     op = _op("T1:S1", "error", None, {},
              cost={"content_chars_total": 40, "approx_tokens_total": 10})
     op["n_injections"] = 3
-    op["steps"] = [1, 5]
-    artifact = build_artifact(
-        {},
-        [{"id": "T1", "run_id": "r", "instance_id": "i",
-          "model": "m", "adapter": "cure@0.1.0"}],
-        [op], [], {"T1": 3}, [],
-    )
+    artifact = build_artifact({}, [{"id": "T1", "model": "m"}], [op], [], [])
     summary = build_summary(artifact)
-    t = summary["trajectories"][0]
-    assert t["verdicts"]["counts"]["error"] == 1
-    assert t["counts"]["n_spans"] == 1 and t["counts"]["n_injections"] == 3
-    assert t["model"] == "m" and t["adapter"] == "cure@0.1.0"
-    detail = summary["details"]["trajectories"][t["id"]]
-    assert "rates" not in t["verdicts"]
-    for shell in ("headline", "rubric", "judge", "memory_usage"):
-        assert shell not in detail
-    assert detail["delivery"]["cost"]["approx_tokens_total"] == 10
-    assert detail["spans"] == [{
-        "operation_id": "T1:S1", "verdict": "error",
-        "steps": [1, 5], "n_injections": 3,
-    }]
-    ov = summary["overall"]
-    assert "rates" not in ov["verdicts"]
-    assert "confidence" not in ov["judge"]
-    for shell in ("headline", "rubric"):
-        assert shell not in ov
+    overall = summary["overall"]
+    assert overall["verdicts"]["judged_spans"] == 0
+    assert overall["verdicts"]["counts"]["error"] == 1
+    assert "rates" not in overall["verdicts"]
+    assert "rubric" not in overall and "judge" not in overall
+    assert overall["delivery"]["approx_tokens_total"] == 10
+    assert overall["delivery"]["approx_tokens_by_verdict"]["error"] == 10
+    assert summary["trajectories"][0]["counts"]["n_injections"] == 3
+    assert "rates" not in summary["trajectories"][0]["verdicts"]
+    empty = build_summary(build_artifact({}, [{"id": "T1"}], [], [], []))
+    assert empty["overall"]["verdicts"]["judged_spans"] == 0
+    assert "delivery" not in empty["overall"]
 
 
-def test_summary_keeps_comparisons_ahead_of_drilldown(tmp_path):
-    """Long memory lists must not interrupt the trajectory comparison, and
-    moving statistics must neither lose them nor mutate the report."""
-    op = _op("T1:S1", "positive", 0.9,
-             usage={"m1": {"usage": "used", "evidence": "report only"}},
-             memories=[{"id": "m1", "key": "k", "value": "report only"}],
-             rubric={"m1": _signals(inf="acted_on", pe="improved")},
-             cost={"content_chars_total": 40, "approx_tokens_total": 10})
-    op["input"] = {"path": "agent", "gold": True, "forced": True}
-    policy = {"n_steps": 2, "n_injections": 1, "n_searches": 3,
-              "n_extractions": 2, "extraction_failures": 1,
-              "est_injected_tokens": 10, "prompt_tokens_total": 100}
-    artifact = build_artifact(
-        {"judge_model": "judge", "config": {"max_steps": 4}},
-        [{"id": "T1", "instance_id": "i", "policy": policy}, {"id": "T2"}],
-        [op], [], {"T1": 1, "T2": 0}, [],
-    )
+def test_summary_keeps_selection_separate_from_recording_policy(tmp_path):
+    op = _op("T1:S1", "positive", cost={"content_chars_total": 40, "approx_tokens_total": 10})
+    op["n_injections"] = 1
+    excluded = _op("T1:S2", "unjudged", cost={"content_chars_total": 360, "approx_tokens_total": 90})
+    excluded.update(analysis="outside --episode", n_injections=1)
+    selection = {"episode_ids": ["chosen"], "episodes_selected": 1, "episodes_discovered": 2,
+                 "policy_scope": "whole_recordings"}
+    policy = {"n_steps": 20, "n_injections": 2, "n_searches": 2,
+              "est_injected_tokens": 100, "prompt_tokens_total": 1000,
+              "residency": {"proven_resident_chars": 800, "approx_resident_tokens": 200,
+                            "observed_input_views": 20, "views_with_gaps": 1, "unresolved_placements": 1}}
+    artifact = build_artifact({"selection": selection},
+                              [{"id": "T1", "policy": policy}, {"id": "T2"}],
+                              [op, excluded], [], [{"level": "error", "msg": "REPORT ONLY"}])
     before = json.dumps(artifact)
     from util import atomic_write
     path = tmp_path / "summary.json"
     atomic_write(path, json.dumps(build_summary(artifact), indent=2) + "\n")
     summary = json.loads(path.read_text())
-    assert list(summary) == ["overall", "trajectories", "details", "generated_at", "tool"]
-    assert list(summary["overall"])[0] == "headline"
-    assert summary["tool"] == {
-        "name": "injudge", "schema": "injudge.summary/v14",
-        "source_report_schema": "injudge.report/v16",
-        "judge_model": "judge", "config": {"max_steps": 4},
-    }
-    assert summary["generated_at"] == artifact["generated_at"]
+    assert summary["overall"]["counts"]["n_spans"] == 1
+    assert summary["overall"]["delivery"]["approx_tokens_total"] == 10
+    assert summary["recording_policy"]["scope"] == "whole_input_recordings"
+    assert summary["recording_policy"]["est_injected_tokens"] == 100
+    assert summary["recording_policy"]["residency"]["approx_resident_tokens"] == 200
+    assert summary["recording_policy"]["residency"]["views_with_gaps"] == 1
+    assert summary["recording_policy"]["residency"]["unresolved_placements"] == 1
+    assert "proven_resident_chars" not in summary["recording_policy"]["residency"]
+    assert "cost_caveat" not in summary["recording_policy"]
+    assert summary["selection"] == selection
+    assert summary["diagnostics"] == {"error": 1, "warn": 0, "info": 0}
+    assert [row["id"] for row in summary["trajectories"]] == ["T1", "T2"]
+    assert summary["trajectories"][1]["verdicts"]["judged_spans"] == 0
     assert json.dumps(artifact) == before
-    ov = summary["overall"]
-    agg = artifact["aggregates"]["overall"]
-    assert ov["counts"] == {"n_trajectories": 2, "n_episodes": 0, "n_injections": 1,
-                            "n_spans": 1, "restated_injections": 0}
-    assert ov["verdicts"]["rates"] == agg["rates"]
-    assert ov["delivery"] == {"cost": agg["cost"], "policy": agg["policy"]}
-    assert ov["judge"]["input_paths"] == {"agent": 1}
-    assert ov["judge"]["gold_scored"] == ov["judge"]["forced_answers"] == 1
-    assert ov["judge"]["compliance"] == agg["judge_compliance"]
-    assert ov["judge"]["confidence"]["mean_by_verdict"] == {"positive": 0.9}
-    assert "rubric" not in ov and "memory_usage" not in ov
-    assert summary["details"]["overall"]["rubric"]["counts"] == agg["rubric"]["counts"]
-    assert [t["id"] for t in summary["trajectories"]] == ["T1", "T2"]
-    for row in summary["trajectories"]:
-        assert set(row) <= {"id", "instance_id", "model", "adapter", "counts", "verdicts"}
-        detail = summary["details"]["trajectories"][row["id"]]
-        ta = artifact["aggregates"]["per_trajectory"][row["id"]]
-        assert row["counts"] == {k: ta[k] for k in (
-            "n_episodes", "n_injections", "n_spans", "restated_injections",
-        )}
-        assert row["verdicts"]["counts"] == {k: ta[k] for k in (
-            "positive", "negative", "unresolved", "neutral", "error", "unjudged",
-            "unassessable", "empty",
-        )}
-        if row["id"] == "T1":
-            assert row["verdicts"]["rates"] == ta["rates"]
-            assert detail["delivery"] == {"cost": ta["cost"], "policy": policy}
-            assert detail["headline"]["caveat"] == BENEFIT_SHARE_CAVEAT
-            assert detail["spans"][0]["operation_id"] == op["operation_id"]
-        else:
-            assert "rates" not in row["verdicts"]
-            assert detail == {"spans": []}
-    _assert_stats_only(summary)
+
+
+def test_summary_keeps_executed_judge_health_and_unknown_usage():
+    judged = _op("T1:S1", "positive", 0.4)
+    judged.update(pe_pairing_corrections=1, input={"path": "agent", "attempts": 3,
+        "gold": True, "forced": False, "any_phase_forced": True,
+        "llm_calls": 2, "executed_llm_calls": 4, "executed_tool_calls": 3,
+        "context_rollbacks": 1, "reported_usage": {"input": 40, "output": 20,
+        "cache_read": 10, "cache_write": 0}})
+    error = _op("T1:S2", "error")
+    error["input"] = {"path": "agent", "attempts": 1, "executed_llm_calls": 1,
+                      "executed_tool_calls": 0, "context_rollbacks": 0}
+    artifact = build_artifact({}, [{"id": "T1"}], [judged, error], [], [])
+    judge = build_summary(artifact)["overall"]["judge"]
+    assert judge == {"attempted_spans": 2, "gold_scored": 1, "spans_with_repairs": 1,
+        "forced_spans": 1, "executed_llm_calls": 5, "executed_tool_calls": 3,
+        "context_rollbacks": 1, "reported_usage": {"input": None, "output": None,
+        "cache_read": None, "cache_write": None}, "effect_pairing_corrected_spans": 1,
+        "low_confidence_spans": 1}
 
 
 def test_cli_writes_results_first_summary(monkeypatch, tmp_path):
-    """The real writer must emit the new paths, not just the in-memory
-    projection; the judge still runs only against disposable evidence."""
+    """Check the saved summary, not only its in-memory projection."""
     b = TrajBuilder().agent_turn(with_task=True)
     b.recall([REF_A, REF_B]).agent_turn()
     source = b.write(tmp_path / "trajectory")
@@ -1925,16 +1896,15 @@ def test_cli_writes_results_first_summary(monkeypatch, tmp_path):
     summary = json.loads(text)
     report = json.loads((run_dir / "injudge-report.json").read_text())
     assert text.startswith('{\n  "overall": {\n') and text.endswith("\n")
-    assert summary["tool"]["schema"] == "injudge.summary/v14"
+    assert summary["tool"]["schema"] == "injudge.summary/v16"
     assert summary["tool"]["source_report_schema"] == report["tool"]["schema"]
     assert "test-key-only" not in text
     (row,) = summary["trajectories"]
     assert row["verdicts"]["counts"]["positive"] == 1
     assert "spans" not in row
-    (span,) = summary["details"]["trajectories"][row["id"]]["spans"]
-    assert span["operation_id"] == report["operations"][0]["operation_id"]
-    assert span["usage"] == {"m1": "used", "m2": "ignored"}
-    assert summary["details"]["overall"]["rubric"]["deliveries"] == 2
+    assert summary["overall"]["rubric"]["judged_entries"] == 2
+    assert summary["overall"]["judge"]["attempted_spans"] == 1
+    assert (run_dir / summary["report"]).is_file()
 
 
 @pytest.mark.parametrize("source_kind", ["manifest", "agent_end"])
@@ -1961,10 +1931,10 @@ def test_cli_counts_embedding_billing_without_golden_answers(monkeypatch, tmp_pa
     assert len(calls) == 1 and calls[0]["system"] is SYSTEM_PROMPT
     (run_dir,) = output.iterdir()
     summary = json.loads((run_dir / "summary.json").read_text())
-    policy = summary["overall"]["delivery"]["policy"]
+    policy = summary["recording_policy"]
     expected = 350 if source_kind == "manifest" else 325
     assert policy["prompt_tokens_total"] == expected
-    assert policy["injected_token_share"] == round(policy["est_injected_tokens"] / expected, 4)
+    assert policy["delivery_token_ratio"] == round(policy["est_injected_tokens"] / expected, 4)
 
 
 @pytest.mark.parametrize("usage", [[], {"prompt_tokens": True}, {"prompt_tokens": "99"},
@@ -2045,7 +2015,7 @@ def test_cli_runs_share_the_container_without_clobbering(monkeypatch, tmp_path):
     assert len(run_dirs) == 2  # distinct stamps even for same-second runs
     for run_dir in run_dirs:
         report = json.loads((run_dir / "injudge-report.json").read_text())
-        assert report["tool"]["schema"] == "injudge.report/v16"
+        assert report["tool"]["schema"] == "injudge.report/v17"
         assert (run_dir / "summary.json").is_file()
         (span_evidence,) = (run_dir / "evidence").iterdir()
         assert (span_evidence / "manifest.json").is_file()
@@ -2055,91 +2025,19 @@ def test_cli_runs_share_the_container_without_clobbering(monkeypatch, tmp_path):
     assert names[0] == names[1]  # the identical span id, isolated per run
 
 
-def test_summary_display_keys_never_conflate_shared_id_prefixes():
-    """Two identities sharing a key AND the 8-char item_id prefix would
-    collapse to one display key under the bare-prefix rule — the summary
-    would conflate two memories the report tells apart (it keeps the full
-    ids). Exactly the colliding identities fall back to the full id; an
-    8-char-unique suffix stays short."""
-    rolls = [
-        {"key": "k", "item_id": "aaaaaaaa0001", "tallies": {"used": 1}},
-        {"key": "k", "item_id": "aaaaaaaa0002", "tallies": {"ignored": 2}},
-        {"key": "k", "item_id": "bbbbbbbb0001", "tallies": {"used": 1}},
-        {"key": "solo", "item_id": "cccccccc0001", "tallies": {"used": 3}},
-    ]
-    keys = [e["key"] for e in _slim_usage_rollup(rolls)]
-    assert keys == ["k#aaaaaaaa0001", "k#aaaaaaaa0002", "k#bbbbbbbb", "solo"]
 
 
-def test_summary_display_keys_use_namespace_when_the_id_echoes_the_key():
-    """No item_id recorded: item_key falls back to the display key, so two
-    namespaces' same-keyed items carry identical id halves — an id-cut
-    suffix would render both as the same "k#k", conflating two identities
-    the report keeps apart. The namespace, the identity's other half, cuts
-    the suffix instead; a namespace-less entry keeps the bare key."""
-    rolls = [
-        {"key": "k", "item_id": "k", "namespace": "aaaaaaaa0001", "tallies": {"used": 1}},
-        {"key": "k", "item_id": "k", "namespace": "bbbbbbbb0002", "tallies": {"used": 1}},
-        {"key": "k", "item_id": "k", "namespace": None, "tallies": {"ignored": 1}},
-        {"key": "k", "item_id": "realid000001", "namespace": "cccccccc", "tallies": {"used": 1}},
-    ]
-    keys = [e["key"] for e in _slim_usage_rollup(rolls)]
-    assert keys == ["k#aaaaaaaa", "k#bbbbbbbb", "k", "k#realid00"]
 
 
-def test_summary_display_keys_use_namespace_when_namespaces_share_an_item_id():
-    """Two stores CAN record the same item id under one key (item ids are
-    store-local): an id-cut suffix would render both as the same "k#id",
-    conflating two identities the report keeps apart. The shared id half
-    cannot speak, so the namespace cuts the suffix instead; a third entry
-    with its own id keeps the short id suffix."""
-    rolls = [
-        {"key": "k", "item_id": "item-1", "namespace": "aaaaaaaa0001", "tallies": {"used": 1}},
-        {"key": "k", "item_id": "item-1", "namespace": "bbbbbbbb0002", "tallies": {"ignored": 2}},
-        {"key": "k", "item_id": "item-9", "namespace": "aaaaaaaa0001", "tallies": {"used": 1}},
-    ]
-    keys = [e["key"] for e in _slim_usage_rollup(rolls)]
-    assert keys == ["k#aaaaaaaa", "k#bbbbbbbb", "k#item-9"]
 
 
-def test_summary_display_keys_survive_a_recut_collision():
-    """The namespace re-cut is not collision-free: one namespace carrying two
-    items that EACH share their item id with other namespaces' items re-cuts
-    both onto its own string, and a re-cut namespace base can spell another
-    entry's unre-cut item id. Identical final bases for distinct identities
-    escalate to the full item@namespace pair (never prefix-cut), so the
-    summary never conflates memories the report tells apart."""
-    rolls = [
-        {"key": "k", "item_id": "a", "namespace": "n1", "tallies": {"used": 1}},
-        {"key": "k", "item_id": "a", "namespace": "n2", "tallies": {"used": 1}},
-        {"key": "k", "item_id": "b", "namespace": "n1", "tallies": {"ignored": 1}},
-        {"key": "k", "item_id": "b", "namespace": "n3", "tallies": {"used": 1}},
-        # a no-namespace item whose id spells entry 2's re-cut namespace base
-        {"key": "k", "item_id": "n2", "namespace": None, "tallies": {"used": 1}},
-    ]
-    keys = [e["key"] for e in _slim_usage_rollup(rolls)]
-    assert keys == ["k#a@n1", "k#a@n2", "k#b@n1", "k#n3", "k#n2"]
-    assert len(set(keys)) == len(keys)
 
 
-def test_summary_display_keys_escalation_rechecks_the_surviving_bases():
-    """The escalation creates NEW strings, and one can spell a surviving
-    entry's base: an item id literally containing "@namespace" equals the
-    full pair another entry escalated to. The fixpoint re-check earns that
-    entry its own compound escalation instead of conflating the two."""
-    rolls = [
-        {"key": "k", "item_id": "a", "namespace": "n1", "tallies": {"used": 1}},
-        {"key": "k", "item_id": "a", "namespace": "n2", "tallies": {"used": 1}},
-        {"key": "k", "item_id": "b", "namespace": "n1", "tallies": {"ignored": 1}},
-        {"key": "k", "item_id": "b", "namespace": "n3", "tallies": {"used": 1}},
-        # an item id spelling the compound entry 1 escalates to ("a@n1")
-        {"key": "k", "item_id": "a@n1", "namespace": "n9", "tallies": {"used": 1}},
-    ]
-    keys = [e["key"] for e in _slim_usage_rollup(rolls)]
-    # entry 2's "n2" base never collides here, so it keeps the short suffix;
-    # the last entry escalates to its own compound "a@n1@n9"
-    assert keys == ["k#a@n1", "k#n2", "k#b@n1", "k#n3", "k#a@n1@n9"]
-    assert len(set(keys)) == len(keys)
+
+
+
+
+
 
 
 
@@ -2210,22 +2108,7 @@ def test_usage_rollup_compares_local_ids_by_content(digest):
     assert [r["first_value"] for r in rolls] == ["same", "different"]
 
 
-def test_summary_value_drift_needs_two_recorded_values():
-    """An unrecorded end is not a content change: a re-delivery recording no
-    value (redacted content) must not flag value_drift in the summary — the
-    marker means the RECORDED content changed, so both compared ends must be
-    recorded values. The report's raw first/last stay the literal record."""
-    ops = [
-        _op("T1:S1", "neutral", 0.9, {"m1": {"usage": "ignored", "evidence": ""}},
-            memories=[{"id": "m1", "key": "k", "value": "v1"}]),
-        _op("T1:S2", "neutral", 0.9, {"m1": {"usage": "ignored", "evidence": ""}},
-            memories=[{"id": "m1", "key": "k", "value": None}]),
-    ]
-    artifact = build_artifact({}, [{"id": "T1", "run_id": "r"}], ops, [], {"T1": 2}, [])
-    (roll,) = artifact["aggregates"]["overall"]["memory_usage"]
-    assert roll["first_value"] == "v1" and roll["last_value"] is None
-    (usage,) = build_summary(artifact)["details"]["overall"]["memory_usage"]
-    assert usage["key"] == "k" and "value_drift" not in usage
+
 
 
 def test_aggregate_usage_rollup_excludes_auto_neutral_spans():
@@ -2453,7 +2336,7 @@ def test_rubric_line_surfaces_the_novelty_distribution(capsys):
         {**_op("T1:S2", "neutral", 0.9, rubric={"kc": _signals(nov="confirming")}),
          "payload_summary": "1 injection"},
     ]
-    artifact = build_artifact({}, [{"id": "T1", "run_id": "r"}], ops, [], {"T1": 3}, [])
+    artifact = build_artifact({}, [{"id": "T1", "run_id": "r"}], ops, [], [])
     print_summary(artifact)
     line = "novelty: novel 33%, confirming 33%, redundant 33%"
     assert line in capsys.readouterr().out
@@ -2486,15 +2369,10 @@ def test_rubric_rollup_excludes_auto_neutral_placeholders(capsys):
     # no agent turn ever classified: [None, None] is not a step range —
     # the field is omitted, never emitted as nulls
     assert "steps" not in op
-    artifact = build_artifact({}, [{"id": "T1", "run_id": "r"}], [op], [], {"T1": 1}, [])
-    assert "steps" not in build_summary(artifact)["details"]["trajectories"]["T1"]["spans"][0]
-    # the placeholder "unclear" usage is a rule-judged marker, not a
-    # statistic: the summary's span index omits it like the usage rollup does
-    # (a label no tally could ever corroborate)
-    assert "usage" not in build_summary(artifact)["details"]["trajectories"]["T1"]["spans"][0]
-    row = build_summary(artifact)["details"]["trajectories"]["T1"]["spans"][0]
-    assert row["verdict"] == "unassessable"
-    assert row["auto"] == "no_subsequent_turn"
+    artifact = build_artifact({}, [{"id": "T1", "run_id": "r"}], [op], [], [])
+    summary = build_summary(artifact)["overall"]
+    assert summary["verdicts"]["counts"]["unassessable"] == 1
+    assert "rubric" not in summary
     rub = artifact["aggregates"]["overall"]["rubric"]
     assert rub["deliveries"] == 0  # placeholder rubric is not a judged delivery
     assert all(v is None for v in rub["rates"].values())
@@ -2550,10 +2428,9 @@ def test_aggregate_lists_an_action_two_spans_credit_to_one_memory():
     shared = aggregate(ops, 3)["rubric"]["shared_anchors"]
     assert shared == [{"namespace": "ns", "item_id": "kb-1", "key": "kb-1",
                        "anchors": [{"traj": "T1", "step": 4, "spans": ["T1:S1", "T1:S2"]}]}]
-    artifact = build_artifact({}, [{"id": "T1", "run_id": "r"}], ops, [], {"T1": 3}, [])
-    summary = build_summary(artifact)["details"]["overall"]["rubric"]
-    assert summary["shared_anchors"] == [
-        {"key": "kb-1", "anchors": [{"traj": "T1", "step": 4, "spans": ["T1:S1", "T1:S2"]}]}]
+    artifact = build_artifact({}, [{"id": "T1", "run_id": "r"}], ops, [], [])
+    summary = build_summary(artifact)["overall"]["rubric"]
+    assert summary["shared_action_groups"] == 1
 
 
 def test_aggregate_unassessable_spans_leave_every_directional_denominator():
@@ -2587,11 +2464,11 @@ def test_aggregate_unassessable_spans_leave_every_directional_denominator():
     assert agg["cost"]["approx_tokens_by_verdict"]["neutral"] == 0
     # the summary projection and stdout line carry the class too
     artifact = build_artifact({}, [{"id": "T1", "run_id": "r"}],
-                              [auto, judged], [], {"T1": 2}, [])
+                              [auto, judged], [], [])
     slim = build_summary(artifact)["overall"]
     assert slim["verdicts"]["counts"]["unassessable"] == 1
-    assert slim["headline"]["unassessable_spans"] == 1
-    assert slim["headline"]["unassessable_tokens"] == 25
+    assert slim["verdicts"]["judged_spans"] == 1
+    assert slim["delivery"]["approx_tokens_by_verdict"]["unassessable"] == 25
 
 
 def test_empty_delivery_has_separate_cost_and_summary_population():
@@ -2599,16 +2476,15 @@ def test_empty_delivery_has_separate_cost_and_summary_population():
              "auto": "empty_delivery"}
     judged = _op("T1:S2", "positive", 0.9,
                  cost={"content_chars_total": 400, "approx_tokens_total": 100})
-    report = build_artifact({}, [{"id": "T1"}], [empty, judged], [], {"T1": 2}, [])
+    report = build_artifact({}, [{"id": "T1"}], [empty, judged], [], [])
     summary = build_summary(report)
     overall = summary["overall"]
     assert overall["verdicts"]["counts"]["empty"] == 1
     assert overall["verdicts"]["counts"]["unassessable"] == 0
     assert overall["verdicts"]["rates"]["positive"] == 1
-    assert overall["headline"]["judged_tokens"] == 100
-    assert overall["headline"]["share_without_demonstrated_benefit"] == 0
-    assert overall["delivery"]["cost"]["approx_tokens_by_verdict"]["empty"] == 10
-    assert summary["details"]["trajectories"]["T1"]["spans"][0]["verdict"] == "empty"
+    assert overall["verdicts"]["judged_spans"] == 1
+    assert overall["delivery"]["approx_tokens_by_verdict"]["positive"] == 100
+    assert overall["delivery"]["approx_tokens_by_verdict"]["empty"] == 10
 
 
 def test_headline_benefit_share_is_over_judged_cost_only():
@@ -2643,7 +2519,7 @@ def test_policy_rollup():
     assert pol["est_injected_tokens"] == 800
     assert pol["est_injected_tokens_billed"] == 800  # every trajectory billed
     assert pol["prompt_tokens_total"] == 40000
-    assert pol["injected_token_share"] == round(800 / 40000, 4)
+    assert pol["delivery_token_ratio"] == round(800 / 40000, 4)
     assert policy_rollup([])["prompt_tokens_total"] is None
     assert policy_rollup([])["est_injected_tokens_billed"] is None
 
@@ -2664,7 +2540,7 @@ def test_policy_rollup_share_ignores_usage_less_trajectories():
     assert pol["est_injected_tokens"] == 1400  # the deterministic total keeps all
     assert pol["est_injected_tokens_billed"] == 500  # the share's numerator matches its denominator's scope
     assert pol["prompt_tokens_total"] == 10000
-    assert pol["injected_token_share"] == round(500 / 10000, 4)
+    assert pol["delivery_token_ratio"] == round(500 / 10000, 4)
 
 
 def test_policy_rollup_tolerates_corrupt_huge_literals():
@@ -2681,7 +2557,7 @@ def test_policy_rollup_tolerates_corrupt_huge_literals():
     ])
     assert pol["est_injected_tokens"] == huge
     assert pol["prompt_tokens_total"] == 1000
-    assert pol["injected_token_share"] is None
+    assert pol["delivery_token_ratio"] is None
     # a huge-int trajectory total summing with a float one keeps the exact
     # int side (the dropped float part is below its precision)
     pol = policy_rollup([
@@ -2758,13 +2634,13 @@ def test_policy_line_names_the_billed_scope_when_it_differs():
                     "est_injected_tokens": 900, "prompt_tokens_total": None}},
     ])
     line = _policy_line(mixed)
-    assert "injected ≈1,400 tok; ≈500 of it on runs with usage records = 5.0% of Σprompt 10,000" in line
+    assert "delivered once ≈1,400 tok; ≈500 of it on runs with usage records = 5.0% of Σprompt 10,000" in line
     full = policy_rollup([
         {"id": "T1", "n_spans": 1,
          "policy": {"n_steps": 10, "n_injections": 2, "n_searches": 1,
                     "est_injected_tokens": 500, "prompt_tokens_total": 10000}},
     ])
-    assert "injected ≈500 tok = 5.0% of Σprompt 10,000" in _policy_line(full)
+    assert "delivered once ≈500 tok = 5.0% of Σprompt 10,000" in _policy_line(full)
 
 
 def test_aggregate_cost_by_verdict():
@@ -2848,17 +2724,18 @@ def test_pe_pairing_corrections_counted_and_aggregated(tmp_path):
         "pe_pairing_correction_rate": 0.5,
     }
     artifact = build_artifact({}, [{"id": "T1", "run_id": "r"}], [op, clean, auto],
-                              [], {"T1": 3}, [])
-    assert build_summary(artifact)["overall"]["judge"]["compliance"] == agg["judge_compliance"]
+                              [], [])
+    op["input"] = {"path": "agent"}
+    assert build_summary(artifact)["overall"]["judge"]["effect_pairing_corrected_spans"] == 1
     assert "pe_pairing_corrections" not in operation_record(span, auto_verdict_no_subsequent_turn(span),
                                                             {"deliveries": 0})
 
 
 def test_headline_benefit_share_always_carries_the_caveat(capsys):
-    """The share without demonstrated benefit is a span-level proxy whatever its value: the
-    caveat rides every reported share (a low share's coarse bundle charging
-    is just as present), in the aggregate, the summary projection, and the
-    stdout summary."""
+    """Report and stdout shares need the caveat even when the share is low.
+
+    The compact summary omits the share and keeps verdict rates.
+    """
     ops = [
         _op("T1:S1", "neutral", 0.9,
             cost={"deliveries": 1, "content_chars_total": 400, "approx_tokens_total": 300}),
@@ -2870,9 +2747,10 @@ def test_headline_benefit_share_always_carries_the_caveat(capsys):
     assert agg["headline"]["share_without_demonstrated_benefit"] == 0.75
     assert "not waste, harm, or net gain" in agg["headline"]["caveat"]
     assert "unresolved_tokens" in agg["headline"]["caveat"]
-    artifact = build_artifact({}, [{"id": "T1", "run_id": "r"}], ops, [], {"T1": 2}, [])
-    slim = build_summary(artifact)["overall"]["headline"]
-    assert slim["negative_span_rate"] == 0.0 and "caveat" in slim
+    artifact = build_artifact({}, [{"id": "T1", "run_id": "r"}], ops, [], [])
+    slim = build_summary(artifact)["overall"]
+    assert "headline" not in slim
+    assert slim["verdicts"]["rates"]["negative"] == 0.0
     print_summary(artifact)
     assert "caveat: share_without_demonstrated_benefit" in capsys.readouterr().out
 
@@ -3358,9 +3236,57 @@ def test_agent_runner_failure_is_an_error_verdict_not_a_retry(monkeypatch, tmp_p
                          evidence_root=tmp_path, transcripts_root=tmp_path / "runs")
     assert verdict["verdict"] == "error"
     assert verdict["input"]["path"] == "agent" and verdict["input"]["attempts"] == 1
+    assert verdict["input"]["executed_llm_calls"] is None
+    assert all(value is None for value in verdict["input"]["reported_usage"].values())
     # a runner-level failure is unmasked never retried; whatever trajectory
     # lines a crashed runner managed to append stay as-is (partial audit)
     assert any("judge agent failed" in w for w in warnings)
+
+
+@pytest.mark.parametrize("missing_phase", [1, 2])
+@pytest.mark.parametrize("invalid", [None, True, -1, float("inf")])
+def test_agent_unknown_usage_stays_unknown_across_repair(monkeypatch, tmp_path, missing_phase, invalid):
+    results = [
+        {**_result(answer), "executed_llm_calls": 2, "executed_tool_calls": 3,
+         "context_rollbacks": 0,
+         "reported_usage": {"input": 100, "output": 20, "cache_read": 0, "cache_write": 0}}
+        for answer in ("invalid", GOOD)
+    ]
+    results[missing_phase - 1]["executed_llm_calls"] = invalid
+    results[missing_phase - 1]["reported_usage"]["input"] = invalid
+    stub_runner(monkeypatch, results)
+    span, steps = _judge_input_fixture()
+    verdict = judge_span(span, steps, _agent_cfg(), [], evidence_root=tmp_path,
+                         transcripts_root=tmp_path / "runs")
+    assert verdict["verdict"] == "positive"
+    assert verdict["input"]["executed_llm_calls"] is None
+    assert verdict["input"]["executed_tool_calls"] == 6
+    assert verdict["input"]["reported_usage"] == {
+        "input": None, "output": 40, "cache_read": 0, "cache_write": 0}
+    op = operation_record(span, verdict, {})
+    summary = build_summary(build_artifact({}, [{"id": span.traj}], [op], [], []))
+    assert summary["overall"]["judge"]["executed_llm_calls"] is None
+    assert summary["overall"]["judge"]["reported_usage"]["input"] is None
+
+
+def test_agent_runner_failure_after_repair_does_not_report_partial_totals(monkeypatch, tmp_path, capsys):
+    first = {**_result("invalid"), "executed_llm_calls": 2, "executed_tool_calls": 3,
+             "context_rollbacks": 0,
+             "reported_usage": {"input": 100, "output": 20, "cache_read": 0, "cache_write": 0}}
+    stub_runner(monkeypatch, [first, None])
+    span, steps = _judge_input_fixture()
+    verdict = judge_span(span, steps, _agent_cfg(), [], evidence_root=tmp_path,
+                         transcripts_root=tmp_path / "runs")
+    assert verdict["verdict"] == "error"
+    assert verdict["input"]["attempts"] == 2
+    assert verdict["input"]["executed_llm_calls"] is None
+    assert verdict["input"]["executed_tool_calls"] is None
+    assert all(value is None for value in verdict["input"]["reported_usage"].values())
+    from injudge.report import print_summary
+    op = operation_record(span, verdict, {})
+    artifact = build_artifact({}, [{"id": span.traj}], [op], [], [])
+    assert print_summary(artifact) == 1
+    assert "unknown model calls, unknown tool calls" in capsys.readouterr().out
 
 
 def test_agent_run_error_field_is_an_error_verdict(monkeypatch, tmp_path):
@@ -3390,7 +3316,8 @@ def test_agent_forced_answer_lands_in_the_input_record(monkeypatch, tmp_path):
     agg = aggregate([op], 1, 1)
     assert agg["input_paths"] == {"agent": 1}
     assert agg["forced_answers"] == 1
-    assert _slim_aggregate(agg)["judge"]["forced_answers"] == 1
+    artifact = build_artifact({}, [{"id": span.traj}], [op], [], [])
+    assert build_summary(artifact)["overall"]["judge"]["forced_spans"] == 1
 
 
 def test_context_rollback_repair_cannot_erase_missing_investigation(monkeypatch, tmp_path):
@@ -3402,6 +3329,7 @@ def test_context_rollback_repair_cannot_erase_missing_investigation(monkeypatch,
              "reported_usage": {"input": 100, "output": 20, "cache_read": 0, "cache_write": 0}}
     repair = {**_result(GOOD, messages=unread), "retained_evidence": 0,
               "executed_llm_calls": 1, "executed_tool_calls": 0,
+              "context_rollbacks": 0,
               "reported_usage": {"input": 50, "output": 10, "cache_read": 0, "cache_write": 0}}
     calls = stub_runner(monkeypatch, [first, repair])
     span, steps = _judge_input_fixture()
@@ -3559,7 +3487,7 @@ def test_config_validates_the_budget_knobs(monkeypatch):
         resolve_config({**base, "MAX_OUTPUT_TOKENS": "999999",
                         "CONTEXT_WINDOW": "1000"})
     cfg = resolve_config(dict(base))
-    assert cfg.max_steps == 40 and cfg.max_output_tokens == 65536
+    assert cfg.max_steps == 40 and cfg.max_output_tokens == 32768
     assert cfg.context_window == 131072 and cfg.temperature == 0.0
     assert cfg.api == "openai-chat" and cfg.thinking_level == "off"
     with pytest.raises(SystemExit, match="API"):
@@ -3592,19 +3520,19 @@ def test_agent_unknown_novelty_preserves_independent_signals(
     if usage == "ignored":
         assert result["memory_usage"]["m1"]["reason"] == "ignored_unknown_novelty"
     op = operation_record(span, result, {})
-    artifact = build_artifact({}, [{"id": span.traj}], [op], [], {span.traj: 1}, [])
+    artifact = build_artifact({}, [{"id": span.traj}], [op], [], [])
     path = tmp_path / "report.json"
     path.write_text(json.dumps(artifact))
     saved = json.loads(path.read_text())
-    assert saved["tool"]["schema"] == "injudge.report/v16"
+    assert saved["tool"]["schema"] == "injudge.report/v17"
     assert saved["operations"][0]["rubric"]["m1"]["novelty"]["value"] is None
     rub = saved["aggregates"]["overall"]["rubric"]
     assert rub["deliveries"] == 2
     assert rub["counts"]["novelty"] == {"null": 1, "novel": 1}
     assert rub["rates"]["novelty"] == 1.0  # unknown does not dilute the rate
     summary = build_summary(saved)
-    assert summary["tool"]["schema"] == "injudge.summary/v14"
-    assert summary["details"]["overall"]["rubric"]["counts"]["novelty"] == rub["counts"]["novelty"]
+    assert summary["tool"]["schema"] == "injudge.summary/v16"
+    assert summary["overall"]["rubric"]["counts"]["novelty"] == rub["counts"]["novelty"]
     if usage == "ignored":
         assert rub["no_footprint_reasons"] == {"ignored_unknown_novelty": 1, "irrelevant": 1}
 
@@ -3629,14 +3557,40 @@ def test_repair_does_not_reinvite_a_forbidden_null(monkeypatch, tmp_path, signal
     result = judge_span(span, steps, _agent_cfg(), [], evidence_root=tmp_path / "evidence",
                         transcripts_root=tmp_path / "runs")
     assert result["input"]["attempts"] == 2
-    assert f"m1.{signal} value None outside the contract" in calls[1]["message"]
+    assert f"m1.{signal} JSON value null outside the contract" in calls[1]["message"]
     policy = load_prompt("injudge/scoring/uncertainty")
-    for prompt in (SYSTEM_PROMPT, GOLD_SYSTEM_PROMPT, calls[0]["message"],
-                   calls[1]["message"], _FORCED):
+    for prompt in (SYSTEM_PROMPT, GOLD_SYSTEM_PROMPT, calls[1]["message"], _FORCED):
         assert policy in prompt
         assert "@uncertainty@" not in prompt
     assert '"novel"|"confirming"|"redundant"|null' in SYSTEM_PROMPT
     assert '"novel"|"confirming"|"redundant"|null' in calls[1]["message"]
+
+
+@pytest.mark.parametrize("signal,quoted,value", [
+    ("novelty", "null", None),
+    ("influence", "null", None),
+    ("positive_effect", "null", None),
+    ("relevance", "true", True),
+])
+def test_repair_identifies_a_quoted_json_literal(monkeypatch, tmp_path, signal, quoted, value):
+    fixed = json.loads(GOOD)
+    entry = fixed["memories"][0]
+    entry.update(_signals(inf="none", pe=None), anchors=[])
+    entry[signal]["value"] = value
+    bad = json.loads(json.dumps(fixed))
+    bad["memories"][0][signal]["value"] = quoted
+    calls = stub_runner(monkeypatch, [_result(json.dumps(bad)), _result(json.dumps(fixed))])
+    span, steps = _judge_input_fixture()
+    result = judge_span(span, steps, _agent_cfg(), [], evidence_root=tmp_path / "evidence",
+                        transcripts_root=tmp_path / "runs")
+    assert f'm1.{signal} JSON string "{quoted}" outside the contract' in calls[1]["message"]
+    assert result["input"]["attempts"] == 2
+    assert result["pe_pairing_corrections"] == 0
+    path = tmp_path / "operation.json"
+    path.write_text(json.dumps(operation_record(span, result, {})))
+    saved = json.loads(path.read_text())
+    assert saved["rubric"]["m1"][signal]["value"] is value
+    assert saved["rubric"]["m1"]["positive_effect"]["value"] is None
 
 
 @pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
@@ -3809,7 +3763,10 @@ def test_masking_a_truncated_utf8_transcript_preserves_no_secret(tmp_path):
 
 
 def test_transcript_masking_failure_keeps_an_error_input_record(monkeypatch, tmp_path):
-    calls = stub_runner(monkeypatch, [_result(GOOD)])
+    result = {**_result(GOOD), "executed_llm_calls": 3, "executed_tool_calls": 4,
+              "context_rollbacks": 0,
+              "reported_usage": {"input": 100, "output": 20, "cache_read": 0, "cache_write": 0}}
+    calls = stub_runner(monkeypatch, [result])
     def fail_mask(*_):
         raise OSError("cannot replace transcript")
     monkeypatch.setattr("injudge.agent._mask_trajectory_file", fail_mask)
@@ -3823,4 +3780,6 @@ def test_transcript_masking_failure_keeps_an_error_input_record(monkeypatch, tmp
     assert {key: verdict["input"][key] for key in ("path", "attempts", "llm_calls", "tool_calls")} == {
         "path": "agent", "attempts": 1, "llm_calls": 3, "tool_calls": 4,
     }
+    assert verdict["input"]["executed_llm_calls"] == 3
+    assert verdict["input"]["reported_usage"]["input"] == 100
     assert warnings

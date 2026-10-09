@@ -7,7 +7,7 @@ mem-eval scores memory-system quality from schema-v10 gate trajectories
   self-contained HTML/JSON graph.
 - **injudge** scores each episode-scoped recall span's subsequent influence
   with an agentic LLM rubric (a pi agent searching one evidence folder per
-  span) and writes `injudge.report/v16`, which memgraph can overlay with
+  span) and writes `injudge.report/v17`, which memgraph can overlay with
   `--verdicts`.
 
 An injection is judged by its influence on later agent turns. The final
@@ -61,7 +61,13 @@ render. injudge also accepts `--golden`, `--correctness`, `--gold-metadata`,
 `--harness-report`, `--episode`, `--limit`, and `--env` (see
 `doc/en/configuration.md`). `--episode ID` (repeatable) judges only the
 episodes whose recorded episode id, benchmark identity, or execution id
-matches; other spans are `unjudged`, and an unmatched ID fails fast.
+matches; other spans are compact `unjudged` records (joins and delivery cost retained),
+and an unmatched ID fails fast. Aggregate statistics, summary counts, and
+dry-run span counts exclude these out-of-selection spans. Only an `unjudged`
+scheduler placeholder with the exclusion marker is excluded; judged analysis
+text cannot remove a span from statistics. Attachments are joined only to selected episodes,
+while execution/sidecar ambiguity checks still use the complete recording.
+Policy totals explicitly cover whole input recordings.
 
 `--prepare-only` is a staged offline path. It uses bridge episode lifecycle
 events only for scope/provenance, keeps memory operations annotation-only, and
@@ -100,12 +106,13 @@ memgraph/parse_trajectory.py  # trajectory.jsonl → ops; shared step rule
 memgraph/episodes.py       # shared episode-scope rule (bridge boundaries) + graph episode rows
 memgraph/graph.py          # path discovery, cross-trajectory linking, validation
 memgraph/html.py           # self-contained HTML (template + embedded graph JSON)
-memgraph/verdicts.py       # merge injudge.report/v16 onto recall ops
+memgraph/verdicts.py       # merge injudge.report/v17 onto recall ops
 memgraph/__main__.py       # python3 -m memgraph
 injudge/__init__.py        # REPORT_SCHEMA / SUMMARY_SCHEMA (writer + memgraph reader)
 injudge/model.py           # AgentStep / ToolExec / InjectionSpan
 injudge/steps.py           # agent-lane step stream + all-lane billed prompt tokens
 injudge/episodes.py        # offline episode preparation and source assignments
+injudge/cost.py            # proven placement residency across recorded input views
 injudge/spans.py           # episode recall ops → injection spans
 injudge/judge.py           # the verdict contract, judge prompts, evidence renderers
 injudge/evidence.py        # one span's judge evidence as a folder of files + manifest
@@ -113,7 +120,7 @@ injudge/agent.py           # .env → AgentConfig, runner subprocess, corrective
 injudge/gold.py            # golden-answer / correctness sidecars and CLI joins
 injudge/prompts.py         # loads prompts/ (never inline prompts in code)
 injudge/aggregate.py       # verdict counts/rates, per-memory usage roll-ups
-injudge/report.py          # injudge.report/v16 + injudge.summary/v14 + stdout
+injudge/report.py          # injudge.report/v17 + injudge.summary/v16 + stdout
 injudge/__main__.py        # python3 -m injudge
 agent/                     # TS judge agent: runner.ts (pi Agent + budgets),
                            # evidence-tools.ts (scoped read-only tools),
@@ -304,10 +311,11 @@ The span verdict is derived in code: any harmful use (`misused`) ⇒
 negative, else any `used` ⇒ positive, else any `unclear` ⇒ unresolved,
 else neutral. `used` is acted-on influence with `positive_effect: improved`;
 `unproductive` is acted-on influence with `no_effect` and is neutral;
-`misused` requires `harmed`. Memory-caused work that is discarded, undone,
-or corrected without contributing to the outcome or process is `harmed`,
-even when quick, and so is the memory-caused part of a useful change that
-a later step corrects; reading memory content is delivery cost, not such work.
+`misused` requires `harmed`. Memory guidance that misdirects work into an abandoned or corrected detour
+without a used finding is `harmed`. An agent typo, unavailable tool, or unrelated
+environment failure alone does not establish harm from memory; follow corrected
+attempts to their results. A blocked attempt with no finding has unknown effect.
+Reading memory content is delivery cost, not such work.
 `unclear` covers unknown attribution (influence
 null) or acted-on influence with unknown effect. `selected` records
 retrieval of fuller memory content recorded as its own delivery, without
@@ -332,7 +340,13 @@ Records carry `step`,
 stands in for action timing. A rejected read can improve work by resolving
 uncertainty only when later work demonstrably uses that finding; rejection
 alone does not establish benefit or `no_effect`. Removing a completed diagnostic
-probe is not harm, while an abandoned attempt without a used finding is harm.
+probe is not harm, while a memory-misdirected abandoned attempt without a used finding is harm.
+
+Historical retrieval relevance requires the connecting mechanism or applicable
+action in the exposed text; a query or later diagnosis cannot supply it. Explicit
+task instructions that already specify the action can support none, while a
+symptom alone is not an implementation plan. Narrative summaries preserve null
+attribution instead of naming a competing source as the established cause.
 
 The judge is an AGENT, not one prompt. Python prepares episodes before
 grouping spans, then materializes each span's target and parent episode evidence
@@ -402,7 +416,7 @@ Easy to get wrong:
   unknown novelty is missing baseline evidence, not a forced tier or an
   influence verdict. Ignored relevant entries with null novelty carry
   `ignored_unknown_novelty`; `counts.novelty.null` records them and novelty
-  rates exclude them. Scoring, opening, forced-answer, and repair prompts
+  rates exclude them. Scoring, forced-answer, and repair prompts
   share `prompts/injudge/scoring/uncertainty.md`.
 - The evidence grounds every memory to its recorded placement exposure
   (adapter-free value-vs-placement compare: full / whitespace-and-escape
@@ -538,7 +552,7 @@ The HTML colors rewrite markers by each marker's own `on_memory_lane` flag,
 computed at parse time against the final lane set. Do not prune a field
 from one consumer only.
 
-**injudge** writes `injudge.report/v16` (`{tool, generated_at, trajectories,
+**injudge** writes `injudge.report/v17` (`{tool, generated_at, trajectories,
 operations, injections, aggregates, validation}`), checkpointed after every
 completed span (including parallel completions), with pending spans explicitly
 `unjudged`, so interruption within a multi-episode trajectory keeps completed
@@ -586,6 +600,10 @@ to its run.
   many lines remain and where to continue.
 - `aggregates.overall` counts the regimes: `input_paths`, `gold_scored`,
   `forced_answers`.
+- Residency and evidence removal share the unique placement-interval rule.
+  Residency retains proven intervals when another placement is unresolved,
+  counts overlapping intervals once per host and input view, and follows the
+  same host occurrence across episode boundaries while it remains visible.
 - The run also writes `<output>/<run-stamp>/evidence/<span-dir>/` — the
   exact folders the agents read (audit/replay value; only exposed memory
   content is included) — and
@@ -600,38 +618,30 @@ to its run.
   (non-`[A-Za-z0-9._-]` replaced by `_`, capped at 80 chars) plus an
   8-char digest suffix — `evidence.span_dir_name`.
 
-The companion `summary.json` (`injudge.summary/v14`) is the run's final
-statistics: counts/rates, rubric distributions, cost, confidence, judge
-compliance (the positive_effect↔influence correction rate), per-trajectory
-extraction reliability (`n_extractions` / `extraction_failures`), and slim
-per-memory usage tallies. The results-first layout is `overall` (headline,
-`counts`, `verdicts`, `delivery`, `judge`), compact `trajectories` comparison
-rows, then `details`. Rows carry `instance_id` / `model` / `adapter` when
-recorded, plus `counts` and `verdicts`. `details.overall` holds rubric and
-memory usage; `details.trajectories` is keyed by trajectory id and holds
-headline, delivery, judge, rubric, usage, and a narrative-free `spans` index
-(verdict / confidence / usage labels). Mechanical-skip index rows retain `auto`: empty deliveries use
-`verdict: "empty"`; unobserved consumers use `verdict: "unassessable"`. Both
-are outside directional denominators and the benefit share. Counts include
-`n_episodes`, and each trajectory detail includes a compact episode-to-span index.
-`generated_at` and `tool` follow the
-results; `tool.source_report_schema` records the source report's version.
-Empty rate / headline / rubric / confidence shells are omitted with no
-judged population; zero-cost shells are omitted, but error-only delivery
-cost remains visible. The JSON uses two-space indentation.
-The headline binds span rates (positive / negative / unresolved) to
-`share_without_demonstrated_benefit` — never "waste": negative + neutral +
-unresolved tokens over judged tokens, naming
-`tokens_without_demonstrated_benefit`, its `unresolved_tokens` part, and
-`judged_tokens` — shows `error_unjudged_tokens` when non-zero, and states the
-proxy caveat on every reported share. Rule-judged
-auto-neutral (no-subsequent-turn) spans tally as `unassessable`, out of
-every directional denominator and the benefit share, with
-`unassessable_spans` / `unassessable_tokens` named in an existing headline
-when non-zero — observation missingness is not a measured null effect.
-Identities sharing one display key carry a `key#<item-or-namespace>`
-suffix (8-char prefix, full base on a prefix collision). Narrative and
-process detail stays in the report artifact alone.
+The companion `summary.json` (`injudge.summary/v16`) contains compact final
+statistics. `overall` holds counts, verdict counts/rates with `judged_spans`,
+five-signal rubric counts/rates with `judged_entries`, estimated tokens for nonzero
+recorded delivery sizes, and judge execution counters. Judge counters cover attempted
+spans, gold-scored spans, repairs, any-phase forced rounds, context rollbacks,
+executed calls, and reported usage; unknown counters are null. Nonzero effect
+pairing correction and low-confidence counts are optional. Rubric reason counts
+and shared-action group counts are optional.
+`trajectories` contains compact identity/count/verdict rows and delivery token
+totals when delivery size is nonzero. `recording_policy` explicitly covers `whole_input_recordings`,
+including episodes outside the judge selection. It retains policy metrics and
+residency estimates, without raw resident-character totals.
+`diagnostics` counts error/warning/info records; optional `selection` retains
+the source selection. `report` points to `injudge-report.json`. `generated_at`
+is the source report's time. `tool` contains only name, schema,
+source_report_schema, and judge_model. `notes` states that delivery/residency
+estimates use chars divided by four and are not billing or overhead relative
+to a no-memory run. Span verdicts measure
+memory influence, not benchmark task success.
+Summary has no repeated headline, span or episode index, memory lists, confidence
+means/buckets, configuration, or provenance. Those details remain in report v17.
+Empty/unassessable/error/unjudged spans stay outside verdict-rate denominators.
+Rates are omitted when no spans were judged; rubric is omitted without judged
+entries, and judge counters without agent runs. JSON uses two-space indentation.
 
 memgraph joins the report by `(run_id, op seq)`. Unmatched entries in
 either direction are validation notes, never errors. An ambiguous join key

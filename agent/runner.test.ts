@@ -246,7 +246,7 @@ test("output-only history cannot bypass continuation preflight", async (t) => {
 	assert.equal(requests.length, 1);
 });
 
-for (const limit of [2, 4]) {
+for (const limit of [1, 2, 4]) {
 	test(`resumed investigation forces its final answer within ${limit} fresh calls`, async (t) => {
 		const missing = '{"needs_evidence":"inspect step 2"}';
 		const { run, requests, config } = await fixture(t, [
@@ -269,6 +269,30 @@ for (const limit of [2, 4]) {
 		assert.deepEqual(requests.at(-1)!.messages.at(-1)!.content, [{ type: "text", text: "answer now" }]);
 	});
 }
+
+test("a one-call investigation forces the first answer and blocks tools", async (t) => {
+	const { run, requests, root, config } = await fixture(t, [
+		{ content: '{"done":true}', tool_calls: [readStepTwo] },
+	]);
+	const result = await run({ repair: false, opening: "judge the evidence",
+		config: { ...config, max_steps: 1 } });
+	assert.equal(result.error, null);
+	assert.equal(result.answer, '{"done":true}');
+	assert.equal(result.stop_reason, "step_budget_forced");
+	assert.equal(result.executed_llm_calls, 1);
+	assert.equal(result.executed_tool_calls, 0);
+	assert.equal(result.retained_evidence, 0);
+	assert.equal(requests.length, 1);
+	assert.ok(JSON.stringify(requests[0].messages).includes("judge the evidence"));
+	assert.deepEqual(requests[0].messages.at(-1)!.content, [{ type: "text", text: "answer now" }]);
+	const live = new Map<number, unknown>();
+	for (const line of fs.readFileSync(path.join(root, "trace.jsonl"), "utf8").trim().split("\n")) {
+		const event = JSON.parse(line);
+		if (event.type === "message") live.set(event.seq, event.message);
+		if (event.type === "tombstone") for (const seq of event.removedSeqs) live.delete(seq);
+	}
+	assert.deepEqual([...live.values()], result.messages);
+});
 
 for (const repair of [false, true]) {
 	test(`an empty final answer never reuses earlier text (repair=${repair})`, async (t) => {

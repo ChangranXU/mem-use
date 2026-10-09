@@ -5,7 +5,8 @@ The counting rules:
 - rates are over judged spans only: denominator = positive + negative +
   neutral + unresolved (attribution or effect undetermined). Selection and
   unproductive use are neutral; only harmful acted-on influence is negative. `error` (judge failures),
-  `unjudged` (--limit/--episode truncation), and `unassessable`
+  `unjudged` (--limit truncation; spans outside --episode never reach
+  these totals), and `unassessable`
   (rule-judged no-subsequent-turn spans) are counts, never denominators;
   restated re-injections never appear in rates at all (they roll up into
   their span).
@@ -63,10 +64,14 @@ The counting rules:
 
 from __future__ import annotations
 
+import hashlib
+import json
+
 from injudge.judge import _ACCURACY, _ACTED, RUBRIC_SIGNALS
+from injudge.cost import TOKEN_COST_CAVEAT
 from injudge.model import stamped_entry_id
 from injudge.steps import _mixed_sum, _token_share
-from memgraph.annotations import is_int, item_ident
+from memgraph.annotations import canonical_entry, is_int, item_ident, version_identity
 
 _VERDICTS = ("positive", "negative", "neutral", "unresolved")
 _USAGES = ("used", "unproductive", "misused", "selected", "noted", "ignored", "unclear")
@@ -369,6 +374,8 @@ def aggregate(operations: list[dict], n_injections: int, n_trajectories: int | N
                     "spans": [],
                     "first_value": first_values.get(ident),
                     "last_value": last_values.get(ident),
+                    "episodes": [],
+                    "exposures": [],
                 }
             u = entry.get("usage")
             roll["tallies"][u if u in roll["tallies"] else "unclear"] += 1
@@ -378,6 +385,34 @@ def aggregate(operations: list[dict], n_injections: int, n_trajectories: int | N
             if op["operation_id"] not in roll["spans"]:
                 roll["spans"].append(op["operation_id"])
             roll["last_value"] = last_values.get(ident)
+            episode = op.get("episode_execution_id")
+            if episode is not None and episode not in roll["episodes"]:
+                roll["episodes"].append(episode)
+            # Reverse lookup is conditional on this delivered version/exposure.
+            # Preview judgments must never become assertions about unseen text
+            # or every revision of the stored item.
+            memory = records.get(entry_id, (None, {}))[1]
+            ordinal = next((i for i, m in enumerate(op.get("memories") or [])
+                            if m.get("id") == entry_id), None)
+            exposures = op.get("memory_exposure") or []
+            exposure = exposures[ordinal] if ordinal is not None and ordinal < len(exposures) else {}
+            signature = json.dumps([canonical_entry(memory), exposure], sort_keys=True, ensure_ascii=False)
+            exposure_id = hashlib.sha256(signature.encode("utf-8", "surrogatepass")).hexdigest()
+            bucket = next((b for b in roll["exposures"] if b["exposure_id"] == exposure_id), None)
+            if bucket is None:
+                _, scheme, version, digest = version_identity(memory, withhold_local=True)
+                bucket = {"exposure_id": exposure_id, "identity_scheme": scheme,
+                          "version_id": version, "content_sha256": digest,
+                          "exposure": exposure, "judged_entries": 0, "spans": [],
+                          "signals": {s: {} for s in RUBRIC_SIGNALS}}
+                roll["exposures"].append(bucket)
+            bucket["judged_entries"] += 1
+            if op["operation_id"] not in bucket["spans"]:
+                bucket["spans"].append(op["operation_id"])
+            for signal, signal_counts in bucket["signals"].items():
+                value = ((op.get("rubric") or {}).get(entry_id, {}).get(signal) or {}).get("value")
+                label = _bucket_value(value)
+                signal_counts[label] = signal_counts.get(label, 0) + 1
     for v in _VERDICTS:
         out[v] = counts[v]
         out["mean_confidence_by_verdict"][v] = (
@@ -483,7 +518,7 @@ def policy_rollup(trajectories: list[dict], validation: list[dict] | None = None
         # instead of implying est == share x prompt
         "est_injected_tokens_billed": est_billed if billed else None,
         "prompt_tokens_total": prompt or None,
-        "injected_token_share": share,
+        "delivery_token_ratio": share,
         # annotation-mode total (None when no trajectory recorded searches)
         "n_searches": n_searches or None,
         # memory-system extraction reliability, rolled up over the run like
@@ -494,4 +529,8 @@ def policy_rollup(trajectories: list[dict], validation: list[dict] | None = None
         **({"extraction_failures": sum(b.get("extraction_failures") or 0 for b in blocks)}
            if n_extractions else {}),
     }
+    out["cost_caveat"] = TOKEN_COST_CAVEAT
+    residency = [b["residency"] for b in blocks if b.get("residency")]
+    if residency:
+        out["residency"] = {key: sum(r[key] for r in residency) for key in residency[0]}
     return out

@@ -61,7 +61,13 @@ uv run -m calibration score output/calibration/*/injudge-report.json
 ```
 
 `score` reports every disagreement, per-label stability across repeats, and
-matched-pair novelty consistency. Missing or failed targets are reported as
+matched-pair novelty consistency. It also breaks agreement down by signal and
+by expected effect in acted-on cases (improved, harmed, no effect, unknown),
+so unused entries with null effects cannot dominate the effect score. Effect
+stability is reported separately. Judge health reports forced answers in any
+phase, spans requiring repair, executed calls, context rollbacks, and reported
+input/output/cache tokens; executed usage includes discarded rounds.
+Missing or failed targets are reported as
 unavailable and excluded from the agreement denominator; with no answers, it
 reports no assessed labels rather than an agreement score. Use identical settings to measure repeatability;
 changed settings measure sensitivity. Inspect source claims as well as labels:
@@ -72,6 +78,67 @@ All included cases are regressions. A held-out set must be newly written, with
 its cases, expected labels, and judge prompt frozen before its first paid run.
 Once its results inform tuning, it becomes regression data and a fresh set is
 needed for held-out validation.
+
+The diagnostic controls distinguish code being exercised from its relevant
+output being verified. The preview controls include repository work before
+a recorded full read, with either a used finding or an abandoned failed search.
+These are controlled regressions, not labels imposed on ambiguous real traces.
+Use repeatable `--case NAME` with both `build` and `score` to limit a calibration
+experiment explicitly; follow-up deliveries remain included and missing targets
+inside the selected cases stay unavailable. For example:
+
+```bash
+uv run -m calibration build output/calibration/effects/cases --case diagnostic_verified_harm
+uv run -m injudge output/calibration/effects/cases -o output/calibration/effects/runs --judge-max-tokens 32768
+uv run -m calibration score output/calibration/effects/runs/*/injudge-report.json --case diagnostic_verified_harm
+```
+
+Change one treatment at a time when comparing prompts or budgets, then repeat
+with identical settings. Reports retain settings and prompt/evidence hashes;
+the scorer flags differing run provenance or evidence hashes rather than claiming
+fixed-input repeatability. The 32,768-token default reserves more space for evidence inside
+the 131,072-token context. An existing `.env` value still overrides it; use
+`--judge-max-tokens 32768` for an explicit experiment. Check output cuts, errors,
+and agreement as well as fewer forced answers before claiming improvement.
+
+## Comparing memory systems and reviewing stored items
+
+Keep three units separate: a task attempt for benchmark outcomes, a
+span × exposed entry for attribution, and a portable stored item for diagnosis.
+Multiple injections, entries, or spans within an attempt are not independent
+trials. Four attempts of each task estimate per-task repeatability: report the
+mean per-task success fraction, its 0–4 success distribution, and all-four/any-one
+success separately. Any-one success is not single-attempt performance.
+
+Compare memory and no-memory runs on matched task IDs, with the same model,
+harness, budgets, task order, and reset policy. Keep harness errors and missing
+attempts explicit. A baseline trace is a separate trial, not evidence the
+memory-enabled agent saw: do not insert it into `baseline.md`. Join its test
+outcomes and resource costs outside the injection judge. A solved task does not
+make every injected memory helpful, and an injection verdict is not a causal
+estimate of the system's task-success delta. With persistent memory, preserve
+sequence/run clusters when estimating uncertainty; resampling individual
+injections creates false precision. Four runs alone give limited information
+about run-level variability.
+
+Reverse review already starts from `aggregates.overall.memory_usage`, joined
+through its span IDs to per-entry rubric notes, action anchors, exposed text,
+and episode identity. This is useful for finding contradicted content, harmful
+uses, repeated retrieval mismatches, and demonstrated useful advice. Review
+versions/exposures separately before judging an item's current revision. An
+ignored entry can indicate irrelevant retrieval, redundancy, or uncertain
+attribution; it does not establish that the stored item is bad. Never-delivered
+items have no evidence here. Keep unknown/error/unjudged coverage and shared
+action anchors explicit; do not turn these selected observations into an
+intrinsic quality score, a net benefit estimate, or automatic deletion policy.
+
+Prefer this existing evidence join over another paid grader or scalar score.
+The five rubric signals answer different questions, and coverage checks,
+episode preparation, and credit windows protect those distinctions. Simplify
+navigation and instructions before removing these checks. Synthetic calibration,
+manual review of real disagreements, and deterministic benchmark outcomes
+provide complementary checks, as described in
+[Anthropic's agent-evaluation guide](https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents).
 
 ## Contributing
 

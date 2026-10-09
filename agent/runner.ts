@@ -314,13 +314,22 @@ async function main(): Promise<number> {
 
 	let error: string | null = null;
 	try {
+		// A one-call investigation must use its only call for the forced answer.
 		const opening: UserMessage = {
 			role: "user", content: [{ type: "text", text: job.opening }], timestamp: Date.now(),
 		};
+		const openingMessages: UserMessage[] = [opening];
+		if (!job.repair && cfg.max_steps === 1) {
+			budget.forced = { reason: "step_budget_forced", rollbackTail: 0 };
+			budget.forcedInjected = true;
+			openingMessages.push({
+				role: "user", content: [{ type: "text", text: job.forced_message }], timestamp: Date.now(),
+			});
+		}
 		const inputTokens = estimateInput({
 			systemPrompt: agent.state.systemPrompt,
 			tools: agent.state.tools,
-			messages: [...agent.state.messages, opening],
+			messages: [...agent.state.messages, ...openingMessages],
 		});
 		// A final answer can consume some of the reserved output room before
 		// needing repair. Keep its evidence and cap the continuation's output
@@ -334,7 +343,7 @@ async function main(): Promise<number> {
 		}
 		// A saved final/repair answer has an assistant tail: bare continue()
 		// rejects it. prompt() appends the follow-up without resetting history.
-		await agent.prompt(job.opening);
+		await agent.prompt(openingMessages);
 	} catch (e) {
 		error = `agent run failed: ${e instanceof Error ? e.message : String(e)}`;
 	}

@@ -36,7 +36,7 @@ npm --prefix agent install    # TS 侧执行一次（需要 PATH 上有 node >= 
 |---|---|---|
 | `MAX_STEPS` | `40` | 首次调查的 LLM 调用上限（含最终作答轮）。每次恢复调查最多 `min(MAX_STEPS, 4)` 次调用；修复仅一次。 |
 | `CONTEXT_WINDOW` | `131072` | 评审模型的上下文窗口（token）。水位线（窗口减 `MAX_OUTPUT_TOKENS` 和强制作答消息的估算大小）在上下文溢出前触发强制作答。 |
-| `MAX_OUTPUT_TOKENS` | `65536` | 每次 LLM 调用的输出 token 上限。上下文水位线会为输出预留这部分空间，因此输入证据的可用空间相应减少；计费仍按实际生成量。加上强制作答消息估算后，须在 `CONTEXT_WINDOW` 内为输入留出空间；无效配置在加载轨迹前拒绝。`--judge-max-tokens` 可覆盖。 |
+| `MAX_OUTPUT_TOKENS` | `32768` | 每次 LLM 调用的输出 token 上限。上下文水位线会为输出预留这部分空间，因此输入证据的可用空间相应减少；计费仍按实际生成量。加上强制作答消息估算后，须在 `CONTEXT_WINDOW` 内为输入留出空间；无效配置在加载轨迹前拒绝。`--judge-max-tokens` 可覆盖。 |
 
 中途被截断的判定不是失败类别：该答案只是无法通过契约解析，纠正重试会继续同一对话重新作答。
 
@@ -57,7 +57,7 @@ npm --prefix agent install    # TS 侧执行一次（需要 PATH 上有 node >= 
 | `--timeout` | `300` | 单次 LLM 调用超时（秒） |
 | `--max-attempts` | `MAX_ATTEMPTS` | 每区间的调查/修复阶段总数 |
 | `--judge-max-tokens` | `MAX_OUTPUT_TOKENS` | 单次调用输出上限 |
-| `--episode ID` | 不设 | 只评判已录制 episode id、benchmark 身份或执行 id 等于 *ID* 的 episode（可重复）；其余区间均为 `unjudged`。无匹配的 *ID* 在任何调用前快速失败。不可与 `--prepare-only` 同用。 |
+| `--episode ID` | 不设 | 只评判已录制 episode id、benchmark 身份或执行 id 等于 *ID* 的 episode（可重复）。其余区间保留紧凑的 `unjudged` 审计记录，不计入汇总统计、summary 计数和 dry-run 区间计数。policy 总量仍覆盖完整轨迹。无匹配的 *ID* 在任何调用前快速失败。不可与 `--prepare-only` 同用。 |
 | `--limit N` | 不设 | 最多用智能体评判 *N* 个 episode 内、非空的区间；先校验全部 episode 与附件的适用范围。`--prepare-only` 则改为限制物化的 episode 数量。小于 1 的值会快速失败。 |
 | `--dry-run` | 关 | 打印每个付费区间任务的目标文档、文件索引与开场消息；不发起调用、不写文件 |
 | `--golden PATH` | 不设 | 只适用于恰好一个 episode 的 golden answer；其他情况请用带键的元数据 |

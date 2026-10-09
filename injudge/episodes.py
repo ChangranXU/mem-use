@@ -345,6 +345,22 @@ def _proof_sources(
     return out
 
 
+def placement_interval(host: object, text: object) -> tuple[int, int] | None:
+    """Find the placement's unique interval in its original host.
+
+    Empty text covers no characters. Unresolved text has no proven interval.
+    Multiple matches are ambiguous, even when their character ranges overlap.
+    """
+    if text == "":
+        return 0, 0
+    if not isinstance(host, str) or not isinstance(text, str):
+        return None
+    start = host.find(text)
+    if start < 0 or host.find(text, start + 1) >= 0:
+        return None
+    return start, start + len(text)
+
+
 def project_occurrence(item: dict[str, Any], deliveries: list[dict[str, Any]]) -> dict[str, Any]:
     """Separate proven placement text from the rest of its host message.
 
@@ -355,19 +371,14 @@ def project_occurrence(item: dict[str, Any], deliveries: list[dict[str, Any]]) -
     text = item.get("content")
     refs: list[str] = []
     unresolved = False
-    removed: set[str] = set()
+    intervals: set[tuple[int, int]] = set()
     for delivery in deliveries:
         for placement in delivery["placements"]:
             proof = placement["source_resolution"]
             if proof.get("occurrence_id") == item["occurrence_id"]:
-                shown = placement.get("text")
-                if isinstance(shown, str) and shown in removed:
-                    # Re-deliveries can prove the same resident placement.
-                    # Its host is projected once, while every delivery keeps its link.
-                    pass
-                elif isinstance(text, str) and isinstance(shown, str) and shown and text.count(shown) == 1:
-                    text = text.replace(shown, "", 1)
-                    removed.add(shown)
+                interval = placement_interval(text, placement.get("text"))
+                if interval is not None:
+                    intervals.add(interval)
                 else:
                     unresolved = True
                 refs.append(delivery["entry_prefix"])
@@ -375,6 +386,16 @@ def project_occurrence(item: dict[str, Any], deliveries: list[dict[str, Any]]) -
                 unresolved = True
                 refs.append(delivery["entry_prefix"])
     if refs:
+        # Find every proven interval in the original host before removing their union;
+        # sequential removal can break overlapping or nested placement proofs.
+        if isinstance(text, str):
+            parts: list[str] = []
+            end = 0
+            for left, right in sorted(intervals):
+                if left > end:
+                    parts.append(text[end:left])
+                end = max(end, right)
+            text = "".join([*parts, text[end:]])
         projected["content"] = None if unresolved else text
         projected["memory_delivery_refs"] = list(dict.fromkeys(refs))
         # An emptied host is not an empty message: name where its memory text went.

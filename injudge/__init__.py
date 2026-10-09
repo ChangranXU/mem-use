@@ -21,12 +21,13 @@ from __future__ import annotations
 # (injudge.report.py) and the reader (memgraph/verdicts.py) so a bump can
 # never land on one side only and surface at read time. Tests pin the
 # literal deliberately — a bump must update them (see AGENTS.md).
-# v16 counts memory-caused discarded/corrected work without a demonstrated
-# contribution as harm. Earlier v15 effect labels are not comparable.
-REPORT_SCHEMA = "injudge.report/v16"
+# v17 separates memory misdirection from execution slips, names direct
+# delivery volume separately from residency, and compacts excluded spans.
+# v16 harm judgments are not directly comparable.
+REPORT_SCHEMA = "injudge.report/v17"
 
-# v14 aggregates v16's revised harm/no-effect semantics.
-SUMMARY_SCHEMA = "injudge.summary/v14"
+# v16 keeps compact totals; per-memory evidence stays in report v17.
+SUMMARY_SCHEMA = "injudge.summary/v16"
 
 # v2 drops episode.md (the manifest describes every file) and stores each
 # message text once: context.json and baseline.md name the file holding it.

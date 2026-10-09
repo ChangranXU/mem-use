@@ -31,6 +31,7 @@ import hashlib
 from collections import Counter
 from pathlib import Path
 
+from injudge.report import _summary_judge
 from tests.annotated_fixtures import AnnotatedBuilder, cure_ref
 
 _SIGNALS = ("relevance", "accuracy", "novelty", "influence", "positive_effect")
@@ -631,6 +632,174 @@ CASES: dict[str, dict] = {
     },
 }
 
+# These controls separate execution from verification: printing an ID is
+# evidence the path ran, but only an independent oracle establishes its value.
+_ENCODING = {
+    "task": "Add literal node IDs for the serializer's wire protocol.",
+    "before": [("Inspect the missing method before implementing it.", "cat src/literal.py",
+                "def get_id(value): raise NotImplementedError")],
+    "memory": ("literal_wire_id", "The literal wire ID is 'li' followed by the literal text."),
+    "consumer": ("Use the stored li prefix in get_id.", "python implement_literal_id.py",
+                 "def get_id(value): return 'li' + value"),
+    "expect": {"influence": ["acted_on"]},
+}
+CASES["diagnostic_exercised_unverified"] = {
+    **_ENCODING,
+    "after": [("Exercise the method and check that the literal spelling survives.",
+               "python -c \"from literal import get_id; print(get_id('7')); assert str(7) == '7'\"",
+               "li7\nspelling assertion passed"),
+              ("There is no protocol oracle available; submit the implementation as is.",
+               "git diff", "+def get_id(value): return 'li' + value")],
+    "expect": {**_ENCODING["expect"], "positive_effect": [None], "verdict": ["unresolved"]},
+}
+CASES["diagnostic_verified_benefit"] = {
+    **_ENCODING,
+    "after": [("Check against the independent protocol conformance fixture.",
+               "pytest tests/protocol/test_literal_id.py -q",
+               "assert get_id('7') == 'li7'\nassert get_id('42') == 'li42'\n2 passed")],
+    "expect": {**_ENCODING["expect"], "positive_effect": ["improved"], "verdict": ["positive"]},
+}
+CASES["diagnostic_verified_harm"] = {
+    **_ENCODING,
+    "after": [("Exercise the method.", "python -c \"from literal import get_id; print(get_id('7'))\"",
+               "li7"),
+              ("Check the independent wire-protocol fixture.", "pytest tests/protocol/test_literal_id.py -q",
+               "assert get_id('7') == 'L7E'\nAssertionError: 'li7' != 'L7E'"),
+              ("The stored prefix is wrong for this protocol. Replace the memory-caused encoding.",
+               "python correct_literal_id.py", "def get_id(value): return 'L' + value + 'E'"),
+              ("Verify the correction.", "pytest tests/protocol/test_literal_id.py -q", "2 passed")],
+    "expect": {**_ENCODING["expect"], "positive_effect": ["harmed"], "verdict": ["negative"]},
+}
+
+# A preview can shape repository work before its full read; labeling only
+# the lookup loses that action. The full read supplies no further instruction.
+_HELPER = {
+    "task": "Fix merge_config dropping an explicitly supplied zero retry limit.",
+    "before": [("Reproduce before locating the implementation.", "python config_repro.py",
+                "retry_limit=0 becomes retry_limit=5")],
+    "memory": ("kb-retry-helper", "ID kb-retry-helper: inspect coalesce_retry in src/legacy_retry.py; "
+               "its falsy fallback can replace zero."),
+    "followup": {
+        "lookup": "Also read kb-retry-helper for further details.",
+        "value": "ID kb-retry-helper: inspect coalesce_retry in src/legacy_retry.py; its falsy fallback "
+                 "can replace zero. This is the complete stored advice; there are no further details.",
+        "expect": {"influence": ["referenced"], "positive_effect": [None], "verdict": ["neutral"]},
+    },
+}
+CASES["preview_repository_benefit"] = {
+    **_HELPER,
+    "consumer": ("The preview names a helper I have not located. Inspect that file first.",
+                 "cat src/legacy_retry.py", "def coalesce_retry(value, default): return value or default"),
+    "followup": {
+        **_HELPER["followup"],
+        "lookup": "The code just read shows the falsy fallback replacing zero. I will change it "
+                  "to return default if value is None else value, then rerun config_repro.py. "
+                  "Read kb-retry-helper only for any additional details before that planned edit.",
+    },
+    "after": [("The full read adds nothing. The helper found using the preview replaces zero; "
+               "use that finding to change the fallback to an explicit None check.",
+               "python fix_retry_helper.py", "return default if value is None else value"),
+              ("Verify.", "python config_repro.py", "0 preserved; None defaults to 5")],
+    "expect": {"influence": ["acted_on"], "positive_effect": ["improved"], "verdict": ["positive"]},
+}
+CASES["preview_repository_detour"] = {
+    **_HELPER,
+    "consumer": ("The preview names a helper I have not located. Search that file first.",
+                 "grep coalesce_retry src/legacy_retry.py", "src/legacy_retry.py: No such file or directory"),
+    "followup": {
+        **_HELPER["followup"],
+        "lookup": "The step-2 result shows src/legacy_retry.py is absent. The search yielded no finding. "
+                  "I will abandon that helper and inspect src/config.py next. "
+                  "Read kb-retry-helper only for any additional details before that planned inspection.",
+    },
+    "after": [("The full read only repeats that suggestion. The failed helper search yielded no "
+               "finding; abandon it and inspect src/config.py instead.",
+               "cat src/config.py", "def merge_config(value): return value or 5"),
+              ("Fix the None guard from this code.", "python fix_config.py",
+               "return 5 if value is None else value"),
+              ("Verify.", "python config_repro.py", "0 preserved; None defaults to 5")],
+    "expect": {"influence": ["acted_on"], "positive_effect": ["harmed"], "verdict": ["negative"]},
+}
+
+# Execution faults do not establish that the memory's guidance was bad.
+CASES["useful_guidance_execution_slip"] = {
+    **_ENCODING,
+    "consumer": ("Use the stored li prefix; try it in the implementation.",
+                 "python implement_literal_id.py", "SyntaxError: unterminated string literal"),
+    "after": [("I mistyped the quote; correct my syntax while retaining the stored encoding.",
+               "python fix_quote.py", "def get_id(value): return 'li' + value"),
+              ("Check the independent protocol fixture.",
+               "pytest tests/protocol/test_literal_id.py -q", "assert get_id('7') == 'li7'\n1 passed")],
+    "expect": {"influence": ["acted_on"], "positive_effect": ["improved"], "verdict": ["positive"]},
+}
+CASES["guidance_environment_blocked"] = {
+    **_ENCODING,
+    "consumer": ("Use the stored li prefix; try it in the implementation.",
+                 "python implement_literal_id.py", "sh: python: command not found"),
+    "after": [("The environment is unusable; stop without a change or finding.", "git diff", "")],
+    "expect": {"influence": ["acted_on"], "positive_effect": [None], "verdict": ["unresolved"]},
+}
+
+# Raw code visibility and a committed prior direction are different evidence.
+_TIE = {
+    "task": "Changed settings take effect only after restarting the process. Fix this.",
+    "before": [("Inspect settings and the cache.", "cat settings.py",
+                "def update(self, key, value): self.values[key] = value\n"
+                "def lookup(self, key): return self.memo.setdefault(key, self.values[key])")],
+    "memory": ("settings_cache", "Settings.update is the place to invalidate memoized values after a change."),
+    "consumer": ("Invalidate the cache in update.", "python edit_settings.py",
+                 "def update(self, key, value): self.values[key] = value; self.memo.pop(key, None)"),
+    "after": [("Check invalidation.", "pytest test_settings.py -q", "3 passed")],
+    "expect": {"influence": [None], "positive_effect": [None], "verdict": ["unresolved"]},
+}
+CASES["exact_location_competing_code"] = _TIE
+CASES["exact_location_prior_plan"] = {
+    **_TIE,
+    "before": [*_TIE["before"],
+               ("The cached value is stale: update must pop key from memo after assignment. "
+                "I will make that exact change.", "pytest test_settings.py -q",
+                "FAILED: lookup returns the old value after update")],
+    "expect": {"influence": ["none"], "positive_effect": [None], "verdict": ["neutral"]},
+}
+CASES["exact_task_instruction"] = {
+    **_TIE,
+    "task": "In Settings.update, evict key from self.memo after assigning self.values[key].",
+    "memory": ("settings_cache", "In Settings.update, evict key from self.memo after assigning self.values[key]."),
+    "expect": {"novelty": ["redundant"], "influence": ["none"],
+               "positive_effect": [None], "verdict": ["neutral"]},
+}
+CASES["same_function_different_mechanism"] = {
+    **_TIE,
+    "memory": ("settings_cache", "An older Settings.update bug failed to reject non-string keys. "
+               "Validate key types before assigning values."),
+    "expect": {"relevance": [False], "influence": ["none"],
+               "positive_effect": [None], "verdict": ["neutral"]},
+}
+
+# Historical similarity needs an exposed mechanism; an explicit wrong
+# diagnosis of this task remains relevant. These labels do not depend on use.
+CASES["relevance_specificity"] = {
+    **CASES["exact_location_prior_plan"],
+    "memories": [
+        ("stale_reads", "In another application, reads returned an old setting after a new value was written."),
+        ("mutable_settings", "A past release added mutable settings with update and lookup methods, "
+                             "allowing stored values and cached reads to work together."),
+        ("setter_contract", "An older Settings.update bug accepted non-string keys. "
+                            "Validate key types before assigning values."),
+        ("separate_memo", "Another store memoized lookups separately from stored values. "
+                          "Its setter changed the stored value without removing the memo entry, "
+                          "so reads stayed stale. Evict the memo entry when writing."),
+        ("current_diagnosis", "For the stale settings failure in this task, diagnostic log handlers "
+                               "are retaining old values. Remove the log handlers to fix these reads."),
+        ("compare_values", "To distinguish a failed write from a stale read cache, compare the raw "
+                           "stored value with the memoized lookup immediately after writing a new value."),
+    ],
+    "expect": {"relevance": [False]},
+    "entries": {"m2": {"relevance": [False]}, "m3": {"relevance": [False]},
+                "m4": {"relevance": [True]}, "m5": {"relevance": [True]},
+                "m6": {"relevance": [True]}},
+}
+
 # The same statement about the current checkout is refutable by its code.
 # Explicit source scope makes this pair decidable without assuming that every
 # delivered claim describes a historical state or that none ever does.
@@ -743,10 +912,12 @@ def case_id(name: str) -> str:
     return "ep-" + hashlib.sha256(name.encode()).hexdigest()[:8]
 
 
-def build(root: Path) -> list[Path]:
+def build(root: Path, cases: list[str] | None = None) -> list[Path]:
     """Write one trajectory directory per case, named by its opaque id."""
     out = []
     for name, case in CASES.items():
+        if cases is not None and name not in cases:
+            continue
         ident = case_id(name)
         b = AnnotatedBuilder(task_ref={"availability": "inline", "text": case["task"]},
                              instance_id=ident)
@@ -847,14 +1018,43 @@ def _labels(report: dict) -> dict[str, dict]:
         out[target] = {s: (entry.get(s) or {}).get("value") for s in _SIGNALS}
         out[target]["verdict"] = op.get("verdict")
         out[target]["notes"] = {s: (entry.get(s) or {}).get("note") for s in _SIGNALS}
+        out[target]["evidence_sha256"] = (op.get("input") or {}).get("evidence_sha256")
     return out
 
 
-def score(reports: list[dict]) -> list[str]:
-    """Agreement, disagreements, stability, and matched-pair lines."""
+def _health(report: dict, cases: set[str]) -> str:
+    """Actual executed usage includes repairs and context rollbacks; retained
+    conversation counts would make a struggling judge look cheaper."""
+    runs = {t["id"] for t in report.get("trajectories", []) if t.get("run_id") in cases}
+    ops = [o for o in report.get("operations", []) if o.get("traj") in runs and not o.get("auto")]
+    health = _summary_judge(ops, {})
+
+    def total(key: str) -> str:
+        value = health.get(key)
+        return str(value) if value is not None else "unavailable"
+
+    usage = health.get("reported_usage") or {}
+    tokens = ", ".join(f"{key}={usage[key]}"
+                       if usage.get(key) is not None
+                       else f"{key}=unavailable"
+                       for key in ("input", "output", "cache_read", "cache_write"))
+    return (f"judge health: {health.get('attempted_spans', 0)}/{len(ops)} spans attempted, "
+            f"{sum(bool(o.get('error') or o.get('verdict') == 'error') for o in ops)} errors, "
+            f"{health.get('forced_spans', 0)} forced in any phase, "
+            f"{health.get('spans_with_repairs', 0)} spans requiring repair; "
+            f"executed calls={total('executed_llm_calls')}, "
+            f"context rollbacks={total('context_rollbacks')}; reported tokens: {tokens}")
+
+
+def score(reports: list[dict], case_names: list[str] | None = None) -> list[str]:
+    """Agreement by signal/effect, disagreements, stability, and run health.
+    Explicit subsets keep a focused repeat's missing cases out of its scope;
+    missing targets INSIDE that scope remain unavailable, never agreement."""
     lines: list[str] = []
     labeled = [_labels(r) for r in reports]
     expected = expected_labels()
+    if case_names is not None:
+        expected = {name: labels for name, labels in expected.items() if _target(name)[0] in case_names}
     for i, cases in enumerate(labeled, 1):
         agree = total = unavailable = 0
         misses = []
@@ -877,7 +1077,35 @@ def score(reports: list[dict]) -> list[str]:
         headline = f"{agree}/{total} expected labels agree" if total else "no expected labels assessed"
         lines.append(f"report {i}: {headline}" + (f"; {unavailable} unavailable" if unavailable else ""))
         lines.extend(misses)
+        groups = {s: [(name, s) for name, labels in expected.items() if s in labels]
+                  for s in (*_SIGNALS, "verdict")}
+        # All unused entries have effect null. Keep their easy agreements
+        # out of the effect controls' denominators, including unknown-effect controls.
+        for effect in ("improved", "harmed", "no_effect", None):
+            groups[f"acted_on effect={effect!r}"] = [
+                (name, "positive_effect") for name, labels in expected.items()
+                if labels.get("influence") == ["acted_on"]
+                and labels.get("positive_effect") == [effect]]
+        for group, targets in groups.items():
+            if not targets:
+                continue
+            assessed = [(name, label) for name, label in targets if "problem" not in cases[name]]
+            hits = sum(cases[name][label] in expected[name][label] for name, label in assessed)
+            lines.append(f"  {group}: {hits}/{len(assessed)} agree; "
+                         f"{len(targets) - len(assessed)} unavailable")
+        lines.append("  " + _health(reports[i - 1], {case_id(_target(name)[0]) for name in expected}))
     if len(labeled) > 1:
+        settings = [(r.get("tool", {}).get("judge_model"),
+                     {k: v for k, v in (r.get("tool", {}).get("config") or {}).items()
+                      if k != "judge_parallel"},
+                     r.get("tool", {}).get("provenance")) for r in reports]
+        if any(setting != settings[0] for setting in settings[1:]):
+            lines.append("comparison: judge settings or provenance differ; label stability below "
+                         "measures sensitivity, not repeatability under fixed conditions")
+        if any(len({c[name]["evidence_sha256"] for c in labeled
+                    if c[name].get("evidence_sha256")}) > 1 for name in expected):
+            lines.append("comparison: evidence differs for a repeated target; label stability below "
+                         "does not measure repeatability on identical evidence")
         # Only labels every report produced can be stable; a missing or
         # errored case is unavailable, never an agreement.
         stable = total = unavailable = 0
@@ -900,11 +1128,20 @@ def score(reports: list[dict]) -> list[str]:
         lines.append(f"stability: {stable}/{total} labels identical across {len(labeled)} reports"
                      + (f"; {unavailable} unavailable (missing or errored in a report)" if unavailable else ""))
         lines.extend(unstable)
+        effect_targets = [name for name, labels in expected.items()
+                          if labels.get("influence") == ["acted_on"] and "positive_effect" in labels]
+        available = [name for name in effect_targets if all("problem" not in c[name] for c in labeled)]
+        stable_effects = sum(len({repr(c[name]["positive_effect"]) for c in labeled}) == 1
+                             for name in available)
+        lines.append(f"acted_on effect stability: {stable_effects}/{len(available)} identical; "
+                     f"{len(effect_targets) - len(available)} unavailable")
     pairs: dict[str, list[str]] = {}
     for name, case in CASES.items():
-        if case.get("pair"):
+        if case.get("pair") and name in expected:
             pairs.setdefault(case["pair"], []).append(name)
     for pair, names in pairs.items():
+        if len(names) < 2:
+            continue
         for i, cases in enumerate(labeled, 1):
             values = [cases[n].get("novelty", cases[n].get("problem")) for n in names]
             if any("problem" in cases[n] for n in names):

@@ -1,38 +1,9 @@
-"""Report assembly: the `injudge.report/v16` JSON artifact, the statistics-only
-`injudge.summary/v14` distillation, and the stdout summary.
+"""Detailed report v17, compact summary v16, and stdout statistics.
 
-The runtime artifact's output contract: per operation
-{operation_id, kind, seq, payload_summary, verdict, confidence, evidence[]}
-plus the rubric that produced the verdict (per delivered ENTRY, keyed by its
-span-local memory id — relevance / accuracy / novelty / influence /
-positive_effect with notes, plus the entry's action anchors), the judge's
-analysis, the per-entry placement exposure record (what the agent could
-actually see of each canonical value) and the per-entry footprint window
-bounds the anchors were validated against, the agent-run record on judged
-spans ({"path": "agent", "attempts", "llm_calls", "tool_calls",
-"transcript"} plus the gold-regime marker and the forced-answer marker when
-a budget ended the conversation — `transcript` points at the conversation's
-pi event-sourced trajectory JSONL under agent-runs/), the per-span
-pairing-correction count,
-the deterministic delivery-cost and delivery-policy accounting, and per-run
-aggregates (verdict rates, rubric distributions, headline numbers, the
-input-path, gold-regime and forced-answer counts) over all
-audited trajectories — the artifact used to claim one memory system or
-configuration is better than another. The tool block carries the resolved,
-secret-free judge configuration so the run is reproducible from its own
-artifact.
-
-The summary puts the combined results and compact trajectory comparisons
-before the detailed statistics. Rubric distributions, memory tallies and
-the narrative-free span index live under `details` (`operation_id` points
-into the report for the full record). No rubric notes, no recorded memory
-text, no validation log. Judge configuration and source-report provenance
-follow the results rather than interrupting them.
-
-All rubric signals but relevance are enums (accuracy 3-state, novelty
-3-tier-or-null, influence 4-level, positive_effect 3-state-or-null); verdicts are
-derived in code (see judge.derive_verdict) and mere reference never yields
-negative.
+The report keeps each span's judgments, evidence, costs, and judge execution
+record. The summary keeps population totals for comparison and points to the
+report for detail. Recording policy covers whole inputs; judge statistics follow
+the selected population. Neither artifact treats task success as memory impact.
 """
 
 from __future__ import annotations
@@ -43,9 +14,19 @@ from datetime import datetime, timezone
 from util import print_safe, print_validation
 
 from injudge import REPORT_SCHEMA, SUMMARY_SCHEMA
-from injudge.aggregate import aggregate, counted_verdict, policy_rollup
+from injudge.aggregate import aggregate, policy_rollup
 from injudge.judge import _ACCURACY, _NOVELTY
 from injudge.model import InjectionSpan, memory_id, step_range
+
+# The analysis of a span that --episode excluded. Such a span keeps a compact
+# record for joins and real delivery cost, but it is not part of the run's
+# statistics.
+OUTSIDE_SELECTION = "outside --episode"
+
+
+def _outside_selection(op: dict) -> bool:
+    """Exclude only unjudged placeholders marked OUTSIDE_SELECTION."""
+    return op.get("verdict") == "unjudged" and op.get("analysis") == OUTSIDE_SELECTION
 
 
 def _summary_label(m: dict) -> str:
@@ -74,6 +55,15 @@ def payload_summary(span: InjectionSpan) -> str:
 
 def operation_record(span: InjectionSpan, verdict: dict, delivery_cost: dict) -> dict:
     """The per-operation record for one judged (or unjudged) span."""
+    if _outside_selection(verdict):
+        # Keep joins, missingness and real delivery cost without copying
+        # every excluded memory body into a selected-episode report.
+        return {
+            "operation_id": span.id, "kind": "recall_injection_span", "traj": span.traj,
+            "episode_execution_id": span.episode_execution_id, "seq": span.seq_first,
+            "n_injections": span.n_injections, "verdict": "unjudged",
+            "analysis": OUTSIDE_SELECTION, "delivery_cost": delivery_cost,
+        }
     return {
         "operation_id": span.id,
         "kind": "recall_injection_span",
@@ -180,15 +170,17 @@ def build_artifact(
     trajectories: list[dict],
     operations: list[dict],
     injections: list[dict],
-    n_injections_by_traj: dict[str, int],
     validation: list[dict],
 ) -> dict:
+    # Aggregates describe the judged scope. Spans outside --episode are not
+    # in any count, rate or cost total; the policy block keeps whole recordings.
+    scoped = [o for o in operations if not _outside_selection(o)]
     per_traj = {}
     for t in trajectories:
-        ops = [o for o in operations if o["traj"] == t["id"]]
-        per_traj[t["id"]] = aggregate(ops, n_injections_by_traj.get(t["id"], 0))
+        ops = [o for o in scoped if o["traj"] == t["id"]]
+        per_traj[t["id"]] = aggregate(ops, sum(o.get("n_injections") or 0 for o in ops))
         per_traj[t["id"]]["n_episodes"] = len(t.get("episodes", []))
-    overall = aggregate(operations, sum(n_injections_by_traj.values()), len(trajectories))
+    overall = aggregate(scoped, sum(o.get("n_injections") or 0 for o in scoped), len(trajectories))
     overall["n_episodes"] = sum(stats["n_episodes"] for stats in per_traj.values())
     overall["policy"] = policy_rollup(trajectories, validation)
     return {
@@ -310,7 +302,7 @@ def _policy_line(pol: dict) -> str | None:
     density = f"{pol['injection_density']:.2f}" if pol.get("injection_density") is not None else "?"
     restated = f"{pol['restated_ratio']:.0%}" if pol.get("restated_ratio") is not None else "?"
     share = ""
-    if pol.get("injected_token_share") is not None:
+    if pol.get("delivery_token_ratio") is not None:
         # the share exists exactly when a billed trajectory exists — which is
         # also exactly when the rollup sets est_injected_tokens_billed
         est_billed = pol["est_injected_tokens_billed"]
@@ -318,155 +310,27 @@ def _policy_line(pol: dict) -> str | None:
             # the share covers only trajectories with usage records — name its
             # numerator instead of implying est == share x Σprompt
             share = f"; ≈{est_billed:,} of it on runs with usage records"
-        share += f" = {pol['injected_token_share']:.1%} of Σprompt {pol['prompt_tokens_total']:,}"
+        share += f" = {pol['delivery_token_ratio']:.1%} of Σprompt {pol['prompt_tokens_total']:,}"
     searches = f", {pol['n_searches']} searches" if pol.get("n_searches") is not None else ""
     return (
         f"delivery policy: {pol['n_injections']} injections over {pol['n_steps']} steps"
         f"{searches} (density {density}, restated {restated}), "
-        f"injected ≈{pol['est_injected_tokens']:,} tok{share}"
+        f"delivered once ≈{pol['est_injected_tokens']:,} tok{share}"
+        + (f"; resident across recorded inputs ≈{pol['residency']['approx_resident_tokens']:,} tok"
+           if pol.get("residency") else "")
+        + " (chars/4 estimates; not baseline overhead)"
     )
 
 
-def _display_keys(entries: list[dict]) -> list[str]:
-    """Each entry's display key, parallel to `entries`: bare `key` normally;
-    identities sharing one key get a short suffix to stay apart (the full
-    64-char namespace hash is runtime detail — the report keeps it). The
-    suffix is cut from the item id, or from the namespace when the id is the
-    key echoed back — item_key falls back to the display key when the
-    recorder carried no item_id, so the id half cannot tell two namespaces'
-    same-keyed items apart and the identity's other half must speak. The
-    same re-cut applies when two namespaces recorded the SAME item id under
-    the shared key: the id half is identical for both, so the namespace cuts
-    the suffix instead. The re-cut itself can still collide (one namespace
-    carrying two cross-store-shared item ids re-cuts both onto its own
-    string; a namespace base can spell another item's id), so entries still
-    sharing a base escalate to the full item@namespace pair, re-checked to a
-    fixpoint — an escalated pair can spell a surviving base in turn.
-    Two identities whose suffix bases share the 8-char prefix fall back to the
-    full base — a colliding suffix would conflate them in the summary while
-    the report tells them apart."""
-    counts = Counter(e.get("key") for e in entries)
-    bases = [_suffix_base(e) for e in entries]
-    # a suffix base shared by several same-keyed entries is two namespaces'
-    # items recorded under one item id: the id half is identical for both,
-    # so the suffix re-cuts from the namespace — the identity's other half.
-    # The collision counts ride the ORIGINAL bases, so every member of a
-    # colliding group re-cuts, in any entry order.
-    shared = Counter((e.get("key"), b) for e, b in zip(entries, bases) if b)
-    for i, e in enumerate(entries):
-        if shared[(e.get("key"), bases[i])] > 1:
-            ns = e.get("namespace")
-            bases[i] = str(ns) if ns else bases[i]
-    # the re-cut is NOT collision-free: one namespace can carry two items
-    # that each share their item id with other namespaces' items (both
-    # re-cut onto the same namespace base), and a re-cut namespace base can
-    # spell another entry's unre-cut item id — identical bases for distinct
-    # identities, which the short-suffix rule below cannot tell apart (its
-    # prefix groups dedupe equal bases). Colliding bases escalate to the
-    # full identity pair (never prefix-cut: a cut could re-collide them),
-    # re-checked to a fixpoint: an escalated pair can itself spell a
-    # surviving base (an item id containing "@namespace"), earning that base
-    # its own escalation next round. One coincidence stays conflated by
-    # construction — two identities whose full pairs spell the SAME compound
-    # (item "a@b" in namespace "c" vs item "a" in namespace "b@c"): doubly
-    # adversarial, display-only, and the report keeps the full identities.
-    escalated: set[int] = set()
-    while True:
-        final = Counter((e.get("key"), b) for e, b in zip(entries, bases) if b)
-        colliding = [
-            i
-            for i, (e, b) in enumerate(zip(entries, bases))
-            if b and final[(e.get("key"), b)] > 1
-        ]
-        if not colliding:
-            break
-        # an entry's compound is computed from its recorded fields, never
-        # from its current base, so each entry escalates at most once — the
-        # loop ends in at most len(entries) productive rounds
-        progressed = False
-        for i in colliding:
-            compound = _compound_base(entries[i])
-            if bases[i] != compound:
-                bases[i] = compound
-                escalated.add(i)
-                progressed = True
-        if not progressed:
-            break  # the colliding bases ARE the compounds (see above)
-    # group same-keyed bases by their 8-char prefix in one pass: a prefix
-    # shared by DISTINCT bases conflates under the short suffix, so exactly
-    # those fall back to the full base (never an entries × entries scan)
-    prefix_bases: dict[tuple, set[str]] = {}
-    for e, base in zip(entries, bases):
-        prefix_bases.setdefault((e.get("key"), base[:8]), set()).add(base)
-    out = []
-    for i, (e, base) in enumerate(zip(entries, bases)):
-        key = e.get("key")
-        if counts[key] == 1 or not base:
-            out.append(key)
-            continue
-        if i in escalated or len(prefix_bases[(key, base[:8])]) > 1:
-            out.append(f"{key}#{base}")
-            continue
-        out.append(f"{key}#{base[:8]}")
-    return out
-
-
-def _suffix_base(e: dict) -> str:
-    """The identity half a disambiguating suffix is cut from: the recorded
-    item id, else the namespace, else nothing (the entry keeps its bare
-    key)."""
-    item = e.get("item_id")
-    if item and str(item) != str(e.get("key")):
-        return str(item)
-    ns = e.get("namespace")
-    return str(ns) if ns else ""
-
-
-def _compound_base(e: dict) -> str:
-    """The full-identity suffix base: the item id (or the key it echoes)
-    joined with the namespace. One namespace + one item id is one identity
-    (merged upstream), so the pair is unique per entry — up to an
-    "@"-inside-a-field spelling coincidence (_display_keys documents it)."""
-    item = e.get("item_id") or e.get("key")
-    ns = e.get("namespace")
-    return f"{item}@{ns}" if ns else str(item)
-
-
-def _slim_key_list(entries: list[dict]) -> list[dict]:
-    """A triage list (inaccurate/irrelevant keys) as bare statistics:
-    key + the spans that produced it."""
-    return [
-        {"key": display, "spans": e.get("spans") or []}
-        for e, display in zip(entries, _display_keys(entries))
-    ]
-
-
-def _slim_usage_rollup(rolls: list[dict]) -> list[dict]:
-    """Per-memory usage tallies as bare statistics: key + non-zero tallies.
-    The namespace hash and the recorded values stay in the report; a value
-    that actually drifted across spans gets a one-line marker instead."""
-    out = []
-    for r, display in zip(rolls, _display_keys(rolls)):
-        entry = {
-            "key": display,
-            "tallies": {k: n for k, n in (r.get("tallies") or {}).items() if n},
-        }
-        first, last = r.get("first_value"), r.get("last_value")
-        # drift means the RECORDED content changed: a None end recorded no
-        # value at all (redacted/unavailable content) — unrecorded, never a
-        # proven change
-        if first is not None and last is not None and first != last:
-            entry["value_drift"] = True
-        out.append(entry)
-    return out
+SUMMARY_NOTES = (
+    "Delivery and residency estimates use chars // 4. They are not billed tokens "
+    "or overhead relative to a no-memory run.",
+    "Span verdicts measure memory influence, not benchmark task success.",
+)
 
 
 def _slim_aggregate(a: dict) -> dict:
-    """The statistics-only projection of an aggregate block: the verdict
-    tally always; rates / headline / rubric / confidence only when a judged
-    population exists. Empty shells (all-null rates, zero-delivery rubric,
-    null means, zero cost, empty triage) are omitted — the same rule empty
-    `low_confidence` already followed."""
+    """Keep comparison totals; detailed memory records stay in the report."""
     out = {
         "counts": {k: a[k] for k in (
             "n_trajectories", "n_episodes", "n_injections", "n_spans", "restated_injections",
@@ -476,160 +340,99 @@ def _slim_aggregate(a: dict) -> dict:
             "unassessable", "empty",
         )}},
     }
-    rates = a.get("rates") or {}
-    if any(v is not None for v in rates.values()):
-        out["verdicts"]["rates"] = rates
-    headline = a.get("headline") or {}
-    judged = headline.get("judged_spans") or 0
+    judged = sum(a[k] for k in ("positive", "negative", "unresolved", "neutral"))
+    out["verdicts"]["judged_spans"] = judged
     if judged:
-        # the two headline metrics are always presented together — a zero
-        # negative-span rate alone misreads an ignored flood as "harmless";
-        # the caveat rides along when it fired
-        h = {
-            "judged_spans": judged,
-            "positive_span_rate": headline.get("positive_span_rate"),
-            "negative_span_rate": headline.get("negative_span_rate"),
-            "unresolved_span_rate": headline.get("unresolved_span_rate"),
-        }
-        if headline.get("share_without_demonstrated_benefit") is not None:
-            h["share_without_demonstrated_benefit"] = headline["share_without_demonstrated_benefit"]
-            # the share's named numerator/denominator, its unresolved part,
-            # and the excluded error/unjudged/unassessable classes: a bare
-            # share next to the all-class total has read as per-memory truth
-            for name in ("tokens_without_demonstrated_benefit", "unresolved_tokens",
-                         "judged_tokens"):
-                if headline.get(name) is not None:
-                    h[name] = headline[name]
-            if headline.get("error_unjudged_tokens"):
-                h["error_unjudged_tokens"] = headline["error_unjudged_tokens"]
-        if headline.get("unassessable_spans"):
-            h["unassessable_spans"] = headline["unassessable_spans"]
-            if headline.get("unassessable_tokens"):
-                h["unassessable_tokens"] = headline["unassessable_tokens"]
-        if headline.get("caveat"):
-            h["caveat"] = headline["caveat"]
-        out = {"headline": h, **out}
-    delivery = {}
-    cost = a.get("cost") or {}
-    if cost.get("approx_tokens_total") or cost.get("content_chars_total"):
-        delivery["cost"] = cost
-    if a.get("policy"):
-        delivery["policy"] = a["policy"]
-    if delivery:
-        out["delivery"] = delivery
-    judge = {}
-    means = {k: v for k, v in (a.get("mean_confidence_by_verdict") or {}).items()
-             if v is not None}
-    buckets = a.get("confidence_buckets") or {}
-    if means or any(buckets.values()):
-        judge["confidence"] = {"mean_by_verdict": means, "buckets": buckets}
-    for opt in ("input_paths", "gold_scored", "forced_answers"):
-        if opt in a:
-            judge[opt] = a[opt]
-    if a.get("judge_compliance"):
-        judge["compliance"] = a["judge_compliance"]
-    if a.get("low_confidence"):
-        judge["low_confidence"] = a["low_confidence"]
-    if judge:
-        out["judge"] = judge
+        out["verdicts"]["rates"] = a["rates"]
     rub = a.get("rubric") or {}
     if rub.get("deliveries"):
-        rubric = {
-            "deliveries": rub["deliveries"],
-            "counts": rub.get("counts") or {},
-            "rates": rub.get("rates") or {},
+        out["rubric"] = {
+            "judged_entries": rub["deliveries"],
+            "counts": rub["counts"],
+            "rates": rub["rates"],
         }
         if rub.get("no_footprint_reasons"):
-            rubric["no_footprint_reasons"] = rub["no_footprint_reasons"]
-        for name in ("inaccurate_keys", "irrelevant_keys"):
-            entries = rub.get(name) or []
-            if entries:
-                rubric[name] = _slim_key_list(entries)
-        shared = rub.get("shared_anchors") or []
-        if shared:
-            rubric["shared_anchors"] = [
-                {"key": display, "anchors": e.get("anchors") or []}
-                for e, display in zip(shared, _display_keys(shared))
-            ]
-        out["rubric"] = rubric
-    if a.get("memory_usage"):
-        out["memory_usage"] = _slim_usage_rollup(a["memory_usage"])
+            out["rubric"]["no_footprint_reasons"] = rub["no_footprint_reasons"]
+        if rub.get("shared_anchors"):
+            out["rubric"]["shared_action_groups"] = len(rub["shared_anchors"])
+    cost = a.get("cost") or {}
+    if cost.get("approx_tokens_total") or cost.get("content_chars_total"):
+        out["delivery"] = {k: cost[k] for k in ("approx_tokens_total", "approx_tokens_by_verdict")}
     return out
 
 
-def _summary_span_index(op: dict) -> dict:
-    """One span's index entry in the summary: verdict + the per-memory usage
-    LABELS — no rubric notes, no narrative (those live in the report, which
-    `operation_id` points into). Null confidence and empty usage are omitted,
-    and so is a rule-judged auto-neutral span's placeholder "unclear": the
-    summary is the run's statistics set, and the usage rollups exclude the
-    same placeholder (no judge ran), so projecting it here would emit a label
-    no tally can ever corroborate."""
-    out = {"operation_id": op["operation_id"], "verdict": op["verdict"]}
-    if op.get("auto"):
-        out["verdict"] = counted_verdict(op)
-        out["auto"] = op["auto"]
-    if op.get("confidence") is not None:
-        out["confidence"] = op["confidence"]
-    if op.get("steps") is not None:
-        out["steps"] = op["steps"]
-    if op.get("n_injections") is not None:
-        out["n_injections"] = op["n_injections"]
-    if op.get("episode_execution_id"):
-        out["episode_execution_id"] = op["episode_execution_id"]
-    usage = {} if op.get("auto") else {
-        k: v.get("usage") for k, v in (op.get("memory_usage") or {}).items()
-        if v.get("usage")
+def _summary_judge(operations: list[dict], aggregate: dict) -> dict:
+    """Count executed work across phases without treating unknown usage as zero."""
+    inputs = [op["input"] for op in operations if op.get("input")]
+    if not inputs:
+        return {}
+
+    def total(records: list[dict], key: str) -> int | float | None:
+        values = [record.get(key) for record in records]
+        # A total is known only when every attempted span reports that value.
+        return sum(values) if all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                                  for v in values) else None
+
+    judge = {
+        "attempted_spans": len(inputs),
+        "gold_scored": sum(bool(i.get("gold")) for i in inputs),
+        "spans_with_repairs": sum(i.get("attempts", 1) > 1 for i in inputs),
+        "forced_spans": sum(bool(i.get("any_phase_forced", i.get("forced"))) for i in inputs),
+        **{key: total(inputs, key) for key in
+           ("executed_llm_calls", "executed_tool_calls", "context_rollbacks")},
+        "reported_usage": {key: total([i.get("reported_usage") or {} for i in inputs], key)
+                           for key in ("input", "output", "cache_read", "cache_write")},
     }
-    if usage:
-        out["usage"] = usage
-    return out
+    corrections = (aggregate.get("judge_compliance") or {}).get("pe_pairing_corrected_spans")
+    if corrections:
+        judge["effect_pairing_corrected_spans"] = corrections
+    if aggregate.get("low_confidence"):
+        judge["low_confidence_spans"] = len(aggregate["low_confidence"])
+    return judge
 
 
 def build_summary(artifact: dict) -> dict:
-    """Results first, drilldown second, provenance last. Trajectory rows
-    compare populations and verdicts; their ids join to detailed aggregates
-    and spans without repeating the rows.
-    This is a projection of saved statistics, never a re-judgment; retain
-    the source schema and timestamp alongside the secret-free judge config.
-    """
-    spans_by_traj: dict[str, list[dict]] = {}
-    for op in artifact["operations"]:
-        spans_by_traj.setdefault(op["traj"], []).append(_summary_span_index(op))
-    overall = _slim_aggregate(artifact["aggregates"]["overall"])
-    overall_details = {k: overall.pop(k) for k in ("rubric", "memory_usage") if k in overall}
+    """Separate selected judge results from whole-recording policy totals."""
+    aggregate = artifact["aggregates"]["overall"]
+    overall = _slim_aggregate(aggregate)
+    scoped = [op for op in artifact["operations"] if not _outside_selection(op)]
+    if judge := _summary_judge(scoped, aggregate):
+        overall["judge"] = judge
     trajectories = []
-    trajectory_details = {}
     for t in artifact["trajectories"]:
         stats = _slim_aggregate(artifact["aggregates"]["per_trajectory"][t["id"]])
-        if t.get("policy"):
-            stats.setdefault("delivery", {})["policy"] = t["policy"]
-        trajectories.append({
+        row = {
             "id": t["id"],
-            **{k: t[k] for k in ("instance_id", "model", "adapter") if t.get(k)},
-            "counts": stats.pop("counts"),
-            "verdicts": stats.pop("verdicts"),
-        })
-        trajectory_details[t["id"]] = {
-            **stats, "spans": spans_by_traj.get(t["id"], []),
+            **{k: t[k] for k in ("run_id", "instance_id", "model", "adapter") if t.get(k)},
+            "counts": stats["counts"],
+            "verdicts": stats["verdicts"],
         }
-        if t.get("episodes"):
-            trajectory_details[t["id"]]["episodes"] = [{
-                "execution_id": episode["execution_identity"]["execution_id"],
-                "episode_id": episode["recorded_episode_identity"].get("episode_id"),
-                "span_ids": episode["span_ids"],
-                "preparation_status": episode["preparation_status"],
-            } for episode in t["episodes"]]
-    tool = dict(artifact.get("tool") or {})
+        if stats.get("delivery"):
+            row["approx_delivery_tokens"] = stats["delivery"]["approx_tokens_total"]
+        trajectories.append(row)
+    tool = artifact["tool"]
+    summary = {"overall": overall, "trajectories": trajectories}
+    policy = aggregate.get("policy") or {}
+    if policy:
+        summary["recording_policy"] = {
+            "scope": "whole_input_recordings",
+            **{k: v for k, v in policy.items() if k not in ("cost_caveat", "residency")},
+        }
+        if policy.get("residency"):
+            summary["recording_policy"]["residency"] = {
+                k: v for k, v in policy["residency"].items() if k != "proven_resident_chars"}
+    levels = Counter(item.get("level") for item in artifact.get("validation") or [])
+    summary["diagnostics"] = {level: levels[level] for level in ("error", "warn", "info")}
+    if tool.get("selection"):
+        summary["selection"] = tool["selection"]
     return {
-        "overall": overall,
-        "trajectories": trajectories,
-        "details": {"overall": overall_details, "trajectories": trajectory_details},
+        **summary,
+        "notes": list(SUMMARY_NOTES),
+        "report": "injudge-report.json",
         "generated_at": artifact["generated_at"],
         "tool": {"name": "injudge", "schema": SUMMARY_SCHEMA,
-                 "source_report_schema": tool["schema"], **{
-            k: v for k, v in tool.items() if k not in ("name", "schema")
-        }},
+                 "source_report_schema": tool["schema"],
+                 **({"judge_model": tool["judge_model"]} if tool.get("judge_model") else {})},
     }
 
 
@@ -681,7 +484,9 @@ def print_summary(artifact: dict) -> int:
         if caveat:
             print_safe(f"  caveat: {caveat}")
     if (txt := _policy_line(agg.get("policy") or {})) is not None:
-        print_safe(f"  {txt}")
+        # the policy block covers whole recordings, also under --episode
+        scope = " [whole recordings]" if (artifact.get("tool") or {}).get("selection") else ""
+        print_safe(f"  {txt}{scope}")
     rub = agg.get("rubric") or {}
     if (txt := _rubric_line(rub)) is not None:
         print_safe(f"  rubric: {rub['deliveries']} memory-deliveries — {txt}")
@@ -697,13 +502,15 @@ def print_summary(artifact: dict) -> int:
             f"  {t['id']} {name}: {search_txt}{ta['n_injections']} inj, {ta['n_spans']} spans — "
             f"{_verdict_tally(ta)}"
         )
-    inputs = [op["input"] for op in artifact["operations"] if op.get("input")]
-    if inputs:
+    judge = _summary_judge(artifact["operations"], agg)
+    if judge:
+        def count(key: str) -> str:
+            return str(judge[key]) if judge[key] is not None else "unknown"
+
         print_safe(
-            f"  judge: {len(inputs)} spans, {sum(i.get('executed_llm_calls', 0) for i in inputs)} model calls, "
-            f"{sum(i.get('executed_tool_calls', 0) for i in inputs)} tool calls; "
-            f"{sum(bool(i.get('any_phase_forced')) for i in inputs)} forced, "
-            f"{sum(i.get('context_rollbacks', 0) for i in inputs)} context rollbacks"
+            f"  judge: {judge['attempted_spans']} spans, {count('executed_llm_calls')} model calls, "
+            f"{count('executed_tool_calls')} tool calls; "
+            f"{judge['forced_spans']} forced, {count('context_rollbacks')} context rollbacks"
         )
     notes = artifact.get("validation") or []
     if notes:

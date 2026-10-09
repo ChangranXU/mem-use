@@ -183,7 +183,7 @@ class AgentConfig:
     model: str
     api: str = "openai-chat"  # one of API_FORMATS
     max_steps: int = 40  # initial LLM-call cap; resumed investigations are clamped
-    max_output_tokens: int = 65536  # per-call output cap
+    max_output_tokens: int = 32768  # per-call output cap
     context_window: int = 131072  # the model's context window in tokens
     temperature: float = 0.0
     max_attempts: int = 5  # total judge/repair invocations per span
@@ -583,6 +583,11 @@ def _input_record(
             record["forced"] = True
     if health:
         record.update(health)
+    if result is None:
+        # Without a phase result, earlier totals do not cover the full run.
+        for key in ("executed_llm_calls", "executed_tool_calls", "context_rollbacks"):
+            record[key] = None
+        record["reported_usage"] = dict.fromkeys(("input", "output", "cache_read", "cache_write"))
     if transcript is not None:
         record["transcript"] = transcript
     if gold.golden:
@@ -694,6 +699,24 @@ def judge_span(
                 _mask_trajectory_file(trajectory_path, cfg.api_key)
             except OSError as e:
                 mask_error = _mask_key(str(e), cfg.api_key)
+        if result is not None:
+            # Each total needs a valid value from every phase. Later values cannot fill a gap.
+            for key in ("executed_llm_calls", "executed_tool_calls", "context_rollbacks"):
+                value = result.get(key)
+                health[key] = (health[key] + value if health[key] is not None
+                               and isinstance(value, int) and not isinstance(value, bool)
+                               and value >= 0 else None)
+            usage = result.get("reported_usage")
+            for key, previous in health["reported_usage"].items():
+                value = usage.get(key) if isinstance(usage, dict) else None
+                health["reported_usage"][key] = (
+                    previous + value if previous is not None
+                    and isinstance(value, (int, float)) and not isinstance(value, bool)
+                    and value >= 0 and (not isinstance(value, float) or math.isfinite(value)) else None)
+            health["any_phase_forced"] = health["any_phase_forced"] or bool(result.get("forced"))
+            health["retained_llm_calls"] = result.get("llm_calls", 0)
+            health["retained_tool_calls"] = result.get("tool_calls", 0)
+            health["retained_evidence"] = result.get("retained_evidence", 0)
         if mask_error is not None:
             verdict = blank_verdict()
             verdict["error"] = f"cannot mask judge transcript: {mask_error}"
@@ -709,20 +732,6 @@ def judge_span(
             verdict["error"] = "judge agent failed to run (see validation notes)"
             verdict["input"] = _input_record(gold, attempt, None, transcript, health)
             return verdict
-        for key in ("executed_llm_calls", "executed_tool_calls", "context_rollbacks"):
-            value = result.get(key)
-            if isinstance(value, int) and not isinstance(value, bool):
-                health[key] += value
-        usage = result.get("reported_usage")
-        if isinstance(usage, dict):
-            for key in health["reported_usage"]:
-                value = usage.get(key)
-                if isinstance(value, (int, float)) and not isinstance(value, bool):
-                    health["reported_usage"][key] += value
-        health["any_phase_forced"] = health["any_phase_forced"] or bool(result.get("forced"))
-        health["retained_llm_calls"] = result.get("llm_calls", 0)
-        health["retained_tool_calls"] = result.get("tool_calls", 0)
-        health["retained_evidence"] = result.get("retained_evidence", 0)
         read_files = _read_files(result["messages"], files)
         read_steps = _read_steps(read_files, files)
         # which step files the retained conversation actually read: the

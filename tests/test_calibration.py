@@ -116,6 +116,16 @@ def test_calibration_with_no_answers_reports_no_assessed_labels():
     assert lines[0] == f"report 1: no expected labels assessed; {unavailable} unavailable"
 
 
+def test_concurrency_alone_does_not_change_judge_conditions():
+    a = {"tool": {"config": {"judge_parallel": 1, "temperature": 0.5}},
+         "trajectories": [], "operations": []}
+    b = copy.deepcopy(a)
+    b["tool"]["config"]["judge_parallel"] = 4
+    assert not any("settings or provenance differ" in line for line in score([a, b]))
+    b["tool"]["config"]["temperature"] = 0.7
+    assert any("settings or provenance differ" in line for line in score([a, b]))
+
+
 def test_calibration_evidence_does_not_name_the_case(tmp_path, monkeypatch):
     roots = []
     _judge_cases(tmp_path, monkeypatch, roots)
@@ -213,3 +223,100 @@ def test_correction_case_keeps_consequences_after_the_original_action_window(tmp
     files = build_span_evidence(first, episode)
     assert "0 -> 10 (expected 0)" in files["steps/step_000004.md"]
     assert "earlier memory-caused edit" in files["steps/step_000005.md"]
+
+
+def test_effect_agreement_and_stability_do_not_hide_behind_unused_entries(tmp_path, monkeypatch):
+    _status, report = _judge_cases(tmp_path, monkeypatch)
+    changed = copy.deepcopy(report)
+    runs = {t["id"]: t["run_id"] for t in changed["trajectories"]}
+    op = next(o for o in changed["operations"]
+              if runs[o["traj"]] == case_id("diagnostic_verified_harm"))
+    op["rubric"]["m1"]["positive_effect"]["value"] = None
+    op["input"].update(any_phase_forced=True, forced=False, attempts=3,
+                       executed_llm_calls=11, context_rollbacks=1,
+                       reported_usage={"input": 100, "output": 80, "cache_read": 200, "cache_write": 0})
+    lines = score([report, changed], ["diagnostic_verified_harm"])
+    assert "  acted_on effect='harmed': 0/1 agree; 0 unavailable" in lines
+    assert "acted_on effect stability: 0/1 identical; 0 unavailable" in lines
+    assert any("1 forced in any phase, 1 spans requiring repair; executed calls=11" in line
+               and "input=100, output=80, cache_read=200" in line for line in lines)
+    assert not any("unscored" in line for line in lines)
+
+
+def test_calibration_subset_preserves_missing_targets_and_builds_only_requested_cases(tmp_path):
+    paths = build(tmp_path, ["preview_repository_detour"])
+    assert [p.name for p in paths] == [case_id("preview_repository_detour")]
+    lines = score([{"trajectories": [], "operations": []}], ["preview_repository_detour"])
+    assert lines[0] == "report 1: no expected labels assessed; 6 unavailable"
+    assert "  acted_on effect='harmed': 0/0 agree; 1 unavailable" in lines
+
+
+def test_calibration_reports_unknown_judge_usage_without_crashing():
+    report = {
+        "trajectories": [{"id": "T1", "run_id": case_id("explicit_use")}],
+        "operations": [{"traj": "T1", "verdict": "error", "error": "runner failed",
+                        "input": {"attempts": 1, "executed_llm_calls": None,
+                                  "context_rollbacks": None,
+                                  "reported_usage": {"input": None, "output": None,
+                                                     "cache_read": None, "cache_write": None}}}],
+    }
+    lines = score([report], ["explicit_use"])
+    assert any("executed calls=unavailable, context rollbacks=unavailable" in line
+               and "input=unavailable, output=unavailable" in line for line in lines)
+    assert lines[0] == "report 1: no expected labels assessed; 4 unavailable"
+
+
+def test_calibration_changed_settings_are_sensitivity_not_repeatability():
+    reports = [{"tool": {"config": {"max_output_tokens": n}}} for n in (32768, 65536)]
+    assert any("measures sensitivity, not repeatability" in line for line in score(reports))
+
+
+def test_calibration_changed_evidence_is_not_identical_input_repeatability(tmp_path, monkeypatch):
+    _status, report = _judge_cases(tmp_path, monkeypatch)
+    changed = copy.deepcopy(report)
+    changed["operations"][0]["input"]["evidence_sha256"] = "changed-evidence"
+    assert any("evidence differs for a repeated target" in line for line in score([report, changed]))
+
+
+def test_diagnostic_controls_retain_exercise_and_distinguishing_results(tmp_path):
+    from injudge.episodes import prepare_trajectory
+    from injudge.evidence import build_span_evidence
+    from injudge.spans import group_spans
+    from memgraph.graph import load_trajectories
+
+    names = ["diagnostic_exercised_unverified", "diagnostic_verified_benefit", "diagnostic_verified_harm"]
+    paths = build(tmp_path, names)
+    trajectories, ops, events, _ = load_trajectories(paths)
+    expected = {case_id(names[0]): "print(get_id('7'))", case_id(names[1]): "assert get_id('7') == 'li7'",
+                case_id(names[2]): "AssertionError: 'li7' != 'L7E'"}
+    for trajectory in trajectories:
+        episode, = prepare_trajectory(trajectory, events[trajectory.id], ops[trajectory.id]).episodes
+        span, = group_spans(ops[trajectory.id], trajectory.id, episode=episode,
+                           last_step=episode.steps[-1].step)
+        files = build_span_evidence(span, episode)
+        steps = "\n".join(text for path, text in files.items() if path.startswith("steps/"))
+        assert expected[trajectory.run_id] in steps
+        assert span.memory_windows["m1"] == episode.steps[-1].step
+
+
+def test_attribution_controls_keep_the_fix_out_of_the_symptom_only_task(tmp_path):
+    from injudge.episodes import prepare_trajectory
+    from injudge.evidence import build_span_evidence
+    from injudge.spans import group_spans
+    from memgraph.graph import load_trajectories
+
+    names = ["exact_location_competing_code", "exact_location_prior_plan", "exact_task_instruction"]
+    trajectories, ops, events, _ = load_trajectories(build(tmp_path, names))
+    files_by_case = {}
+    for trajectory in trajectories:
+        episode, = prepare_trajectory(trajectory, events[trajectory.id], ops[trajectory.id]).episodes
+        span, = group_spans(ops[trajectory.id], trajectory.id, episode=episode,
+                           last_step=episode.steps[-1].step)
+        name = next(n for n in names if case_id(n) == trajectory.run_id)
+        files_by_case[name] = build_span_evidence(span, episode)
+    tie, plan, instructed = (files_by_case[name] for name in names)
+    assert tie["task.md"] == plan["task.md"]
+    assert "Settings.update" not in tie["task.md"] and "memo" not in tie["task.md"]
+    assert "self.memo.setdefault" in tie["steps/step_000001.md"]
+    assert "I will make that exact change" in plan["steps/step_000002.md"]
+    assert "evict key from self.memo" in instructed["task.md"]
