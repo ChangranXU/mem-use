@@ -25,8 +25,8 @@ action; the query, later diagnosis, gold and a fuller read cannot fill a preview
 missing mechanism. A feature-introduction history alone does not diagnose a
 defect in an already implemented feature.
 
-Novelty, correctness, influence and effect are independent. A redundant reminder
-can shape an action; an inaccurate claim can trigger a useful diagnostic. A
+Novelty, correctness, influence and effect are independent. A redundant entry
+the agent explicitly credits is still acted_on; an inaccurate claim can trigger a useful diagnostic. A
 passing local check proves only the behavior it checks. Local improvement can
 coexist with task failure, and an execution without a recorded result proves
 only an attempt.
@@ -40,8 +40,6 @@ Outcome attachments corroborate but do not determine a signal.
 
 ## Influence and action scope
 
-- `none`: after inspecting the complete window, no reference or attributable
-  action was established. This does not prove zero effect.
 - `referenced`: mentioned, with no changed action established after inspecting
   the complete window. The mention must single out the entry (its shown
   identifier, distinctive content, or list position); a remark about the
@@ -54,16 +52,31 @@ Outcome attachments corroborate but do not determine a signal.
   reading repository code at a distinctive path supplied by memory, is
   acted_on: no other span judges what it returned, so its consequence is this
   entry's effect.
-- `acted_on`: distinctive exposed content, explicit credit, or a demonstrated
-  memory-shaped change of direction influenced an action. A decision needs
-  subsequent execution. Routine practice or wording overlap alone is not use.
-- `null`: an action uses the entry's distinctive content, but an independent
-  source explains the same action equally. Independent sources are the task,
-  code and tool output, and reasoning stated before the delivery. A plan first
-  stated after the delivery is not one. Or the investigation is incomplete. Name
-  the action and the competing source, or the missing evidence. Effect is null.
-  If no action uses the entry's distinctive content, the label is `none`. A
-  shared general direction is not ambiguity.
+- `acted_on`: an action uses memory-specific content, the agent explicitly
+  credits the entry, or the agent turns from a recorded prior direction to the
+  one the entry names right after its delivery. A decision needs subsequent
+  execution.
+- `none`: after inspecting the complete window, no action uses
+  memory-specific content and nothing credits the entry. An action that only
+  carries out the task's instruction or the agent's own pre-delivery decision
+  is explained by that source. This does not prove zero effect.
+- `null`: an action uses content that, before the delivery, was stated only as
+  an open possibility (the agent's unverified hypothesis, question, or search
+  query) or only in a prior source the agent had not acted on, and nothing in
+  the record separates the two; or the window was not read completely. Name
+  the action and the quoted prior source, or the unread steps. Effect is null.
+
+Memory-specific content is a specific mechanism, location, identifier, value,
+command, check, or remedy the entry exposed that no prior source states. Prior
+sources are the records before the first consuming step: the task, the visible
+input, earlier steps' reasoning, commands, queries and tool results, and other
+deliveries already in the input. A prior source counts only when the judge can
+quote the same specific content from it. A pattern used elsewhere, content a
+capable agent could derive, outside knowledge, and anything recorded at or after
+the consuming step do not compete. Routine practice (reproducing the failure,
+running tests, reading the code at hand) is not memory-specific unless the action
+uses a detail only the entry named. This makes attribution an observable test
+instead of a weighing of how "equally" two sources explain an action.
 
 The redundant `decisive` tier was removed in v15. Describe a course change in
 an `acted_on` note. A preview can directly shape an edit without being opened;
@@ -172,14 +185,12 @@ from no-effect use. Complete `read_steps` now certifies the step files themselve
 baseline references do not count as reading those files. Older reports are not silently reinterpreted. See
 [Artifacts](artifacts.md) and [Judge evidence](scoring-input.md).
 
-A prior code read is not a precommitted plan. If a later action uses an exact
-location or mechanism from memory and earlier code supports that same action
-equally, attribution remains null unless the record distinguishes the sources.
-Exact same-item, same-text copies in one consuming input are one memory source.
-Distinct framing and later actions still need judgment.
+A prior code read that shows a location without stating the remedy does not
+compete with memory that states it. Exact same-item, same-text copies in one
+consuming input are one memory source.
 
 An explicit task instruction specifying the same concrete action supports none
-when memory adds nothing and there is no credit, reminder or changed direction.
-A symptom or desired outcome does not specify the implementation action.
+when memory adds nothing and there is no credit. A symptom or desired outcome
+does not specify the implementation action.
 Narrative analysis must preserve a null attribution instead of naming either
 competing source as the established cause.

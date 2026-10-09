@@ -11,7 +11,7 @@ Use exactly this shape:
       "novelty":         {"value": @novelty@,
                           "note": "<baseline citation, or specific gap for null>"},
       "influence":       {"value": @influence@,
-                          "note": "<consuming step; action; source; attribution>"},
+                          "note": "<action step; memory-specific content it uses, or the quoted prior source>"},
       "positive_effect": {"value": @positive_effect@,
                           "note": "<result step and demonstrated consequence, or what remains unknown>"},
       "anchors":         [<int>...]
@@ -22,11 +22,11 @@ Use exactly this shape:
                 "seqs": [<int>...]}...],
   "confidence": <number 0.0-1.0>
 }
-Keep causal-source arguments in entry notes. An influence note's source is
-an exact task quote, a tool/earlier step, memory, or common practice.
-Keep analysis and evidence claims consistent with those notes: when attribution
-is null, do not summarize either memory or its competing source as the
-established cause of the action.
+Keep causal-source arguments in entry notes: an influence note names the
+memory-specific content an action uses, or the quoted prior source or
+routine practice that explains it. Keep analysis and evidence claims
+consistent with those notes: when attribution is null, do not summarize
+either memory or its competing source as the established cause.
 memories has exactly one entry per delivered id. anchors lists in-window
 steps where the shaped action or decision happened, including the consuming
 step when applicable. A decision can anchor credit if later execution

@@ -29,9 +29,9 @@ injudge.agent (the retry continues the same agent conversation, so it
 costs no re-reading), and exhaustion becomes verdict "error" with the raw
 text kept — it is NEVER silently coerced to neutral, because that would
 pollute the neutral rate with judge failures. Novelty, accuracy,
-influence, and effect are ORTHOGONAL signals — a redundant memory can
-still change the action as a reminder, and refuted content can still have
-triggered the fix — so no cross-signal combination is a contract
+influence, and effect are ORTHOGONAL signals — a redundant memory the
+agent explicitly credits is still acted on, and refuted content can still
+have triggered the fix — so no cross-signal combination is a contract
 violation.
 
 The evidence grounds every memory to its recorded placement exposure: a
@@ -47,6 +47,7 @@ import json
 import math
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
 
 from injudge.model import InjectionSpan, memory_id, step_range
@@ -432,8 +433,8 @@ def _verdict_semantics(
     evidence of influence), and the anchor/influence shape the contract
     states (anchors are empty when influence is `none` — there is no
     footprint to cite). Novelty, accuracy, influence, and effect are
-    ORTHOGONAL signals and stay so here: a redundant memory can still act
-    as a reminder that changes an action, and refuted content can still
+    ORTHOGONAL signals and stay so here: a redundant memory the agent
+    explicitly credits is still acted on, and refuted content can still
     have triggered the diagnostic that found the fix — no cross-signal
     combination is a shape contradiction, so none is rejected.
     `last_step` is a required argument (None only when the caller holds no
@@ -605,78 +606,23 @@ _MASK_MIN_KEY = 8  # a key this short is no credential: masking its every
 # occurrence (a single letter matches ordinary words) would destroy the
 # kept endpoint output while protecting nothing
 
-_HEX_ESCAPE = re.compile("%[0-9A-Fa-f]{2}")
 
-# The byte values even a hand-rolled aggressive escaper leaves literal:
-# ASCII alphanumerics (quote & co. also leave the unreserved -_.~, which is
-# why the spelling that encodes them needs its own form below).
-_ASCII_ALNUM = frozenset(b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
-_JSON_STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
-
-
-def _key_forms(api_key: str) -> set[str]:
-    """Every spelling of the key an echoing endpoint can carry: the raw
-    value plus the percent-encoded forms a URL-logging gateway produces —
-    quote (leaves '/' literal), quote_plus (encodes it, maps space to '+'),
-    safe='' (encodes it too; none of the three ever encodes the unreserved
-    -_.~ and alphanumerics), the fully-encoded spelling an aggressive
-    encoder emits (every byte percent-encoded), and the non-alphanumeric
-    spelling a hand-rolled escaper emits (every byte outside [A-Za-z0-9]
-    percent-encoded — an sk- key's dash becomes %2D). The mask matches each
-    escape case-insensitively while preserving the key's literal case."""
-    from urllib.parse import quote, quote_plus
-
-    return {
-        api_key,
-        repr(api_key)[1:-1],  # validation messages can quote endpoint values
-        quote(api_key),
-        quote(api_key, safe=""),
-        quote_plus(api_key),
-        "".join(f"%{b:02X}" for b in api_key.encode("utf-8")),
-        "".join(
-            chr(b) if b in _ASCII_ALNUM else f"%{b:02X}"
-            for b in api_key.encode("utf-8")
-        ),
-    }
+@lru_cache(maxsize=4)
+def _key_pattern(api_key: str) -> re.Pattern[str]:
+    """The key raw or percent-encoded: each character matches itself or its
+    %XX escape in either hex case, covering every URL-encoder's spelling."""
+    return re.compile("".join(
+        f"(?:{re.escape(ch)}|" + "".join(f"(?i:%{b:02X})" for b in ch.encode()) + ")"
+        for ch in api_key))
 
 
 def _mask_key(text: str, api_key: str) -> str:
-    """The configured key masked wherever endpoint output could echo it
-    back: an auth/proxy fault page reflecting the request (the credential
-    header) must never write the .env secret into a verdict, validation
-    note, or report artifact. Covers the raw value and every urlencoded
-    spelling (a gateway spelling the request as a URL carries those, in
-    either hex case)."""
+    """Mask the configured key wherever endpoint output echoes it (an
+    auth/proxy fault page reflecting the request) before the text reaches a
+    verdict, validation note, or artifact."""
     if not api_key or len(api_key) < _MASK_MIN_KEY:
         return text
-    # Escapes can mix hex case within one echo. Literal key characters stay
-    # case-sensitive, and unrelated escapes keep their original spelling.
-    pattern = re.compile("|".join(
-        _HEX_ESCAPE.sub(lambda m: f"(?i:{m[0]})", re.escape(form))
-        for form in sorted(_key_forms(api_key), key=len, reverse=True)
-    ))
-
-    def mask_json_string(match: re.Match[str], depth: int) -> str:
-        try:
-            value = json.loads(match[0])
-        except ValueError:
-            return match[0]  # quoted prose need not be a valid JSON string
-        masked = mask(value, depth + 1)
-        return json.dumps(masked, ensure_ascii=False) if masked != value else match[0]
-
-    def mask(value: str, depth: int = 0) -> str:
-        # Transcripts embed answer JSON inside message JSON. Decode string
-        # literals before matching so escaping at either layer cannot hide
-        # a credential; unchanged literals retain their exact spelling.
-        if "\\" in value:
-            # Excessively wrapped endpoint text is not useful evidence. Mask
-            # the whole literal instead of risking an unmasked failed rewrite.
-            if depth >= 16:
-                return "***"
-            value = _JSON_STRING.sub(lambda m: mask_json_string(m, depth), value)
-        return pattern.sub("***", value)
-
-    return mask(text)
+    return _key_pattern(api_key).sub("***", text)
 
 
 def _masked_head(text: str, api_key: str, cap: int) -> str:

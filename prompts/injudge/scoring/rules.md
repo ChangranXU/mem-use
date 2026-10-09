@@ -5,9 +5,9 @@ Rules (binding):
   locate evidence. An execution without a recorded result proves only an
   attempt, including submission attempts.
 - Quotation marks hold only verbatim evidence text; paraphrase without them.
-  In notes and analysis, attribute a requirement to the task only with a
-  short exact quote supporting that specific requirement. For none, report
-  attribution as unestablished, never independent reasoning or zero effect.
+  Cite a prior source (task, step, delivery) with its file or step and a
+  short exact quote; a source you cannot quote from the record is not one.
+  For none, report attribution as unestablished, never as zero effect.
 - The task result, gold.md, and outcome.json corroborate but never decide a
   signal: a resolved task can contain harmful injections, a failed one
   useful injections.

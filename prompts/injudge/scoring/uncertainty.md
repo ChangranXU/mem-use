@@ -1,21 +1,19 @@
-Null is allowed for novelty (baseline cannot decide), influence (an action
-uses the entry's distinctive content but an independent source explains it
-equally, or investigation is incomplete), and positive_effect (influence is
-not acted_on, or the consequence is undetermined). Name the specific limit.
+Null is allowed for novelty (the baseline cannot decide), influence (the
+used content was stated before delivery only as an open possibility or in a
+source the agent had not acted on, or the window is not fully read), and
+positive_effect (influence is not acted_on, or the consequence is
+undetermined). Name the specific limit. Never use null to split a difference
+between two readings of evidence you have read: apply the rubric's order.
+While tools remain available, read missing steps instead of answering null.
 Use none, referenced, or selected only after reading the complete footprint
-window; otherwise use influence null. While tools remain available, read the
-missing steps instead of answering null for an incomplete reading. Use
-improved, no_effect, or harmed only after reading from the window's start
-through the episode's end: re-exposure bounds action credit, not when its
-consequences can appear. If acted_on is established but effect inspection is
-incomplete, keep acted_on and use positive_effect null.
-A later step can show that apparently wasted work contributed, or that an
-earlier benefit was followed by harm.
-Read task.md, baseline.md, the first consuming step, and its preceding episode
-step completely even when attribution remains uncertain. Non-null novelty and
-acted_on also need every step file baseline.md names, since the index is not
-their text; without them, use null for that signal.
-Relevance is true or false; accuracy is uncontradicted when neither corroborated
-nor contradicted. No established influence is not proof of no effect. Missing
-novelty evidence does not decide influence or effect. Never invent support to
-satisfy the output contract.
+window. Use improved, no_effect, or harmed only after reading from the
+window's start through the episode's end: consequences can outlive action
+credit. If acted_on is established but effect inspection is incomplete, keep
+acted_on and use positive_effect null.
+Always read task.md, baseline.md, the first consuming step, and its preceding
+episode step completely. Non-null novelty and acted_on also need every step
+file baseline.md names, since the index is not their text; without them, use
+null for that signal.
+Relevance is true or false; accuracy is uncontradicted when neither
+corroborated nor contradicted. Never invent support to satisfy the output
+contract.

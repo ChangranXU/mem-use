@@ -1,12 +1,16 @@
 ---
-description: "injudge.report/v19, injudge.summary/v17, every field, and how every rate is counted."
+description: "injudge.report/v20, injudge.summary/v17, every field, and how every rate is counted."
 icon: box-archive
 ---
 
 # Artifacts
 
-Report v19 removes the aggregate `headline` block. Verdict counts, rates, and
-costs by verdict remain. Judge labels and summary schema v17 do not change.
+Report v20 changes how influence is attributed: an action credits memory only
+when it uses content no pre-exposure record states, and influence null no
+longer means "another source explains it equally" (see
+[Verdict derivation](verdict-derivation.md)). Influence, effect, and verdict
+counts from v19 and earlier are not comparable. The artifact shape and summary
+schema v17 are unchanged; v19 had removed the aggregate `headline` block.
 A bundle can contain both useful and harmful entries, so its verdict cannot
 measure how many tokens helped.
 
@@ -15,7 +19,7 @@ execution. A memory-misdirected detour that is abandoned or corrected without a
 used finding is harm. An agent typo, missing tool, or unrelated environment
 failure alone does not prove memory harm; follow corrected attempts to their
 results. Do not combine effect labels or rates from different scoring versions.
-Older reports remain historical artifacts; memgraph accepts only report v19.
+Older reports remain historical artifacts; memgraph accepts only report v20.
 
 {% hint style="info" %}
 injudge writes all artifacts of a run to that run's own `<run-stamp>/` folder under the output container (`-o DIR`, default `output/`) — a run never overwrites another run's artifacts.
@@ -23,7 +27,7 @@ injudge writes all artifacts of a run to that run's own `<run-stamp>/` folder un
 
 | File | Schema | Role |
 |---|---|---|
-| `injudge-report.json` | `injudge.report/v19` | Runtime judging record. Checkpointed after each completed span, with pending spans marked `unjudged`, so interruption within a multi-episode trajectory keeps completed work. Feed it to memgraph with `--verdicts`. |
+| `injudge-report.json` | `injudge.report/v20` | Runtime judging record. Checkpointed after each completed span, with pending spans marked `unjudged`, so interruption within a multi-episode trajectory keeps completed work. Feed it to memgraph with `--verdicts`. |
 | `summary.json` | `injudge.summary/v17` | Compact final statistics: counts, rates, delivery estimates, and judge execution totals. |
 | `summary.md` | — | Short readable summary of the same totals, the spans to inspect first, diagnostic counts, and links to the JSON files. |
 | `memgraph-verdicts.html` | — | Only with `--html` (off by default): memgraph with recall nodes colored by span verdict. |
@@ -76,7 +80,7 @@ Episode counts appear alongside trajectory/span counts. Empty deliveries and
 unobserved consumers use separate classes (`empty`, `unassessable`), outside
 verdict-rate denominators. The report keeps complete diagnostics, memory
 identities, episode rows, and span records. `memgraph --verdicts` accepts only
-`injudge.report/v19`.
+`injudge.report/v20`.
 
 ### The Report's Aggregates
 

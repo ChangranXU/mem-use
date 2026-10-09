@@ -28,7 +28,7 @@ uv run -m injudge <paths> --dry-run --limit 3
 
 | 文件 | 内容 |
 |---|---|
-| `injudge-report.json` | 运行时评审记录（`injudge.report/v19`），付费调用前写入并将待评区间标为 `unjudged`；每个区间完成后保存，包括并行完成的结果 |
+| `injudge-report.json` | 运行时评审记录（`injudge.report/v20`），付费调用前写入并将待评区间标为 `unjudged`；每个区间完成后保存，包括并行完成的结果 |
 | `summary.json` | 最终统计（`injudge.summary/v17`）：计数、比率、投递估算、评审运行总量 |
 | `memgraph-verdicts.html` | 仅在 `--html` 时产出：召回节点按判定着色的 memgraph |
 | `evidence/` | 每个送入评审智能体的区间一个文件夹（含运行失败产生的 error 判定）：只包含目标 `span.md`，加上其父 episode 已准备的文件与可选附件 |

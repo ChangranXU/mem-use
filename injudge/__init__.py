@@ -21,6 +21,9 @@ from __future__ import annotations
 # (injudge.report.py) and the reader (memgraph/verdicts.py) so a bump can
 # never land on one side only and surface at read time. Tests pin the
 # literal deliberately — a bump must update them (see AGENTS.md).
+# v20 changes influence attribution (memory-specific content, null only for
+# unread windows or open-possibility ties): influence, effect, and verdict
+# counts are not comparable with v19. The artifact shape is unchanged.
 # v19 removes the aggregate headline block and the unused span set-diff
 # fields (new/removed/previous/changed keys). Verdict counts, rates, costs
 # by verdict, and judge labels are unchanged. Summary keeps schema v17.
@@ -29,7 +32,7 @@ from __future__ import annotations
 # accuracy over relevant entries (rubric.relevant_counts). Judge labels are
 # unchanged from v17, which separated memory misdirection from execution
 # slips. v16 harm judgments are not directly comparable.
-REPORT_SCHEMA = "injudge.report/v19"
+REPORT_SCHEMA = "injudge.report/v20"
 
 # v17 rates novelty and accuracy over relevant entries (relevant_counts);
 # v16 rated them over all entries. Per-memory evidence stays in the report.

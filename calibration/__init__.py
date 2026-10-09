@@ -742,7 +742,8 @@ CASES["guidance_environment_blocked"] = {
     "expect": {"influence": ["acted_on"], "positive_effect": [None], "verdict": ["unresolved"]},
 }
 
-# Raw code visibility and a committed prior direction are different evidence.
+# Code that shows the location without stating the remedy is not a prior
+# source; a committed prior direction is.
 _TIE = {
     "task": "Changed settings take effect only after restarting the process. Fix this.",
     "before": [("Inspect settings and the cache.", "cat settings.py",
@@ -752,7 +753,7 @@ _TIE = {
     "consumer": ("Invalidate the cache in update.", "python edit_settings.py",
                  "def update(self, key, value): self.values[key] = value; self.memo.pop(key, None)"),
     "after": [("Check invalidation.", "pytest test_settings.py -q", "3 passed")],
-    "expect": {"influence": [None], "positive_effect": [None], "verdict": ["unresolved"]},
+    "expect": {"influence": ["acted_on"], "positive_effect": [None], "verdict": ["unresolved"]},
 }
 CASES["exact_location_competing_code"] = _TIE
 CASES["exact_location_prior_plan"] = {

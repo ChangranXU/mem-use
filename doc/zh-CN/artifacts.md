@@ -1,18 +1,20 @@
 ---
-description: "injudge.report/v19、injudge.summary/v17、全部字段，以及每项比率如何计数。"
+description: "injudge.report/v20、injudge.summary/v17、全部字段，以及每项比率如何计数。"
 icon: box-archive
 ---
 
 # 产物
 
-Report v19 删除了 aggregates 中的 `headline` 块。判定计数、比率和按判定分类的
-成本保留；评审标签与 summary schema v17 不变。一个记忆包可以同时包含有益
+Report v20 改变影响归因：只有当行动使用了暴露前记录未陈述的内容时才归功于记忆，
+influence null 不再表示"另一来源同样能解释"（见[判定推导](verdict-derivation.md)）。
+v19 及更早版本的影响、效果与判定计数不可比较。产物结构与 summary schema v17 不变；
+v19 已删除 aggregates 中的 `headline` 块。一个记忆包可以同时包含有益
 和有害条目，因此不能用整包判定衡量哪些 token 带来了收益。
 
 Report 和 summary 区分记忆指导造成的危害和执行中的失败。由记忆误导、
 随后放弃或纠正且没有产生被使用发现的弯路计为危害。智能体自身的笔误、缺失工具
 或无关环境失败本身不能证明记忆危害；应追踪纠正后的结果。不要混合比较不同评分
-版本的效果标签或比率。旧报告保留为历史产物；memgraph 仅接受 report v19。
+版本的效果标签或比率。旧报告保留为历史产物；memgraph 仅接受 report v20。
 
 {% hint style="info" %}
 injudge 把一次运行的全部产物写入输出容器（`-o DIR`，默认 `output/`）下该次运行自己的 `<run-stamp>/` 文件夹——一次运行绝不覆盖另一次运行的产物。
@@ -20,7 +22,7 @@ injudge 把一次运行的全部产物写入输出容器（`-o DIR`，默认 `ou
 
 | 文件 | Schema | 作用 |
 |---|---|---|
-| `injudge-report.json` | `injudge.report/v19` | 运行时评审记录。每个区间完成后保存，待评区间标为 `unjudged`；即使一条多 episode 轨迹中途被打断，也保留已完成部分。用 `--verdicts` 喂给 memgraph。 |
+| `injudge-report.json` | `injudge.report/v20` | 运行时评审记录。每个区间完成后保存，待评区间标为 `unjudged`；即使一条多 episode 轨迹中途被打断，也保留已完成部分。用 `--verdicts` 喂给 memgraph。 |
 | `summary.json` | `injudge.summary/v17` | 精简最终统计：计数、比率、投递估算及评审运行总量。 |
 | `summary.md` | — | 同一批统计的简短可读摘要，列出应优先查看的区间、诊断计数，并链接到 JSON 文件。 |
 | `memgraph-verdicts.html` | — | 仅在 `--html` 时产出（默认关闭）：召回节点按区间判定着色的 memgraph。 |
@@ -66,7 +68,7 @@ memgraph 的 `--json` 产物是 `{tool, trajectories, ops, memories, edges, vali
 
 Episode 数与轨迹/区间数一起呈现。空投递和不可观察消费者分别计为 `empty`、
 `unassessable`，不进入判定比率分母。完整诊断、记忆身份、episode 行和区间记录
-保留在 report。`memgraph --verdicts` 只接受 `injudge.report/v19`。
+保留在 report。`memgraph --verdicts` 只接受 `injudge.report/v20`。
 
 ### Report 的 aggregates
 

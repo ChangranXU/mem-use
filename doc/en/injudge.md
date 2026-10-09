@@ -28,7 +28,7 @@ Each run writes its own `<run-stamp>/` folder (`YYYYMMDD-HHMMSS-<hex>`) under `-
 
 | File | Contents |
 |---|---|
-| `injudge-report.json` | The runtime judging record (`injudge.report/v19`), written before paid work with pending spans marked `unjudged`, then checkpointed after each completed span, including parallel completions |
+| `injudge-report.json` | The runtime judging record (`injudge.report/v20`), written before paid work with pending spans marked `unjudged`, then checkpointed after each completed span, including parallel completions |
 | `summary.json` | The final statistics (`injudge.summary/v17`): counts, rates, delivery estimates, judge execution totals |
 | `memgraph-verdicts.html` | Only with `--html`: memgraph with recall nodes colored by verdict |
 | `evidence/` | One folder per span sent to the judge agent (error verdicts from a failed run included): target `span.md` plus only its parent's prepared episode files and optional attachments |

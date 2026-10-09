@@ -7,7 +7,7 @@ mem-eval scores memory-system quality from schema-v10 gate trajectories
   self-contained HTML/JSON graph.
 - **injudge** scores each episode-scoped recall span's subsequent influence
   with an agentic LLM rubric (a pi agent searching one evidence folder per
-  span) and writes `injudge.report/v19`, which memgraph can overlay with
+  span) and writes `injudge.report/v20`, which memgraph can overlay with
   `--verdicts`.
 
 An injection is judged by its influence on later agent turns. The final
@@ -106,7 +106,7 @@ memgraph/parse_trajectory.py  # trajectory.jsonl → ops; shared step rule
 memgraph/episodes.py       # shared episode-scope rule (bridge boundaries) + graph episode rows
 memgraph/graph.py          # path discovery, cross-trajectory linking, validation
 memgraph/html.py           # self-contained HTML (template + embedded graph JSON)
-memgraph/verdicts.py       # merge injudge.report/v19 onto recall ops
+memgraph/verdicts.py       # merge injudge.report/v20 onto recall ops
 memgraph/__main__.py       # python3 -m memgraph
 injudge/__init__.py        # REPORT_SCHEMA / SUMMARY_SCHEMA (writer + memgraph reader)
 injudge/model.py           # AgentStep / ToolExec / InjectionSpan
@@ -120,7 +120,7 @@ injudge/agent.py           # .env → AgentConfig, runner subprocess, corrective
 injudge/gold.py            # golden-answer / correctness sidecars and CLI joins
 injudge/prompts.py         # loads prompts/ (never inline prompts in code)
 injudge/aggregate.py       # verdict counts/rates, per-memory usage roll-ups
-injudge/report.py          # injudge.report/v19 + injudge.summary/v17 + summary.md + stdout
+injudge/report.py          # injudge.report/v20 + injudge.summary/v17 + summary.md + stdout
 injudge/__main__.py        # python3 -m injudge
 agent/                     # TS judge agent: runner.ts (pi Agent + budgets),
                            # evidence-tools.ts (scoped read-only tools),
@@ -327,8 +327,18 @@ A retrieval returning no recorded delivery,
 or reading repository code at a memory-supplied distinctive path, is
 acted_on. `referenced` records a mention singling out that entry (a remark on
 the whole result list references none of several entries); `none` records
-no established influence after complete window inspection. A course change is `acted_on`,
-described in the note. Selection and acted-on claims require in-window action
+no established influence after complete window inspection. Attribution is an
+observable test, never a weighing of how "equally" two sources explain an
+action: `acted_on` needs an in-window action using memory-specific content (a
+specific mechanism, location, identifier, value, command, check, or remedy no
+pre-exposure record states — quotable from the task, visible input, earlier
+steps, or deliveries already in the input), explicit credit, or a course change
+right after delivery. Derivable content, outside knowledge, patterns used
+elsewhere, and post-exposure findings never compete; routine practice is not
+memory-specific. Content the task instructed or the agent decided before
+delivery gives `none`; content stated before delivery only as an open
+possibility (hypothesis, question, the agent's own query) or in a source the
+agent had not acted on gives influence null. Selection and acted-on claims require in-window action
 anchors. Only acted_on keeps a non-null effect; assembly coerces any other
 pairing to null and counts it under judge compliance.
 An explicit search using an entry's shown key is recorded as `memory_followups`
@@ -344,8 +354,8 @@ probe is not harm, while a memory-misdirected abandoned attempt without a used f
 
 Historical retrieval relevance requires the connecting mechanism or applicable
 action in the exposed text; a query or later diagnosis cannot supply it. Explicit
-task instructions that already specify the action can support none, while a
-symptom alone is not an implementation plan. Narrative summaries preserve null
+task instructions that already specify the action give none, while a symptom
+alone is not an implementation plan. Narrative summaries preserve null
 attribution instead of naming a competing source as the established cause.
 
 The judge is an AGENT, not one prompt. Python prepares episodes before
@@ -509,10 +519,9 @@ These are load-bearing; never weaken them.
   the request — an auth/proxy fault reflecting the credential, in an HTTP
   error page or a 200 answer alike — is masked before any of its text
   reaches a verdict, `judge_raw`, or validation note. Masking covers the
-  raw key and every percent-encoded spelling (quote, quote_plus,
-  fully-encoded, non-alphanumeric-encoded — an sk- key's dash as `%2D` —
-  each also in lowercase hex). A key shorter than 8 characters is treated
-  as no credential and left unmasked.
+  raw key and any percent-encoding of its characters, in either hex case.
+  A key shorter than 8 characters is treated as no credential and left
+  unmasked.
 - The memgraph HTML is an untrusted-content host. Every trajectory- or
   artifact-controlled value interpolated into it is escaped: the embedded
   graph JSON has every `<` (plus U+2028/U+2029) unicode-escaped, the title
@@ -554,7 +563,7 @@ The HTML colors rewrite markers by each marker's own `on_memory_lane` flag,
 computed at parse time against the final lane set. Do not prune a field
 from one consumer only.
 
-**injudge** writes `injudge.report/v19` (`{tool, generated_at, trajectories,
+**injudge** writes `injudge.report/v20` (`{tool, generated_at, trajectories,
 operations, injections, aggregates, validation}`), checkpointed after every
 completed span (including parallel completions), with pending spans explicitly
 `unjudged`, so interruption within a multi-episode trajectory keeps completed
@@ -647,12 +656,15 @@ source_report_schema, and judge_model. `notes` states that delivery/residency
 estimates use chars divided by four and are not billing or overhead relative
 to a no-memory run. Span verdicts measure
 memory influence, not benchmark task success.
-Report v19 removes the aggregate `headline` block. It keeps verdict counts,
+Report v20 narrows influence null to unread windows and open-possibility ties
+(attribution is the memory-specific-content test above); v19 and earlier
+influence/effect/verdict counts are not comparable. v19 removed the aggregate
+`headline` block. The report keeps verdict counts,
 rates, costs by verdict, and the same judge labels. A mixed bundle can contain
 useful and harmful entries, so costs by verdict do not measure per-memory token
 benefit. Summary v17 is unchanged.
 Summary has no span or episode index, memory lists, confidence
-means/buckets, configuration, or provenance. Those details remain in report v19.
+means/buckets, configuration, or provenance. Those details remain in report v20.
 Empty/unassessable/error/unjudged spans stay outside verdict-rate denominators.
 Rates are omitted when no spans were judged; rubric is omitted without judged
 entries, and judge counters without agent runs. JSON uses two-space indentation.
