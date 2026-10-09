@@ -38,6 +38,13 @@ Each text is stored once, so a judge never reads a copy as a second source. `bas
 
 Step bodies are not truncated or renumbered. Each span's step file labels its timing as pre-exposure, first consuming step (post-exposure), or post-exposure, using global step numbers. This describes when the agent acted or read the result, not when the displayed source code was originally written; it does not replace per-entry action windows or prove continued visibility. The opening includes `span.md` and compact navigation, not the detailed manifest or step bodies; the runner checks its full estimated context against the input watermark **before** any paid call. Gold selects the gold rubric for that episode's spans, while outcome is corroboration only.
 
+The `deliveries.md` file entry in `manifest.json` includes `sections`, each
+with a delivery `ref` and inclusive `line_start` / `line_end`. These bounds
+are recorded during rendering, so headings inside memory text cannot forge
+them. They let coverage checks require only the complete sections for other
+deliveries visible in the baseline. Target deliveries point to the opening's
+`span.md` text and have no section to reread.
+
 ## The Tools
 
 The agent's entire toolset is two read-only operations, scoped to that one folder:

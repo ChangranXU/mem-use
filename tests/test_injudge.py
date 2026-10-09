@@ -2641,6 +2641,31 @@ def test_masking_covers_json_escapes_in_saved_artifacts(tmp_path, key, literal):
     assert json.loads(record["answer"]) == {"echo": "***"}
 
 
+@pytest.mark.parametrize("key,fragment", [
+    ("sk-abcdefgh", r'{"echo":"sk\u002dabcdefgh'),
+    ("sk-ab/cd+ef=gh", r'{"echo":"sk-ab\/cd+ef=gh'),
+    ("sk-abcdefgh", '{"echo":"sk\\u002dabcdefgh' + '\\'),
+    ("sk-abcdefgh", r'{"echo":"sk\u002dabcdefgh\q"}'),
+])
+def test_masking_redacts_malformed_json_credential_echoes(tmp_path, key, fragment):
+    from injudge.agent import _mask_trajectory_file
+
+    verdict = _error_verdict("invalid", fragment, _FakeSpan(), [], key)
+    assert "abcdefgh" not in verdict["judge_raw"] and "cd+ef=gh" not in verdict["judge_raw"]
+    assert "***" in verdict["judge_raw"]
+    transcript = tmp_path / "trace.jsonl"
+    complete = json.dumps({"answer": fragment}) + "\n"
+    transcript.write_text(complete + fragment)
+    _mask_trajectory_file(transcript, key)
+    first, tail = transcript.read_text().split("\n", 1)
+    assert json.loads(first)["answer"] == verdict["judge_raw"]
+    assert tail == verdict["judge_raw"]
+    cut = tmp_path / "cut.jsonl"
+    cut.write_text(json.dumps({"answer": fragment})[:-2])  # runner killed mid-write
+    _mask_trajectory_file(cut, key)
+    assert "abcdefgh" not in cut.read_text() and "cd+ef=gh" not in cut.read_text()
+
+
 def test_masking_excessive_json_wrapping_keeps_a_safe_transcript(tmp_path):
     from injudge.agent import _mask_trajectory_file
 
@@ -2659,11 +2684,20 @@ def test_masking_excessive_json_wrapping_keeps_a_safe_transcript(tmp_path):
     assert answer == "***"
 
 
-def test_masking_preserves_unrelated_json_escapes():
+@pytest.mark.parametrize("text", [
+    r'{"answer":"{\"text\":\"unrelated\\n\\u002f\"}"}',
+    r'grep -n "DJANGO_SETTINGS_MODULE\|settings=" tests/runtests.py',  # invalid JSON escape
+    r'{"answer":"cut off at / and \d',  # unfinished string
+])
+def test_masking_preserves_unrelated_json_escapes(tmp_path, text):
+    from injudge.agent import _mask_trajectory_file
     from injudge.judge import _mask_key
 
-    text = r'{"answer":"{\"text\":\"unrelated\\n\\u002f\"}"}'
     assert _mask_key(text, "sk-abcdefgh") == text
+    transcript = tmp_path / "trace.jsonl"
+    transcript.write_text(json.dumps({"answer": text}) + "\n")
+    _mask_trajectory_file(transcript, "sk-abcdefgh")
+    assert json.loads(transcript.read_text())["answer"] == text
 
 
 def test_masking_covers_every_urlencoded_spelling():
@@ -2797,11 +2831,12 @@ def test_cli_timeout_override_must_be_finite(monkeypatch, timeout):
 
 
 def _reads(*steps):
-    """Retained baseline and step reads, shaped like runner toolResult messages."""
+    """Retained source reads, shaped like runner toolResult messages."""
     return [{"role": "toolResult", "toolName": "read_evidence", "isError": False,
              "_fixture_read": True,
              "details": {"path": path, "lines_read": 3}}
-            for path in ["task.md", "baseline.md", *(f"steps/step_{s:06d}.md" for s in steps)]]
+            for path in ["task.md", "baseline.md", "deliveries.md",
+                         *(f"steps/step_{s:06d}.md" for s in steps)]]
 
 
 def _fill_reads(result, evidence_dir):

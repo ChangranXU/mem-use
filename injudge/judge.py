@@ -605,7 +605,9 @@ def blank_verdict() -> dict:
 _MASK_MIN_KEY = 8  # a key this short is no credential: masking its every
 # occurrence (a single letter matches ordinary words) would destroy the
 # kept endpoint output while protecting nothing
-_JSON_STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
+# Include an unfinished final string, even one cut just after a backslash.
+_JSON_STRING = re.compile(r'"(?:[^"\\]|\\[\s\S])*(?:"|\\?\Z)')
+_ESCAPE = re.compile(r"\\(?:u([0-9a-fA-F]{4})|([\s\S]))")
 
 
 @lru_cache(maxsize=4)
@@ -629,18 +631,24 @@ def _mask_key(text: str, api_key: str) -> str:
         try:
             value = json.loads(match[0])
         except ValueError:
-            return match[0]  # quoted endpoint prose need not be valid JSON
+            # A cut-off or malformed string (or quoted code, e.g. a grep
+            # pattern) can still spell the key through its escapes: decode
+            # them loosely and redact the fragment only when they do.
+            body = match[0][1:]
+            loose = _ESCAPE.sub(lambda m: chr(int(m[1], 16)) if m[1] else m[2], body)
+            return '"***"' if loose != body and mask(loose, depth + 1) != loose else match[0]
         masked = mask(value, depth + 1)
         return json.dumps(masked, ensure_ascii=False) if masked != value else match[0]
 
     def mask(value: str, depth: int = 0) -> str:
+        value = pattern.sub("***", value)
         # Even ASCII keys can be JSON-escaped inside an answer, itself a
         # string in the transcript. Unchanged literals keep their spelling.
         if "\\" in value:
             if depth >= 16:
                 return "***"  # fail closed on excessively wrapped strings
             value = _JSON_STRING.sub(lambda m: mask_json_string(m, depth), value)
-        return pattern.sub("***", value)
+        return value
 
     return mask(text)
 

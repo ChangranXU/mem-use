@@ -68,9 +68,15 @@ An answer cut at the output cap fails the contract parse and takes the correctiv
 
 The API key travels from Python to the runner only through the `JUDGE_API_KEY` environment variable — never through the job file, the result file, or any artifact — and is sent only to the configured endpoint. Endpoint output that echoes the request (an auth/proxy fault page reflecting the credential, in an HTTP error or a 200 answer alike) is masked before any of its text reaches a verdict, `judge_raw`, or a validation note: the raw key and every percent-encoded spelling, in either hex case.
 
-Masking follows JSON string escapes, including answer JSON nested inside transcript records. Excessively wrapped strings are masked as a whole. An interrupted UTF-8 write still gets masked; if saving the masked transcript fails, the raw file is removed and the span records an error with its input diagnostics.
+Masking follows JSON string escapes, including answer JSON nested inside transcript records. Excessively wrapped strings, and malformed or unfinished quoted fragments whose escapes spell the key, are masked as a whole; other quoted text such as code keeps its spelling. An interrupted UTF-8 write still gets masked; if saving the masked transcript fails, the raw file is removed and the span records an error with its input diagnostics.
 
 Successful read metadata includes `line_start`, `line_end`, and `truncated`, counting only text actually returned after the character cap. A read whose `limit` stops before the file's last non-blank line ends with a note giving the remaining line count and the next offset. Paged reads combine. `read_steps` certifies complete step text, not just file access: header-only reads, truncated lines, search hits and rolled-back reads do not qualify. Every answer requires complete task and baseline files, the first consuming step, and its preceding episode step if present. The baseline index does not certify its referenced files: non-null novelty and acted-on influence also require every step file it names for visible input, or use null. None/referenced/selected require the full entry window; a non-null acted-on effect requires the episode remainder as well, because consequences can outlive an action window. Incomplete attribution or effect uses influence or positive_effect null. Complete coverage does not prove the judgment itself is correct.
+
+Non-null novelty and acted-on influence also require the complete sections of
+other deliveries visible in the baseline. The manifest supplies their line
+ranges in `deliveries.md`; partial retained reads combine under the same rules
+as step files. Target text is already in the opening, and deliveries absent
+from that input do not need extra baseline reads.
 
 A character-capped read gives an exact continuation `offset` and `column`.
 `column` counts Unicode characters within the first requested line, starting

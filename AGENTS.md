@@ -411,8 +411,10 @@ Easy to get wrong:
   step file combine). Header-only reads do not count. Every answer also requires complete task.md,
   baseline.md, and the preceding episode step when present; baseline references
   do not certify their source files, so non-null novelty and acted_on influence
-  also require every step file baseline.md names for visible input. None/referenced/selected require the complete
-  footprint window; a non-null acted-on effect requires reading from its start
+  also require every step file baseline.md names for visible input and the
+  complete sections of other visible deliveries in deliveries.md (the manifest
+  records their line ranges; the target's text is already in the opening).
+  None/referenced/selected require the complete footprint window; a non-null acted-on effect requires reading from its start
   through the episode end, since consequences can outlive action credit. Incomplete investigation must use
   influence (or effect) null, not fabricate neutrality or benefit. Harm in any
   of an entry's shaped actions makes its effect harmed. If the first answer
@@ -523,7 +525,8 @@ These are load-bearing; never weaken them.
   reaches a verdict, `judge_raw`, or validation note. Masking covers the
   raw key and any percent-encoding of its characters, in either hex case.
   JSON string escapes are decoded for masking, including nested transcript
-  answers; excessively wrapped strings are masked as a whole.
+  answers; excessively wrapped strings, and malformed or unfinished quoted
+  fragments whose escapes spell the key, are masked as a whole.
   A key shorter than 8 characters is treated as no credential and left
   unmasked.
 - The memgraph HTML is an untrusted-content host. Every trajectory- or

@@ -12,6 +12,8 @@ Investigate before assigning labels:
 2. Was that content stated before the delivery? For each such action, look
    for the same specific content in task.md, the preceding step, and the
    step files baseline.md names (search them for its identifiers or values).
+   Also read the complete sections of other visible deliveries in
+   deliveries.md; manifest.json lists their line ranges.
    Quote what you find; content you cannot quote from those records is
    memory-specific.
 3. What did the action lead to? Follow it through the episode's remainder:

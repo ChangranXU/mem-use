@@ -440,9 +440,12 @@ def build_episode_evidence(episode: EpisodeInput, target_ops: set[str] | None = 
     })
 
     delivery_lines = ["# Memory deliveries", ""]
+    delivery_sections = []
+    next_line = len(delivery_lines) + 1
     if not episode.deliveries:
         delivery_lines.append("(no deliveries recorded)")
     for delivery in episode.deliveries:
+        start = len(delivery_lines)
         prefix = delivery.get("entry_prefix") or "D?"
         consumer = delivery.get("consumer") or {}
         target = delivery.get("op_id") in (target_ops or ())
@@ -459,21 +462,27 @@ def build_episode_evidence(episode: EpisodeInput, target_ops: set[str] | None = 
         if target:
             delivery_lines.extend([f"placement and entries: in span.md ({prefix}.E1, {prefix}.E2, … are "
                                    "[m1], [m2], … in order)", ""])
-            continue
-        for placement in delivery.get("placements", []):
-            delivery_lines.append(
-                f"placement {placement.get('slot')!r} ({placement.get('kind') or 'kind unrecorded'}; "
-                f"source {((placement.get('source_resolution') or {}).get('status') or 'unknown')}):"
-            )
-            text = placement.get("text")
-            delivery_lines.append(text if text is not None else "(placement content unrecorded)")
-        memories = delivery.get("memories") or []
-        if memories:
-            delivery_lines.append("delivered entries:")
-            delivery_lines.extend(_episode_memory_line(entry) for entry in memories)
-        elif not delivery.get("placements"):
-            delivery_lines.append("(empty delivery: no memories and no placement slots)")
-        delivery_lines.append("")
+        else:
+            for placement in delivery.get("placements", []):
+                delivery_lines.append(
+                    f"placement {placement.get('slot')!r} ({placement.get('kind') or 'kind unrecorded'}; "
+                    f"source {((placement.get('source_resolution') or {}).get('status') or 'unknown')}):"
+                )
+                text = placement.get("text")
+                delivery_lines.append(text if text is not None else "(placement content unrecorded)")
+            memories = delivery.get("memories") or []
+            if memories:
+                delivery_lines.append("delivered entries:")
+                delivery_lines.extend(_episode_memory_line(entry) for entry in memories)
+            elif not delivery.get("placements"):
+                delivery_lines.append("(empty delivery: no memories and no placement slots)")
+            delivery_lines.append("")
+        end_line = next_line + sum(text.count("\n") + 1 for text in delivery_lines[start:]) - 1
+        if not target:
+            # Record boundaries while rendering: memory text can itself
+            # contain Markdown headings, so reparsing headings is unsafe.
+            delivery_sections.append({"ref": prefix, "line_start": next_line, "line_end": end_line})
+        next_line = end_line + 1
     files["deliveries.md"] = "\n".join(delivery_lines) + "\n"
 
     files["searches.json"] = _records_json({
@@ -488,6 +497,7 @@ def build_episode_evidence(episode: EpisodeInput, target_ops: set[str] | None = 
     entries = [_file_entry(name, kind, files) for name, kind in (
         ("task.md", "task"), ("deliveries.md", "deliveries"),
         ("searches.json", "searches"), ("context.json", "context"))]
+    next(entry for entry in entries if entry["kind"] == "deliveries")["sections"] = delivery_sections
     for step in episode.steps:
         name = step_files[step.turn]
         entries.append({"path": name, "kind": "step", "step": step.step, "turn": step.turn,

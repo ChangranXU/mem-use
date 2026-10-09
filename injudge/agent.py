@@ -423,7 +423,7 @@ def _invoke_runner(
 
 
 def _read_files(messages: list, files: dict[str, str]) -> set[str]:
-    """Certify complete evidence text, including reads paged across calls.
+    """Certify files and delivery sections, including reads paged across calls.
 
     Only text actually returned and retained counts. Line-range metadata
     alone would certify a header or a truncated result as an entire step.
@@ -468,6 +468,16 @@ def _read_files(messages: list, files: dict[str, str]) -> set[str]:
         needed = {i for i, line in enumerate(lines[path], 1) if line.strip()}
         if needed and needed <= complete.get(path, set()):
             read.add(path)
+    # A visible earlier delivery needs its whole section, not unrelated
+    # later deliveries sharing the same file. Targets are in the opening.
+    index = json.loads(files["manifest.json"])
+    for entry in index["files"]:
+        path = entry["path"]
+        for section in entry.get("sections", []):
+            needed = {i for i in range(section["line_start"], section["line_end"] + 1)
+                      if lines[path][i - 1].strip()}
+            if needed and needed <= complete.get(path, set()):
+                read.add(f"{path}#{section['ref']}")
     return read
 
 
@@ -484,7 +494,8 @@ def _baseline_error(obj: dict, span: InjectionSpan, files: dict[str, str],
     The index does not certify its referenced sources; a complete preceding
     step gives the immediate prior direction without restoring evicted history.
     Novelty and acted-on credit compare the entry with everything the consumer
-    could still see, so those claims need every step file holding that input.
+    could still see, including memory text moved out of its host into
+    deliveries.md. Only visible non-target delivery sections are required.
     """
     required = {"task.md", "baseline.md"}
     index = json.loads(files["manifest.json"])
@@ -503,13 +514,21 @@ def _baseline_error(obj: dict, span: InjectionSpan, files: dict[str, str],
     sources = sorted({record["text_in"] for record in context["message_occurrences"]
                       if record["occurrence_id"] in visible and record.get("text_in") in step_paths}
                      - read_files)
+    delivery_refs = {ref for record in context["message_occurrences"]
+                     if record["occurrence_id"] in visible
+                     for ref in record.get("memory_delivery_refs", [])}
+    for file in index["files"]:
+        for section in file.get("sections", []):
+            ref = section["ref"]
+            if ref in delivery_refs and f"{file['path']}#{ref}" not in read_files:
+                sources.append(f"{file['path']} {ref} lines {section['line_start']}–{section['line_end']}")
     for entry in obj["memories"] if sources else []:
         novelty = entry["novelty"]["value"]
         claims = [f"novelty {novelty!r}"] if novelty is not None else []
         if entry["influence"]["value"] == "acted_on":
             claims.append("acted_on influence")
         if claims:
-            gaps.append(f"{entry['id']} claims {' and '.join(claims)} without reading the step files "
+            gaps.append(f"{entry['id']} claims {' and '.join(claims)} without reading the source text "
                         f"baseline.md names for visible input: {sources}; read them, or use null "
                         "for a signal whose prior-knowledge comparison remains unassessed")
     return "; ".join(gaps) or None

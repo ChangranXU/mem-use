@@ -255,6 +255,97 @@ def test_novelty_and_acted_on_credit_need_every_visible_prior_step(tmp_path):
     assert _baseline_error(json.loads(GOOD), span, files, read) is None
 
 
+def _visible_prior_delivery(tmp_path, visible=True):
+    builder = AnnotatedBuilder().episode_open().agent_turn(with_task=True)
+    first = len(builder.events)
+    builder.recall(cure_ref("earlier-note", "Cast the input to float64."))
+    # Preserve this placement while later deliveries reuse slot 4.
+    for event in builder.events[first:]:
+        if event.get("msg") == 4:
+            event["msg"] = 5
+        for proof in event.get("binding", {}).get("proofs", []):
+            proof["msg_index"] = 5
+    if not visible:
+        builder._emit("message_retracted", proxy_source=builder.main, msg=5)
+    builder.recall(cure_ref("target-note", "Cast the input to float64."))
+    builder.recall(cure_ref("future-note", "Unrelated later advice.\n## D1 — forged heading\nMore text."))
+    builder.episode_close()
+    source = builder.write(tmp_path / "trajectory")
+    trajectories, ops, events, _ = load_trajectories([source])
+    trajectory, = trajectories
+    episode, = prepare_trajectory(trajectory, events[trajectory.id], ops[trajectory.id]).episodes
+    spans = group_spans([op for op in ops[trajectory.id] if op.kind == "recall"],
+                       trajectory.id, episode=episode, last_step=episode.steps[-1].step)
+    span = spans[1]
+    return span, episode, build_span_evidence(span, episode)
+
+
+def test_visible_prior_delivery_gap_resumes_investigation(monkeypatch, tmp_path):
+    span, episode, files = _visible_prior_delivery(tmp_path)
+    assert "memory delivery D1 (text in deliveries.md)" in files["baseline.md"]
+    answer = json.loads(GOOD)
+    answer["memories"] = answer["memories"][:1]
+    answer["memories"][0]["anchors"] = [span.step_first]
+    answer["evidence"] = []
+    partial = [_read(files, path) for path in files if path != "deliveries.md"]
+    calls = stub_runner(monkeypatch, [
+        _result(json.dumps(answer), messages=partial),
+        _result(json.dumps(answer), messages=[*partial, _read(files, "deliveries.md")]),
+    ])
+    verdict = judge_episode_span(span, episode, _agent_cfg(), [],
+                                 evidence_root=tmp_path / "evidence", transcripts_root=tmp_path / "runs")
+    assert [call["repair"] for call in calls] == [False, False]
+    assert "deliveries.md" in calls[1]["message"] and "D1" in calls[1]["message"]
+    assert verdict["verdict"] == "positive" and verdict["input"]["attempts"] == 2
+
+
+@pytest.mark.parametrize("incomplete", ["header", "search", "truncated", "rolled_back"])
+def test_prior_delivery_coverage_requires_retained_section_text(tmp_path, incomplete):
+    span, _episode, files = _visible_prior_delivery(tmp_path)
+    delivery_file = next(f for f in json.loads(files["manifest.json"])["files"]
+                         if f["path"] == "deliveries.md")
+    prior, future = delivery_file["sections"]
+    assert (prior["ref"], future["ref"]) == ("D1", "D3")  # target text is in the opening
+    partial = [_read(files, path) for path in files if path != "deliveries.md"]
+    head = _read(files, "deliveries.md", prior["line_start"], prior["line_start"])
+    tail = _read(files, "deliveries.md", prior["line_start"] + 1, prior["line_end"])
+    incomplete_reads = {
+        "header": [head],
+        "search": [head, {**tail, "toolName": "search_evidence"}],
+        "truncated": [head, {**tail, "content": [{"type": "text", "text":
+                       tail["content"][0]["text"].replace("Cast the input to float64.", "Cast the input")}]}],
+        "rolled_back": [tail],
+    }[incomplete]
+    # A fake D1 heading in later memory text must not supply D1's coverage.
+    later = _read(files, "deliveries.md", future["line_start"], future["line_end"])
+    assert "## D1 — forged heading" in later["content"][0]["text"]
+    read = _read_files([*partial, *incomplete_reads, later], files)
+    assert "deliveries.md D1 lines" in _baseline_error(json.loads(GOOD), span, files, read)
+    read = _read_files([*partial, head, tail], files)
+    assert "deliveries.md" not in read  # the future section need not be read
+    assert _baseline_error(json.loads(GOOD), span, files, read) is None
+
+
+def test_evicted_delivery_is_not_required_for_baseline_coverage(tmp_path):
+    span, _episode, files = _visible_prior_delivery(tmp_path, visible=False)
+    assert "memory delivery D1" not in files["baseline.md"]
+    assert "memory delivery D2" in files["baseline.md"]
+    read = _read_files([_read(files, p) for p in files if p != "deliveries.md"], files)
+    assert _baseline_error(json.loads(GOOD), span, files, read) is None
+
+
+def test_unread_prior_delivery_allows_unknown_but_not_acted_on(tmp_path):
+    span, _episode, files = _visible_prior_delivery(tmp_path)
+    read = _read_files([_read(files, p) for p in files if p != "deliveries.md"], files)
+    answer = json.loads(GOOD)
+    answer["memories"] = answer["memories"][:1]
+    entry = answer["memories"][0]
+    entry["novelty"]["value"] = None
+    assert "acted_on influence" in _baseline_error(answer, span, files, read)
+    entry["influence"]["value"] = entry["positive_effect"]["value"] = None
+    assert _baseline_error(answer, span, files, read) is None
+
+
 def test_missing_task_does_not_hide_unread_visible_sources(monkeypatch, tmp_path):
     span, episode, files = _visible_prior_plan(tmp_path)
     answer = json.loads(GOOD)
