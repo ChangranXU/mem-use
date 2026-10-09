@@ -605,6 +605,7 @@ def blank_verdict() -> dict:
 _MASK_MIN_KEY = 8  # a key this short is no credential: masking its every
 # occurrence (a single letter matches ordinary words) would destroy the
 # kept endpoint output while protecting nothing
+_JSON_STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
 
 
 @lru_cache(maxsize=4)
@@ -622,7 +623,26 @@ def _mask_key(text: str, api_key: str) -> str:
     verdict, validation note, or artifact."""
     if not api_key or len(api_key) < _MASK_MIN_KEY:
         return text
-    return _key_pattern(api_key).sub("***", text)
+    pattern = _key_pattern(api_key)
+
+    def mask_json_string(match: re.Match[str], depth: int) -> str:
+        try:
+            value = json.loads(match[0])
+        except ValueError:
+            return match[0]  # quoted endpoint prose need not be valid JSON
+        masked = mask(value, depth + 1)
+        return json.dumps(masked, ensure_ascii=False) if masked != value else match[0]
+
+    def mask(value: str, depth: int = 0) -> str:
+        # Even ASCII keys can be JSON-escaped inside an answer, itself a
+        # string in the transcript. Unchanged literals keep their spelling.
+        if "\\" in value:
+            if depth >= 16:
+                return "***"  # fail closed on excessively wrapped strings
+            value = _JSON_STRING.sub(lambda m: mask_json_string(m, depth), value)
+        return pattern.sub("***", value)
+
+    return mask(text)
 
 
 def _masked_head(text: str, api_key: str, cap: int) -> str:

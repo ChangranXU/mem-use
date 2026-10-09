@@ -37,18 +37,20 @@
      acted_on;
    - referenced: the agent mentions or quotes this entry (its shown
      identifier, distinctive content, or list position; a remark about the
-     whole result list references no single entry) with no action
-     established;
-   - none: no action uses memory-specific content and nothing credits this
-     entry. An action that only carries out what the task instructs, or
-     what the agent decided or did before the delivery, is explained by that
-     source;
+     whole result list references no single entry unless this entry was the
+     only one shown) with no action established;
    - null: an action uses content that, before the delivery, was stated only
      as an open possibility (the agent's unverified hypothesis, question, or
      search query) or only in a prior source the agent had not acted on,
      and the record shows nothing that separates the two; or the window was
      not inspected completely. Name the action and the quoted prior source,
-     or the unread steps.
+     or the unread steps;
+   - none: after reading the complete window, no reference, selection, or
+     attributable action was established, and no action remains ambiguous
+     under the null rule above. An action that only carries out what the
+     task instructs, or what the agent decided or did before the delivery,
+     is explained by that source. An open possibility or a prior source the
+     agent had not acted on is not a settled decision: apply null first.
 
    Deliveries of other items are prior sources once they are in the agent's
    input. When a preview's shown identifier selected a recorded fuller

@@ -56,15 +56,17 @@ Outcome attachments corroborate but do not determine a signal.
   credits the entry, or the agent turns from a recorded prior direction to the
   one the entry names right after its delivery. A decision needs subsequent
   execution.
-- `none`: after inspecting the complete window, no action uses
-  memory-specific content and nothing credits the entry. An action that only
-  carries out the task's instruction or the agent's own pre-delivery decision
-  is explained by that source. This does not prove zero effect.
 - `null`: an action uses content that, before the delivery, was stated only as
   an open possibility (the agent's unverified hypothesis, question, or search
   query) or only in a prior source the agent had not acted on, and nothing in
   the record separates the two; or the window was not read completely. Name
   the action and the quoted prior source, or the unread steps. Effect is null.
+- `none`: after inspecting the complete window, no reference, selection, or
+  attributable action was established, and no action remains ambiguous under
+  the `null` rule. An action that only carries out the task's instruction or
+  the agent's own pre-delivery decision is explained by that source. An open
+  possibility or a prior source the agent had not acted on is not a settled
+  decision: apply `null` first. This does not prove zero effect.
 
 Memory-specific content is a specific mechanism, location, identifier, value,
 command, check, or remedy the entry exposed that no prior source states. Prior

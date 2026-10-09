@@ -2620,6 +2620,52 @@ def test_masking_skips_degenerate_short_keys():
     assert _mask_key("sk-secret guided", "sk-secret") == "*** guided"
 
 
+@pytest.mark.parametrize("key,literal", [
+    ("sk-abcdefgh", r'"sk\u002dabcdefgh"'),
+    ("sk-ab/cd+ef=gh", r'"sk-ab\/cd+ef=gh"'),
+    ("sk-ab/cd+ef=gh", r'"sk-ab\u002fcd%2bef%3dgh"'),
+    ('sk-quote"slash\\secret', json.dumps('sk-quote"slash\\secret')),
+    ("sk-unicode-é-secret", json.dumps("sk-unicode-é-secret")),
+])
+def test_masking_covers_json_escapes_in_saved_artifacts(tmp_path, key, literal):
+    from injudge.agent import _mask_trajectory_file
+
+    answer = '{"echo":' + literal + '}'
+    verdict = _error_verdict("invalid", answer, _FakeSpan(), [], key)
+    assert json.loads(verdict["judge_raw"]) == {"echo": "***"}
+    transcript = tmp_path / "trace.jsonl"
+    transcript.write_text(json.dumps({"answer": answer, "error": json.loads(literal)}) + "\n")
+    _mask_trajectory_file(transcript, key)
+    record = json.loads(transcript.read_text())
+    assert record["error"] == "***"
+    assert json.loads(record["answer"]) == {"echo": "***"}
+
+
+def test_masking_excessive_json_wrapping_keeps_a_safe_transcript(tmp_path):
+    from injudge.agent import _mask_trajectory_file
+
+    key = "sk-abcdefgh"
+    wrapped = r'"sk\u002dabcdefgh"'
+    for _ in range(18):
+        wrapped = json.dumps(wrapped)
+    transcript = tmp_path / "trace.jsonl"
+    transcript.write_text(json.dumps({"answer": wrapped, "error": key}) + "\n")
+    _mask_trajectory_file(transcript, key)
+    record = json.loads(transcript.read_text())
+    assert record["error"] == "***"
+    answer = record["answer"]
+    while answer.startswith('"'):
+        answer = json.loads(answer)
+    assert answer == "***"
+
+
+def test_masking_preserves_unrelated_json_escapes():
+    from injudge.judge import _mask_key
+
+    text = r'{"answer":"{\"text\":\"unrelated\\n\\u002f\"}"}'
+    assert _mask_key(text, "sk-abcdefgh") == text
+
+
 def test_masking_covers_every_urlencoded_spelling():
     """A URL-logging gateway can percent-encode the key with any encoder —
     quote (leaves '/' literal), quote_plus, safe='' — encode every byte

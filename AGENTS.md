@@ -326,7 +326,8 @@ create influence or transfer actions already shaped before the full read.
 A retrieval returning no recorded delivery,
 or reading repository code at a memory-supplied distinctive path, is
 acted_on. `referenced` records a mention singling out that entry (a remark on
-the whole result list references none of several entries); `none` records
+the whole result list references none of several entries, but does reference
+the entry when only one was shown); `none` records
 no established influence after complete window inspection. Attribution is an
 observable test, never a weighing of how "equally" two sources explain an
 action: `acted_on` needs an in-window action using memory-specific content (a
@@ -338,7 +339,8 @@ elsewhere, and post-exposure findings never compete; routine practice is not
 memory-specific. Content the task instructed or the agent decided before
 delivery gives `none`; content stated before delivery only as an open
 possibility (hypothesis, question, the agent's own query) or in a source the
-agent had not acted on gives influence null. Selection and acted-on claims require in-window action
+agent had not acted on gives influence null. Check these unresolved ties before
+`none`; an open possibility is not a settled decision. Selection and acted-on claims require in-window action
 anchors. Only acted_on keeps a non-null effect; assembly coerces any other
 pairing to null and counts it under judge compliance.
 An explicit search using an entry's shown key is recorded as `memory_followups`
@@ -442,9 +444,9 @@ Easy to get wrong:
 - The API key travels to the runner only via the JUDGE_API_KEY
   environment variable — never in the job/result files — and endpoint
   output that echoes it is masked before any text reaches a verdict,
-  `judge_raw`, or validation note (raw key and every percent-encoded
-  spelling, either hex case; a key shorter than 8 characters is no
-  credential). A runner-level failure mid-run (the subprocess fails to
+  `judge_raw`, or validation note (raw key, every percent-encoded
+  spelling in either hex case, and JSON-escaped spellings; a key shorter
+  than 8 characters is no credential). A runner-level failure mid-run (the subprocess fails to
   start, exits non-zero, exceeds its wall-clock bound, or writes no
   readable result) is that span's error verdict with a note, not a
   retry; a missing node, runner, or agent-package tree is setup misuse
@@ -520,6 +522,8 @@ These are load-bearing; never weaken them.
   error page or a 200 answer alike — is masked before any of its text
   reaches a verdict, `judge_raw`, or validation note. Masking covers the
   raw key and any percent-encoding of its characters, in either hex case.
+  JSON string escapes are decoded for masking, including nested transcript
+  answers; excessively wrapped strings are masked as a whole.
   A key shorter than 8 characters is treated as no credential and left
   unmasked.
 - The memgraph HTML is an untrusted-content host. Every trajectory- or
