@@ -1,25 +1,24 @@
-3. novelty (@novelty@) — was the substance already available before the
-   delivery? The baseline is the task and updates available by then,
-   baseline.md and earlier visible input; never the target
-   placement or later input. Novelty is relative to this recorded baseline,
-   not the agent's unobserved knowledge; even common practice can be novel.
-   - confirming: the agent had voiced it as open (a suspicion, hypothesis, or
-     unverified assumption) and the memory settles it. Expressed uncertainty
-     wins even when supporting facts were already visible;
-   - redundant: already established — stated in the task, stated or applied
-     by the agent, or shown by a tool result;
-   - novel: the baseline supports that it was new; absence from an incomplete
-     record is not enough;
-   - null: the baseline cannot decide; name the missing context.
-   Expected task outputs do not automatically supply the solution mechanism.
-   Do not call a prescription redundant because the agent could derive it.
-   Judge substance, not wording: a related or contradictory proposition does
-   not establish this claim in the baseline. For a memory with several claims, it is
-   redundant only if every material claim was established; otherwise take
-   the tier of the rest (confirming if all were open, else novel) and name
-   which claims were known and which were new. Do not drop a claim from
-   novelty because it is irrelevant to this task. Cite the task text or step
-   the tier rests on. Earlier deliveries are part of the baseline only
-   while still in the consuming input: span.md states this for each entry.
-   A copy still there is earlier visible input; one that arrived in the
-   same input is not earlier.
+3. novelty (@novelty@) — compare substance with the recorded pre-delivery
+   baseline, not the agent's unobserved knowledge.
+   a. Use the task and updates available then, baseline.md, and earlier
+      visible input. Exclude the target and later input. Earlier deliveries
+      count only while still visible, as span.md states; copies arriving in
+      the same consuming input are not earlier.
+   b. Compare the same proposition, including material claims irrelevant to
+      the task. Related or contradictory claims do not establish it. Expected
+      outputs do not supply a solution mechanism, and derivability does not
+      make advice already known; even common practice can be novel.
+   c. Assign:
+      - confirming: the agent voiced it as an open hypothesis or assumption
+        and the memory settles it. Expressed uncertainty wins even when
+        supporting facts were already visible;
+      - redundant: already established in the task, agent's statements or
+        actions, or tool results;
+      - novel: absent from the inspected recorded baseline, with no missing
+        baseline source preventing that comparison;
+      - null: a missing or unread baseline source prevents the comparison.
+        Name that source or recorded visibility gap.
+   For mixed claims, redundant requires every material claim to be established.
+   Otherwise classify the remaining claims: confirming if all were open,
+   else novel, unless a baseline gap prevents deciding. Name what was known
+   and what was new or open, citing the task text or step.

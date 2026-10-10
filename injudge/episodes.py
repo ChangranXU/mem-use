@@ -125,8 +125,12 @@ def _replay_context(
 
     Retried closes can repeat a slot and missing records leave holes. Neither
     changes what ``kept`` means: only indexes below that prefix survive.
+    An explicit retraction is known absence; a slot with no source record is
+    missing evidence. Check the latter at each input so later records can fill it.
     """
     history: dict[str | None, dict[int, dict[str, Any]]] = {}
+    recorded_slots: dict[str | None, set[int]] = {}
+    retained_prefix: dict[str | None, int] = {}
     views: dict[int, ContextView] = {}
     occurrences: dict[str, dict[str, Any]] = {}
     gaps: dict[str | None, list[str]] = {}
@@ -139,6 +143,7 @@ def _replay_context(
         if lane not in main_lanes:
             continue
         prior = history.setdefault(lane, {})
+        recorded = recorded_slots.setdefault(lane, set())
         if typ == "history_rewritten":
             kept = _as_int(event.get("kept"))
             if kept is None or kept < 0:
@@ -146,8 +151,12 @@ def _replay_context(
                 gaps.setdefault(lane, []).append(note)
                 diagnostics.append(note)
                 prior.clear()
+                recorded.clear()
+                retained_prefix.pop(lane, None)
             else:
                 history[lane] = {slot: item for slot, item in prior.items() if slot < kept}
+                recorded_slots[lane] = set(history[lane])
+                retained_prefix[lane] = kept
                 if len(history[lane]) == kept:
                     # Slots are distinct nonnegative integers below kept, so
                     # this proves the entire prefix without iterating a corrupt
@@ -174,13 +183,20 @@ def _replay_context(
             item = _occurrence(event)
             occurrences[item["occurrence_id"]] = item
             prior[msg] = item
+            recorded.add(msg)
         elif typ == "turn_start" and is_int(event.get("turn")):
             visible = [prior[slot] for slot in sorted(prior)]
+            view_gaps = list(gaps.get(lane, []))
+            expected = max(retained_prefix.get(lane, 0), max(recorded, default=-1) + 1)
+            if missing := expected - len(recorded):
+                note = f"event {index}: {missing} unrecorded input message slot(s) in prefix 0..{expected - 1}"
+                view_gaps.append(note)
+                diagnostics.append(note)
             views[index] = ContextView(
                 turn=event["turn"], step=step_by_turn.get(event["turn"]),
                 source_refs=[SourceRef(**item["source"]) for item in visible],
                 messages=[{"occurrence_id": item["occurrence_id"]} for item in visible],
-                gaps=list(gaps.get(lane, [])),
+                gaps=view_gaps,
             )
     return views, occurrences, diagnostics
 

@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from annotated_fixtures import AnnotatedBuilder, cure_ref
-from injudge.episodes import evidence_problem, prepare_trajectory, project_occurrence
+from injudge.episodes import _replay_context, evidence_problem, prepare_trajectory, project_occurrence
 from injudge.evidence import build_episode_evidence, build_span_evidence
 from injudge.spans import group_spans
 from memgraph.parse_trajectory import parse_trajectory
@@ -266,7 +266,7 @@ def test_pointer_proof_does_not_claim_an_arbitrary_message(tmp_path):
 def _pointer_fixture(tmp_path, shape="responses"):
     memory = "Use the distinctive λ helper to preserve coordinate dtype."
     task = "Repair this copy bug without changing the public interface."
-    builder = AnnotatedBuilder().episode_open()
+    builder = AnnotatedBuilder(system=None if shape.startswith("system") else "").episode_open()
     ref = cure_ref("hint", memory)
     sid = builder.search(returned=[ref])
     if shape in ("responses", "chat_tool"):
@@ -365,7 +365,7 @@ def test_request_proof_failures_remain_unresolved(tmp_path, fault):
         starts = [event for event in builder.events if event.get("type") == "turn_start"]
         consumer_index = builder.events.index(starts[-1])
         if fault == "duplicate":
-            builder.events.insert(consumer_index, {**tool, "msg": 5})
+            builder.events.insert(consumer_index, {**tool, "msg": 4})
         else:
             builder.events.remove(tool)
             builder.events.append(tool)
@@ -381,7 +381,7 @@ def test_request_tool_id_disambiguates_identical_visible_results(tmp_path):
     builder, source, _path, _proof, memory, _task = _pointer_fixture(tmp_path)
     tool = next(event for event in builder.events if event.get("type") == "tool_execution_end")
     consumer = [event for event in builder.events if event.get("type") == "turn_start"][-1]
-    builder.events.insert(builder.events.index(consumer), {**tool, "msg": 5, "tool_call_id": "other-call"})
+    builder.events.insert(builder.events.index(consumer), {**tool, "msg": 4, "tool_call_id": "other-call"})
     builder.write(source)
     trajectory, ops, events = parse_trajectory(source, [])
     episode = prepare_trajectory(trajectory, events, ops).episodes[0]
@@ -402,6 +402,75 @@ def test_replay_uses_message_slots_for_kept_prefix(tmp_path):
     episode = prepare_trajectory(*_prepare_args(tmp_path, builder)).episodes[0]
     assert not any("discarded slot one" in (item.get("content") or "") for item in episode.message_occurrences)
     assert "discarded slot one" not in build_episode_evidence(episode)["task.md"]
+
+
+@pytest.mark.parametrize("missing", [0, 1, 2])
+def test_replay_detects_missing_retained_slots_and_recovers_when_recorded(missing):
+    events = [
+        *({"type": "message_end", "role": "user", "msg": slot, "content": f"message {slot}"}
+          for slot in range(3) if slot != missing),
+        {"type": "history_rewritten", "kept": 3},
+        {"type": "turn_start", "turn": 1},
+        {"type": "message_end", "role": "user", "msg": missing, "content": "late record"},
+        {"type": "turn_start", "turn": 2},
+    ]
+    events = [{**event, "seq": i + 1, "_event_index": i} for i, event in enumerate(events)]
+    views, _, diagnostics = _replay_context(events, [], {None})
+    first, recovered = views.values()
+    assert first.gaps == ["event 3: 1 unrecorded input message slot(s) in prefix 0..2"]
+    assert recovered.gaps == []
+    assert diagnostics == first.gaps  # recovery does not erase the earlier input's gap
+
+
+def test_replay_distinguishes_missing_slots_from_explicit_retractions():
+    events = [
+        {"type": "message_end", "role": "user", "msg": 0, "content": "task"},
+        {"type": "message_end", "role": "assistant", "msg": 2, "content": "draft"},
+        {"type": "turn_start", "turn": 1},
+        {"type": "message_end", "role": "assistant", "msg": 1, "content": "other draft"},
+        {"type": "message_retracted", "msg": 1},
+        {"type": "turn_start", "turn": 2},
+        {"type": "history_rewritten", "kept": 1},
+        {"type": "turn_start", "turn": 3},
+    ]
+    events = [{**event, "seq": i + 1, "_event_index": i} for i, event in enumerate(events)]
+    views, _, _ = _replay_context(events, [], {None})
+    missing, removed, rewritten = views.values()
+    assert missing.gaps
+    assert removed.gaps == [] and rewritten.gaps == []
+    assert removed.messages == [{"occurrence_id": "event:0"}, {"occurrence_id": "event:1"}]
+
+
+def test_missing_record_blocks_an_otherwise_proven_delivery_baseline(tmp_path):
+    builder = (AnnotatedBuilder().episode_open().agent_turn(with_task=True)
+               .recall(cure_ref("hint", "Use the existing helper.")).agent_turn().episode_close())
+    missing = next(event for event in builder.events if event.get("type") == "tool_execution_end")
+    builder.events.remove(missing)
+    episode, = prepare_trajectory(*_prepare_args(tmp_path, builder)).episodes
+    delivery, = episode.deliveries
+    assert delivery["placements"][0]["source_resolution"]["status"] == "resolved"
+    consumer = next(view for view in episode.context if view.turn == delivery["consumer"]["turn"])
+    assert any("1 unrecorded input message slot" in gap for gap in consumer.gaps)
+    assert evidence_problem(episode) == "consumer context has unresolved visibility gaps"
+    assert episode.context[-1].gaps == []  # a later record cannot repair the earlier input
+
+
+@pytest.mark.parametrize("large_index", ["msg", "kept"])
+def test_replay_checks_large_input_prefix_without_expanding_missing_slots(large_index):
+    huge = 10**100
+    events = [
+        {"type": "message_end", "role": "user", "msg": 0, "content": "task"},
+        ({"type": "message_end", "role": "assistant", "msg": huge, "content": "later"}
+         if large_index == "msg" else {"type": "history_rewritten", "kept": huge}),
+        {"type": "turn_start", "turn": 1},
+        {"type": "history_rewritten", "kept": 1},
+        {"type": "turn_start", "turn": 2},
+    ]
+    events = [{**event, "seq": i + 1, "_event_index": i} for i, event in enumerate(events)]
+    views, _, _ = _replay_context(events, [], {None})
+    missing, recovered = views.values()
+    assert len(missing.gaps) == 1 and str(huge - 1) in missing.gaps[0]
+    assert recovered.gaps == []
 
 
 def test_corrupt_retraction_does_not_pop_last_message(tmp_path):

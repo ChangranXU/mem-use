@@ -80,7 +80,7 @@ class AnnotatedBuilder:
     """Assembles a synthetic annotated (schema v10) trajectory.jsonl."""
 
     def __init__(self, main=MAIN, mem=MEM, adapter=None, task_ref=None,
-                 instance_id="pydata__xarray-2905"):
+                 instance_id="pydata__xarray-2905", system=""):
         self.events = []
         self.seq = 0
         self.turn = 0
@@ -111,6 +111,9 @@ class AnnotatedBuilder:
             {"trace_session_id": SID, "logical_role": "memory", "adapter": self.adapter},
             lane=self.mem,
         )
+        # Fixture task/reply/result slots are 1/2/3; the recorder indexes from 0.
+        if system is not None:
+            self._emit("message_end", proxy_source=self.main, role="system", msg=0, content=system)
 
     def _emit(self, type, **kw):
         self.seq += 1

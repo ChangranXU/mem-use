@@ -251,7 +251,10 @@ def span_baseline(episode: EpisodeInput, span: InjectionSpan,
             head = " ".join([f"[{item['role']} {item['occurrence_id']}]", "; ".join(notes)]).rstrip()
             blocks.append(head)
     step = consumer.get("step")
+    gaps = view.gaps if view else ["consumer input view unavailable"]
     rendered = (f"# Visible input at step {step if is_int(step) else '?'}, the first consuming step\n\n"
+                f"Recorded visible messages: {len(visible)}.\n"
+                f"Known reconstruction gaps: {'; '.join(gaps) if gaps else 'none detected'}.\n\n"
                 "The consumer's input in recorded order, one [role occurrence] block per message. "
                 "Memory placements are removed: the target's is in span.md, others in deliveries.md. "
                 "Each message names its task, step, or message file instead of "
@@ -259,7 +262,7 @@ def span_baseline(episode: EpisodeInput, span: InjectionSpan,
     return ({"target_delivery_source": _compact((delivery or {}).get("source")), "consumer": consumer,
              "visible_occurrence_ids": [item["occurrence_id"] for item in visible],
              "non_memory_text_occurrence_ids": [item["occurrence_id"] for item in independent],
-             "visibility_gaps": view.gaps if view else ["consumer input view unavailable"],
+             "visibility_gaps": gaps,
              "prior_sources": list(dict.fromkeys(sources))}, rendered)
 
 

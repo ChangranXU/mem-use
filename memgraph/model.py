@@ -139,8 +139,8 @@ class MemoryOp:
     # intentionally internal: graph JSON remains keyed by (run_id, seq) and
     # never exposes recorder event indexes as a second public contract.
     source_event_index: int | None = field(default=None, repr=False)
-    # index into the trajectory's `episodes` (the scope containing the
-    # op's anchor event); None outside every recorded episode
+    # index into the trajectory's `episodes`: a recall's bound consumer
+    # turn when recorded, otherwise the anchor event; None outside every scope
     episode: int | None = None
     # recall payload
     memories: list[dict] = field(default_factory=list)

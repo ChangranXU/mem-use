@@ -19,9 +19,8 @@ are pre-exposure. A search query in the agent's own tool call records what
 the agent expressed at that step: an open possibility, not a decision.
 Other search queries and hidden annotation keys are metadata, not delivered
 content or agent knowledge; an identifier the placement shows is delivered
-content. Judge only what the placement showed, never an unseen suffix. The
-recording is incomplete: a missing fact is not proof the agent lacked it,
-and an earlier delivery is not proof it stayed visible after a context
-rewrite.
+content. Judge only what the placement showed, never an unseen suffix. Baseline visibility and known reconstruction gaps are stated in baseline.md.
+Compare novelty with that recorded input, not knowledge outside it. An earlier
+delivery is not proof it stayed visible after a context rewrite.
 
 @uncertainty@

@@ -249,9 +249,10 @@ def episode_rows(events: list[dict[str, Any]], step_of_turn: dict[int, int], ops
     """The graph's episode rows, in scope order, and each op's `episode` (row index).
 
     A row's agent steps are those whose turn_start lies inside its scope —
-    injudge's step assignment — and an op belongs to the scope containing its
-    anchor event. Scope diagnostics are not repeated here: injudge's preparation
-    reports them, and the row's `status` already says when a scope needs review.
+    injudge's step assignment. A recall's bound turn establishes its episode
+    even when its annotation arrives after the episode closes; otherwise the
+    anchor event supplies the scope. Scope diagnostics are not repeated here:
+    injudge's preparation reports them, and the row's `status` marks review needs.
     """
     scopes = episode_scopes(events, [], [])
     turn_index: dict[int, int] = {}
@@ -264,7 +265,9 @@ def episode_rows(events: list[dict[str, Any]], step_of_turn: dict[int, int], ops
         if scope is not None:
             steps.setdefault(scope.ordinal, []).append(step)
     for op in ops:
-        scope = episode_for_index(scopes, op.source_event_index)
+        source_index = (turn_index.get(op.turn) if op.kind == "recall" and op.turn is not None
+                        else op.source_event_index)
+        scope = episode_for_index(scopes, source_index)
         op.episode = scope.ordinal if scope is not None else None
     return [{
         "episode_id": scope.episode_id,

@@ -345,7 +345,9 @@ under `<output>/<run-stamp>/evidence/` (`injudge/evidence.py`: `span.md`,
 `steps/`, and optional `messages.md` / `gold.md` / `outcome.json`). Each text is stored once:
 `baseline.md` names the file holding a visible message, `deliveries.md`
 points a span's own delivery to `span.md`, and JSON lists hold one record per
-line. `messages.md` preserves input text without a task/step home, with source
+line. The baseline states its recorded visible-message count and known
+reconstruction gaps; no detected gap is not a claim about unrecorded agent knowledge.
+`messages.md` preserves input text without a task/step home, with source
 positions and its first visible turn/step. The full visibility replay stays in
 the offline audit package. The manifest describes every file and lists `required_reads`
 (`always`: task, baseline, messages and gold when present, preceding and first consuming step; `prior_sources`:
@@ -369,7 +371,12 @@ Request-pointer placement proofs are checked against the bound call's recorded
 request and JSON-value digest, then matched uniquely to the consumer's visible
 host occurrence; wire indexes never stand in for recorder message slots.
 Unresolved placement ownership or gaps in delivery consumers' context block
-assessable spans before a paid call (and make dry-run exit 2). A valid history
+assessable spans before a paid call (and make dry-run exit 2). A reconstructed
+input also requires every slot inside its observed or retained zero-based
+prefix to have a recorded source; explicit retractions are known removals,
+not missing records. Later-arriving records can repair a later input view,
+but cannot erase gaps in an earlier consumer's input. No suffix length is
+inferred beyond the recorded prefix. A valid history
 rewrite clears that lane's active gaps when every retained slot `0..kept-1`
 is known (including `kept=1` preserving a known system prompt), while retaining
 prior audit notes. Incomplete prefixes stay uncertain. Informational preparation
@@ -469,7 +476,10 @@ Candidate, delivered, and deletion refs carry `grouping_id`, the registry's
 item identity, so content-grouped local refs link correctly in HTML.
 Trajectory rows carry `episodes` (`{episode_id, sequence_id, status,
 first_step, last_step}` per recorded scope, in order) and every op carries
-`episode`, its index there (null outside every scope); the HTML groups rows
+`episode`, its index there (null outside every scope). Recalls follow their
+bound consumer turn when recorded, including incomplete turns; otherwise
+operations use their annotation position. A delayed delivery annotation cannot
+move a recall into a later episode. The HTML groups rows
 run → sequence → episode by them and adds no validation notes of its own
 (injudge's preparation reports scope problems).
 The HTML colors rewrite markers by each marker's own `on_memory_lane` flag,

@@ -613,9 +613,7 @@ def test_informational_preparation_warning_does_not_block_judge(tmp_path, monkey
     (10**100, True, None, False),
 ])
 def test_known_prefix_reset_recovers_later_episode_after_corruption(tmp_path, monkeypatch, kept, system, damage, recovered):
-    builder = AnnotatedBuilder().episode_open("first")
-    if system:
-        builder._emit("message_end", proxy_source=builder.main, role="system", msg=0, content="stable system prompt")
+    builder = AnnotatedBuilder(system="stable system prompt" if system else None).episode_open("first")
     builder.agent_turn(with_task=True)
     builder._emit("message_retracted", proxy_source=builder.main, msg=True)
     builder.recall(cure_ref("bad", "first fact")).episode_close("first")
@@ -624,6 +622,8 @@ def test_known_prefix_reset_recovers_later_episode_after_corruption(tmp_path, mo
     elif damage == "missing_slot":
         builder._emit("message_retracted", proxy_source=builder.main, msg=1)
     builder.history_rewrite(kept=kept, dropped=5)
+    if type(kept) is int and kept == 0:
+        builder._emit("message_end", proxy_source=builder.main, role="system", msg=0, content="")
     builder.episode_open("second").agent_turn(with_task=True)
     builder.recall(cure_ref("good", "second fact")).episode_close("second")
     status, report, _directory, calls, _source = _run(
@@ -642,7 +642,9 @@ def test_nonconsumer_visibility_gap_does_not_block_proven_delivery(tmp_path, mon
     builder = AnnotatedBuilder().episode_open().agent_turn(with_task=True)
     if gap_position == "before_reset":
         builder._emit("message_retracted", proxy_source=builder.main, msg=True)
-        builder.agent_turn().history_rewrite(kept=0, dropped=5).agent_turn(with_task=True)
+        builder.agent_turn().history_rewrite(kept=0, dropped=5)
+        builder._emit("message_end", proxy_source=builder.main, role="system", msg=0, content="")
+        builder.agent_turn(with_task=True)
     builder.recall(cure_ref("hint", "verified fact"))
     if gap_position == "after_delivery":
         builder._emit("message_retracted", proxy_source=builder.main, msg=True)

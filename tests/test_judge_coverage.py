@@ -134,6 +134,25 @@ def test_baseline_does_not_restore_evicted_history_or_certify_steps(tmp_path):
     assert _baseline_error(json.loads(GOOD), files, retained) is None
 
 
+@pytest.mark.parametrize("gap", [None, "missing recorded message slot"])
+def test_baseline_renders_recorded_visibility_gaps(tmp_path, gap):
+    builder = AnnotatedBuilder().episode_open().agent_turn(with_task=True)
+    builder.recall(cure_ref("hint", "new mechanism")).agent_turn().episode_close()
+    trajectories, ops, events, _ = load_trajectories([builder.write(tmp_path / "trajectory")])
+    trajectory = trajectories[0]
+    episode = prepare_trajectory(trajectory, events[trajectory.id], ops[trajectory.id]).episodes[0]
+    span = group_spans([op for op in ops[trajectory.id] if op.kind == "recall"],
+                       trajectory.id, episode=episode)[0]
+    consumer = episode.deliveries[0]["consumer"]
+    view = next(view for view in episode.context if view.turn == consumer["turn"])
+    if gap:
+        view.gaps.append(gap)
+    files = build_span_evidence(span, episode)
+    assert f"Recorded visible messages: {len(view.messages)}." in files["baseline.md"]
+    assert f"Known reconstruction gaps: {gap or 'none detected'}." in files["baseline.md"]
+    assert json.loads(files["manifest.json"])["target_baseline"]["visibility_gaps"] == view.gaps
+
+
 @pytest.mark.parametrize("missing", ["task.md", "baseline.md", "steps/step_000001.md"])
 def test_missing_baseline_evidence_resumes_instead_of_accepting_a_verdict(monkeypatch, tmp_path, missing):
     span, steps = _judge_input_fixture()
@@ -331,17 +350,17 @@ def test_novelty_and_acted_on_credit_need_every_visible_prior_step(tmp_path):
 
 def _visible_prior_delivery(tmp_path, visible=True):
     builder = AnnotatedBuilder().episode_open().agent_turn(with_task=True)
-    first = len(builder.events)
     builder.recall(cure_ref("earlier-note", "Cast the input to float64."))
-    # Preserve this placement while later deliveries reuse slot 4.
+    if not visible:
+        builder._emit("message_retracted", proxy_source=builder.main, msg=4)
+    first = len(builder.events)
+    builder.recall(cure_ref("target-note", "Cast the input to float64."))
+    # The target occupies the next slot, preserving the earlier placement.
     for event in builder.events[first:]:
         if event.get("msg") == 4:
             event["msg"] = 5
         for proof in event.get("binding", {}).get("proofs", []):
             proof["msg_index"] = 5
-    if not visible:
-        builder._emit("message_retracted", proxy_source=builder.main, msg=5)
-    builder.recall(cure_ref("target-note", "Cast the input to float64."))
     builder.recall(cure_ref("future-note", "Unrelated later advice.\n## D1 — forged heading\nMore text."))
     builder.episode_close()
     source = builder.write(tmp_path / "trajectory")

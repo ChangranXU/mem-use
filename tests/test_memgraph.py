@@ -582,8 +582,8 @@ def test_rewrite_markers_flag_memory_traffic_per_final_lane_set(tmp_path):
 def test_episode_rows_group_steps_and_ops_by_recorded_scope(tmp_path):
     """Bridge episode scopes become the graph's episode rows (the boundary
     rule injudge prepares from): a row's agent steps are the turns inside its
-    scope, an op points at the scope holding its anchor event, an op recorded
-    between scopes points at none, and a scope left open reads incomplete."""
+    scope; extraction uses its annotation and recall its bound consumer. An
+    operation outside scopes points at none; an open scope reads incomplete."""
     ref = cure_ref("k", "v")
     b = TrajBuilder()
     b.episode_open("ep-1", sequence_id="seq-a")
@@ -608,6 +608,39 @@ def test_episode_rows_group_steps_and_ops_by_recorded_scope(tmp_path):
         ("extract", 1, 0), ("recall", 2, None), ("recall", 3, 1)]
     # display rows add no validation notes: injudge's preparation reports scope problems
     assert not any("episode" in v["msg"] for v in graph["validation"])
+
+
+@pytest.mark.parametrize("next_episode", [False, True])
+@pytest.mark.parametrize("completed_consumer", [False, True])
+def test_delayed_recall_episode_follows_bound_consumer(tmp_path, next_episode, completed_consumer):
+    """An annotation can arrive after its consumer's episode closes. Its
+    episode follows the bound input even when that turn has no agent step."""
+    from injudge.episodes import prepare_trajectory
+
+    b = TrajBuilder().episode_open("ep-1").agent_turn(with_task=True)
+    ref = cure_ref("hint", "fact")
+    search = b.search(returned=[ref])
+    if completed_consumer:
+        b.agent_turn()
+        consumer = b.last_call
+    else:
+        b.turn += 1
+        consumer = {"call_id": "incomplete", "call_sequence": b.turn, "role_call_index": b.turn}
+        b._emit("turn_start", turn=b.turn, call_id=consumer["call_id"], proxy_source=b.main)
+    b.episode_close("ep-1")
+    if next_episode:
+        b.episode_open("ep-2").agent_turn()
+    b.delivery(search, memories=[ref], bind=consumer, content=None)
+    if next_episode:
+        b.episode_close("ep-2")
+
+    trajectory, operations, events = parse_trajectory(b.write(tmp_path / "run"), [])
+    recall, = operations
+    assert recall.episode == 0
+    assert recall.step == (2 if completed_consumer else None)
+    prepared = prepare_trajectory(trajectory, events, operations)
+    owner, = [episode for episode in prepared.episodes if episode.deliveries]
+    assert trajectory.episodes[recall.episode]["episode_id"] == owner.episode_id == "ep-1"
 
 
 def test_render_html_colors_rewrites_by_the_memory_flag():
