@@ -120,7 +120,7 @@ def _replay_context(
     events: list[dict[str, Any]],
     steps: list[AgentStep],
     main_lanes: set[str | None],
-) -> tuple[dict[int, ContextView], dict[int, dict[str, Any]], list[str]]:
+) -> tuple[dict[int, ContextView], dict[str, dict[str, Any]], list[str]]:
     """Replay the recorder's lane-local slots, not append counts.
 
     Retried closes can repeat a slot and missing records leave holes. Neither
@@ -128,7 +128,7 @@ def _replay_context(
     """
     history: dict[str | None, dict[int, dict[str, Any]]] = {}
     views: dict[int, ContextView] = {}
-    occurrences: dict[int, dict[str, Any]] = {}
+    occurrences: dict[str, dict[str, Any]] = {}
     gaps: dict[str | None, list[str]] = {}
     step_by_turn = {step.turn: step.step for step in steps}
     diagnostics: list[str] = []
@@ -172,7 +172,7 @@ def _replay_context(
             if typ == "message_end" and not isinstance(event.get("role"), str):
                 continue
             item = _occurrence(event)
-            occurrences[index] = item
+            occurrences[item["occurrence_id"]] = item
             prior[msg] = item
         elif typ == "turn_start" and is_int(event.get("turn")):
             visible = [prior[slot] for slot in sorted(prior)]
@@ -272,7 +272,7 @@ def _request_message(request: object, proof: dict[str, Any]) -> tuple[str, str, 
 
 def _proof_sources(
     event: dict[str, Any],
-    occurrences: dict[int, dict[str, Any]],
+    occurrences: dict[str, dict[str, Any]],
     view: ContextView | None,
     directory: Path,
 ) -> list[dict[str, Any]]:
@@ -288,6 +288,11 @@ def _proof_sources(
     if not isinstance(proofs, list):
         return []
     visible = {item["occurrence_id"] for item in view.messages} if view else set()
+    candidates_in_view = sorted(
+        (occurrences[oid] for oid in visible if oid in occurrences
+         and occurrences[oid].get("lane") == event.get("proxy_source")),
+        key=lambda item: item["source"]["event_index"],
+    )
     request = (_request_for_delivery(event, directory)
                if any(isinstance(proof, dict) and proof.get("kind") == "request_json_pointer" for proof in proofs)
                else None)
@@ -298,11 +303,7 @@ def _proof_sources(
             continue
         msg = _as_int(proof.get("msg_index"))
         digest = _as_str(proof.get("content_sha256"))
-        candidates = [
-            item for item in occurrences.values()
-            if item["occurrence_id"] in visible
-            and item.get("lane") == event.get("proxy_source")
-        ]
+        candidates = candidates_in_view
         if proof.get("kind") == "canonical_message":
             candidates = [item for item in candidates if msg is not None and msg >= 0 and item.get("msg") == msg]
             matched = [item for item in candidates if digest is not None
@@ -460,7 +461,7 @@ def _delivery_projection(
     event: dict[str, Any],
     delivery_number: int,
     events: list[dict[str, Any]],
-    occurrences: dict[int, dict[str, Any]],
+    occurrences: dict[str, dict[str, Any]],
     call_map: dict[str, tuple[int, int | None]],
     view: ContextView | None,
     index: AnnotationIndex,
@@ -761,13 +762,14 @@ def prepare_episodes(
             for item in view.messages
             if isinstance(item.get("occurrence_id"), str)
         }
-        episode.message_occurrences = [
-            copy.deepcopy(item)
-            for _, item in sorted(occurrences.items())
-            if item.get("occurrence_id") in used_occurrence_ids
-        ]
-        for _, occurrence in sorted(occurrences.items()):
-            if occurrence["occurrence_id"] not in used_occurrence_ids or occurrence.get("lane") not in main_lanes:
+        # Views already name the exact occurrences. Look up just those messages,
+        # preserving source order without rescanning the recording per episode.
+        episode.message_occurrences = [copy.deepcopy(item) for item in sorted(
+            (occurrences[oid] for oid in used_occurrence_ids if oid in occurrences),
+            key=lambda item: item["source"]["event_index"],
+        )]
+        for occurrence in episode.message_occurrences:
+            if occurrence.get("lane") not in main_lanes:
                 continue
             if occurrence.get("role") != "user":
                 continue

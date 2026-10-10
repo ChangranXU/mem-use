@@ -356,7 +356,10 @@ opening; detailed episode evidence is read through tools scoped to that
 folder (absolute paths, `..`, and out-of-root symlinks refused).
 `read_evidence` takes several `paths` per call (one text block per file,
 aligned with `details.files`), because every model call resends the
-conversation; offset/limit/column page a single named file.
+conversation; offset/limit/column page each named file. Search matches
+complete lines, shows bounded excerpts, returns at most 200 matched lines, and
+fails after 5 seconds (vm timeout) rather than stalling on a runaway regex.
+Search results never certify read coverage.
 `span.md` states each entry's earlier deliveries in the episode and, from the
 consumer's recorded input view, whether each is still visible, arrived in that
 same input, or is gone, and whether it showed all of the entry's text. Only

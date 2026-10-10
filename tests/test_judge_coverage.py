@@ -2,6 +2,9 @@
 
 import copy
 import json
+from pathlib import Path
+import shutil
+import subprocess
 
 import pytest
 
@@ -13,7 +16,7 @@ from injudge.agent import (
 )
 from injudge.agent import judge_span as judge_episode_span
 from injudge.episodes import prepare_trajectory
-from injudge.evidence import build_span_evidence
+from injudge.evidence import build_span_evidence, write_evidence
 from injudge.judge import GoldInput, _strict_parse, _verdict_semantics, _assemble_verdict
 from injudge.aggregate import aggregate
 from injudge.report import operation_record
@@ -35,6 +38,34 @@ def _read(files, path, start=1, end=None):
                                    "lines_read": end - start + 1, "truncated": False}]},
             "content": [{"type": "text", "text": f"==> {path} <==\n" + "\n".join(
                 f"{i}: {lines[i - 1]}" for i in range(start, end + 1))}]}
+
+
+@pytest.mark.skipif(shutil.which("node") is None or not
+                    (Path(__file__).resolve().parents[1] / "agent/node_modules").is_dir(),
+                    reason="node or agent packages not installed")
+def test_real_batched_read_certifies_only_returned_evidence(tmp_path):
+    span, steps = _judge_input_fixture()
+    # The second step exceeds one read; a batch must not certify its unread
+    # tail merely because that path was requested.
+    steps[1].content = "x" * 200_100 + " unseen action"
+    files = build_span_evidence(span, _test_episode(span, steps))
+    write_evidence(tmp_path, files)
+    module = (Path(__file__).resolve().parents[1] / "agent/evidence-tools.ts").as_uri()
+    script = f"""
+        import {{ createEvidenceTools }} from {json.dumps(module)};
+        const read = createEvidenceTools(process.argv[1])[0];
+        const paths = ['steps/step_000001.md', 'steps/step_000002.md'];
+        const results = [await read.execute('batch', {{ paths }}), await read.execute('page', {{ paths, limit: 2 }})];
+        process.stdout.write(JSON.stringify(results.map((r) => ({{role: 'toolResult', toolName: 'read_evidence', ...r}}))));
+    """
+    result = subprocess.run(["node", "--input-type=module", "-e", script, str(tmp_path)],
+                            capture_output=True, text=True, check=True, timeout=30)
+    message, paged = json.loads(result.stdout)
+    assert _read_steps([message], files) == [1]
+    assert "unseen action" not in json.dumps(message)
+    assert _read_steps([message, _read(files, "steps/step_000002.md")], files) == [1, 2]
+    # A line window over several files certifies none of their unread tails.
+    assert len(paged["content"]) == 2 and _read_steps([paged], files) == []
 
 
 @pytest.mark.parametrize("neutral", [False, True])

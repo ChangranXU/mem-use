@@ -14,12 +14,13 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import * as vm from "node:vm";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Type } from "typebox";
 
 const READ_CHAR_CAP = 200_000; // chars per read_evidence call, across its files
 const SEARCH_MATCH_CAP = 200; // matched lines per search_evidence call
-const SEARCH_LINE_CAP = 10_000; // chars of a line offered to the regex engine
+const SEARCH_TIMEOUT_MS = 5_000; // a synchronous regex can backtrack without bound on a long line
 
 /** Resolve `rel` inside `root`, refusing escapes; returns the real path. */
 export function resolveInside(root: string, rel: string): string {
@@ -157,14 +158,12 @@ export function createEvidenceTools(root: string): AgentTool<any>[] {
 		description:
 			"Read evidence files with 1-based line numbers. Pass every file you need in `paths` "
 			+ "(for example all steps of a footprint window) to read them in one call; offset/limit/column "
-			+ "page through a single named file. Line numbers are not agent-step anchors.",
+			+ "page through each named file. Line numbers are not agent-step anchors.",
 		parameters: readSchema,
 		execute: async (_id, params) => {
-			const paging = params.offset !== undefined || params.limit !== undefined || params.column !== undefined;
 			if (params.paths && params.path) throw new Error("pass either path or paths, not both");
 			const targets = params.paths ?? (params.path !== undefined ? [params.path] : []);
 			if (!targets.length) throw new Error("name the files to read in paths");
-			if (paging && targets.length !== 1) throw new Error("offset/limit/column page a single file: name one file");
 			const rootReal = fs.realpathSync(root);
 			const blocks: string[] = [], files: FileRead[] = [];
 			let used = 0;
@@ -173,16 +172,16 @@ export function createEvidenceTools(root: string): AgentTool<any>[] {
 				try {
 					const target = resolveInside(root, rel);
 					relative = path.relative(rootReal, target).split(path.sep).join("/");
+					if (used >= READ_CHAR_CAP) {
+						blocks.push(`==> ${relative} <==\n(not read: the call's character cap was reached; read it in another call)`);
+						files.push({ path: relative, lines_read: 0, truncated: true });
+						continue;
+					}
 					text = fs.readFileSync(target, "utf8");
 				} catch (e) {
 					const error = e instanceof Error ? e.message : String(e);
 					blocks.push(`==> ${rel} <==\n(error: ${error})`);
 					files.push({ path: rel, lines_read: 0, error });
-					continue;
-				}
-				if (used >= READ_CHAR_CAP) {
-					blocks.push(`==> ${relative} <==\n(not read: the call's character cap was reached; read it in another call)`);
-					files.push({ path: relative, lines_read: 0, truncated: true });
 					continue;
 				}
 				const result = readLines(relative, text, READ_CHAR_CAP - used, params.offset, params.limit, params.column);
@@ -213,50 +212,49 @@ export function createEvidenceTools(root: string): AgentTool<any>[] {
 				throw new Error(`invalid regular expression ${params.pattern}: ${e instanceof Error ? e.message : e}`);
 			}
 			const rootReal = fs.realpathSync(root);
-			let files: string[];
-			if (params.path) {
-				const scope = resolveInside(root, params.path);
-				const rel = path.relative(rootReal, scope).split(path.sep).join("/");
-				files = fs.statSync(scope).isDirectory()
-					? walkFiles(rootReal).filter((f) => !rel || f.startsWith(rel + "/"))
-					: [rel];
-			} else {
-				files = walkFiles(rootReal).filter((f) => f.startsWith("steps/"));
-			}
+			// The default scope passes the same boundary check as an explicit one:
+			// a symlinked steps/ must not lead the walk outside the folder.
+			const scope = resolveInside(root, params.path || "steps");
+			const rel = path.relative(rootReal, scope).split(path.sep).join("/");
+			const files = fs.statSync(scope).isDirectory() ? walkFiles(rootReal, rel) : [rel];
 			const hits: string[] = [];
 			let truncated = false;
-			let clippedLines = 0;
-			for (const f of files) {
-				if (hits.length >= SEARCH_MATCH_CAP) {
-					truncated = true;
-					break;
-				}
-				const text = fs.readFileSync(path.join(rootReal, f), "utf8");
-				const lines = text.split("\n");
-				for (let i = 0; i < lines.length; i++) {
-					if (lines[i].length > SEARCH_LINE_CAP) clippedLines++;
-					const match = regex.exec(lines[i].slice(0, SEARCH_LINE_CAP));
-					if (match) {
-						// Long reasoning paragraphs put the actual match well past
-						// the head of the line; show it, not an unrelated prefix.
-						const start = Math.max(0, match.index - 100);
-						const end = Math.max(start + 300, match.index + match[0].length);
-						const excerpt = (start ? "…" : "") + lines[i].slice(start, end)
-							+ (end < lines[i].length ? "…" : "");
-						hits.push(`${f}:${i + 1}: ${excerpt}`);
-						if (hits.length >= SEARCH_MATCH_CAP) {
-							truncated = true;
-							break;
+			const search = () => {
+				for (const f of files) {
+					const text = fs.readFileSync(path.join(rootReal, f), "utf8");
+					const lines = text.split("\n");
+					for (let i = 0; i < lines.length; i++) {
+						const match = regex.exec(lines[i]);
+						if (match) {
+							// Look ahead one match so exactly 200 matches do not claim a hidden tail.
+							if (hits.length === SEARCH_MATCH_CAP) {
+								truncated = true;
+								break;
+							}
+							// Long reasoning paragraphs put the actual match well past
+							// the head of the line; show it, not an unrelated prefix.
+							const start = Math.max(0, match.index - 100);
+							const end = start + 300;
+							const excerpt = (start ? "…" : "") + lines[i].slice(start, end)
+								+ (end < lines[i].length ? "…" : "");
+							hits.push(`${f}:${i + 1}: ${excerpt}`);
 						}
 					}
+					if (truncated) break;
 				}
+			};
+			// vm's timeout interrupts the regex engine itself, so a pathological
+			// pattern costs the judge one tool error instead of the whole run.
+			try {
+				vm.runInNewContext("search()", { search }, { timeout: SEARCH_TIMEOUT_MS });
+			} catch (e) {
+				if ((e as { code?: string }).code !== "ERR_SCRIPT_EXECUTION_TIMEOUT") throw e;
+				throw new Error(`search exceeded ${SEARCH_TIMEOUT_MS / 1000}s; use a pattern without unbounded `
+					+ "repetition such as .* or a narrower path");
 			}
 			let textOut = hits.join("\n") || "(no matches)";
 			if (truncated) {
-				textOut += `\n(... cut at ${SEARCH_MATCH_CAP} matched lines; narrow the pattern or scope to see more)`;
-			}
-			if (clippedLines) {
-				textOut += `\n(search examined only the first ${SEARCH_LINE_CAP} chars of ${clippedLines} long line(s); use read_evidence to inspect their remaining text)`;
+				textOut += `\n(... more than ${SEARCH_MATCH_CAP} matched lines; narrow the pattern or path)`;
 			}
 			return { content: [{ type: "text", text: textOut }], details: { pattern: params.pattern, path: params.path } };
 		},

@@ -5,6 +5,11 @@ import * as path from "node:path";
 import { test } from "node:test";
 import { createEvidenceTools, resolveInside, type FileRead } from "./evidence-tools.ts";
 
+function firstText(result: { content: { type: string; text?: string }[] }): string {
+	assert.equal(result.content[0].type, "text");
+	return result.content[0].text!;
+}
+
 function makeRoot(): string {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "evidence-test-"));
 	fs.mkdirSync(path.join(root, "steps"), { recursive: true });
@@ -52,7 +57,10 @@ test("read_evidence returns file text, offset/limit slices in lines", async () =
 	await assert.rejects(() => read.execute("t3", { path: "nope.md" }));
 	const one = await read.execute("t4", { paths: ["span.md"], offset: 2 });
 	assert.equal(one.content[0].type === "text" ? one.content[0].text : "", "==> span.md <==\n2: second line\n3: ");
-	await assert.rejects(() => read.execute("t4b", { paths: ["span.md", "manifest.json"], limit: 1 }), /single file/);
+	// The same line window pages each named file.
+	const both = await read.execute("t4b", { paths: ["span.md", "steps/step_000001.md"], offset: 2, limit: 1 });
+	assert.deepEqual(both.content.map((block) => block.type === "text" ? block.text : ""),
+		["==> span.md <==\n2: second line", "==> steps/step_000001.md <==\n2: "]);
 	await assert.rejects(() => read.execute("t5", {}), /paths/);
 	fs.rmSync(root, { recursive: true, force: true });
 });
@@ -208,22 +216,65 @@ test("search_evidence resolves equivalent directory scopes before matching files
 	}
 });
 
-test("search_evidence discloses unsearched tails of long lines", async () => {
+test("search_evidence searches complete long lines and bounds broad-match excerpts", async () => {
 	const root = makeRoot();
 	try {
 		const file = "steps/step_000001.md";
 		fs.writeFileSync(path.join(root, file), "x".repeat(10_001) + " hidden evidence");
 		const tools = createEvidenceTools(root);
 		const search = tools.find((t) => t.name === "search_evidence")!;
-		for (const pattern of ["hidden evidence", "xxx"]) {
-			const result = await search.execute("t", { pattern, path: file });
-			const text = result.content[0].type === "text" ? result.content[0].text : "";
-			assert.match(text, /only the first 10000 chars of 1 long line/);
-			assert.match(text, /read_evidence/);
-		}
-		const read = tools.find((t) => t.name === "read_evidence")!;
-		const result = await read.execute("t", { path: file });
+		const result = await search.execute("t", { pattern: "hidden evidence$", path: file });
 		assert.match(result.content[0].type === "text" ? result.content[0].text : "", /hidden evidence/);
+		const broad = await search.execute("t", { pattern: ".*", path: file });
+		assert.ok(broad.content[0].type === "text" && broad.content[0].text.length < 400);
+		const artificialEnd = await search.execute("t", { pattern: "x$", path: file });
+		assert.equal(firstText(artificialEnd), "(no matches)");
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("the default search scope cannot follow a steps symlink out of the folder", async () => {
+	const root = makeRoot();
+	const outside = fs.mkdtempSync(path.join(os.tmpdir(), "evidence-outside-"));
+	try {
+		fs.writeFileSync(path.join(outside, "step_000001.md"), "external marker");
+		fs.rmSync(path.join(root, "steps"), { recursive: true });
+		fs.symlinkSync(outside, path.join(root, "steps"));
+		const search = createEvidenceTools(root).find((t) => t.name === "search_evidence")!;
+		await assert.rejects(() => search.execute("t", { pattern: "marker" }), /outside the evidence folder/);
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(outside, { recursive: true, force: true });
+	}
+});
+
+test("search_evidence bounds a runaway regex but still searches whole long lines", async () => {
+	const root = makeRoot();
+	try {
+		const file = "steps/step_000001.md";
+		fs.writeFileSync(path.join(root, file), " ".repeat(200_000) + "found");
+		const search = createEvidenceTools(root).find((t) => t.name === "search_evidence")!;
+		const started = Date.now();
+		await assert.rejects(() => search.execute("t", { pattern: " *missing_identifier", path: file }), /exceeded 5s/);
+		assert.ok(Date.now() - started < 8_000);
+		assert.match(firstText(await search.execute("t", { pattern: "found$", path: file })), /found/);
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("search_evidence reports truncation only when a match exceeds the cap", async () => {
+	const root = makeRoot();
+	try {
+		const search = createEvidenceTools(root).find((t) => t.name === "search_evidence")!;
+		const file = "steps/step_000001.md";
+		for (const [count, cut] of [[200, false], [201, true]] as const) {
+			fs.writeFileSync(path.join(root, file), Array.from({ length: count }, (_, i) => `hit ${i + 1}`).join("\n"));
+			const text = firstText(await search.execute("t", { pattern: "hit", path: file }));
+			assert.equal(text.includes("more than 200 matched lines"), cut);
+			assert.equal(text.split("\n").filter((line) => line.startsWith(file)).length, 200);
+		}
 	} finally {
 		fs.rmSync(root, { recursive: true, force: true });
 	}
