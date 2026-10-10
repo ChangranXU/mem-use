@@ -122,12 +122,6 @@ GOLD_SYSTEM_PROMPT = _substitute_enums(_scoring_prompt("gold"))
 # never drift apart.
 MEMORIES_NOTE = load_prompt("injudge/scoring/memories_note")
 
-# The corrective retry note's frame (the @error@ slot takes the contract
-# violation) — one module-level load like every other prompt file here,
-# never a re-read per corrective retry.
-_CORRECTIVE_NOTE = _substitute_enums(load_prompt("injudge/scoring/corrective"))
-
-
 def _scoring_system(gold: GoldInput) -> str:
     """The scoring call's system prompt: the gold regime's frame when a
     golden-answer body attaches, else the plain one. Every send site
@@ -605,52 +599,28 @@ def blank_verdict() -> dict:
 _MASK_MIN_KEY = 8  # a key this short is no credential: masking its every
 # occurrence (a single letter matches ordinary words) would destroy the
 # kept endpoint output while protecting nothing
-# Include an unfinished final string, even one cut just after a backslash.
-_JSON_STRING = re.compile(r'"(?:[^"\\]|\\[\s\S])*(?:"|\\?\Z)')
-_ESCAPE = re.compile(r"\\(?:u([0-9a-fA-F]{4})|([\s\S]))")
 
 
 @lru_cache(maxsize=4)
 def _key_pattern(api_key: str) -> re.Pattern[str]:
-    """The key raw or percent-encoded: each character matches itself or its
-    %XX escape in either hex case, covering every URL-encoder's spelling."""
-    return re.compile("".join(
+    """Match the key's literal JSON spellings as well as raw/URL echoes.
+    Escape only the known key; never decode unrelated endpoint text."""
+    serialized = {json.dumps(api_key, ensure_ascii=ascii_only)[1:-1]
+                  for ascii_only in (False, True)} - {api_key}
+    url_or_raw = "".join(
         f"(?:{re.escape(ch)}|" + "".join(f"(?i:%{b:02X})" for b in ch.encode()) + ")"
-        for ch in api_key))
+        for ch in api_key)
+    return re.compile("|".join([*(re.escape(s) for s in sorted(serialized, key=len, reverse=True)),
+                                url_or_raw]))
 
 
 def _mask_key(text: str, api_key: str) -> str:
     """Mask the configured key wherever endpoint output echoes it (an
-    auth/proxy fault page reflecting the request) before the text reaches a
-    verdict, validation note, or artifact."""
+    auth/proxy fault page reflecting the request, raw, URL-encoded, or
+    JSON-serialized) before it reaches a verdict, validation note, or artifact."""
     if not api_key or len(api_key) < _MASK_MIN_KEY:
         return text
-    pattern = _key_pattern(api_key)
-
-    def mask_json_string(match: re.Match[str], depth: int) -> str:
-        try:
-            value = json.loads(match[0])
-        except ValueError:
-            # A cut-off or malformed string (or quoted code, e.g. a grep
-            # pattern) can still spell the key through its escapes: decode
-            # them loosely and redact the fragment only when they do.
-            body = match[0][1:]
-            loose = _ESCAPE.sub(lambda m: chr(int(m[1], 16)) if m[1] else m[2], body)
-            return '"***"' if loose != body and mask(loose, depth + 1) != loose else match[0]
-        masked = mask(value, depth + 1)
-        return json.dumps(masked, ensure_ascii=False) if masked != value else match[0]
-
-    def mask(value: str, depth: int = 0) -> str:
-        value = pattern.sub("***", value)
-        # Even ASCII keys can be JSON-escaped inside an answer, itself a
-        # string in the transcript. Unchanged literals keep their spelling.
-        if "\\" in value:
-            if depth >= 16:
-                return "***"  # fail closed on excessively wrapped strings
-            value = _JSON_STRING.sub(lambda m: mask_json_string(m, depth), value)
-        return value
-
-    return mask(text)
+    return _key_pattern(api_key).sub("***", text)
 
 
 def _masked_head(text: str, api_key: str, cap: int) -> str:
@@ -749,13 +719,6 @@ def _assemble_verdict(
              "seqs": _int_list(ev.get("seqs"), span.id, "seqs", warnings)}
         )
     return verdict
-
-
-def _corrective_note(error: str) -> str:
-    """What a corrective retry adds to the conversation: the contract
-    violation, so the retry differs from the failed attempt even at
-    temperature 0."""
-    return _CORRECTIVE_NOTE.replace("@error@", error)
 
 
 def auto_verdict_no_subsequent_turn(span: InjectionSpan) -> dict:

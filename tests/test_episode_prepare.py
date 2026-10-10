@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from annotated_fixtures import AnnotatedBuilder, cure_ref
-from injudge.episodes import evidence_problem, prepare_trajectory
+from injudge.episodes import evidence_problem, prepare_trajectory, project_occurrence
 from injudge.evidence import build_episode_evidence, build_span_evidence
 from injudge.spans import group_spans
 from memgraph.parse_trajectory import parse_trajectory
@@ -135,13 +135,18 @@ def test_input_prefix_preserves_task_and_marks_only_memory_text(tmp_path):
     files = build_episode_evidence(episode)
     assert task in files["task.md"]
     assert memory not in files["task.md"]
-    context = json.loads(files["context.json"])
-    user = next(item for item in context["message_occurrences"] if item["role"] == "user")
-    assert user["text_in"] == "task.md" and "content" not in user
+    user = _user_occurrence(episode)
+    assert user["content"].strip() == task
     assert user["memory_delivery_refs"] == ["D1"]
     # the stripped memory text is named as moved, never left reading as absent
     assert "deliveries.md (D1)" in user["memory_delivery_text"]
     assert memory in files["deliveries.md"]
+
+
+def _user_occurrence(episode):
+    """The user message as the evidence renders it: memory placements moved out."""
+    return next(project_occurrence(item, episode.deliveries)
+                for item in episode.message_occurrences if item["role"] == "user")
 
 
 def _prepare_args(tmp_path, builder):
@@ -172,8 +177,7 @@ def test_proven_overlapping_placements_preserve_nonmemory_task(tmp_path, placeme
     assert evidence_problem(episode) is None
     assert "Repair the parser." in files["task.md"]
     assert "abcdefgh" not in files["task.md"]
-    occurrence = next(item for item in json.loads(files["context.json"])["message_occurrences"]
-                      if item["role"] == "user")
+    occurrence = _user_occurrence(episode)
     assert occurrence["memory_delivery_refs"] == ["D1", "D2"]
     assert occurrence["source_ownership"] == "memory_delivery"
 
@@ -194,9 +198,7 @@ def test_placement_removal_cannot_create_proof_for_another_placement(tmp_path, h
     builder.episode_close()
     episode = prepare_trajectory(*_prepare_args(tmp_path, builder)).episodes[0]
     assert evidence_problem(episode) == "memory placement cannot be separated from its host message"
-    occurrence = next(item for item in json.loads(build_episode_evidence(episode)["context.json"])
-                      ["message_occurrences"] if item["role"] == "user")
-    assert occurrence["source_ownership"] == "memory_delivery_unknown"
+    assert _user_occurrence(episode)["source_ownership"] == "memory_delivery_unknown"
 
 
 @pytest.mark.parametrize("proof_slots", [["other-slot"], ["input_prefix", "input_prefix"], [None]])
@@ -325,7 +327,7 @@ def test_request_pointer_excludes_target_from_baseline_and_preserves_task(tmp_pa
     assert not any(memory in text for path, text in files.items() if path != "span.md")
     assert "memory delivery D1 (text in span.md)" in files["baseline.md"]
     if shape.startswith("system"):
-        assert "Keep the task's existing interface." in files["baseline.md"]
+        assert "Keep the task's existing interface." in files["messages.md"]
 
 
 def test_system_pointer_does_not_resolve_against_user_text(tmp_path):
@@ -398,7 +400,7 @@ def test_replay_uses_message_slots_for_kept_prefix(tmp_path):
     builder.history_rewrite(kept=1, dropped=1)
     builder.user_message("current task", msg=1).agent_turn().episode_close()
     episode = prepare_trajectory(*_prepare_args(tmp_path, builder)).episodes[0]
-    assert "discarded slot one" not in build_episode_evidence(episode)["context.json"]
+    assert not any("discarded slot one" in (item.get("content") or "") for item in episode.message_occurrences)
     assert "discarded slot one" not in build_episode_evidence(episode)["task.md"]
 
 
@@ -408,10 +410,9 @@ def test_corrupt_retraction_does_not_pop_last_message(tmp_path):
     builder.agent_turn().episode_close()
     episode = prepare_trajectory(*_prepare_args(tmp_path, builder)).episodes[0]
     files = build_episode_evidence(episode)
-    context = json.loads(files["context.json"])
-    task = next(item for item in context["message_occurrences"] if item["role"] == "user")
-    assert task["text_in"] == "task.md" and "keep this task" in files["task.md"]
-    assert task["occurrence_id"] in context["views"][0]["visible"]
+    task = _user_occurrence(episode)
+    assert "keep this task" in files["task.md"]
+    assert {"occurrence_id": task["occurrence_id"]} in episode.context[0].messages
     assert episode.preparation_status == "needs_review"
 
 

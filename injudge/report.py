@@ -335,7 +335,7 @@ def _summary_judge(operations: list[dict], aggregate: dict) -> dict:
     judge = {
         "attempted_spans": len(inputs),
         "gold_scored": sum(bool(i.get("gold")) for i in inputs),
-        "spans_with_repairs": sum(i.get("attempts", 1) > 1 for i in inputs),
+        "spans_with_followups": sum(i.get("attempts", 1) > 1 for i in inputs),
         "forced_spans": sum(bool(i.get("any_phase_forced", i.get("forced"))) for i in inputs),
         **{key: total(inputs, key) for key in
            ("executed_llm_calls", "executed_tool_calls", "context_rollbacks")},
@@ -484,7 +484,7 @@ def render_summary(artifact: dict, inspect_cap: int = 10) -> str:
         lines += [
             "", "## Judge", "",
             f"Model calls {count('executed_llm_calls')}, tool calls {count('executed_tool_calls')}. "
-            f"Spans with follow-up phases {count('spans_with_repairs')}, with a forced final round "
+            f"Spans with follow-up phases {count('spans_with_followups')}, with a forced final round "
             f"{count('forced_spans')}. Context rollbacks {count('context_rollbacks')}.",
         ]
     diagnostics = summary["diagnostics"]

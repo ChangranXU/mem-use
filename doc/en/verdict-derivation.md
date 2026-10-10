@@ -137,10 +137,10 @@ is incomplete, keep `acted_on` and use `positive_effect: null`. Unassessed
 attribution uses influence null; do not invent neutrality or benefit to finish
 a budget-limited investigation.
 
-Missing required evidence in an otherwise valid first answer gets one short
-investigation before repair, if phases remain. Other violations take one
-tool-free repair over the same history; its `needs_evidence` reply can reopen
-tools. Invalid repair or exhaustion is `error`, never neutral.
+Every rejected answer (missing required evidence, malformed or out-of-contract
+JSON, or no final text) takes the same short follow-up over the same history,
+with the evidence tools, while phases remain. Exhaustion is `error`, never
+neutral.
 
 ## Usage and span verdicts
 

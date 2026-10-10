@@ -3,12 +3,13 @@ read through read_evidence and search_evidence. span.md holds the target's
 entries ([m1], [m2], ... — key your answer by these ids), placement,
 exposure, and each entry's footprint window. task.md holds the task and
 later user updates. baseline.md lists the consumer's visible input in order
-and names the task or step file holding each message; text with no other
-home is written there. Memory text is in span.md (the target) or
+and names the file holding each message. messages.md, when present, holds
+other input messages with source positions and first visible turn/step.
+Memory text is in span.md (the target) or
 deliveries.md under its D-ref. steps/ holds one file per agent step, named by
 its global step number; earlier steps can show a prior direction even if a
-history rewrite later removed them from the input. context.json is the
-detailed visibility index. Other deliveries are competing sources, not
+history rewrite later removed them from the input. manifest.json indexes the
+files and the required reads. Other deliveries are competing sources, not
 targets. Optional gold.md is a reference solution; outcome.json is
 corroboration only.
 

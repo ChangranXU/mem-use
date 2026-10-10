@@ -10,8 +10,8 @@ import pytest
 from annotated_fixtures import TASK, AnnotatedBuilder, cure_ref
 from injudge.__main__ import main
 from injudge.agent import _opening_message
-from injudge.episodes import prepare_trajectory
-from injudge.evidence import build_span_evidence, span_dir_name
+from injudge.episodes import prepare_trajectory, project_occurrence
+from injudge.evidence import build_episode_evidence, build_span_evidence, span_dir_name
 from injudge.judge import _verdict_semantics
 from injudge.spans import group_spans
 from memgraph.graph import build_graph, load_trajectories
@@ -49,7 +49,7 @@ def test_three_spans_in_one_episode_have_independent_judges_and_graph_links(tmp_
         builder.agent_turn()
     builder.episode_close()
     status, report, run_dir, calls, source = _run(
-        tmp_path, monkeypatch, builder, [{**_result(_answer()), "retained_evidence": 1} for _ in range(3)],
+        tmp_path, monkeypatch, builder, [_result(_answer()) for _ in range(3)],
         extra=("--html",),
     )
     assert status == 0 and len(calls) == 3
@@ -66,8 +66,8 @@ def test_three_spans_in_one_episode_have_independent_judges_and_graph_links(tmp_
     for op, call in zip(operations, calls):
         root = call["evidence_dir"]
         assert root.name == span_dir_name(op["operation_id"])
-        assert {p.name for p in root.iterdir()} == {"span.md", "baseline.md", "task.md", "context.json",
-                                                     "deliveries.md", "searches.json", "manifest.json", "steps"}
+        assert {p.name for p in root.iterdir()} == {"span.md", "baseline.md", "task.md", "deliveries.md",
+                                                     "searches.json", "manifest.json", "steps"}
         assert (root / "span.md").read_text().count("[m1]") == 1
         assert set(op["rubric"]) == {"m1"}
         assert (run_dir / op["input"]["transcript"]).is_file()
@@ -180,7 +180,7 @@ def test_later_episode_baseline_uses_global_steps_and_rejects_foreign_anchor(tmp
     assert span.step_first > 1 and span.memory_windows["m1"] == episode.steps[-1].step
     assert "independent initial task" in files["task.md"]
     assert "text in task.md" in files["baseline.md"]
-    context = json.loads(files["context.json"])["target_baseline"]
+    context = json.loads(files["manifest.json"])["target_baseline"]
     assert context["visible_occurrence_ids"]
     answer = json.loads(_answer())
     answer["memories"][0]["anchors"] = [episodes[0].steps[0].step]
@@ -207,7 +207,7 @@ def test_late_annotation_does_not_move_the_exposure_baseline(tmp_path, same_trea
     spans = group_spans([op for op in ops[trajectory.id] if op.kind == "recall"], trajectory.id,
                         episode=episode, last_step=episode.steps[-1].step)
     files = build_span_evidence(spans[0], episode)
-    context = json.loads(files["context.json"])["target_baseline"]
+    context = json.loads(files["manifest.json"])["target_baseline"]
     assert context["consumer"]["step"] == spans[0].step_first == 2
     update = next(item for item in episode.message_occurrences
                   if item.get("content") == "Post-exposure user update")
@@ -239,7 +239,7 @@ def test_span_folder_stores_each_text_once_and_one_record_per_line(tmp_path):
     baseline = files["baseline.md"]
     assert "text in task.md" in baseline and "result in steps/step_000001.md" in baseline
     assert "memory delivery D1 (text in span.md)" in baseline
-    for name in ("context.json", "searches.json", "manifest.json"):
+    for name in ("searches.json", "manifest.json"):
         records = [line.strip().rstrip(",") for line in files[name].splitlines() if line.startswith("    {")]
         assert records and all(isinstance(json.loads(record), dict) for record in records)
         json.loads(files[name])
@@ -259,11 +259,39 @@ def test_visible_system_text_is_stored_once_in_the_span_folder(tmp_path):
     episode = prepare_trajectory(trajectory, events[trajectory.id], ops[trajectory.id]).episodes[0]
     span, = group_spans([op for op in ops[trajectory.id] if op.kind == "recall"], trajectory.id)
     files = build_span_evidence(span, episode)
-    assert system in files["baseline.md"]
-    assert [path for path, body in files.items() if system in body] == ["baseline.md"]
-    record = next(item for item in json.loads(files["context.json"])["message_occurrences"]
-                  if item["role"] == "system")
-    assert record["text_in"] == "baseline.md" and "content" not in record
+    assert "text and commands in messages.md" in files["baseline.md"]
+    assert [path for path, body in files.items() if system in body] == ["messages.md"]
+
+
+@pytest.mark.parametrize("role,content,tool_calls", [
+    ("system", "Environment update: the parser fallback is disabled.", []),
+    ("assistant", "Historical context: parser tests already passed; inspect transport.", []),
+    ("assistant", "", [{"id": "prior", "name": "read", "args": {"path": "transport.py"}}]),
+])
+def test_later_input_messages_remain_judge_readable(tmp_path, role, content, tool_calls):
+    builder = AnnotatedBuilder().episode_open().agent_turn(with_task=True)
+    builder.recall(cure_ref("hint", "Use the parser fallback."))
+    builder._emit("message_end", role=role, content=content, tool_calls=tool_calls,
+                  origin="history", msg=5, proxy_source=builder.main)
+    source_seq = builder.seq
+    builder.agent_turn(command="inspect_transport").agent_turn().episode_close()
+    trajectories, ops, events, _ = load_trajectories([builder.write(tmp_path / "trajectory")])
+    trajectory, = trajectories
+    episode, = prepare_trajectory(trajectory, events[trajectory.id], ops[trajectory.id]).episodes
+    span, = group_spans([op for op in ops[trajectory.id] if op.kind == "recall"],
+                       trajectory.id, episode=episode)
+    assert episode.preparation_status == "prepared" and span.step_first == 2
+    marker = content or "transport.py"
+    for files in (build_episode_evidence(episode), build_span_evidence(span, episode)):
+        assert [path for path, text in files.items() if marker in text] == ["messages.md"]
+        assert f"seq {source_seq}" in files["messages.md"]
+        assert "first visible input: global step 3, turn 3" in files["messages.md"]
+        assert files["messages.md"].count(marker) == 1
+        manifest = json.loads(files["manifest.json"])
+        assert any(item["path"] == "messages.md" for item in manifest["files"])
+        if "baseline.md" in files:
+            assert "messages.md" in manifest["required_reads"]["always"]
+            assert marker not in files["baseline.md"]
 
 
 def test_visible_tool_result_keeps_its_occurrence_in_a_step_with_multiple_results(tmp_path):
@@ -337,7 +365,8 @@ def test_replayed_tool_result_does_not_borrow_another_occurrences_step_home(tmp_
     span, = group_spans([op for op in ops[trajectory.id] if op.kind == "recall"], trajectory.id)
     files = build_span_evidence(span, episode)
     visible, = [item for item in episode.message_occurrences if item["kind"] == "tool_result"]
-    assert f"[tool {visible['occurrence_id']}]\nRepeated result" in files["baseline.md"]
+    assert f"[tool {visible['occurrence_id']}] text and commands in messages.md" in files["baseline.md"]
+    assert "Repeated result" in files["messages.md"]
     assert f"tool result [{visible['occurrence_id']}]" not in files["steps/step_000001.md"]
 
 
@@ -350,9 +379,9 @@ def test_failed_and_empty_spans_do_not_cancel_sibling_judgments(tmp_path, monkey
     builder.recall(cure_ref("good", "second")).agent_turn().episode_close()
     status, report, _run_dir, calls, _source = _run(
         tmp_path, monkeypatch, builder, [_result("not json"), _result("still invalid"),
-                                        {**_result(_answer()), "retained_evidence": 1}]
+                                        _result("still invalid"), _result(_answer())]
     )
-    assert status == 2 and len(calls) == 3
+    assert status == 2 and len(calls) == 4
     verdicts = [op["verdict"] for op in report["operations"]]
     assert verdicts == ["error", "neutral", "neutral"]
     assert report["operations"][1]["auto"] == "empty_delivery"
@@ -444,10 +473,11 @@ def test_placement_host_keeps_independent_task_or_system_text(tmp_path, slot, ro
     recall = next(op for op in operations[trajectory.id] if op.kind == "recall")
     (span,) = group_spans([recall], trajectory.id, last_step=episode.steps[-1].step)
     files = build_span_evidence(span, episode)
-    # Each text is stored once: task text in task.md, other text inline.
-    assert host in files["task.md" if role == "user" else "baseline.md"]
+    # Each text is stored once, with only the independent part of a host.
+    assert host in files["task.md" if role == "user" else "messages.md"]
     assert memory in files["span.md"] and "memory delivery D1 (text in span.md)" in files["baseline.md"]
-    assert not any(memory in files[name] for name in ("deliveries.md", "context.json", "baseline.md"))
+    assert not any(memory in files[name] for name in ("deliveries.md", "baseline.md"))
+    assert memory not in files.get("messages.md", "")
 
 
 @pytest.mark.parametrize("reasoning", ["earlier reasoning", ""])
@@ -512,8 +542,8 @@ def test_repeated_resident_placement_preserves_task_and_system_context(tmp_path)
     assert task in files["task.md"] and "text in task.md" in files["baseline.md"]
     assert memory not in files["task.md"] and memory not in files["baseline.md"]
     assert episode.preparation_status == "prepared"
-    context = json.loads(files["context.json"])
-    host = next(item for item in context["message_occurrences"] if item["role"] == "user")
+    host = next(project_occurrence(item, episode.deliveries)
+                for item in episode.message_occurrences if item["role"] == "user")
     assert host["memory_delivery_refs"] == ["D1", "D2"]
 
 

@@ -456,9 +456,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--timeout", type=float, default=None,
                     help="per-LLM-call timeout seconds (default 300)")
     ap.add_argument("--max-attempts", type=int, default=None,
-                    help="total judge/repair phases per span; only an explicit "
-                    "missing-evidence request resumes investigation "
-                    "(default: MAX_ATTEMPTS from .env, else 5)")
+                    help="runner phases per span: the investigation plus follow-ups "
+                    "after a rejected answer (default: MAX_ATTEMPTS from .env, else 3)")
     ap.add_argument("--judge-max-tokens", type=int, default=None,
                     help="max output tokens per LLM call (default: "
                     "MAX_OUTPUT_TOKENS from .env, else 32768)")

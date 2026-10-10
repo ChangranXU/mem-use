@@ -6,6 +6,10 @@
  * inside the evidence root: absolute paths, ".." segments, and symlinks
  * pointing out of the root are refused. The judged evidence can therefore
  * never exceed what Python materialized into the folder.
+ *
+ * A judgment needs whole files (Python certifies complete reads), and every
+ * model call resends the conversation, so read_evidence takes several paths
+ * at once: a footprint window costs one call instead of one per step.
  */
 
 import * as fs from "node:fs";
@@ -13,7 +17,7 @@ import * as path from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Type } from "typebox";
 
-const READ_CHAR_CAP = 200_000; // chars per read_evidence call
+const READ_CHAR_CAP = 200_000; // chars per read_evidence call, across its files
 const SEARCH_MATCH_CAP = 200; // matched lines per search_evidence call
 const SEARCH_LINE_CAP = 10_000; // chars of a line offered to the regex engine
 
@@ -61,8 +65,22 @@ function walkFiles(rootReal: string, rel = ""): string[] {
 	return out.sort();
 }
 
+/** What one returned block covers; Python certifies complete reads from it. */
+export interface FileRead {
+	path: string;
+	lines_read: number;
+	line_start?: number;
+	line_end?: number;
+	truncated?: boolean;
+	error?: string;
+}
+
 const readSchema = Type.Object({
-	path: Type.String({ description: "Evidence file path relative to the evidence folder, e.g. steps/step_000012.md" }),
+	paths: Type.Optional(Type.Array(Type.String(), {
+		minItems: 1,
+		description: "Evidence files to read whole, relative to the evidence folder, e.g. [\"task.md\", \"steps/step_000012.md\", \"steps/step_000013.md\"]",
+	})),
+	path: Type.Optional(Type.String({ description: "One evidence file (same as a one-entry paths)" })),
 	offset: Type.Optional(
 		Type.Integer({ minimum: 1, description: "First line to return (1-based); default 1" }),
 	),
@@ -75,71 +93,107 @@ const readSchema = Type.Object({
 });
 
 const searchSchema = Type.Object({
-	pattern: Type.String({ description: "Regular expression to match (per line)" }),
+	pattern: Type.String({ description: "JavaScript regular expression matched per line; use ignore_case, not inline (?i)" }),
 	path: Type.Optional(
 		Type.String({ description: "Search this file or subfolder (relative path); default steps" }),
 	),
 	ignore_case: Type.Optional(Type.Boolean({ description: "Case-insensitive matching (default false)" })),
 });
 
+/** One file's numbered lines within `room` characters, plus where to continue. */
+function readLines(rel: string, text: string, room: number, offset = 1, limit?: number, column = 1):
+	{ block: string; used: number; read: FileRead } {
+	const lines = text.split("\n");
+	const from = offset - 1;
+	if (from > 0 && from >= lines.length) {
+		const block = `(the file has ${lines.length} lines; offset ${offset} is past its end)`;
+		return { block, used: block.length, read: { path: rel, lines_read: 0 } };
+	}
+	const selected = limit ? lines.slice(from, from + limit) : lines.slice(from);
+	const returned: string[] = [];
+	let used = 0, note = "";
+	for (let i = 0; i < selected.length; i++) {
+		const line = from + i + 1, col = i === 0 ? column : 1;
+		const body = col === 1 ? selected[i] : Array.from(selected[i]).slice(col - 1).join("");
+		const prefix = col === 1 ? `${line}: ` : `${line}@${col}: `;
+		const space = room - used - prefix.length - (returned.length ? 1 : 0);
+		if (space <= 0) {
+			note = `\n(... character cap; continue with path=${rel}, offset=${line}, column=${col})`;
+			break;
+		}
+		let chunk = body.slice(0, space);
+		// Never split a surrogate pair: continuation columns count Unicode
+		// characters, matching Python's evidence-coverage coordinates.
+		if (chunk.length < body.length && /[\uD800-\uDBFF]$/.test(chunk)) chunk = chunk.slice(0, -1);
+		returned.push(prefix + chunk);
+		used += prefix.length + chunk.length + (returned.length > 1 ? 1 : 0);
+		if (chunk.length < body.length) {
+			note = `\n(... character cap; continue with path=${rel}, offset=${line}, column=${col + Array.from(chunk).length})`;
+			break;
+		}
+	}
+	const truncated = !!note;
+	// A limit that stops early must say so: a clean slice boundary reads
+	// like the end of the file, and coverage needs every non-blank line.
+	const next = from + selected.length, last = lines.findLastIndex((line) => line.trim());
+	if (!note && last >= next) {
+		const more = last + 1 - next;
+		note = `\n(... ${more} more line${more === 1 ? "" : "s"}; continue with path=${rel}, offset=${next + 1})`;
+	}
+	return {
+		block: returned.join("\n") + note,
+		used,
+		// Coverage describes only text returned, never the selected tail
+		// removed by the character cap. The final line may be partial.
+		read: { path: rel, lines_read: returned.filter((line) => line.replace(/^\d+(?:@\d+)?: /, "").trim()).length,
+			line_start: from + 1, line_end: from + returned.length, truncated },
+	};
+}
+
 export function createEvidenceTools(root: string): AgentTool<any>[] {
-	const readEvidence: AgentTool<typeof readSchema, { path: string; lines_read: number; line_start?: number; line_end?: number; truncated?: boolean }> = {
+	const readEvidence: AgentTool<typeof readSchema, { files: FileRead[] }> = {
 		label: "Read evidence",
 		name: "read_evidence",
 		description:
-			"Read one evidence file with 1-based line numbers. Use offset/limit to inspect the context around search hits; line numbers are not agent-step anchors.",
+			"Read evidence files with 1-based line numbers. Pass every file you need in `paths` "
+			+ "(for example all steps of a footprint window) to read them in one call; offset/limit/column "
+			+ "page through a single named file. Line numbers are not agent-step anchors.",
 		parameters: readSchema,
 		execute: async (_id, params) => {
-			const target = resolveInside(root, params.path);
-			const relative = path.relative(fs.realpathSync(root), target).split(path.sep).join("/");
-			const text = fs.readFileSync(target, "utf8");
-			const lines = text.split("\n");
-			const from = (params.offset ?? 1) - 1;
-			if (from > 0 && from >= lines.length) {
-				return {
-					content: [{ type: "text", text: `(the file has ${lines.length} lines; offset ${params.offset} is past its end)` }],
-					details: { path: relative, lines_read: 0 },
-				};
-			}
-			const selected = params.limit ? lines.slice(from, from + params.limit) : lines.slice(from);
-			const returned: string[] = [];
-			let used = 0, note = "";
-			for (let i = 0; i < selected.length; i++) {
-				const line = from + i + 1, column = i === 0 ? (params.column ?? 1) : 1;
-				const text = column === 1 ? selected[i] : Array.from(selected[i]).slice(column - 1).join("");
-				const prefix = column === 1 ? `${line}: ` : `${line}@${column}: `;
-				const room = READ_CHAR_CAP - used - prefix.length - (returned.length ? 1 : 0);
-				if (room <= 0) {
-					note = `\n(... character cap; continue with offset=${line}, column=${column})`;
-					break;
+			const paging = params.offset !== undefined || params.limit !== undefined || params.column !== undefined;
+			if (params.paths && params.path) throw new Error("pass either path or paths, not both");
+			const targets = params.paths ?? (params.path !== undefined ? [params.path] : []);
+			if (!targets.length) throw new Error("name the files to read in paths");
+			if (paging && targets.length !== 1) throw new Error("offset/limit/column page a single file: name one file");
+			const rootReal = fs.realpathSync(root);
+			const blocks: string[] = [], files: FileRead[] = [];
+			let used = 0;
+			for (const rel of targets) {
+				let text: string, relative: string;
+				try {
+					const target = resolveInside(root, rel);
+					relative = path.relative(rootReal, target).split(path.sep).join("/");
+					text = fs.readFileSync(target, "utf8");
+				} catch (e) {
+					const error = e instanceof Error ? e.message : String(e);
+					blocks.push(`==> ${rel} <==\n(error: ${error})`);
+					files.push({ path: rel, lines_read: 0, error });
+					continue;
 				}
-				let chunk = text.slice(0, room);
-				// Never split a surrogate pair: continuation columns count Unicode
-				// characters, matching Python's evidence-coverage coordinates.
-				if (chunk.length < text.length && /[\uD800-\uDBFF]$/.test(chunk)) chunk = chunk.slice(0, -1);
-				returned.push(prefix + chunk);
-				used += prefix.length + chunk.length + (returned.length > 1 ? 1 : 0);
-				if (chunk.length < text.length) {
-					note = `\n(... character cap; continue with offset=${line}, column=${column + Array.from(chunk).length})`;
-					break;
+				if (used >= READ_CHAR_CAP) {
+					blocks.push(`==> ${relative} <==\n(not read: the call's character cap was reached; read it in another call)`);
+					files.push({ path: relative, lines_read: 0, truncated: true });
+					continue;
 				}
+				const result = readLines(relative, text, READ_CHAR_CAP - used, params.offset, params.limit, params.column);
+				used += result.used;
+				blocks.push(`==> ${relative} <==\n${result.block}`);
+				files.push(result.read);
 			}
-			const truncated = !!note;
-			// A limit that stops early must say so: a clean slice boundary reads
-			// like the end of the file, and coverage needs every non-blank line.
-			const next = from + selected.length, last = lines.findLastIndex((line) => line.trim());
-			if (!note && last >= next) {
-				const more = last + 1 - next;
-				note = `\n(... ${more} more line${more === 1 ? "" : "s"}; continue with offset=${next + 1})`;
-			}
-			return {
-				content: [{ type: "text", text: returned.join("\n") + note }],
-				// Coverage describes only text returned, never the selected tail
-				// removed by the character cap. The final line may be partial.
-				details: { path: relative,
-					lines_read: returned.filter((line) => line.replace(/^\d+(?:@\d+)?: /, "").trim()).length,
-					line_start: from + 1, line_end: from + returned.length, truncated },
-			};
+			// Every file failing is a failed call; a batch keeps its good reads.
+			if (files.every((file) => file.error)) throw new Error(files.map((file) => file.error).join("; "));
+			// One text block per file, aligned with details.files.
+			return { content: blocks.map((text) => ({ type: "text" as const, text })), details: { files } };
 		},
 	};
 
@@ -147,7 +201,9 @@ export function createEvidenceTools(root: string): AgentTool<any>[] {
 		label: "Search evidence",
 		name: "search_evidence",
 		description:
-			"Search a regular expression in the recorded steps (or one evidence file/subfolder via `path`). Returns `path:line: match excerpt`; read the surrounding lines before citing. No matches alone do not prove no influence.",
+			"Search a regular expression in the recorded steps (or one evidence file/subfolder via `path`). "
+			+ "Returns `path:line: match excerpt`; use it to locate identifiers, then read the whole files "
+			+ "before citing. No matches alone do not prove no influence.",
 		parameters: searchSchema,
 		execute: async (_id, params) => {
 			let regex: RegExp;

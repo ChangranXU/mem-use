@@ -13,9 +13,8 @@
  * budget trips, the overflowing round is rolled back, the job's
  * forced_message is appended, and any defiant tool call in the forced
  * round is blocked. The conversation's final assistant text is the judge
- * answer; Python owns the verdict contract. A repair invocation restores
- * job.history but disables tools and stops after one model call. Python
- * reopens tools only after an explicit missing-evidence request.
+ * answer; Python owns the verdict contract. A follow-up phase restores
+ * job.history and continues the same conversation under its own budget.
  */
 
 import * as fs from "node:fs";
@@ -165,7 +164,7 @@ function lastAssistantText(messages: readonly AgentMessage[]): string {
 
 function estimateInput(context: AgentContext): number {
 	// Output-only usage says nothing about the input prefix, including when
-	// a conversation is restored for repair. Use pi's content estimate then.
+	// a conversation is restored for a follow-up. Use pi's content estimate then.
 	// Match pi's default wire projection: internal agent events are not LLM
 	// messages, and cannot be passed to the provider's context estimator.
 	const messages = context.messages.filter((m): m is Message =>
@@ -189,7 +188,7 @@ async function main(): Promise<number> {
 	}
 	const cfg = job.config;
 	const { model, models } = buildModel(job, apiKey);
-	const tools: AgentTool<any>[] = job.repair ? [] : createEvidenceTools(job.evidence_dir);
+	const tools: AgentTool<any>[] = createEvidenceTools(job.evidence_dir);
 	const trajectory = new TrajectoryLog(job.trajectory_path);
 
 	const budget: BudgetState = {
@@ -208,8 +207,7 @@ async function main(): Promise<number> {
 
 	const agent = new Agent({
 		initialState: {
-			// The repair control reply is authorized only in this phase.
-			systemPrompt: job.repair ? `${job.system}\n\n${job.opening}` : job.system,
+			systemPrompt: job.system,
 			model,
 			thinkingLevel: cfg.thinking_level as ThinkingLevel,
 			tools,
@@ -225,10 +223,6 @@ async function main(): Promise<number> {
 			});
 		},
 		shouldStopAfterTurn: ({ message, toolResults, context }) => {
-			if (job.repair) {
-				budget.stopReason = "answer";
-				return true; // repair is exactly one model call, even on a defiant tool call
-			}
 			if (budget.forcedInjected) {
 				budget.stopReason = hasUsableText(message) ? budget.forced!.reason : "format_error_forced";
 				// a defiant tool call in the forced round never reaches the
@@ -282,15 +276,11 @@ async function main(): Promise<number> {
 			return { context: { ...context, messages: [...keptContext, forcedMessage] } };
 		},
 		beforeToolCall: async () => {
-			if (!job.repair && !budget.forcedInjected) {
+			if (!budget.forcedInjected) {
 				executedToolCalls += 1;
 				return undefined;
 			}
-			return {
-				block: true,
-				terminate: true,
-				reason: job.repair ? job.opening : job.forced_message,
-			};
+			return { block: true, terminate: true, reason: job.forced_message };
 		},
 	});
 
@@ -298,7 +288,7 @@ async function main(): Promise<number> {
 	// the loop appends (user opening, assistant turns with their tool calls,
 	// tool results), tombstones for what a budget rolled back, the injected
 	// forced message, and the attempt's diagnostics at the end
-	trajectory.attempt(job.attempt, job.repair);
+	trajectory.attempt(job.attempt);
 	agent.subscribe((e) => {
 		if (e.type === "message_end") {
 			trajectory.message(e.message);
@@ -319,7 +309,7 @@ async function main(): Promise<number> {
 			role: "user", content: [{ type: "text", text: job.opening }], timestamp: Date.now(),
 		};
 		const openingMessages: UserMessage[] = [opening];
-		if (!job.repair && cfg.max_steps === 1) {
+		if (cfg.max_steps === 1) {
 			budget.forced = { reason: "step_budget_forced", rollbackTail: 0 };
 			budget.forcedInjected = true;
 			openingMessages.push({
@@ -331,9 +321,9 @@ async function main(): Promise<number> {
 			tools: agent.state.tools,
 			messages: [...agent.state.messages, ...openingMessages],
 		});
-		// A final answer can consume some of the reserved output room before
-		// needing repair. Keep its evidence and cap the continuation's output
-		// to the remaining room instead of rejecting a recoverable verdict.
+		// A rejected final answer can consume some of the reserved output
+		// room. Keep its evidence and cap the follow-up's output to the
+		// remaining room instead of rejecting a recoverable verdict.
 		if (job.history?.length) {
 			maxOutputTokens = Math.min(maxOutputTokens, cfg.context_window - inputTokens - forcedReserve);
 			watermark = cfg.context_window - maxOutputTokens - forcedReserve;
@@ -341,7 +331,7 @@ async function main(): Promise<number> {
 		if (maxOutputTokens <= 0 || inputTokens > watermark) {
 			throw new Error(`opening context (${inputTokens} estimated tokens) exceeds the input budget (${Math.min(watermark, cfg.context_window - forcedReserve)}) before any judge call`);
 		}
-		// A saved final/repair answer has an assistant tail: bare continue()
+		// A rejected saved answer has an assistant tail: bare continue()
 		// rejects it. prompt() appends the follow-up without resetting history.
 		await agent.prompt(openingMessages);
 	} catch (e) {
@@ -373,10 +363,6 @@ async function main(): Promise<number> {
 		executed_llm_calls: executedLlmCalls,
 		executed_tool_calls: executedToolCalls,
 		reported_usage: reportedUsage,
-		retained_evidence: messages.filter((message) => message.role === "toolResult"
-			&& message.toolName === "read_evidence" && !message.isError
-			&& (message.details as { path?: string } | undefined)?.path?.startsWith("steps/")
-			&& ((message.details as { lines_read?: number } | undefined)?.lines_read ?? 0) > 0).length,
 		context_rollbacks: contextRollbacks,
 		messages: messages as unknown[],
 		error,
@@ -391,7 +377,6 @@ async function main(): Promise<number> {
 		executed_llm_calls: result.executed_llm_calls,
 		executed_tool_calls: result.executed_tool_calls,
 		reported_usage: result.reported_usage,
-		retained_evidence: result.retained_evidence,
 		context_rollbacks: result.context_rollbacks,
 		error,
 	});

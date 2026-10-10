@@ -1,5 +1,5 @@
 ---
-description: "injudge.report/v20、injudge.summary/v17、全部字段，以及每项比率如何计数。"
+description: "injudge.report/v21、injudge.summary/v18、全部字段，以及每项比率如何计数。"
 icon: box-archive
 ---
 
@@ -22,8 +22,8 @@ injudge 把一次运行的全部产物写入输出容器（`-o DIR`，默认 `ou
 
 | 文件 | Schema | 作用 |
 |---|---|---|
-| `injudge-report.json` | `injudge.report/v20` | 运行时评审记录。每个区间完成后保存，待评区间标为 `unjudged`；即使一条多 episode 轨迹中途被打断，也保留已完成部分。用 `--verdicts` 喂给 memgraph。 |
-| `summary.json` | `injudge.summary/v17` | 精简最终统计：计数、比率、投递估算及评审运行总量。 |
+| `injudge-report.json` | `injudge.report/v21` | 运行时评审记录。每个区间完成后保存，待评区间标为 `unjudged`；即使一条多 episode 轨迹中途被打断，也保留已完成部分。用 `--verdicts` 喂给 memgraph。 |
+| `summary.json` | `injudge.summary/v18` | 精简最终统计：计数、比率、投递估算及评审运行总量。 |
 | `summary.md` | — | 同一批统计的简短可读摘要，列出应优先查看的区间、诊断计数，并链接到 JSON 文件。 |
 | `memgraph-verdicts.html` | — | 仅在 `--html` 时产出（默认关闭）：召回节点按区间判定着色的 memgraph。 |
 | `evidence/<span-dir>/` | — | 评审智能体实际运行的每个区间一个文件夹：它当时可用的原始文件。 |
@@ -33,9 +33,9 @@ injudge 把一次运行的全部产物写入输出容器（`-o DIR`，默认 `ou
 
 | 文件 | Schema | 作用 |
 |---|---|---|
-| `episode-inputs.json` | `injudge.episode-inputs/v3` | episode 索引、执行/基准身份、边界来源、准备状态、附件状态、计数、审计投影与未归属诊断；不包含 verdict，其 `tool` 块带 `mode: "prepare-only"`。 |
+| `episode-inputs.json` | `injudge.episode-inputs/v4` | episode 索引、执行/基准身份、边界来源、准备状态、附件状态、计数、审计投影与未归属诊断；不包含 verdict，其 `tool` 块带 `mode: "prepare-only"`。 |
 | `episodes/<safe-episode-id>-<8 字符摘要>/task.md` | — | 已录制的用户任务消息与后续更新，附来源。 |
-| `episodes/<safe-episode-id>-<8 字符摘要>/context.json` | — | 可见性索引，每行一条记录：消息出现（注明保存其文本的任务或步骤文件，或附带别处没有的文本）、每个回合可见的消息，以及显式重放缺口。 |
+| `episodes/<safe-episode-id>-<8 字符摘要>/messages.md` | — | 必要时保存任务和步骤文件之外的输入消息，包含来源位置及首次可见的回合/步骤。 |
 | `episodes/<safe-episode-id>-<8 字符摘要>/deliveries.md` | — | 按时间排列的 delivery、搜索、槽位与曝光证据，也包含空 delivery。 |
 | `episodes/<safe-episode-id>-<8 字符摘要>/searches.json` | — | 该 episode 已记录的搜索及其计数。 |
 | `episodes/<safe-episode-id>-<8 字符摘要>/manifest.json` | — | episode 身份、准备状态与诊断、计数，以及每个文件的种类、大小和一行说明（步骤文件另带来源边界）。 |
@@ -68,7 +68,7 @@ memgraph 的 `--json` 产物是 `{tool, trajectories, ops, memories, edges, vali
 
 Episode 数与轨迹/区间数一起呈现。空投递和不可观察消费者分别计为 `empty`、
 `unassessable`，不进入判定比率分母。完整诊断、记忆身份、episode 行和区间记录
-保留在 report。`memgraph --verdicts` 只接受 `injudge.report/v20`。
+保留在 report。`memgraph --verdicts` 只接受 `injudge.report/v21`。
 
 ### Report 的 aggregates
 
@@ -202,7 +202,7 @@ empty、unassessable、error 和 unjudged 只保留计数，不进入判定比�
 | `rubric.shared_action_groups` | 含有被多个区间共同记入的动作的记忆组数，不是共享步骤数；可选。完整锚点保留在 report。 |
 | `delivery.approx_tokens_total` / `approx_tokens_by_verdict` | 估算投递 token 总量及各判定类别的分量；录制投递大小非零时保留，即使估算值舍入为零。 |
 | `judge.attempted_spans` / `gold_scored` | 评审智能体实际运行的区间数，含 error；附带 gold 运行的区间数。 |
-| `judge.spans_with_repairs` | 沿用原字段名：计数 `attempts > 1` 的区间，包含直接补查证据，不要求执行禁用工具的修复。 |
+| `judge.spans_with_followups` | `attempts > 1` 的区间：至少一个被拒答案进行了跟进。 |
 | `judge.forced_spans` | 任一阶段被强制作答的区间数，不限于最终阶段。 |
 | `judge.context_rollbacks` | 所有评审阶段被回滚的轮数。 |
 | `judge.executed_llm_calls` / `executed_tool_calls` | 所有阶段实际执行的调用数，含回滚工作。 |
@@ -222,7 +222,7 @@ empty、unassessable、error 和 unjudged 只保留计数，不进入判定比�
 
 ## 仅 Report 中的字段
 
-`injudge-report.json` 的每个操作还带有：`kind`（`recall_injection_span`）、`traj`、`seq`、`n_injections`、`steps`（无投递归属到 step 时省略）、`payload_summary` 和 `delivery_cost`（`deliveries`、`content_chars_total`、`approx_tokens_total`）；`episode_execution_id` 与 `episode_last_step`；`memories`（带区间本地 id 的完整已录制引用）；`memory_exposure`——与 `memories` **按位置平行**的列表（下标 `i` 描述 `memories[i]`），每条为 `{state, exposed_chars, value_chars}`，state 取 `full`、`full_normalized`、`clipped` 或 `unknown`，未核实的规范值不会进入评审证据；以及逐条目的 `memory_windows`（全局步骤上界，至迟止于该 episode 的最后可用步骤；同 episode 的后续投递也可提前截断），`memory_window_starts` 记录同一步投递冲突的例外（未新增已核实文本的同步副本在共享步骤之后开窗），`memory_variant_steps` 记录窗口内同一记忆以不同或更窄文本再次投递的步骤（不会截断窗口），`memory_followups` 记录经过工具结果来源证明的显式选取 `{step, delivery_step, tool_call_id, operation_id}`，动作步骤与结果投递步骤分开记录。与 `memory_exposure` 不同，`rubric`、`memory_usage` 和 `memory_windows` 按区间本地 id 键控。评分 note、动作 `anchors`、`analysis`、`evidence`、`step_gaps`、`auto`、`error`、`judge_raw` 和适用时的 `pe_pairing_corrections` 仍保留。评审智能体实际运行的区间——含其自身的 error 结局——带有 `input`：`path: agent`、尝试次数、保留的 `llm_calls` / `tool_calls` 及成功读取且仍保留的步骤文件数（`retained_evidence`；`read_steps` 列出完整文本仍保留在对话中的全局步骤（均来自步骤文件）——每个被引用的锚点及结构化 evidence 步骤都必须在其中）、实际执行调用数、包括回滚调用的上报用量、上下文回滚、`any_phase_forced`，以及相对于运行文件夹的 transcript 路径；在智能体运行前就被拒的区间（episode 边界不安全或不完整，或父 episode 没有已录制任务）取 error 判定，没有 `input`、没有 evidence 文件夹、也没有 transcript。`gold` 与仅代表最终答案的 `forced` 在适用时出现。轨迹行带有 `id`、`run_id`、`path`、`instance_id`、`model`、`adapter`、`n_steps`、`n_injections`、`n_spans`、其 `episodes` 行以及该轨迹的 `policy`；episode 行记录边界、任务、附件与证据来源，但不产生 episode verdict。
+`injudge-report.json` 的每个操作还带有：`kind`（`recall_injection_span`）、`traj`、`seq`、`n_injections`、`steps`（无投递归属到 step 时省略）、`payload_summary` 和 `delivery_cost`（`deliveries`、`content_chars_total`、`approx_tokens_total`）；`episode_execution_id` 与 `episode_last_step`；`memories`（带区间本地 id 的完整已录制引用）；`memory_exposure`——与 `memories` **按位置平行**的列表（下标 `i` 描述 `memories[i]`），每条为 `{state, exposed_chars, value_chars}`，state 取 `full`、`full_normalized`、`clipped` 或 `unknown`，未核实的规范值不会进入评审证据；以及逐条目的 `memory_windows`（全局步骤上界，至迟止于该 episode 的最后可用步骤；同 episode 的后续投递也可提前截断），`memory_window_starts` 记录同一步投递冲突的例外（未新增已核实文本的同步副本在共享步骤之后开窗），`memory_variant_steps` 记录窗口内同一记忆以不同或更窄文本再次投递的步骤（不会截断窗口），`memory_followups` 记录经过工具结果来源证明的显式选取 `{step, delivery_step, tool_call_id, operation_id}`，动作步骤与结果投递步骤分开记录。与 `memory_exposure` 不同，`rubric`、`memory_usage` 和 `memory_windows` 按区间本地 id 键控。评分 note、动作 `anchors`、`analysis`、`evidence`、`step_gaps`、`auto`、`error`、`judge_raw` 和适用时的 `pe_pairing_corrections` 仍保留。评审智能体实际运行的区间——含其自身的 error 结局——带有 `input`：`path: agent`、尝试次数、保留的 `llm_calls` / `tool_calls`、`read_steps`（完整文本仍保留在对话中的全局步骤，均来自步骤文件——每个被引用的锚点及结构化 evidence 步骤都必须在其中）、实际执行调用数、包括回滚调用的上报用量、上下文回滚、`any_phase_forced`，以及相对于运行文件夹的 transcript 路径；在智能体运行前就被拒的区间（episode 边界不安全或不完整，或父 episode 没有已录制任务）取 error 判定，没有 `input`、没有 evidence 文件夹、也没有 transcript。`gold` 与仅代表最终答案的 `forced` 在适用时出现。轨迹行带有 `id`、`run_id`、`path`、`instance_id`、`model`、`adapter`、`n_steps`、`n_injections`、`n_spans`、其 `episodes` 行以及该轨迹的 `policy`；episode 行记录边界、任务、附件与证据来源，但不产生 episode verdict。
 
 report 的 `tool` 块给出工具名（`name: "injudge"`）与其 `schema`，并带有已解析、无密钥的评审智能体配置（`config`，URL 规范化为 `scheme://host[:port][/path]`）以及 `judge_model`。
 

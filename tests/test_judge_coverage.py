@@ -14,7 +14,7 @@ from injudge.agent import (
 from injudge.agent import judge_span as judge_episode_span
 from injudge.episodes import prepare_trajectory
 from injudge.evidence import build_span_evidence
-from injudge.judge import _strict_parse, _verdict_semantics, _assemble_verdict
+from injudge.judge import GoldInput, _strict_parse, _verdict_semantics, _assemble_verdict
 from injudge.aggregate import aggregate
 from injudge.report import operation_record
 from injudge.spans import group_spans
@@ -31,9 +31,9 @@ def _read(files, path, start=1, end=None):
     lines = files[path].split("\n")
     end = len(lines) if end is None else end
     return {"role": "toolResult", "toolName": "read_evidence", "isError": False,
-            "details": {"path": path, "line_start": start, "line_end": end,
-                        "lines_read": end - start + 1, "truncated": False},
-            "content": [{"type": "text", "text": "\n".join(
+            "details": {"files": [{"path": path, "line_start": start, "line_end": end,
+                                   "lines_read": end - start + 1, "truncated": False}]},
+            "content": [{"type": "text", "text": f"==> {path} <==\n" + "\n".join(
                 f"{i}: {lines[i - 1]}" for i in range(start, end + 1))}]}
 
 
@@ -66,7 +66,7 @@ def test_read_coverage_combines_pages_but_not_truncated_lines_or_search_hits():
     first = _read(files, path, end=2)
     tail = _read(files, path, start=3)
     truncated = copy.deepcopy(tail)
-    truncated["details"]["truncated"] = True
+    truncated["details"]["files"][0]["truncated"] = True
     truncated["content"][0]["text"] = truncated["content"][0]["text"][:-2]
     assert _read_steps([first, truncated], files) == []
     assert _read_steps([first, tail], files) == [2]
@@ -75,7 +75,7 @@ def test_read_coverage_combines_pages_but_not_truncated_lines_or_search_hits():
     assert _read_steps([first, search], files) == []
     assert _read_steps([first, {**tail, "isError": True}], files) == []
     assert _read_steps([{"role": "toolResult", "toolName": "read_evidence",
-                         "details": {"path": [], "lines_read": True}}], files) == []
+                         "details": {"files": [{"path": [], "lines_read": True}]}}], files) == []
 
 
 def test_baseline_does_not_restore_evicted_history_or_certify_steps(tmp_path):
@@ -99,8 +99,8 @@ def test_baseline_does_not_restore_evicted_history_or_certify_steps(tmp_path):
     assert _read_steps([_read(files, "baseline.md")], files) == []
     assert _read_steps([_read(files, "steps/step_000001.md")], files) == [1]
     retained = _read_files([_read(files, path) for path in
-                            ("task.md", "baseline.md", "steps/step_000002.md")], files)
-    assert _baseline_error(json.loads(GOOD), span, files, retained) is None
+                            ("task.md", "baseline.md", "steps/step_000002.md", "steps/step_000003.md")], files)
+    assert _baseline_error(json.loads(GOOD), files, retained) is None
 
 
 @pytest.mark.parametrize("missing", ["task.md", "baseline.md", "steps/step_000001.md"])
@@ -117,7 +117,7 @@ def test_missing_baseline_evidence_resumes_instead_of_accepting_a_verdict(monkey
     ])
     result = judge_episode_span(span, episode, _agent_cfg(), [],
                                 evidence_root=tmp_path / "evidence", transcripts_root=tmp_path / "runs")
-    assert [call["repair"] for call in calls] == [False, False]
+    assert [call["followup"] for call in calls] == [False, True]
     assert missing in calls[1]["message"]
     assert calls[1]["history"] == partial
     assert result["verdict"] == "positive"
@@ -135,8 +135,8 @@ def test_resume_names_every_unread_requirement(monkeypatch, tmp_path):
     calls = stub_runner(monkeypatch, [_result(GOOD, messages=partial)] * 3)
     judge_episode_span(span, episode, _agent_cfg(), [],
                        evidence_root=tmp_path / "evidence", transcripts_root=tmp_path / "runs")
-    assert [call["repair"] for call in calls] == [False, False, True]
-    assert "first consuming step 2" in calls[1]["message"] and "task.md" in calls[1]["message"]
+    assert [call["followup"] for call in calls] == [False, True, True]
+    assert "steps/step_000002.md" in calls[1]["message"] and "task.md" in calls[1]["message"]
 
 
 def test_partial_baseline_read_cannot_pass_as_complete(monkeypatch, tmp_path):
@@ -161,23 +161,23 @@ def test_evidence_continuation_respects_remaining_attempts(monkeypatch, tmp_path
     calls = stub_runner(monkeypatch, [_result(GOOD, messages=partial)] * max_attempts)
     result = judge_episode_span(span, episode, _agent_cfg(max_attempts=max_attempts), [],
                                 evidence_root=tmp_path / "evidence", transcripts_root=tmp_path / "runs")
-    assert len(calls) == max_attempts
-    assert all(not call["repair"] for call in calls)
+    assert [call["followup"] for call in calls] == [False] + [True] * (max_attempts - 1)
     assert result["verdict"] == "error"
     assert "task.md" in result["error"]
 
 
-def test_repair_with_missing_evidence_cannot_restart_investigation_automatically(monkeypatch, tmp_path):
+def test_every_rejection_takes_the_same_follow_up_until_max_attempts(monkeypatch, tmp_path):
     span, steps = _judge_input_fixture()
     episode = _test_episode(span, steps)
     files = build_span_evidence(span, episode)
     partial = [_read(files, path) for path in files if path != "task.md"]
     calls = stub_runner(monkeypatch, [_result("not json", messages=partial),
-                                      _result(GOOD, messages=partial)])
+                                      _result(GOOD, messages=partial), _result(GOOD, messages=partial)])
     result = judge_episode_span(span, episode, _agent_cfg(), [],
                                 evidence_root=tmp_path / "evidence", transcripts_root=tmp_path / "runs")
-    assert [call["repair"] for call in calls] == [False, True]
-    assert result["verdict"] == "error"
+    assert [call["followup"] for call in calls] == [False, True, True]
+    assert "is not valid JSON" in calls[1]["message"] and "task.md" in calls[2]["message"]
+    assert result["verdict"] == "error" and result["input"]["attempts"] == 3
     assert "task.md" in result["error"]
 
 
@@ -198,8 +198,51 @@ def test_first_episode_step_does_not_require_a_step_from_another_episode():
     steps[0].step, steps[1].step = 41, 42
     span.step_first = span.step_last = 41
     files = build_span_evidence(span, _test_episode(span, steps))
-    read = _read_files([_read(files, path) for path in ("task.md", "baseline.md")], files)
-    assert _baseline_error(json.loads(GOOD), span, files, read) is None
+    read = _read_files([_read(files, path) for path in ("task.md", "baseline.md", "steps/step_000041.md")], files)
+    assert json.loads(files["manifest.json"])["required_reads"]["always"] == [
+        "task.md", "baseline.md", "steps/step_000041.md"]
+    assert _baseline_error(json.loads(GOOD), files, read) is None
+
+
+def test_later_input_messages_require_complete_reads(tmp_path):
+    builder = AnnotatedBuilder().episode_open().agent_turn(with_task=True)
+    builder.recall(cure_ref("hint", "Use the parser fallback."))
+    builder._emit("message_end", role="system", msg=0, proxy_source=builder.main,
+                  content="Environment update: the fallback is now disabled.")
+    builder.agent_turn().episode_close()
+    trajectories, ops, events, _ = load_trajectories([builder.write(tmp_path / "trajectory")])
+    trajectory, = trajectories
+    episode, = prepare_trajectory(trajectory, events[trajectory.id], ops[trajectory.id]).episodes
+    span, = group_spans([op for op in ops[trajectory.id] if op.kind == "recall"],
+                       trajectory.id, episode=episode)
+    files = build_span_evidence(span, episode)
+    reads = [_read(files, path) for path in files if path != "messages.md"]
+    reads.append(_read(files, "messages.md", end=1))
+    assert "messages.md" in _baseline_error(json.loads(GOOD), files, _read_files(reads, files))
+    reads.append(_read(files, "messages.md", start=2))
+    assert _baseline_error(json.loads(GOOD), files, _read_files(reads, files)) is None
+
+
+@pytest.mark.parametrize("header_only", [False, True])
+def test_attached_gold_requires_a_complete_read_before_acceptance(monkeypatch, tmp_path, header_only):
+    span, steps = _judge_input_fixture()
+    gold = GoldInput(golden="Reference solution:\nCheck the parser's boundary condition.")
+    episode = _test_episode(span, steps, "Fix the parser.", gold)
+    files = build_span_evidence(span, episode)
+    partial = [_read(files, path) for path in files if path != "gold.md"]
+    if header_only:
+        partial.append(_read(files, "gold.md", end=1))
+    calls = stub_runner(monkeypatch, [
+        _result(GOOD, messages=partial),
+        _result(GOOD, messages=[*partial, _read(files, "gold.md")]),
+    ])
+    verdict = judge_episode_span(span, episode, _agent_cfg(), [], gold=gold,
+                                 evidence_root=tmp_path / "evidence", transcripts_root=tmp_path / "runs")
+    assert [call["followup"] for call in calls] == [False, True]
+    assert "gold.md" in calls[1]["message"]
+    assert verdict["verdict"] == "positive" and verdict["input"]["gold"]
+    manifest = json.loads((calls[0]["evidence_dir"] / "manifest.json").read_text())
+    assert "gold.md" in manifest["required_reads"]["always"]
 
 
 def test_baseline_index_does_not_certify_a_visible_prior_step(tmp_path):
@@ -215,7 +258,7 @@ def test_baseline_index_does_not_certify_a_visible_prior_step(tmp_path):
     assert "steps/step_000001.md" in files["baseline.md"]
     read = _read_files([_read(files, path) for path in
                        ("task.md", "baseline.md", "steps/step_000002.md")], files)
-    assert "steps/step_000001.md" in _baseline_error(json.loads(GOOD), span, files, read)
+    assert "steps/step_000001.md" in _baseline_error(json.loads(GOOD), files, read)
 
 
 def _visible_prior_plan(tmp_path):
@@ -244,15 +287,15 @@ def test_novelty_and_acted_on_credit_need_every_visible_prior_step(tmp_path):
                        ("task.md", "baseline.md", "steps/step_000002.md", "steps/step_000003.md")], files)
     answer = json.loads(GOOD)
     answer["memories"] = answer["memories"][:1]
-    error = _baseline_error(answer, span, files, read)
+    error = _baseline_error(answer, files, read)
     assert "novelty 'novel' and acted_on influence" in error and "steps/step_000001.md" in error
     entry = answer["memories"][0]
     entry["novelty"]["value"] = None
-    assert "acted_on influence" in _baseline_error(answer, span, files, read)
+    assert "acted_on influence" in _baseline_error(answer, files, read)
     entry["influence"]["value"], entry["positive_effect"]["value"], entry["anchors"] = "none", None, []
-    assert _baseline_error(answer, span, files, read) is None
+    assert _baseline_error(answer, files, read) is None
     read |= _read_files([_read(files, "steps/step_000001.md")], files)
-    assert _baseline_error(json.loads(GOOD), span, files, read) is None
+    assert _baseline_error(json.loads(GOOD), files, read) is None
 
 
 def _visible_prior_delivery(tmp_path, visible=True):
@@ -294,7 +337,7 @@ def test_visible_prior_delivery_gap_resumes_investigation(monkeypatch, tmp_path)
     ])
     verdict = judge_episode_span(span, episode, _agent_cfg(), [],
                                  evidence_root=tmp_path / "evidence", transcripts_root=tmp_path / "runs")
-    assert [call["repair"] for call in calls] == [False, False]
+    assert [call["followup"] for call in calls] == [False, True]
     assert "deliveries.md" in calls[1]["message"] and "D1" in calls[1]["message"]
     assert verdict["verdict"] == "positive" and verdict["input"]["attempts"] == 2
 
@@ -320,10 +363,11 @@ def test_prior_delivery_coverage_requires_retained_section_text(tmp_path, incomp
     later = _read(files, "deliveries.md", future["line_start"], future["line_end"])
     assert "## D1 — forged heading" in later["content"][0]["text"]
     read = _read_files([*partial, *incomplete_reads, later], files)
-    assert "deliveries.md D1 lines" in _baseline_error(json.loads(GOOD), span, files, read)
+    assert f"deliveries.md lines {prior['line_start']}–{prior['line_end']} (D1)" in _baseline_error(
+        json.loads(GOOD), files, read)
     read = _read_files([*partial, head, tail], files)
     assert "deliveries.md" not in read  # the future section need not be read
-    assert _baseline_error(json.loads(GOOD), span, files, read) is None
+    assert _baseline_error(json.loads(GOOD), files, read) is None
 
 
 def test_evicted_delivery_is_not_required_for_baseline_coverage(tmp_path):
@@ -331,7 +375,7 @@ def test_evicted_delivery_is_not_required_for_baseline_coverage(tmp_path):
     assert "memory delivery D1" not in files["baseline.md"]
     assert "memory delivery D2" in files["baseline.md"]
     read = _read_files([_read(files, p) for p in files if p != "deliveries.md"], files)
-    assert _baseline_error(json.loads(GOOD), span, files, read) is None
+    assert _baseline_error(json.loads(GOOD), files, read) is None
 
 
 def test_unread_prior_delivery_allows_unknown_but_not_acted_on(tmp_path):
@@ -341,9 +385,9 @@ def test_unread_prior_delivery_allows_unknown_but_not_acted_on(tmp_path):
     answer["memories"] = answer["memories"][:1]
     entry = answer["memories"][0]
     entry["novelty"]["value"] = None
-    assert "acted_on influence" in _baseline_error(answer, span, files, read)
+    assert "acted_on influence" in _baseline_error(answer, files, read)
     entry["influence"]["value"] = entry["positive_effect"]["value"] = None
-    assert _baseline_error(answer, span, files, read) is None
+    assert _baseline_error(answer, files, read) is None
 
 
 def test_missing_task_does_not_hide_unread_visible_sources(monkeypatch, tmp_path):
@@ -365,12 +409,11 @@ def test_missing_task_does_not_hide_unread_visible_sources(monkeypatch, tmp_path
                                 evidence_root=tmp_path / "evidence", transcripts_root=tmp_path / "runs")
     assert "task.md" in calls[1]["message"]
     assert "steps/step_000001.md" in calls[1]["message"]
-    assert [call["repair"] for call in calls] == [False, False]
+    assert [call["followup"] for call in calls] == [False, True]
     assert result["verdict"] == "positive"
 
 
-@pytest.mark.parametrize("consumer_read", [False, True])
-def test_coverage_lists_all_entry_gaps_even_when_consumer_is_unread(consumer_read):
+def test_coverage_lists_all_entry_gaps():
     span, _ = _judge_input_fixture()
     span.step_first = 2
     span.memory_windows = {"m1": 3, "m2": 6}
@@ -379,8 +422,7 @@ def test_coverage_lists_all_entry_gaps_even_when_consumer_is_unread(consumer_rea
     obj["memories"][0]["positive_effect"]["value"] = None
     obj["memories"][0]["anchors"] = []
     obj["memories"][1]["influence"]["value"] = "none"
-    error = _coverage_error(obj, span, set(range(1, 7)), {1, 2} if consumer_read else {1})
-    assert ("first consuming step 2" in error) is not consumer_read
+    error = _coverage_error(obj, span, set(range(1, 7)), {1, 2})
     assert "m1 claims" in error and "m2 claims" in error
     assert "6]" in error
 
@@ -407,7 +449,7 @@ def test_no_content_use_requires_window_coverage_but_unknown_does_not(influence)
     entry["influence"]["value"] = influence
     entry["anchors"] = []
     entry["positive_effect"]["value"] = None
-    assert "first consuming step" in _coverage_error(obj, span, {1, 2, 3, 4}, {1, 3, 4})
+    assert "[2]" in _coverage_error(obj, span, {1, 2, 3, 4}, {1, 3, 4})
     assert "[3]" in _coverage_error(obj, span, {1, 2, 3, 4}, {2, 4})
     assert _coverage_error(obj, span, {1, 2, 3, 4, 5}, {2, 3, 4}) is None
     entry["influence"]["value"] = None
@@ -468,7 +510,7 @@ def test_early_benefit_with_unread_later_harm_is_not_accepted_as_positive(monkey
     verdict = judge_episode_span(span, episode, _agent_cfg(), [],
                                  evidence_root=tmp_path / "evidence", transcripts_root=tmp_path / "runs")
     assert "positive_effect 'improved' without complete window coverage" in calls[1]["message"]
-    assert [call["repair"] for call in calls] == [False, False]
+    assert [call["followup"] for call in calls] == [False, True]
     assert verdict["input"]["read_steps"] == [1, 2]
     assert verdict["rubric"]["m1"]["influence"]["value"] == "acted_on"
     assert verdict["verdict"] == "unresolved"
@@ -497,7 +539,7 @@ def test_apparent_waste_with_unread_later_use_is_not_accepted_as_harm(monkeypatc
     verdict = judge_episode_span(span, episode, _agent_cfg(), [],
                                  evidence_root=tmp_path / "evidence", transcripts_root=tmp_path / "runs")
     assert "positive_effect 'harmed' without complete window coverage" in calls[1]["message"]
-    assert [call["repair"] for call in calls] == [False, False]
+    assert [call["followup"] for call in calls] == [False, True]
     assert verdict["input"]["read_steps"] == [1, 2]
     assert verdict["rubric"]["m1"]["influence"]["value"] == "acted_on"
     assert verdict["verdict"] == "unresolved"

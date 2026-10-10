@@ -1,5 +1,5 @@
 ---
-description: "injudge.report/v20, injudge.summary/v17, every field, and how every rate is counted."
+description: "injudge.report/v21, injudge.summary/v18, every field, and how every rate is counted."
 icon: box-archive
 ---
 
@@ -27,8 +27,8 @@ injudge writes all artifacts of a run to that run's own `<run-stamp>/` folder un
 
 | File | Schema | Role |
 |---|---|---|
-| `injudge-report.json` | `injudge.report/v20` | Runtime judging record. Checkpointed after each completed span, with pending spans marked `unjudged`, so interruption within a multi-episode trajectory keeps completed work. Feed it to memgraph with `--verdicts`. |
-| `summary.json` | `injudge.summary/v17` | Compact final statistics: counts, rates, delivery estimates, and judge execution totals. |
+| `injudge-report.json` | `injudge.report/v21` | Runtime judging record. Checkpointed after each completed span, with pending spans marked `unjudged`, so interruption within a multi-episode trajectory keeps completed work. Feed it to memgraph with `--verdicts`. |
+| `summary.json` | `injudge.summary/v18` | Compact final statistics: counts, rates, delivery estimates, and judge execution totals. |
 | `summary.md` | — | Short readable summary of the same totals, the spans to inspect first, diagnostic counts, and links to the JSON files. |
 | `memgraph-verdicts.html` | — | Only with `--html` (off by default): memgraph with recall nodes colored by span verdict. |
 | `evidence/<span-dir>/` | — | One folder per span the judge agent ran for: the exact files available to it. |
@@ -38,9 +38,9 @@ An offline preparation run writes a different package under its own run folder:
 
 | File | Schema | Role |
 |---|---|---|
-| `episode-inputs.json` | `injudge.episode-inputs/v3` | Episode index, execution and benchmark identities, boundary provenance, readiness, attachment status, counts, audit projections, and unassigned diagnostics. It contains no verdicts; its `tool` block carries `mode: "prepare-only"`. |
+| `episode-inputs.json` | `injudge.episode-inputs/v4` | Episode index, execution and benchmark identities, boundary provenance, readiness, attachment status, counts, audit projections (including every message occurrence and per-turn input view), and unassigned diagnostics. It contains no verdicts; its `tool` block carries `mode: "prepare-only"`. |
 | `episodes/<safe-episode-id>-<8-char digest>/task.md` | — | Recorded user task messages and updates with source provenance. |
-| `episodes/<safe-episode-id>-<8-char digest>/context.json` | — | Visibility index, one record per line: message occurrences (each naming the task or step file that holds its text, or carrying text found nowhere else), the messages visible at each turn, and explicit replay gaps. |
+| `episodes/<safe-episode-id>-<8-char digest>/messages.md` | — | When needed: input messages without a task/step home, with source positions and first visible turn/step. |
 | `episodes/<safe-episode-id>-<8-char digest>/deliveries.md` | — | Chronological delivery, search, placement, and exposure evidence, including empty deliveries. |
 | `episodes/<safe-episode-id>-<8-char digest>/searches.json` | — | The episode's recorded searches and their count. |
 | `episodes/<safe-episode-id>-<8-char digest>/manifest.json` | — | Episode identity, preparation status and diagnostics, counts, and every file with its kind, size, and a one-line description (steps also carry source bounds). |
@@ -80,7 +80,7 @@ Episode counts appear alongside trajectory/span counts. Empty deliveries and
 unobserved consumers use separate classes (`empty`, `unassessable`), outside
 verdict-rate denominators. The report keeps complete diagnostics, memory
 identities, episode rows, and span records. `memgraph --verdicts` accepts only
-`injudge.report/v20`.
+`injudge.report/v21`.
 
 ### The Report's Aggregates
 
@@ -218,7 +218,7 @@ cost but do not create more judged spans.
 | `rubric.shared_action_groups` | Optional count of memory groups with an action credited by multiple spans; not a count of shared steps. Full anchors stay in the report. |
 | `delivery.approx_tokens_total` / `approx_tokens_by_verdict` | Estimated delivery tokens and their verdict buckets; present when the recorded delivery size is nonzero, even if the estimate rounds to zero. |
 | `judge.attempted_spans` / `gold_scored` | Spans the judge agent ran for, including errors; spans run with gold attached. |
-| `judge.spans_with_repairs` | Retained field name: counts spans with `attempts > 1`, including direct evidence continuation. A tool-free repair is not required. |
+| `judge.spans_with_followups` | Spans with `attempts > 1`: at least one rejected answer took a follow-up. |
 | `judge.forced_spans` | Spans forced to answer in any phase, not only the final phase. |
 | `judge.context_rollbacks` | Rolled-back rounds across all judge phases. |
 | `judge.executed_llm_calls` / `executed_tool_calls` | Executed calls across all phases, including rolled-back work. |
@@ -241,7 +241,7 @@ nulls remain. Estimate notes appear once at the top level.
 
 ## Report-Only Fields
 
-`injudge-report.json` additionally carries, per operation: `kind` (`recall_injection_span`), `traj`, `seq`, `n_injections`, `steps` (omitted when no delivery has an attributed step), `payload_summary`, and `delivery_cost` (`deliveries`, `content_chars_total`, `approx_tokens_total`); `episode_execution_id` and `episode_last_step`; `memories` (full recorded refs stamped with span-local ids); `memory_exposure` — a **positional** list parallel to `memories` (index `i` describes `memories[i]`), each entry `{state, exposed_chars, value_chars}` with state `full`, `full_normalized`, `clipped`, or `unknown`, unverified canonical values withheld from judge evidence; and `memory_windows` (per-entry global end steps, capped at the episode's last eligible step or the next same-episode delivery), with `memory_window_starts` recording same-step collision exceptions (a same-step copy adding no verified text opens after the shared step), `memory_variant_steps` the in-window steps where the same memory was delivered with different or narrower text (which leaves the window open), and `memory_followups` the proven explicit selections `{step, delivery_step, tool_call_id, operation_id}` (actual action and result-delivery steps recorded separately). Unlike `memory_exposure`, `rubric`, `memory_usage`, and `memory_windows` are keyed by span-local ids. The operation also retains rubric notes and action `anchors`, `analysis`, `evidence`, `step_gaps`, `auto`, `error`, `judge_raw`, and `pe_pairing_corrections` when present. Spans the judge agent ran for — its own error outcomes included — carry `input`: `path: agent`, attempts, retained `llm_calls` / `tool_calls` and successful step-file reads (`retained_evidence`, plus `read_steps`: global steps whose complete text was retained from the step files — every cited anchor and structured evidence step must be one of them), executed call counts, reported usage including rolled-back calls, context rollbacks, `any_phase_forced`, and the transcript path relative to the run folder; a span rejected before the agent ran (an unsafe or incomplete episode boundary, or a parent episode with no recorded task) takes an error verdict with no `input`, no evidence folder, and no transcript. `gold` and final-answer `forced` appear when applicable. Trajectory rows carry `id`, `run_id`, `path`, `instance_id`, `model`, `adapter`, `n_steps`, `n_injections`, `n_spans`, their `episodes` rows, and the trajectory's `policy`; episode rows record boundary, task, attachment, and evidence provenance without an episode verdict.
+`injudge-report.json` additionally carries, per operation: `kind` (`recall_injection_span`), `traj`, `seq`, `n_injections`, `steps` (omitted when no delivery has an attributed step), `payload_summary`, and `delivery_cost` (`deliveries`, `content_chars_total`, `approx_tokens_total`); `episode_execution_id` and `episode_last_step`; `memories` (full recorded refs stamped with span-local ids); `memory_exposure` — a **positional** list parallel to `memories` (index `i` describes `memories[i]`), each entry `{state, exposed_chars, value_chars}` with state `full`, `full_normalized`, `clipped`, or `unknown`, unverified canonical values withheld from judge evidence; and `memory_windows` (per-entry global end steps, capped at the episode's last eligible step or the next same-episode delivery), with `memory_window_starts` recording same-step collision exceptions (a same-step copy adding no verified text opens after the shared step), `memory_variant_steps` the in-window steps where the same memory was delivered with different or narrower text (which leaves the window open), and `memory_followups` the proven explicit selections `{step, delivery_step, tool_call_id, operation_id}` (actual action and result-delivery steps recorded separately). Unlike `memory_exposure`, `rubric`, `memory_usage`, and `memory_windows` are keyed by span-local ids. The operation also retains rubric notes and action `anchors`, `analysis`, `evidence`, `step_gaps`, `auto`, `error`, `judge_raw`, and `pe_pairing_corrections` when present. Spans the judge agent ran for — its own error outcomes included — carry `input`: `path: agent`, attempts, retained `llm_calls` / `tool_calls`, `read_steps` (global steps whose complete text was retained from the step files — every cited anchor and structured evidence step must be one of them), executed call counts, reported usage including rolled-back calls, context rollbacks, `any_phase_forced`, and the transcript path relative to the run folder; a span rejected before the agent ran (an unsafe or incomplete episode boundary, or a parent episode with no recorded task) takes an error verdict with no `input`, no evidence folder, and no transcript. `gold` and final-answer `forced` appear when applicable. Trajectory rows carry `id`, `run_id`, `path`, `instance_id`, `model`, `adapter`, `n_steps`, `n_injections`, `n_spans`, their `episodes` rows, and the trajectory's `policy`; episode rows record boundary, task, attachment, and evidence provenance without an episode verdict.
 
 The report's `tool` block names the tool (`name: "injudge"`) and its `schema`, and carries the resolved, secret-free judge-agent configuration (`config`, URLs sanitized to `scheme://host[:port][/path]`) with `judge_model`.
 

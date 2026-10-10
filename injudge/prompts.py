@@ -6,10 +6,10 @@ Grouped by tool and purpose (new prompts get their own folder group):
   gold runs use the same categories; the scoring frame adds gold guidance.
 - `prompts/injudge/scoring/` — the scoring frame, shared input description,
   delivered-memory and gold attachment labels, binding rules, worked echo
-  example, answer contract, shared signal-specific uncertainty policy, and
-  corrective-retry note. The gold frame adds the optional reference-solution guidance.
+  example, answer contract, and shared signal-specific uncertainty policy.
+  The gold frame adds the optional reference-solution guidance.
 - `prompts/injudge/agent/` — the evidence-search workflow in the opening
-  message, the targeted evidence-resumption follow-up, and the forced
+  message, the follow-up after a rejected answer, and the forced
   final-answer instruction used by both budgets.
 
 Slots are `@name@` tokens filled at assembly time; the enum literals stay

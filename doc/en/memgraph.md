@@ -69,7 +69,7 @@ The rendered page provides:
 |---|---|
 | `-o PATH` | HTML output path (default `memory-graph.html`) |
 | `--json PATH` | Also write the machine-readable graph artifact |
-| `--verdicts PATH` | Merge an `injudge.report/v20` file before rendering |
+| `--verdicts PATH` | Merge an `injudge.report/v21` file before rendering |
 
 ## Verdict Overlay
 

@@ -34,7 +34,7 @@ npm --prefix agent install    # TS 侧执行一次（需要 PATH 上有 node >= 
 
 | 键 | 默认值 | 用途 |
 |---|---|---|
-| `MAX_STEPS` | `40` | 首次调查的 LLM 调用上限（含最终作答轮）。每次恢复调查最多 `min(MAX_STEPS, 4)` 次调用；修复仅一次。 |
+| `MAX_STEPS` | `40` | 首次调查的 LLM 调用上限（含最终作答轮）。答案被拒后的每次跟进最多 `min(MAX_STEPS, 4)` 次调用。 |
 | `CONTEXT_WINDOW` | `131072` | 评审模型的上下文窗口（token）。水位线（窗口减 `MAX_OUTPUT_TOKENS` 和强制作答消息的估算大小）在上下文溢出前触发强制作答。 |
 | `MAX_OUTPUT_TOKENS` | `32768` | 每次 LLM 调用的输出 token 上限。上下文水位线会为输出预留这部分空间，因此输入证据的可用空间相应减少；计费仍按实际生成量。加上强制作答消息估算后，须在 `CONTEXT_WINDOW` 内为输入留出空间；无效配置在加载轨迹前拒绝。`--judge-max-tokens` 可覆盖。 |
 
@@ -44,7 +44,7 @@ npm --prefix agent install    # TS 侧执行一次（需要 PATH 上有 node >= 
 
 | 键 | 默认值 | 用途 |
 |---|---|---|
-| `MAX_ATTEMPTS` | `5` | 每个区间的运行器阶段总数：首次调查、修复与恢复调查。首次答案缺少必读证据时可直接恢复调查；修复也可请求证据。修复仍不合法则停止。`--max-attempts` 可覆盖。 |
+| `MAX_ATTEMPTS` | `3` | 每个区间的运行器阶段总数：首次调查，加上每次答案被拒后的跟进。`--max-attempts` 可覆盖。 |
 | `TIMEOUT` | `300` | 单次 LLM 调用超时（秒）。`--timeout` 可覆盖。 |
 | `JUDGE_PARALLEL` | `1` | 跨所有输入轨迹并行评判的区间数（上限 32）。每个在飞区间是一条独立的智能体对话。 |
 
@@ -55,7 +55,7 @@ npm --prefix agent install    # TS 侧执行一次（需要 PATH 上有 node >= 
 | `--env PATH` | checkout 的 `.env` | 指定另一份 env 文件 |
 | `--judge-model` | `MODEL` | 覆盖评审模型 |
 | `--timeout` | `300` | 单次 LLM 调用超时（秒） |
-| `--max-attempts` | `MAX_ATTEMPTS` | 每区间的调查/修复阶段总数 |
+| `--max-attempts` | `MAX_ATTEMPTS` | 每区间的运行器阶段总数（调查加跟进） |
 | `--judge-max-tokens` | `MAX_OUTPUT_TOKENS` | 单次调用输出上限 |
 | `--episode ID` | 不设 | 只评判已录制 episode id、benchmark 身份或执行 id 等于 *ID* 的 episode（可重复）。其余区间保留紧凑的 `unjudged` 审计记录，不计入汇总统计、summary 计数和 dry-run 区间计数。policy 总量仍覆盖完整轨迹。无匹配的 *ID* 在任何调用前快速失败。不可与 `--prepare-only` 同用。 |
 | `--limit N` | 不设 | 最多用智能体评判 *N* 个 episode 内、非空的区间；先校验全部 episode 与附件的适用范围。`--prepare-only` 则改为限制物化的 episode 数量。小于 1 的值会快速失败。 |
@@ -70,7 +70,7 @@ npm --prefix agent install    # TS 侧执行一次（需要 PATH 上有 node >= 
 ### 离线准备
 
 使用 `--prepare-only` 可在不加载 `.env`、Node 或网络的情况下按 bridge
-episode 分区并写出 `injudge.episode-inputs/v3`：
+episode 分区并写出 `injudge.episode-inputs/v4`：
 
 ```bash
 uv run -m injudge <paths> --prepare-only -o output/

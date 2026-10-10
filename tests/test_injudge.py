@@ -1686,8 +1686,8 @@ def test_summary_is_statistics_only():
         [op], [], [{"level": "warn", "msg": "REPORT ONLY"}])
     before = json.dumps(artifact)
     summary = build_summary(artifact)
-    assert summary["tool"] == {"name": "injudge", "schema": "injudge.summary/v17",
-                               "source_report_schema": "injudge.report/v20", "judge_model": "judge"}
+    assert summary["tool"] == {"name": "injudge", "schema": "injudge.summary/v18",
+                               "source_report_schema": "injudge.report/v21", "judge_model": "judge"}
     assert summary["report"] == "injudge-report.json"
     assert summary["generated_at"] == artifact["generated_at"]
     assert summary["diagnostics"] == {"error": 0, "warn": 1, "info": 0}
@@ -1790,7 +1790,7 @@ def test_summary_keeps_executed_judge_health_and_unknown_usage():
                       "executed_tool_calls": 0, "context_rollbacks": 0}
     artifact = build_artifact({}, [{"id": "T1"}], [judged, error], [], [])
     judge = build_summary(artifact)["overall"]["judge"]
-    assert judge == {"attempted_spans": 2, "gold_scored": 1, "spans_with_repairs": 1,
+    assert judge == {"attempted_spans": 2, "gold_scored": 1, "spans_with_followups": 1,
         "forced_spans": 1, "executed_llm_calls": 5, "executed_tool_calls": 3,
         "context_rollbacks": 1, "reported_usage": {"input": None, "output": None,
         "cache_read": None, "cache_write": None}, "effect_pairing_corrected_spans": 1,
@@ -1817,7 +1817,7 @@ def test_cli_writes_results_first_summary(monkeypatch, tmp_path):
     summary = json.loads(text)
     report = json.loads((run_dir / "injudge-report.json").read_text())
     assert text.startswith('{\n  "overall": {\n') and text.endswith("\n")
-    assert summary["tool"]["schema"] == "injudge.summary/v17"
+    assert summary["tool"]["schema"] == "injudge.summary/v18"
     assert summary["tool"]["source_report_schema"] == report["tool"]["schema"]
     assert "test-key-only" not in text
     (row,) = summary["trajectories"]
@@ -2024,7 +2024,7 @@ def test_cli_runs_share_the_container_without_clobbering(monkeypatch, tmp_path):
     assert len(run_dirs) == 2  # distinct stamps even for same-second runs
     for run_dir in run_dirs:
         report = json.loads((run_dir / "injudge-report.json").read_text())
-        assert report["tool"]["schema"] == "injudge.report/v20"
+        assert report["tool"]["schema"] == "injudge.report/v21"
         assert (run_dir / "summary.json").is_file()
         (span_evidence,) = (run_dir / "evidence").iterdir()
         assert (span_evidence / "manifest.json").is_file()
@@ -2620,68 +2620,52 @@ def test_masking_skips_degenerate_short_keys():
     assert _mask_key("sk-secret guided", "sk-secret") == "*** guided"
 
 
-@pytest.mark.parametrize("key,literal", [
-    ("sk-abcdefgh", r'"sk\u002dabcdefgh"'),
-    ("sk-ab/cd+ef=gh", r'"sk-ab\/cd+ef=gh"'),
-    ("sk-ab/cd+ef=gh", r'"sk-ab\u002fcd%2bef%3dgh"'),
-    ('sk-quote"slash\\secret', json.dumps('sk-quote"slash\\secret')),
-    ("sk-unicode-é-secret", json.dumps("sk-unicode-é-secret")),
-])
-def test_masking_covers_json_escapes_in_saved_artifacts(tmp_path, key, literal):
+@pytest.mark.parametrize("key", ["sk-abcdefgh", "sk-ab/cd+ef=gh", 'sk-quote"secret',
+                               "sk-back\\slash-secret", "sk-unicode-é-secret"])
+def test_masking_covers_raw_url_encoded_and_serialized_echoes(tmp_path, key):
+    """Mask accepted credentials through both the answer and JSONL envelopes."""
+    from urllib.parse import quote
     from injudge.agent import _mask_trajectory_file
 
-    answer = '{"echo":' + literal + '}'
+    encoded = quote(key, safe="")
+    answer = json.dumps({"echo": f"Bearer {key}", "url": f"https://x/?k={encoded}&l={encoded.lower()}"})
     verdict = _error_verdict("invalid", answer, _FakeSpan(), [], key)
-    assert json.loads(verdict["judge_raw"]) == {"echo": "***"}
+    assert json.loads(verdict["judge_raw"]) == {"echo": "Bearer ***", "url": "https://x/?k=***&l=***"}
     transcript = tmp_path / "trace.jsonl"
-    transcript.write_text(json.dumps({"answer": answer, "error": json.loads(literal)}) + "\n")
+    transcript.write_text(json.dumps({"answer": answer, "error": key}) + "\n")
     _mask_trajectory_file(transcript, key)
     record = json.loads(transcript.read_text())
-    assert record["error"] == "***"
-    assert json.loads(record["answer"]) == {"echo": "***"}
+    assert record["error"] == "***" and json.loads(record["answer"])["echo"] == "Bearer ***"
 
 
-@pytest.mark.parametrize("key,fragment", [
-    ("sk-abcdefgh", r'{"echo":"sk\u002dabcdefgh'),
-    ("sk-ab/cd+ef=gh", r'{"echo":"sk-ab\/cd+ef=gh'),
-    ("sk-abcdefgh", '{"echo":"sk\\u002dabcdefgh' + '\\'),
-    ("sk-abcdefgh", r'{"echo":"sk\u002dabcdefgh\q"}'),
-])
-def test_masking_redacts_malformed_json_credential_echoes(tmp_path, key, fragment):
+@pytest.mark.parametrize("key", ['sk-quote"secret', "sk-back\\slash-secret"])
+@pytest.mark.parametrize("nested", [False, True])
+def test_masking_discards_incomplete_records_and_keeps_replayable_history(tmp_path, key, nested):
     from injudge.agent import _mask_trajectory_file
 
-    verdict = _error_verdict("invalid", fragment, _FakeSpan(), [], key)
-    assert "abcdefgh" not in verdict["judge_raw"] and "cd+ef=gh" not in verdict["judge_raw"]
-    assert "***" in verdict["judge_raw"]
     transcript = tmp_path / "trace.jsonl"
-    complete = json.dumps({"answer": fragment}) + "\n"
-    transcript.write_text(complete + fragment)
+    prefix = '{"type": "message", "message": {"content": "keep \\\\n verbatim"}}\n'
+    value = json.dumps({"echo": key}) if nested else key
+    record = json.dumps({"type": "attempt_end", "answer": value})
+    transcript.write_text(prefix + record[:-1])
     _mask_trajectory_file(transcript, key)
-    first, tail = transcript.read_text().split("\n", 1)
-    assert json.loads(first)["answer"] == verdict["judge_raw"]
-    assert tail == verdict["judge_raw"]
-    cut = tmp_path / "cut.jsonl"
-    cut.write_text(json.dumps({"answer": fragment})[:-2])  # runner killed mid-write
-    _mask_trajectory_file(cut, key)
-    assert "abcdefgh" not in cut.read_text() and "cd+ef=gh" not in cut.read_text()
+    assert transcript.read_text() == prefix
+    # A resumed runner must append a new record on its own line.
+    following = {"type": "attempt", "attempt": 2}
+    with transcript.open("a") as stream:
+        stream.write(json.dumps(following) + "\n")
+    records = [json.loads(line) for line in transcript.read_text().splitlines()]
+    assert len(records) == 2 and records[-1] == following
 
 
-def test_masking_excessive_json_wrapping_keeps_a_safe_transcript(tmp_path):
+def test_masking_terminates_a_complete_record_missing_its_newline(tmp_path):
     from injudge.agent import _mask_trajectory_file
 
-    key = "sk-abcdefgh"
-    wrapped = r'"sk\u002dabcdefgh"'
-    for _ in range(18):
-        wrapped = json.dumps(wrapped)
     transcript = tmp_path / "trace.jsonl"
-    transcript.write_text(json.dumps({"answer": wrapped, "error": key}) + "\n")
-    _mask_trajectory_file(transcript, key)
-    record = json.loads(transcript.read_text())
-    assert record["error"] == "***"
-    answer = record["answer"]
-    while answer.startswith('"'):
-        answer = json.loads(answer)
-    assert answer == "***"
+    record = '{"type": "attempt", "attempt": 1}'
+    transcript.write_text(record)
+    _mask_trajectory_file(transcript, "sk-example-key")
+    assert transcript.read_text() == record + "\n"
 
 
 @pytest.mark.parametrize("text", [
@@ -2689,15 +2673,17 @@ def test_masking_excessive_json_wrapping_keeps_a_safe_transcript(tmp_path):
     r'grep -n "DJANGO_SETTINGS_MODULE\|settings=" tests/runtests.py',  # invalid JSON escape
     r'{"answer":"cut off at / and \d',  # unfinished string
 ])
-def test_masking_preserves_unrelated_json_escapes(tmp_path, text):
+@pytest.mark.parametrize("key", ["sk-abcdefgh", 'sk-quote"back\\slash-secret'])
+def test_masking_preserves_unrelated_json_escapes(tmp_path, text, key):
     from injudge.agent import _mask_trajectory_file
     from injudge.judge import _mask_key
 
-    assert _mask_key(text, "sk-abcdefgh") == text
+    assert _mask_key(text, key) == text
     transcript = tmp_path / "trace.jsonl"
     transcript.write_text(json.dumps({"answer": text}) + "\n")
-    _mask_trajectory_file(transcript, "sk-abcdefgh")
-    assert json.loads(transcript.read_text())["answer"] == text
+    original = transcript.read_text()
+    _mask_trajectory_file(transcript, key)
+    assert transcript.read_text() == original
 
 
 def test_masking_covers_every_urlencoded_spelling():
@@ -2834,8 +2820,8 @@ def _reads(*steps):
     """Retained source reads, shaped like runner toolResult messages."""
     return [{"role": "toolResult", "toolName": "read_evidence", "isError": False,
              "_fixture_read": True,
-             "details": {"path": path, "lines_read": 3}}
-            for path in ["task.md", "baseline.md", "deliveries.md",
+             "details": {"files": [{"path": path, "lines_read": 3}]}}
+            for path in ["task.md", "baseline.md", "messages.md", "gold.md", "deliveries.md",
                          *(f"steps/step_{s:06d}.md" for s in steps)]]
 
 
@@ -2846,13 +2832,14 @@ def _fill_reads(result, evidence_dir):
     messages = []
     for message in result["messages"]:
         if message.pop("_fixture_read", False):
-            path = evidence_dir / message["details"]["path"]
+            read = message["details"]["files"][0]
+            path = evidence_dir / read["path"]
             if not path.exists():
                 continue
             lines = path.read_text().split("\n")
-            message["content"] = [{"type": "text", "text": "\n".join(
+            message["content"] = [{"type": "text", "text": f"==> {read['path']} <==\n" + "\n".join(
                 f"{i}: {line}" for i, line in enumerate(lines, 1))}]
-            message["details"].update(lines_read=len(lines), line_start=1, line_end=len(lines), truncated=False)
+            read.update(lines_read=len(lines), line_start=1, line_end=len(lines), truncated=False)
         messages.append(message)
     result["messages"] = messages
     return result
@@ -2868,21 +2855,19 @@ def _result(answer, *, error=None, forced=False, llm_calls=3, tool_calls=4,
         "forced": forced,
         "llm_calls": llm_calls,
         "tool_calls": tool_calls,
-        "retained_evidence": 1,
         "messages": messages if messages is not None else [
             {"role": "user"}, *_reads(*range(1, 60)), {"role": "assistant"}],
         "stop_reason": stop_reason,
     }
 
 
-@pytest.mark.parametrize("continued,repair,configured,expected", [
-    (False, False, 40, 40),
-    (True, False, 40, 4),
-    (True, False, 2, 2),
-    (True, True, 40, 1),
+@pytest.mark.parametrize("continued,configured,expected", [
+    (False, 40, 40),
+    (True, 40, 4),
+    (True, 2, 2),
 ])
-def test_runner_job_uses_the_phase_step_limit(monkeypatch, tmp_path, continued, repair, configured, expected):
-    """Continuing a named evidence gap must not regain the full initial budget."""
+def test_runner_job_uses_the_phase_step_limit(monkeypatch, tmp_path, continued, configured, expected):
+    """A follow-up after a rejected answer must not regain the full initial budget."""
     import subprocess
     from pathlib import Path
     from injudge.agent import _invoke_runner
@@ -2900,7 +2885,7 @@ def test_runner_job_uses_the_phase_step_limit(monkeypatch, tmp_path, continued, 
     result = _invoke_runner(cfg, tmp_path / "evidence", tmp_path / "trace.jsonl",
                             3 if continued else 1, "system", "message",
                             [{"role": "assistant"}] if continued else None,
-                            warnings, repair=repair)
+                            warnings)
     assert result["answer"] == GOOD and warnings == []
     assert cfg.max_steps == configured  # the shared initial config is not mutated
 
@@ -2917,7 +2902,7 @@ def test_deeply_nested_runner_result_is_a_reported_failure(monkeypatch, tmp_path
     monkeypatch.setattr("injudge.agent.subprocess.run", run)
     warnings = []
     result = _invoke_runner(_agent_cfg(), tmp_path / "evidence", tmp_path / "trace.jsonl",
-                            1, "system", "message", None, warnings, repair=False)
+                            1, "system", "message", None, warnings)
     assert result is None
     # Recursive decoders reject the nesting; newer Python decoders can read
     # it, then reject the result shape. Both must remain reported failures.
@@ -2933,8 +2918,8 @@ def stub_runner(monkeypatch, results):
     calls = []
 
     def _fake(cfg, evidence_dir, trajectory_path, attempt, system, message,
-              history, warnings, *, repair):
-        calls.append({"message": message, "history": history, "repair": repair,
+              history, warnings):
+        calls.append({"message": message, "history": history, "followup": history is not None,
                       "system": system, "evidence_dir": evidence_dir,
                       "trajectory_path": trajectory_path, "attempt": attempt})
         if not results:
@@ -3007,7 +2992,7 @@ def test_agent_span_end_to_end(monkeypatch, tmp_path):
     assert "the task" in (dest / "task.md").read_text()
     # The target is in context; the detailed index remains tool-readable.
     assert (dest / "span.md").read_text() in calls[0]["message"]
-    assert "manifest.json" in calls[0]["message"]
+    assert "## Required reads\nAlways: task.md, baseline.md, steps/step_000001.md." in calls[0]["message"]
     assert (dest / "manifest.json").read_text() not in calls[0]["message"]
     for entry in manifest["files"]:
         if entry["kind"] == "step":
@@ -3046,9 +3031,9 @@ def test_agent_opening_matches_optional_attachments(monkeypatch, tmp_path, has_g
 
 @pytest.mark.parametrize("failure", ["format", "coverage"])
 def test_agent_corrective_retry_continues_the_conversation(monkeypatch, tmp_path, failure):
-    """An out-of-contract answer takes one corrective retry that continues
-    the SAME conversation: the retry's message is the corrective note naming
-    the violation, and the history carries the failed attempt's transcript."""
+    """An out-of-contract answer takes a follow-up that continues the SAME
+    conversation: its message names the violation, and the history carries
+    the failed attempt's transcript."""
     bad = json.loads(GOOD)
     bad["memories"] = bad["memories"][:1]  # missing m2 -> coverage violation
     answer = "Evidence is clear.\n```json\n" + GOOD + "\n```" if failure == "format" else json.dumps(bad)
@@ -3062,13 +3047,13 @@ def test_agent_corrective_retry_continues_the_conversation(monkeypatch, tmp_path
     assert violation in calls[1]["message"]
     assert calls[1]["history"] == _fill_reads(_result(answer), calls[0]["evidence_dir"])["messages"]
     assert calls[0]["history"] is None
-    assert [call["repair"] for call in calls] == [False, True]
+    assert [call["followup"] for call in calls] == [False, True]
 
 
 def test_agent_anchor_must_name_a_step_the_conversation_read(monkeypatch, tmp_path):
     """One step read cannot support anchors in other steps. An unread anchor
-    in the first answer resumes investigation before repair. The input record
-    lists only steps read in the retained conversation."""
+    takes a follow-up. The input record lists only steps read in the
+    retained conversation."""
     only_step_1 = [{"role": "user"}, *_reads(1), {"role": "assistant"}]
     calls = stub_runner(monkeypatch, [_result(GOOD, messages=only_step_1),
                                       _result("not json", messages=only_step_1),
@@ -3078,7 +3063,7 @@ def test_agent_anchor_must_name_a_step_the_conversation_read(monkeypatch, tmp_pa
                          evidence_root=tmp_path, transcripts_root=tmp_path / "runs")
     assert verdict["verdict"] == "error"
     assert "cites m1 anchor step(s) [2]" in calls[1]["message"]
-    assert [call["repair"] for call in calls] == [False, False, True]
+    assert [call["followup"] for call in calls] == [False, True, True]
     assert verdict["input"]["read_steps"] == [1]
     calls = stub_runner(monkeypatch, [_result(GOOD, messages=[*only_step_1, *_reads(2, 3)])])
     verdict = judge_span(span, steps, _agent_cfg(), [], None,
@@ -3101,40 +3086,19 @@ def test_agent_evidence_citations_require_retained_step_reads(monkeypatch, tmp_p
     assert "cites evidence step(s) [3]" in calls[1]["message"]
 
 
-def test_agent_invalid_repair_stops_with_raw(monkeypatch, tmp_path):
-    """One failed repair is an error, not repeated blind rewriting."""
+def test_agent_rejected_answers_stop_at_max_attempts_with_raw(monkeypatch, tmp_path):
+    """Follow-ups are bounded by MAX_ATTEMPTS; exhaustion keeps the raw text."""
     calls = stub_runner(monkeypatch, [_result("nope")] * 5)
     span, steps = _judge_input_fixture()
     warnings: list[str] = []
-    verdict = judge_span(span, steps, _agent_cfg(), warnings, None,
+    verdict = judge_span(span, steps, _agent_cfg(max_attempts=2), warnings, None,
                          evidence_root=tmp_path, transcripts_root=tmp_path / "runs")
     assert verdict["verdict"] == "error"
     assert "not valid JSON" in verdict["error"] and "2 attempts" in verdict["error"]
     assert verdict["judge_raw"] == "nope"
     assert len(calls) == 2
     assert verdict["input"]["attempts"] == 2
-
-
-@pytest.mark.parametrize("max_attempts", [2, 3])
-def test_agent_repair_resumes_only_for_requested_evidence(monkeypatch, tmp_path, max_attempts):
-    history = [{"role": "user"}, {"role": "assistant"}, {"role": "user"},
-               {"role": "assistant", "content": "needs step 2's tool result"}]
-    request = json.dumps({"needs_evidence": "Read step 2's tool result to check the action."})
-    calls = stub_runner(monkeypatch, [_result("invalid"),
-                                      _result(request, messages=history), _result(GOOD)])
-    span, steps = _judge_input_fixture()
-    verdict = judge_span(span, steps, _agent_cfg(max_attempts=max_attempts), [], None,
-                         evidence_root=tmp_path, transcripts_root=tmp_path / "runs")
-    assert [call["repair"] for call in calls[:2]] == [False, True]
-    if max_attempts == 2:
-        assert len(calls) == 2 and verdict["verdict"] == "error"
-        assert "needs evidence" in verdict["error"]
-    else:
-        assert len(calls) == 3 and verdict["verdict"] == "positive"
-        assert calls[2]["repair"] is False
-        assert calls[2]["history"] == history
-        assert "Read step 2's tool result" in calls[2]["message"]
-        assert calls[2]["evidence_dir"] == calls[0]["evidence_dir"]
+    assert "Your final answer was rejected: judge output is not valid JSON" in calls[1]["message"]
 
 
 def test_agent_runner_failure_is_an_error_verdict_not_a_retry(monkeypatch, tmp_path):
@@ -3370,7 +3334,7 @@ def test_evidence_replaces_a_prior_run(tmp_path):
     assert "new task" in (tmp_path / "task.md").read_text()
     assert "old task" not in (tmp_path / "task.md").read_text()
     assert sorted(p.name for p in tmp_path.iterdir()) == [
-        "baseline.md", "context.json", "deliveries.md", "manifest.json",
+        "baseline.md", "deliveries.md", "manifest.json",
         "searches.json", "span.md", "steps", "task.md"]
 
 
@@ -3436,7 +3400,7 @@ def test_agent_unknown_novelty_preserves_independent_signals(
     path = tmp_path / "report.json"
     path.write_text(json.dumps(artifact))
     saved = json.loads(path.read_text())
-    assert saved["tool"]["schema"] == "injudge.report/v20"
+    assert saved["tool"]["schema"] == "injudge.report/v21"
     assert saved["operations"][0]["rubric"]["m1"]["novelty"]["value"] is None
     rub = saved["aggregates"]["overall"]["rubric"]
     assert rub["deliveries"] == 2
@@ -3445,7 +3409,7 @@ def test_agent_unknown_novelty_preserves_independent_signals(
     assert rub["relevant_counts"]["novelty"] == {"null": 1}
     assert rub["rates"]["novelty"] is None
     summary = build_summary(saved)
-    assert summary["tool"]["schema"] == "injudge.summary/v17"
+    assert summary["tool"]["schema"] == "injudge.summary/v18"
     assert summary["overall"]["rubric"]["counts"]["novelty"] == rub["counts"]["novelty"]
     if usage == "ignored":
         assert rub["no_footprint_reasons"] == {"ignored_unknown_novelty": 1, "irrelevant": 1}
@@ -3518,7 +3482,7 @@ def test_deeply_nested_repair_is_a_contract_error_with_input_record(monkeypatch,
     deep = '{"extra":' + '[' * 200000 + '0' + ']' * 200000 + '}'
     calls = stub_runner(monkeypatch, [_result("invalid"), _result(deep)])
     span, steps = _judge_input_fixture()
-    result = judge_span(span, steps, _agent_cfg(), [], evidence_root=tmp_path / "evidence",
+    result = judge_span(span, steps, _agent_cfg(max_attempts=2), [], evidence_root=tmp_path / "evidence",
                         transcripts_root=tmp_path / "runs")
     assert result["verdict"] == "error" and "nests too deeply" in result["error"]
     assert result["judge_raw"] == deep[:2000]

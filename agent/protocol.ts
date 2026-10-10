@@ -32,7 +32,7 @@ export interface AgentJob {
 	evidence_dir: string;
 	/** The full scoring system prompt. */
 	system: string;
-	/** The opening, repair instruction, or missing-evidence follow-up. */
+	/** The opening, or the follow-up naming why the last answer was rejected. */
 	opening: string;
 	/** Injected as a user message when the step/context budget is exhausted. */
 	forced_message: string;
@@ -40,8 +40,6 @@ export interface AgentJob {
 	history?: unknown[];
 	/** 1-based attempt number, recorded in the trajectory. */
 	attempt: number;
-	/** One model call with no evidence tools, to repair an invalid final answer. */
-	repair: boolean;
 	/** Absolute path of the trajectory JSONL this conversation appends to. */
 	trajectory_path: string;
 	config: AgentJobConfig;
@@ -70,8 +68,6 @@ export interface AgentResult {
 	executed_llm_calls: number;
 	executed_tool_calls: number;
 	reported_usage: AgentUsage;
-	/** Successfully read step files still present in the conversation. */
-	retained_evidence: number;
 	context_rollbacks: number;
 	/** The full conversation, for the caller's corrective continuation. */
 	messages: unknown[];

@@ -28,8 +28,8 @@ uv run -m injudge <paths> --dry-run --limit 3
 
 | 文件 | 内容 |
 |---|---|
-| `injudge-report.json` | 运行时评审记录（`injudge.report/v20`），付费调用前写入并将待评区间标为 `unjudged`；每个区间完成后保存，包括并行完成的结果 |
-| `summary.json` | 最终统计（`injudge.summary/v17`）：计数、比率、投递估算、评审运行总量 |
+| `injudge-report.json` | 运行时评审记录（`injudge.report/v21`），付费调用前写入并将待评区间标为 `unjudged`；每个区间完成后保存，包括并行完成的结果 |
+| `summary.json` | 最终统计（`injudge.summary/v18`）：计数、比率、投递估算、评审运行总量 |
 | `memgraph-verdicts.html` | 仅在 `--html` 时产出：召回节点按判定着色的 memgraph |
 | `evidence/` | 每个送入评审智能体的区间一个文件夹（含运行失败产生的 error 判定）：只包含目标 `span.md`，加上其父 episode 已准备的文件与可选附件 |
 | `agent-runs/` | 每个送入评审智能体的区间一条轨迹 JSONL：判定如何得出的 pi 事件流记录 |
@@ -44,7 +44,7 @@ uv run -m injudge <paths> --dry-run --limit 3
 
 ## 离线准备
 
-`--prepare-only` 写出离线 episode 包，而不是一次评审运行：`<run-stamp>/episode-inputs.json`（`injudge.episode-inputs/v3` 索引），外加每个物化 episode 一个 `<run-stamp>/episodes/<episode-dir>/` 文件夹。它不加载 `.env`、不需要 Node，也不发起任何评审调用；若边界或归属需要复核，包会先写出，再以非零状态退出。参见[配置](configuration.md#离线准备)。
+`--prepare-only` 写出离线 episode 包，而不是一次评审运行：`<run-stamp>/episode-inputs.json`（`injudge.episode-inputs/v4` 索引），外加每个物化 episode 一个 `<run-stamp>/episodes/<episode-dir>/` 文件夹。它不加载 `.env`、不需要 Node，也不发起任何评审调用；若边界或归属需要复核，包会先写出，再以非零状态退出。参见[配置](configuration.md#离线准备)。
 
 ## 注入区间
 

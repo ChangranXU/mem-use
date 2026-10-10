@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
-import { createEvidenceTools, resolveInside } from "./evidence-tools.ts";
+import { createEvidenceTools, resolveInside, type FileRead } from "./evidence-tools.ts";
 
 function makeRoot(): string {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "evidence-test-"));
@@ -46,11 +46,50 @@ test("read_evidence returns file text, offset/limit slices in lines", async () =
 	const read = tools.find((t) => t.name === "read_evidence")!;
 	const whole = await read.execute("t1", { path: "span.md" });
 	assert.equal(whole.content[0].type, "text");
-	assert.equal(whole.content[0].type === "text" ? whole.content[0].text : "", "1: the span\n2: second line\n3: ");
+	assert.equal(whole.content[0].type === "text" ? whole.content[0].text : "", "==> span.md <==\n1: the span\n2: second line\n3: ");
 	const sliced = await read.execute("t2", { path: "span.md", offset: 2, limit: 1 });
-	assert.equal(sliced.content[0].type === "text" ? sliced.content[0].text : "", "2: second line");
+	assert.equal(sliced.content[0].type === "text" ? sliced.content[0].text : "", "==> span.md <==\n2: second line");
 	await assert.rejects(() => read.execute("t3", { path: "nope.md" }));
+	const one = await read.execute("t4", { paths: ["span.md"], offset: 2 });
+	assert.equal(one.content[0].type === "text" ? one.content[0].text : "", "==> span.md <==\n2: second line\n3: ");
+	await assert.rejects(() => read.execute("t4b", { paths: ["span.md", "manifest.json"], limit: 1 }), /single file/);
+	await assert.rejects(() => read.execute("t5", {}), /paths/);
 	fs.rmSync(root, { recursive: true, force: true });
+});
+
+test("read_evidence reads several whole files in one call, one block per file", async () => {
+	const root = makeRoot();
+	try {
+		const read = createEvidenceTools(root).find((t) => t.name === "read_evidence")!;
+		const result = await read.execute("t", { paths: ["steps/step_000001.md", "nope.md", "./steps/step_000002.md"] });
+		const texts = result.content.map((block) => block.type === "text" ? block.text : "");
+		assert.deepEqual(texts, [
+			"==> steps/step_000001.md <==\n1: alpha beta\n2: ",
+			"==> nope.md <==\n(error: ENOENT: no such file or directory, lstat '" + fs.realpathSync(root) + "/nope.md')",
+			"==> steps/step_000002.md <==\n1: gamma delta\n2: ",
+		]);
+		assert.deepEqual(result.details.files.map((file: FileRead) => [file.path, file.lines_read, !!file.error]), [
+			["steps/step_000001.md", 1, false], ["nope.md", 0, true], ["steps/step_000002.md", 1, false],
+		]);
+		await assert.rejects(() => read.execute("t2", { paths: ["../escape.md"] }), /\.\./);
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("a batch past the character cap names the files left unread", async () => {
+	const root = makeRoot();
+	try {
+		fs.writeFileSync(path.join(root, "steps", "step_000001.md"), "x".repeat(200_100) + "\nUNSEEN ACTION\n");
+		const read = createEvidenceTools(root).find((t) => t.name === "read_evidence")!;
+		const result = await read.execute("t", { paths: ["steps/step_000001.md", "steps/step_000002.md"] });
+		const texts = result.content.map((block) => block.type === "text" ? block.text : "");
+		assert.match(texts[0], /continue with path=steps\/step_000001\.md, offset=1, column=/);
+		assert.match(texts[1], /not read: the call's character cap was reached/);
+		assert.deepEqual(result.details.files[1], { path: "steps/step_000002.md", lines_read: 0, truncated: true });
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
 });
 
 test("a limit that stops before the file end says how many lines remain", async () => {
@@ -58,14 +97,15 @@ test("a limit that stops before the file end says how many lines remain", async 
 	fs.writeFileSync(path.join(root, "steps", "step_000003.md"), "one\ntwo\nthree\n\nfive\n");
 	const read = createEvidenceTools(root).find((t) => t.name === "read_evidence")!;
 	const text = (result: { content: { type: string; text?: string }[] }) => result.content[0].text;
+	const header = "==> steps/step_000003.md <==\n";
 	const head = await read.execute("t1", { path: "steps/step_000003.md", limit: 2 });
-	assert.equal(text(head), "1: one\n2: two\n(... 3 more lines; continue with offset=3)");
-	assert.equal(head.details.truncated, false);
+	assert.equal(text(head), header + "1: one\n2: two\n(... 3 more lines; continue with path=steps/step_000003.md, offset=3)");
+	assert.equal(head.details.files[0].truncated, false);
 	const last = await read.execute("t2", { path: "steps/step_000003.md", offset: 4, limit: 1 });
-	assert.equal(text(last), "4: \n(... 1 more line; continue with offset=5)");
+	assert.equal(text(last), header + "4: \n(... 1 more line; continue with path=steps/step_000003.md, offset=5)");
 	// only the empty line after the final newline remains: nothing to continue
 	const tail = await read.execute("t3", { path: "steps/step_000003.md", offset: 5, limit: 1 });
-	assert.equal(text(tail), "5: five");
+	assert.equal(text(tail), header + "5: five");
 	fs.rmSync(root, { recursive: true, force: true });
 });
 
@@ -95,12 +135,12 @@ test("read coverage excludes lines removed by the character cap", async () => {
 		fs.writeFileSync(path.join(root, "steps", "step_000001.md"), "x".repeat(200_100) + "\nUNSEEN ACTION\n");
 		const read = createEvidenceTools(root).find((t) => t.name === "read_evidence")!;
 		const result = await read.execute("t", { path: "steps/step_000001.md" });
-		assert.deepEqual(result.details, { path: "steps/step_000001.md", lines_read: 1,
-			line_start: 1, line_end: 1, truncated: true });
+		assert.deepEqual(result.details.files, [{ path: "steps/step_000001.md", lines_read: 1,
+			line_start: 1, line_end: 1, truncated: true }]);
 		assert.doesNotMatch(result.content[0].type === "text" ? result.content[0].text : "", /UNSEEN ACTION/);
 		const tail = await read.execute("t2", { path: "steps/step_000001.md", offset: 2, limit: 1 });
-		assert.deepEqual(tail.details, { path: "steps/step_000001.md", lines_read: 1,
-			line_start: 2, line_end: 2, truncated: false });
+		assert.deepEqual(tail.details.files, [{ path: "steps/step_000001.md", lines_read: 1,
+			line_start: 2, line_end: 2, truncated: false }]);
 	} finally {
 		fs.rmSync(root, { recursive: true, force: true });
 	}
@@ -113,8 +153,8 @@ test("a truncated line number is not returned evidence", async () => {
 		for (const first of ["x".repeat(199_995), " ".repeat(199_995)]) {
 			fs.writeFileSync(path.join(root, "steps", "step_000001.md"), first + "\nUNSEEN ACTION");
 			const result = await read.execute("t", { path: "steps/step_000001.md" });
-			assert.deepEqual(result.details, { path: "steps/step_000001.md",
-				lines_read: first.trim() ? 1 : 0, line_start: 1, line_end: 1, truncated: true });
+			assert.deepEqual(result.details.files, [{ path: "steps/step_000001.md",
+				lines_read: first.trim() ? 1 : 0, line_start: 1, line_end: 1, truncated: true }]);
 		}
 	} finally {
 		fs.rmSync(root, { recursive: true, force: true });
@@ -129,12 +169,12 @@ test("character pagination can read every character of an oversized Unicode line
 		const read = createEvidenceTools(root).find((t) => t.name === "read_evidence")!;
 		const first = await read.execute("first", { path: "steps/step_000001.md", limit: 1 });
 		const body = first.content[0].type === "text" ? first.content[0].text : "";
-		const next = /continue with offset=(\d+), column=(\d+)/.exec(body)!;
+		const next = /offset=(\d+), column=(\d+)/.exec(body)!;
 		assert.ok(next);
 		const second = await read.execute("second", { path: "steps/step_000001.md", offset: +next[1], column: +next[2] });
 		const tail = second.content[0].type === "text" ? second.content[0].text : "";
-		assert.equal(second.details.truncated, false);
-		assert.equal(body.split("\n")[0].replace(/^1: /, "") + tail.split("\n")[0].replace(/^1@\d+: /, ""), text);
+		assert.equal(second.details.files[0].truncated, false);
+		assert.equal(body.split("\n")[1].replace(/^1: /, "") + tail.split("\n")[1].replace(/^1@\d+: /, ""), text);
 		assert.match(tail, /2: result: passed/);
 	} finally {
 		fs.rmSync(root, { recursive: true, force: true });

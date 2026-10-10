@@ -6,19 +6,19 @@ folder. The configuration is deliberately tiny — a model/endpoint triple,
 a max-steps cap, a context window, an output-token cap — because the
 agent loop absorbs what the one-shot architecture had to engineer around:
 oversized inputs become "the agent reads selectively", a cut answer
-becomes "the corrective retry answers again", and both budgets end in a
-forced final round instead of an error.
+becomes "the follow-up answers again", and both budgets end in a forced
+final round instead of an error.
 
 Python still owns the verdict contract: the runner reports the
 conversation's final assistant text, and _strict_parse /
 _verdict_semantics / _assemble_verdict (injudge.judge) decide whether it
 is a verdict, and every cited anchor must name a step file the retained
 conversation actually read (a nonzero read count alone does not ground a
-claim about step N). If the first answer passes shape and semantic checks but
-misses required evidence, one short investigation continues job.history before
-repair, if the phase budget allows. Other violations get one tool-free repair.
-Its explicit needs_evidence reply can reopen investigation. An invalid repair
-or exhausted phase budget stays a visible error verdict, never a silent neutral.
+claim about step N). Every rejected answer — malformed, out of contract, or
+missing required reads — gets the same follow-up: the conversation continues
+with the rejection reason and the evidence tools under a short budget.
+MAX_ATTEMPTS bounds the phases; exhaustion stays a visible error verdict,
+never a silent neutral.
 
 The API key reaches the runner only through the JUDGE_API_KEY environment
 variable; it never rides the job/result temp files. Everything the
@@ -46,7 +46,6 @@ from injudge.episodes import evidence_problem
 from injudge.judge import (
     GoldInput,
     _assemble_verdict,
-    _corrective_note,
     _error_verdict,
     _mask_key,
     _masked_head,
@@ -68,8 +67,8 @@ _RUNNER = _AGENT_DIR / "runner.ts"
 # subprocess plus its live LLM calls, so the ceiling is named once here.
 MAX_PARALLEL = 32
 
-# A named evidence gap gets a short follow-up, not another full investigation.
-_RESUME_MAX_STEPS = 4  # three tool rounds plus the forced final answer
+# A rejected answer gets a short follow-up, not another full investigation.
+_FOLLOWUP_MAX_STEPS = 4  # three tool rounds plus the forced final answer
 
 API_FORMATS = ("openai-chat", "anthropic")
 # pi's ThinkingLevel spellings, passed through to the agent state.
@@ -77,11 +76,22 @@ THINKING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
 
 _OPENING = _substitute_enums(load_prompt("injudge/agent/opening"))
 _FORCED = _substitute_enums(load_prompt("injudge/agent/forced"))
-_RESUME = load_prompt("injudge/agent/resume")
+_FOLLOWUP = _substitute_enums(load_prompt("injudge/agent/followup"))
+
+
+def _source_label(source: str, files: dict[str, str]) -> str:
+    """A required source as the judge reads it: a file, or a delivery's line range."""
+    path, _, ref = source.partition("#")
+    if not ref:
+        return path
+    index = json.loads(files["manifest.json"])
+    section = next(sec for entry in index["files"] for sec in entry.get("sections", []) if sec["ref"] == ref)
+    return f"{path} lines {section['line_start']}–{section['line_end']} ({ref})"
 
 
 def _opening_message(span_id: str, files: dict[str, str]) -> str:
-    """Keep the target verbatim; leave the detailed episode index to tools."""
+    """Keep the target verbatim; leave the detailed episode index to tools.
+    The required reads come from the manifest list that validation checks."""
     index = json.loads(files["manifest.json"])
     navigation = [f"{entry['path']} ({entry['chars']} chars) — {entry['description']}"
                   for entry in index["files"] if entry.get("kind") != "step"]
@@ -92,9 +102,15 @@ def _opening_message(span_id: str, files: dict[str, str]) -> str:
     navigation.append(f"steps/: {len(step_files)} files, "
                       f"{step_files[0] if step_files else '?'} … {step_files[-1] if step_files else '?'}"
                       " — one per global step: reasoning, content, commands, results")
+    required = index["required_reads"]
+    reads = [f"Always: {', '.join(required['always'])}."]
+    if required["prior_sources"]:
+        reads.append("Before non-null novelty or acted_on: "
+                     + ", ".join(_source_label(source, files) for source in required["prior_sources"]) + ".")
     return (
         f"## span.md\n{files['span.md']}"
         + "\n\n## Evidence navigation\n" + "\n".join(navigation)
+        + "\n\n## Required reads\n" + "\n".join(reads)
         + "\n\n## Judging request\n" + _OPENING.replace("@span_id@", span_id)
     )
 
@@ -185,11 +201,11 @@ class AgentConfig:
     api_key: str
     model: str
     api: str = "openai-chat"  # one of API_FORMATS
-    max_steps: int = 40  # initial LLM-call cap; resumed investigations are clamped
+    max_steps: int = 40  # initial LLM-call cap; follow-ups are clamped
     max_output_tokens: int = 32768  # per-call output cap
     context_window: int = 131072  # the model's context window in tokens
     temperature: float = 0.0
-    max_attempts: int = 5  # total judge/repair invocations per span
+    max_attempts: int = 3  # runner phases per span: investigation plus follow-ups
     timeout: float = 300.0  # per LLM call, seconds
     thinking_level: str = "off"
 
@@ -346,8 +362,6 @@ def _invoke_runner(
     message: str,
     history: list | None,
     warnings: list[str],
-    *,
-    repair: bool,
 ) -> dict | None:
     """One runner subprocess = one agent conversation round. Writes the job
     (secret-free), runs node (the runner records its own trajectory JSONL at
@@ -355,11 +369,7 @@ def _invoke_runner(
     warning when the subprocess itself failed (missing runner, bad job —
     setup faults the caller records as that span's error, never a retry:
     retrying an identical setup fault would only re-pay it)."""
-    max_steps = cfg.max_steps
-    if repair:
-        max_steps = 1
-    elif history is not None:
-        max_steps = min(max_steps, _RESUME_MAX_STEPS)
+    max_steps = cfg.max_steps if history is None else min(cfg.max_steps, _FOLLOWUP_MAX_STEPS)
     evidence_dir.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".runner-", dir=str(evidence_dir.parent)) as tmp:
         job_path = Path(tmp) / "job.json"
@@ -370,7 +380,6 @@ def _invoke_runner(
             "opening": message,
             "forced_message": _FORCED,
             "attempt": attempt,
-            "repair": repair,
             "trajectory_path": str(trajectory_path),
             "config": {
                 "model": cfg.model,
@@ -436,12 +445,13 @@ def _read_files(messages: list, files: dict[str, str]) -> set[str]:
         details = m.get("details")
         if m.get("toolName") != "read_evidence" or not isinstance(details, dict):
             continue
-        path = details.get("path")
-        if not isinstance(path, str) or path not in lines:
-            continue
-        content = m.get("content")
-        for block in content if isinstance(content, list) else []:
-            if not isinstance(block, dict) or block.get("type") != "text" or not isinstance(block.get("text"), str):
+        # One text block per file read, aligned with details.files.
+        reads = details.get("files") if isinstance(details.get("files"), list) else []
+        content = m.get("content") if isinstance(m.get("content"), list) else []
+        for read, block in zip(reads, content):
+            path = read.get("path") if isinstance(read, dict) else None
+            if (not isinstance(path, str) or path not in lines or not isinstance(block, dict)
+                    or block.get("type") != "text" or not isinstance(block.get("text"), str)):
                 continue
             for line in block["text"].split("\n"):
                 match = re.fullmatch(r"([0-9]{1,9})(?:@([0-9]{1,9}))?: (.*)", line)
@@ -487,50 +497,28 @@ def _read_steps(read_files: set[str], files: dict[str, str]) -> list[int]:
                   if entry.get("kind") == "step" and entry["path"] in read_files)
 
 
-def _baseline_error(obj: dict, span: InjectionSpan, files: dict[str, str],
-                    read_files: set[str]) -> str | None:
-    """Require the opening's baseline inspection, not just post-exposure evidence.
+def _baseline_error(obj: dict, files: dict[str, str], read_files: set[str]) -> str | None:
+    """Require the manifest's required reads, not just post-exposure evidence.
 
-    The index does not certify its referenced sources; a complete preceding
-    step gives the immediate prior direction without restoring evicted history.
-    Novelty and acted-on credit compare the entry with everything the consumer
-    could still see, including memory text moved out of its host into
-    deliveries.md. Only visible non-target delivery sections are required.
+    baseline.md is an index: it does not certify the step files and delivery
+    sections holding the visible text. Novelty and acted-on credit compare the
+    entry with everything the consumer could still see, so those claims need
+    the prior sources themselves; without them, null is the valid answer.
     """
-    required = {"task.md", "baseline.md"}
-    index = json.loads(files["manifest.json"])
-    step_paths = {entry["path"] for entry in index["files"] if entry.get("kind") == "step"}
-    earlier = [entry for entry in index["files"] if entry.get("kind") == "step"
-               and span.step_first is not None and entry["step"] < span.step_first]
-    if earlier:
-        required.add(max(earlier, key=lambda entry: entry["step"])["path"])
+    required = json.loads(files["manifest.json"])["required_reads"]
     gaps: list[str] = []
-    missing = sorted(required - read_files)
-    if missing:
-        gaps.append(f"baseline evidence was not read completely: {missing}; "
-                    "read these files and follow relevant baseline references")
-    context = json.loads(files["context.json"])
-    visible = set(context["target_baseline"]["visible_occurrence_ids"])
-    sources = sorted({record["text_in"] for record in context["message_occurrences"]
-                      if record["occurrence_id"] in visible and record.get("text_in") in step_paths}
-                     - read_files)
-    delivery_refs = {ref for record in context["message_occurrences"]
-                     if record["occurrence_id"] in visible
-                     for ref in record.get("memory_delivery_refs", [])}
-    for file in index["files"]:
-        for section in file.get("sections", []):
-            ref = section["ref"]
-            if ref in delivery_refs and f"{file['path']}#{ref}" not in read_files:
-                sources.append(f"{file['path']} {ref} lines {section['line_start']}–{section['line_end']}")
+    if missing := [path for path in required["always"] if path not in read_files]:
+        gaps.append(f"rests on required files not read completely: {missing}; read them")
+    sources = [_source_label(source, files) for source in required["prior_sources"] if source not in read_files]
     for entry in obj["memories"] if sources else []:
         novelty = entry["novelty"]["value"]
         claims = [f"novelty {novelty!r}"] if novelty is not None else []
         if entry["influence"]["value"] == "acted_on":
             claims.append("acted_on influence")
         if claims:
-            gaps.append(f"{entry['id']} claims {' and '.join(claims)} without reading the source text "
-                        f"baseline.md names for visible input: {sources}; read them, or use null "
-                        "for a signal whose prior-knowledge comparison remains unassessed")
+            gaps.append(f"{entry['id']} claims {' and '.join(claims)} without reading the prior sources "
+                        f"of the visible input: {sources}; read them, or use null for a signal whose "
+                        "prior-knowledge comparison remains unassessed")
     return "; ".join(gaps) or None
 
 
@@ -543,8 +531,6 @@ def _coverage_error(obj: dict, span: InjectionSpan, eligible: set[int], read: se
     cover the window.
     """
     gaps: list[str] = []
-    if span.step_first not in read:
-        gaps.append(f"first consuming step {span.step_first} was not read completely; read its step file")
     for entry in obj["memories"]:
         influence = entry["influence"]["value"]
         effect = entry["positive_effect"]["value"]
@@ -573,8 +559,7 @@ def _unread_anchor_error(obj: dict, read: set[int]) -> str | None:
         if unread:
             gaps.append(
                 f"cites {entry['id']} anchor step(s) {unread} whose complete text was not "
-                "read in this conversation (read every cited step; request the missing "
-                "files with needs_evidence)"
+                "read in this conversation (read every cited step completely)"
             )
     evidence = obj.get("evidence")
     for entry in evidence if isinstance(evidence, list) else []:
@@ -583,7 +568,7 @@ def _unread_anchor_error(obj: dict, read: set[int]) -> str | None:
         if unread:
             gaps.append(
                 f"cites evidence step(s) {unread} whose complete text was not read "
-                "in this conversation (request the missing files with needs_evidence)"
+                "in this conversation (read every cited step completely)"
             )
     return "; ".join(gaps) or None
 
@@ -637,7 +622,36 @@ def _mask_trajectory_file(path: Path, api_key: str) -> None:
         text = path.read_text(encoding="utf-8", errors="replace")
     except FileNotFoundError:
         return
-    masked = _mask_key(text, api_key)
+
+    def mask_value(value: object) -> object:
+        if isinstance(value, str):
+            return _mask_key(value, api_key)
+        if isinstance(value, list):
+            return [mask_value(item) for item in value]
+        if isinstance(value, dict):
+            return {_mask_key(key, api_key): mask_value(item) for key, item in value.items()}
+        return value
+
+    # Decode only the JSONL envelope, never strings inside it. An answer can
+    # itself contain JSON text, so masking serialized bytes alone misses keys
+    # escaped once in that answer and again by the transcript writer.
+    lines = []
+    for line in text.split("\n"):
+        if not line.strip():
+            lines.append(line)
+            continue
+        try:
+            record = json.loads(line)
+            masked_record = mask_value(record)
+        except (ValueError, RecursionError):
+            # An incomplete envelope can hide another layer of key escaping.
+            # It cannot be replayed; discard that record, keeping complete ones.
+            continue
+        else:
+            lines.append(json.dumps(masked_record, ensure_ascii=False) if masked_record != record else line)
+    masked = "\n".join(lines)
+    if masked and not masked.endswith("\n"):
+        masked += "\n"  # the next attempt must append a separate JSONL record
     if masked != text:
         try:
             atomic_write(path, masked)
@@ -652,6 +666,29 @@ def _add_known(total: int | None, value: object) -> int | None:
     return total + value if total is not None and is_int(value) and value >= 0 else None
 
 
+def _answer_error(text: str, result: dict, span: InjectionSpan, episode: EpisodeInput,
+                  files: dict[str, str], read_files: set[str]) -> tuple[dict | None, str | None]:
+    """Parse and validate one final answer: (verdict object, None) or (None, why).
+
+    Every requirement is named at once, so one follow-up can fix them all.
+    """
+    if not text.strip():
+        # A forced round (or a server quirk) without a final message must be
+        # told to ANSWER, not to fix JSON it never wrote.
+        return None, f"is empty: the agent run produced no final text (stop_reason={result.get('stop_reason') or 'unknown'})"
+    obj, error = _strict_parse(text)
+    if obj is None:
+        return None, error
+    steps = {step.step for step in episode.steps}
+    error = _verdict_semantics(obj, span, episode.steps[-1].step if episode.steps else None, steps)
+    if error is None:
+        read = set(_read_steps(read_files, files))
+        gaps = [_unread_anchor_error(obj, read), _coverage_error(obj, span, steps, read),
+                _baseline_error(obj, files, read_files)]
+        error = "; ".join(gap for gap in gaps if gap) or None
+    return (obj, None) if error is None else (None, error)
+
+
 def judge_span(
     span: InjectionSpan,
     episode: EpisodeInput,
@@ -664,17 +701,14 @@ def judge_span(
 ) -> dict:
     """Judge one span with the evidence-searching agent.
 
-    The first answer's evidence gaps get one short investigation before repair
-    if shape and semantic checks pass and the phase budget allows. Other
-    violations get one tool-free repair; its explicit needs_evidence reply
-    can resume investigation. All phases continue job.history within the
-    total attempt budget. The runner records each attempt as a pi event-sourced
-    trajectory (every appended message, budget-rollback tombstones, the
-    forced-answer injection, per-attempt diagnostics) under
-    `transcripts_root` — one JSONL per span, replaced per judging run like
-    the evidence folder, masked after each attempt. A runner-level failure
-    (setup fault, endpoint auth) is that span's error verdict; the run
-    continues.
+    A rejected answer continues the same conversation (job.history) with the
+    rejection reason and the evidence tools, under a short budget, until
+    MAX_ATTEMPTS phases are spent. The runner records each phase in a pi
+    event-sourced trajectory (every appended message, budget-rollback
+    tombstones, the forced-answer injection, per-phase diagnostics) under
+    `transcripts_root` — one JSONL per span, replaced per judging run like the
+    evidence folder, masked after each phase. A runner-level failure (setup
+    fault, endpoint auth) is that span's error verdict; the run continues.
     """
     problem = evidence_problem(episode)
     if problem is not None:
@@ -682,7 +716,6 @@ def judge_span(
         verdict["error"] = f"unsafe episode evidence: {problem}"
         warnings.append(f"{span.id}: {verdict['error']}")
         return verdict
-    steps = episode.steps
     gold = gold or GoldInput()
     system = _scoring_system(gold)
     span_dir = span_dir_name(span.id)
@@ -698,8 +731,6 @@ def judge_span(
     except OSError:
         pass
     transcript = f"{transcripts_root.name}/{_transcript_name(span_dir)}"
-    opening = _opening_message(span.id, files)
-    last_step = steps[-1].step if steps else None
     history: list | None = None
     health: dict = {"evidence_sha256": content_digest(files),
                     "system_prompt_sha256": content_digest({"system": system}),
@@ -710,16 +741,12 @@ def judge_span(
     last_error = "no answer"
     result: dict | None = None
     attempt = 0
-    repair = False
-    message = opening
+    message = _opening_message(span.id, files)
     while attempt < cfg.max_attempts:
         attempt += 1
         mask_error = None
         try:
-            result = _invoke_runner(
-                cfg, dest, trajectory_path, attempt, system, message, history, warnings,
-                repair=repair,
-            )
+            result = _invoke_runner(cfg, dest, trajectory_path, attempt, system, message, history, warnings)
         finally:
             # A timeout/nonzero exit can leave a partial transcript containing
             # endpoint echoes even though no result file ever became readable.
@@ -737,7 +764,6 @@ def judge_span(
             health["any_phase_forced"] = health["any_phase_forced"] or bool(result.get("forced"))
             health["retained_llm_calls"] = result.get("llm_calls", 0)
             health["retained_tool_calls"] = result.get("tool_calls", 0)
-            health["retained_evidence"] = result.get("retained_evidence", 0)
         if mask_error is not None:
             verdict = blank_verdict()
             verdict["error"] = f"cannot mask judge transcript: {mask_error}"
@@ -754,10 +780,9 @@ def judge_span(
             verdict["input"] = _input_record(gold, attempt, None, transcript, health)
             return verdict
         read_files = _read_files(result["messages"], files)
-        read_steps = _read_steps(read_files, files)
         # which step files the retained conversation actually read: the
         # coverage an effect or no-influence answer rests on, and the set anchors need
-        health["read_steps"] = read_steps
+        health["read_steps"] = _read_steps(read_files, files)
         if result.get("error"):
             masked = _mask_key(str(result["error"]), cfg.api_key)
             warnings.append(f"{span.id}: the judge agent run failed: {masked}")
@@ -765,67 +790,17 @@ def judge_span(
             verdict["error"] = f"agent run failed: {masked}"
             verdict["input"] = _input_record(gold, attempt, result, transcript, health)
             return verdict
-        text = result["answer"]
-        if repair:
-            try:
-                request = json.loads(text)
-            except (ValueError, RecursionError):
-                request = None
-            if (isinstance(request, dict) and set(request) == {"needs_evidence"}
-                    and isinstance(request["needs_evidence"], str)
-                    and request["needs_evidence"].strip()):
-                # A repair cannot read files. Its explicit evidence request
-                # resumes tools in the same conversation.
-                need = request["needs_evidence"].strip()
-                last_text, last_error = text, f"needs evidence: {need}"
-                history = result["messages"]
-                message = _RESUME.replace("@max_steps@", str(min(cfg.max_steps, _RESUME_MAX_STEPS)))
-                message = message.replace("@needs_evidence@", need)
-                repair = False
-                continue
-        obj = None
-        if not text.strip():
-            # a forced round (or a server quirk) that never wrote a final
-            # message: name that, not a bare parse error — the corrective
-            # retry must tell the model to ANSWER, not to fix JSON it
-            # never wrote
-            error = (
-                "the agent run produced no final text "
-                f"(stop_reason={result.get('stop_reason') or 'unknown'})"
-            )
-        else:
-            obj, error = _strict_parse(text)
-            if obj is not None:
-                error = _verdict_semantics(obj, span, last_step, {step.step for step in steps})
-                if error is None:
-                    # Name every unread requirement at once: each repair and
-                    # resumed investigation spends one of MAX_ATTEMPTS.
-                    gaps = [_unread_anchor_error(obj, set(read_steps)),
-                            _coverage_error(obj, span, {step.step for step in steps}, set(read_steps)),
-                            _baseline_error(obj, span, files, read_files)]
-                    error = "; ".join(gap for gap in gaps if gap) or None
-                    # Give an otherwise valid first answer one chance to read
-                    # known gaps before a repair answers without evidence tools.
-                    if error is not None and attempt == 1 and attempt < cfg.max_attempts:
-                        last_text, last_error = text, error
-                        history = result["messages"]
-                        message = _RESUME.replace("@max_steps@", str(min(cfg.max_steps, _RESUME_MAX_STEPS)))
-                        message = message.replace("@needs_evidence@", error)
-                        continue
-                if error is not None:
-                    obj = None  # a semantic violation is as out-of-contract as a parse one
+        last_text = result["answer"]
+        obj, last_error = _answer_error(last_text, result, span, episode, files, read_files)
         if obj is not None:
             verdict = _assemble_verdict(obj, span, warnings, cfg.api_key)
             verdict["input"] = _input_record(gold, attempt, result, transcript, health)
             return verdict
-        last_text, last_error = text, error
-        if repair:
-            break  # a failed repair never triggers blind rewriting
         history = result["messages"]
-        repair = True
-        message = _corrective_note(last_error)
-    # repair failed or the attempt budget exhausted on out-of-contract answers: the honest
-    # failure record, raw text kept (masked) — never a silent neutral
+        message = (_FOLLOWUP.replace("@error@", last_error)
+                   .replace("@max_steps@", str(min(cfg.max_steps, _FOLLOWUP_MAX_STEPS))))
+    # the attempt budget exhausted on rejected answers: the honest failure
+    # record, raw text kept (masked) — never a silent neutral
     verdict = _error_verdict(
         f"agent output {last_error} after {attempt} attempts", last_text, span,
         warnings, cfg.api_key,

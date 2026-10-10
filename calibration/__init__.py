@@ -1081,7 +1081,7 @@ def _labels(report: dict) -> dict[str, dict]:
 
 
 def _health(report: dict, cases: set[str]) -> str:
-    """Actual executed usage includes repairs and context rollbacks; retained
+    """Actual executed usage includes follow-ups and context rollbacks; retained
     conversation counts would make a struggling judge look cheaper."""
     runs = {t["id"] for t in report.get("trajectories", []) if t.get("run_id") in cases}
     ops = [o for o in report.get("operations", []) if o.get("traj") in runs and not o.get("auto")]
@@ -1099,7 +1099,7 @@ def _health(report: dict, cases: set[str]) -> str:
     return (f"judge health: {health.get('attempted_spans', 0)}/{len(ops)} spans attempted, "
             f"{sum(bool(o.get('error') or o.get('verdict') == 'error') for o in ops)} errors, "
             f"{health.get('forced_spans', 0)} forced in any phase, "
-            f"{health.get('spans_with_repairs', 0)} spans requiring repair; "
+            f"{health.get('spans_with_followups', 0)} spans with follow-ups; "
             f"executed calls={total('executed_llm_calls')}, "
             f"context rollbacks={total('context_rollbacks')}; reported tokens: {tokens}")
 

@@ -68,7 +68,7 @@ matched-pair novelty consistency. It also breaks agreement down by signal and
 by expected effect in acted-on cases (improved, harmed, no effect, unknown),
 so unused entries with null effects cannot dominate the effect score. Effect
 stability is reported separately. Judge health reports forced answers in any
-phase, spans requiring repair, executed calls, context rollbacks, and reported
+phase, spans with follow-ups, executed calls, context rollbacks, and reported
 input/output/cache tokens; executed usage includes discarded rounds.
 Missing or failed targets are reported as
 unavailable and excluded from the agreement denominator; with no answers, it
@@ -145,4 +145,4 @@ provide complementary checks, as described in
 
 ## Contributing
 
-Working conventions — style guide, commit-message format, artifact contracts — live in `AGENTS.md` at the repository root. Run the suite before opening a PR.
+Working conventions start in `AGENTS.md` at the repository root. Use its task-specific references for detailed contracts and follow its verification guidance for the kind of change you are making.

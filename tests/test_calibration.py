@@ -40,7 +40,7 @@ def _judge_cases(tmp_path, monkeypatch, roots=None):
     monkeypatch.setattr("injudge.agent._check_runner", lambda: None)
 
     def fake(cfg, evidence_dir, trajectory_path, attempt, system, message, history,
-             warnings, *, repair):
+             warnings):
         if roots is not None:
             roots.append(evidence_dir)
         span = (evidence_dir / "span.md").read_text()
@@ -242,7 +242,7 @@ def test_effect_agreement_and_stability_do_not_hide_behind_unused_entries(tmp_pa
     lines = score([report, changed], ["diagnostic_verified_harm"])
     assert "  acted_on effect='harmed': 0/1 agree; 0 unavailable" in lines
     assert "acted_on effect stability: 0/1 identical; 0 unavailable" in lines
-    assert any("1 forced in any phase, 1 spans requiring repair; executed calls=11" in line
+    assert any("1 forced in any phase, 1 spans with follow-ups; executed calls=11" in line
                and "input=100, output=80, cache_read=200" in line for line in lines)
     assert not any("unscored" in line for line in lines)
 

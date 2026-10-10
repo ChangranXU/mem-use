@@ -34,7 +34,7 @@ Both budgets end in a **forced final answer** — the agent is told to stop call
 
 | Key | Default | Purpose |
 |---|---|---|
-| `MAX_STEPS` | `40` | Initial investigation’s LLM-call cap, forced final round included. Each resumed investigation gets `min(MAX_STEPS, 4)` calls; repair gets one. |
+| `MAX_STEPS` | `40` | Initial investigation’s LLM-call cap, forced final round included. Each follow-up after a rejected answer gets `min(MAX_STEPS, 4)` calls. |
 | `CONTEXT_WINDOW` | `131072` | The judge model's context window in tokens. The watermark (context window minus `MAX_OUTPUT_TOKENS` and the forced message estimate) trips the forced answer before the context overflows. |
 | `MAX_OUTPUT_TOKENS` | `32768` | Max output tokens per LLM call. The context watermark reserves this space for output, leaving less room for input evidence; billing is on tokens actually generated. Together with the forced message estimate, must leave input room inside `CONTEXT_WINDOW`; invalid configurations fail before trajectory loading. `--judge-max-tokens` overrides. |
 
@@ -44,7 +44,7 @@ A verdict cut mid-answer is not a failure class: the answer simply fails the con
 
 | Key | Default | Purpose |
 |---|---|---|
-| `MAX_ATTEMPTS` | `5` | Total runner phases per span: initial investigation, repair, and resumed investigation. The first answer can resume directly for missing evidence; a repair can also request evidence. An invalid repair stops. `--max-attempts` overrides. |
+| `MAX_ATTEMPTS` | `3` | Total runner phases per span: the investigation plus a follow-up after each rejected answer. `--max-attempts` overrides. |
 | `TIMEOUT` | `300` | Per-LLM-call timeout seconds. `--timeout` overrides. |
 | `JUDGE_PARALLEL` | `1` | Spans judged in parallel across all input trajectories (cap 32). Each in-flight span is one agent conversation. |
 
@@ -55,7 +55,7 @@ A verdict cut mid-answer is not a failure class: the answer simply fails the con
 | `--env PATH` | checkout `.env` | Alternate env file |
 | `--judge-model` | `MODEL` | Override the judge model |
 | `--timeout` | `300` | Per-LLM-call timeout seconds |
-| `--max-attempts` | `MAX_ATTEMPTS` | Total judge/repair phases per span |
+| `--max-attempts` | `MAX_ATTEMPTS` | Total runner phases per span (investigation plus follow-ups) |
 | `--judge-max-tokens` | `MAX_OUTPUT_TOKENS` | Per-call output cap |
 | `--episode ID` | unset | Judge only episodes whose recorded episode id, benchmark identity, or execution id equals *ID* (repeatable). Other spans retain compact `unjudged` audit records and are excluded from aggregate statistics, summary counts, and dry-run span counts. Policy totals cover whole recordings. An unmatched *ID* fails fast before any call. Not combinable with `--prepare-only`. |
 | `--limit N` | unset | Judge at most *N* episode-scoped, nonempty spans with the agent; validate all episode and attachment scopes first. `--prepare-only` instead limits materialized episodes. A value below 1 fails fast. |
@@ -70,7 +70,7 @@ A verdict cut mid-answer is not a failure class: the answer simply fails the con
 ### Offline preparation
 
 Use `--prepare-only` to partition recordings into bridge-delimited episodes and
-write inspectable `injudge.episode-inputs/v3` evidence without loading `.env`,
+write inspectable `injudge.episode-inputs/v4` evidence without loading `.env`,
 Node, or contacting a judge:
 
 ```bash
