@@ -45,7 +45,7 @@ injudge 的输入预算中。recorder 可以省略零值的缓存读取和推理
 两条时序说明——都属于合法输入而非错误：
 
 - 已加载集合中没有观察到创建的召回记忆，以 `origin: "not_observed"` 注册；HTML 把这类记忆汇总到每条泳道一个虚线“更早创建” ▲ 下。store 条目只是早于已加载轨迹。
-- 时间戳（或在同一轨迹内按 seq）早于首次观察到的创建的召回，会标记 `recalled_before_creation`：store 条目很可能早于已加载轨迹，或者泳道顺序有误。边仍会画出；警告记入 `validation`。
+- 时间戳（或在同一轨迹内的文件位置）早于首次观察到的创建的召回，会标记 `recalled_before_creation`：store 条目很可能早于已加载轨迹，或者泳道顺序有误。边仍会画出；警告记入 `validation`。
 
 ## HTML 功能
 

@@ -18,7 +18,7 @@ from typing import Any
 
 from injudge.model import AgentStep, ContextView, EpisodeInput, PreparationResult, SourceRef
 from injudge.steps import _tool_calls_of, build_step_stream
-from memgraph.annotations import AnnotationIndex, build_annotation_index, is_int, message_text, resolved_content_text
+from memgraph.annotations import AnnotationIndex, is_int, message_text, resolved_content_text
 from memgraph.episodes import Boundary, _as_str, _payload, episode_for_index, episode_scopes
 from memgraph.model import MemoryOp, Trajectory
 
@@ -44,22 +44,14 @@ def _source(event: dict[str, Any]) -> SourceRef:
     )
 
 
-def _main_lanes(events: list[dict[str, Any]], memory_lanes: set[str | None], side_lanes: set[str | None]) -> set[str | None]:
+def _main_lanes(events: list[dict[str, Any]], trajectory: Trajectory) -> set[str | None]:
+    if trajectory.main_lanes:
+        return trajectory.main_lanes
     lanes: set[str | None] = set()
-    for event in events:
-        if event.get("type") != "memory_role_bind":
-            continue
-        payload = _payload(event)
-        if payload.get("logical_role") == "main":
-            lane = event.get("proxy_source")
-            if lane is None or isinstance(lane, str):
-                lanes.add(lane)
-    if lanes:
-        return lanes
     for event in events:
         if event.get("type") == "turn_start":
             lane = event.get("proxy_source")
-            if (lane is None or isinstance(lane, str)) and lane not in memory_lanes and lane not in side_lanes:
+            if (lane is None or isinstance(lane, str)) and lane not in trajectory.memory_lanes and lane not in trajectory.side_lanes:
                 lanes.add(lane)
     return lanes
 
@@ -125,11 +117,13 @@ def _replay_context(
 
     Retried closes can repeat a slot and missing records leave holes. Neither
     changes what ``kept`` means: only indexes below that prefix survive.
-    An explicit retraction is known absence; a slot with no source record is
-    missing evidence. Check the latter at each input so later records can fill it.
+    Slots are positions in the client's contiguous message list and the
+    recorder refills a retracted slot with the next message, so only a
+    retracted tail is a known removal. Each input must hold every slot through
+    its highest visible slot and its retained prefix; a later record can fill
+    a hole for later inputs.
     """
     history: dict[str | None, dict[int, dict[str, Any]]] = {}
-    recorded_slots: dict[str | None, set[int]] = {}
     retained_prefix: dict[str | None, int] = {}
     views: dict[int, ContextView] = {}
     occurrences: dict[str, dict[str, Any]] = {}
@@ -143,7 +137,6 @@ def _replay_context(
         if lane not in main_lanes:
             continue
         prior = history.setdefault(lane, {})
-        recorded = recorded_slots.setdefault(lane, set())
         if typ == "history_rewritten":
             kept = _as_int(event.get("kept"))
             if kept is None or kept < 0:
@@ -151,23 +144,17 @@ def _replay_context(
                 gaps.setdefault(lane, []).append(note)
                 diagnostics.append(note)
                 prior.clear()
-                recorded.clear()
                 retained_prefix.pop(lane, None)
             else:
                 history[lane] = {slot: item for slot, item in prior.items() if slot < kept}
-                recorded_slots[lane] = set(history[lane])
                 retained_prefix[lane] = kept
-                if len(history[lane]) == kept:
-                    # Slots are distinct nonnegative integers below kept, so
-                    # this proves the entire prefix without iterating a corrupt
-                    # huge index. A retained system prompt can restore visibility
-                    # too. Past views and audit diagnostics retain their gaps.
-                    gaps.pop(lane, None)
+                # Each input's prefix check covers the retained slots; past
+                # views and audit diagnostics keep their gaps.
+                gaps.pop(lane, None)
             continue
         if typ == "message_retracted":
             msg = _as_int(event.get("msg"))
-            target = prior.get(msg) if msg is not None and msg >= 0 else None
-            if target is None:
+            if msg is None or msg not in prior:
                 note = f"event {index}: retraction has no visible message target"
                 gaps.setdefault(lane, []).append(note)
                 diagnostics.append(note)
@@ -183,12 +170,11 @@ def _replay_context(
             item = _occurrence(event)
             occurrences[item["occurrence_id"]] = item
             prior[msg] = item
-            recorded.add(msg)
         elif typ == "turn_start" and is_int(event.get("turn")):
             visible = [prior[slot] for slot in sorted(prior)]
             view_gaps = list(gaps.get(lane, []))
-            expected = max(retained_prefix.get(lane, 0), max(recorded, default=-1) + 1)
-            if missing := expected - len(recorded):
+            expected = max(retained_prefix.get(lane, 0), max(prior, default=-1) + 1)
+            if missing := expected - len(prior):
                 note = f"event {index}: {missing} unrecorded input message slot(s) in prefix 0..{expected - 1}"
                 view_gaps.append(note)
                 diagnostics.append(note)
@@ -549,7 +535,8 @@ def prepare_episodes(
     """Partition one parsed trajectory into inspectable episode inputs."""
     diagnostics: list[str] = []
     information: list[str] = []
-    boundaries = episode_scopes(events, diagnostics, information)
+    annotation_index = trajectory._annotation_index
+    boundaries = episode_scopes(events, diagnostics, information, annotation_index)
     scope_needs_review = bool(diagnostics)
     if not boundaries:
         diagnostics.append(
@@ -572,7 +559,6 @@ def prepare_episodes(
             scope_needs_review=scope_needs_review,
         )
 
-    annotation_index = build_annotation_index(events)
     # Non-episode sessions opened inside an explicit session episode are
     # participants of that episode. Their undelivered searches have no
     # consumer turn to establish ownership; retain their recorded scope.
@@ -583,7 +569,7 @@ def prepare_episodes(
         boundary = episode_for_index(boundaries, session_event["_event_index"])
         if boundary and boundary.open_event.get("type") == "memory_session" and boundary.session_id:
             participant_episodes[session_id] = boundary.session_id
-    main_lanes = _main_lanes(events, trajectory.memory_lanes, trajectory.side_lanes)
+    main_lanes = _main_lanes(events, trajectory)
     turn_index, step_sources, call_map = _turn_maps(events, steps)
     views, occurrences, replay_diagnostics = _replay_context(events, steps, main_lanes)
     diagnostics.extend(f"{trajectory.run_id}: {note}" for note in replay_diagnostics)
@@ -736,9 +722,11 @@ def prepare_episodes(
                     episode.searches.append(search)
                     episode_search_ids.add(sid)
                     assigned_search_ids.add(sid)
-    for index, event in enumerate(events):
-        if event.get("type") != "memory_search_start":
+    for operation in annotation_index.operations.values():
+        if operation.kind != "search":
             continue
+        event = operation.start
+        index = event["_event_index"]
         payload = _payload(event)
         sid = _as_str(payload.get("operation_id"))
         if sid is None or sid in assigned_search_ids:
@@ -755,13 +743,14 @@ def prepare_episodes(
         episode_data[boundary.ordinal].searches.append(_search_projection(sid, events, annotation_index, _as_str(payload.get("trace_session_id"))))
         assigned_search_ids.add(sid)
 
-    # An explicit episode-scoped session task is an additional source when no
-    # user input was recorded, or when it supplies a distinct task.
+    # Accepted episode sessions can supply missing or distinct task text.
+    # Rejected duplicates must not add a task that the parser discarded.
     session_tasks = []
-    for index, event in enumerate(events):
+    for event in annotation_index.sessions.values():
         payload = _payload(event)
-        if event.get("type") != "memory_session" or payload.get("session_kind") != "episode":
+        if payload.get("session_kind") != "episode":
             continue
+        index = event["_event_index"]
         text = resolved_content_text(payload.get("task"), events,
                                      annotation_index.binds.get(_as_str(payload.get("trace_session_id")), {}))
         if text:
@@ -815,6 +804,7 @@ def prepare_episodes(
         if not episode.steps and episode.deliveries:
             episode.diagnostics.append("deliveries exist but no completed main-lane consumer step was observed")
         problem = evidence_problem(episode)
+        episode._evidence_problem = problem
         if problem is not None:
             episode.diagnostics.append(problem)
         if episode.diagnostics and episode.preparation_status == "prepared":

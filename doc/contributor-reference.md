@@ -222,6 +222,11 @@ Both tools attribute steps through one rule:
 Episode scope is likewise one rule, `memgraph.episodes.episode_scopes`
 (bridge open/close pairs by event position, else episode-scoped sessions):
 injudge prepares episodes from it and memgraph lays out its rows by it.
+Session boundaries and task text use the sessions accepted by
+`build_annotation_index`. Rejected duplicates and invalid session records
+cannot create another episode or add task text.
+Searches without a delivery use only accepted search starts for episode
+assignment; rejected starts cannot create or move a search.
 
 - Agent step = 1-based ordinal of completed turns that are neither memory
   lane nor side lane.
@@ -265,20 +270,19 @@ Three readings deserve care:
 - **`proxy_source`:** an absent key is the unprefixed lane (the JSONL writer
   drops null). Only a non-string value is corruption.
 - **Seq / file order.** The log is append-only; the event stream keeps file
-  order.
+  order. Parsed event positions determine operation order and fallback step
+  attribution. They also order same-step deliveries and late tool results,
+  so corrupt seq values cannot change their attribution.
   - A missing or non-integer seq gets a synthetic seq one past the highest
-    seen so far — never a trailing one, which would detach retraction/order
-    pairings from their targets.
+    seen so far. Its event keeps its file position.
   - A genuinely non-increasing seq is noted, never re-sorted.
   - A real seq colliding with an earlier synthetic one gets its own
     collision note. The colliding ops share a `(run_id, seq)` join key, so
     the verdict merge's ambiguity guard refuses both; the corrupt copy costs
-    that one real delivery its verdict annotation. A trailing fabrication
-    would invent order violations in other pairings.
-  - The delivery↔search order check cannot false-fire on such a collision:
-    an exact seq tie is never a clean-stream state, so the check defers to
-    file position, and only a delivery that also sits before its search end
-    in the stream is "recorded before its search end".
+    that one real delivery its verdict annotation.
+  - The delivery/search order check uses file positions. A delivery is
+    "recorded before its search end" only when it appears first in the file,
+    regardless of either seq value.
 
 CLI misuse (unmatched input paths, unwritable report paths, bad `.env`
 values) fails fast with a targeted `SystemExit` before any paid judge call.
@@ -371,15 +375,15 @@ Request-pointer placement proofs are checked against the bound call's recorded
 request and JSON-value digest, then matched uniquely to the consumer's visible
 host occurrence; wire indexes never stand in for recorder message slots.
 Unresolved placement ownership or gaps in delivery consumers' context block
-assessable spans before a paid call (and make dry-run exit 2). A reconstructed
-input also requires every slot inside its observed or retained zero-based
-prefix to have a recorded source; explicit retractions are known removals,
-not missing records. Later-arriving records can repair a later input view,
-but cannot erase gaps in an earlier consumer's input. No suffix length is
-inferred beyond the recorded prefix. A valid history
-rewrite clears that lane's active gaps when every retained slot `0..kept-1`
-is known (including `kept=1` preserving a known system prompt), while retaining
-prior audit notes. Incomplete prefixes stay uncertain. Informational preparation
+assessable spans before a paid call (and make dry-run exit 2), so a judged
+`baseline.md` is the consumer's complete recorded input. Slots are positions
+in the client's contiguous message list and the recorder refills a retracted
+slot, so every input must hold each slot through its highest visible slot and
+its retained `kept` prefix; only a retracted tail is a known removal. A later
+record can fill a hole for later inputs, never an earlier consumer's. No
+suffix length is inferred beyond the recorded prefix. A valid history rewrite
+clears the lane's earlier notes (the prefix check still covers retained
+slots); past views and audit notes keep theirs. Informational preparation
 notes alone do not block judging; empty/unobserved spans retain mechanical skips. `not_in_request`,
 `adapter_defined`, and missing proofs remain unverified for input-grounded
 judging; recorder validity does not establish exposure ownership.

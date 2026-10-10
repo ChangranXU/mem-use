@@ -82,7 +82,7 @@ Attribution rules:
 
 - An extraction observed before the first agent turn completes is step `0`.
 - Later extractions and rewrite markers use the ordinal of the most recently classified agent turn, including when pipelined responses complete out of turn order.
-- A delivery that cannot be attributed to any agent turn has `step = None` and merges into a matching-content span wherever it sits; a span whose deliveries are all unattributable has no grounded downstream footprint and is rule-judged neutral (see [injudge](injudge.md#injection-spans)).
+- A delivery that cannot be attributed to any agent turn has `step = None`. It can merge only with other unattributable deliveries under the same-treatment span rule. Such a span has no grounded downstream footprint and is rule-judged neutral (see [injudge](injudge.md#injection-spans)).
 
 A delivery naming a consumer call whose turn is missing or unclassified stays unattributable. It cannot fall back to an earlier or declared step.
 
@@ -97,6 +97,12 @@ Each CLI path may be:
 The same directory under two spellings is loaded once. A path that matches nothing is a usage error, named explicitly — never a silent skip.
 
 ## Episode preparation
+
+Session boundaries and task text use only the sessions accepted by the
+annotation parser. Repeated or invalid session records produce diagnostics;
+they cannot split an episode or add task text.
+Searches without a delivery use only accepted search starts for episode
+assignment; rejected starts cannot create or move a search.
 
 Preparation keeps the global agent-step ordinals from the parsed stream. It
 replays lane-specific message occurrences at each main-lane `turn_start`,
@@ -124,12 +130,13 @@ block lists, with newline separators). Wire indexes are
 never treated as recorder message slots. Missing or corrupt requests, ambiguous
 hosts, and out-of-root symlinks leave the proof unresolved. Unsafe placement
 ownership and gaps in delivery consumers' context block paid judging and make
-dry-run exit 2; gaps in unrelated views remain review notes. A valid
-`history_rewritten(kept=k)` clears that lane's active gaps when all retained
-slots `0..k-1` are known, including a `kept=1` reset retaining a known system
-prompt. Earlier views and audit diagnostics remain intact. Invalid rewrites or
-missing retained slots cannot establish recovery. Episode resets and proven
-wrapper removals retain separate source events.
+dry-run exit 2; gaps in unrelated views remain review notes. The recorder
+refills a retracted slot, so each input must hold a recorded message in every
+slot through its highest visible slot and in any retained
+`history_rewritten(kept=k)` prefix `0..k-1`; only a retracted tail is a known
+removal. A valid rewrite clears the lane's earlier notes; earlier views and
+audit diagnostics remain intact. Invalid rewrites cannot establish recovery.
+Episode resets and proven wrapper removals retain separate source events.
 
 Recorder-valid `not_in_request` and `adapter_defined` declarations do not prove
 how a placement reached the agent's captured input. They and missing binding
@@ -149,4 +156,7 @@ warnings; the run continues.
 An unusable CLI attachment fails fast instead, with a targeted `SystemExit`:
 an unreadable or wrong-schema `--verdicts` report, or an empty `--golden` file.
 
-The event stream keeps file order. A missing or non-integer seq gets a synthetic seq one past the highest seen so far, so retraction and order pairings stay attached to their targets. A genuinely non-increasing seq is noted, never re-sorted.
+The event stream keeps file order. File positions determine operation order,
+fallback step attribution, and delivery/search order checks. A missing or
+non-integer seq gets a synthetic seq one past the highest seen so far.
+Non-increasing seq values produce warnings; they do not change event order.

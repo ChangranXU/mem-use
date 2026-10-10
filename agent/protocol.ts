@@ -64,7 +64,6 @@ export interface AgentResult {
 	forced: boolean;
 	llm_calls: number;
 	tool_calls: number;
-	usage: AgentUsage;
 	executed_llm_calls: number;
 	executed_tool_calls: number;
 	reported_usage: AgentUsage;

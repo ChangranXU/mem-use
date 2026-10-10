@@ -163,8 +163,8 @@ def build_graph(
     edges: list[Edge] = []
     all_ops: list[MemoryOp] = []
 
-    # Ops in (trajectory order, seq) — trajectories are pre-sorted by time,
-    # and parse_trajectory returns each trajectory's ops sorted by seq.
+    # Trajectories are sorted by start time. Within each trajectory, ops
+    # keep file order so corrupt seq values cannot change the memory lifecycle.
     for traj in trajectories:
         ops = ops_by_traj.get(traj.id, [])
         all_ops.extend(ops)
@@ -336,9 +336,9 @@ def build_graph(
     # creation is causally impossible within the loaded set — the store entry
     # predates it (or lanes are misordered). Flag, never silently link. Lanes
     # may overlap in wall-clock time (concurrent runs sharing one store), so
-    # prefer each op's `at` timestamp; load order is evidence only within one
-    # trajectory (seq order = recording order there) — across trajectories it
-    # is run-START order, not op time, and a corrupt or missing timestamp
+    # prefer each op's `at` timestamp; file order is evidence only within one
+    # trajectory. Across trajectories, load order follows run start times,
+    # not op times, and a corrupt or missing timestamp
     # must not fabricate a causal warning, whichever side lacks one.
     order = {op.id: i for i, op in enumerate(all_ops)}
     at_by_id = {op.id: _parse_at(op.at) for op in all_ops}

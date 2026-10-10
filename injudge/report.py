@@ -1,4 +1,4 @@
-"""Detailed report v20, compact summary v17, and stdout statistics.
+"""Detailed reports, compact summaries, and stdout statistics.
 
 The report keeps each span's judgments, evidence, costs, and judge execution
 record. The summary keeps population totals for comparison and points to the

@@ -146,13 +146,8 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
     index = AnnotationIndex()
     seen_annotation_ids: set[str] = set()
     seen_delivery_ids: set[str] = set()
-    # Each event's file position — the positional truth every consumer
-    # trusts. The seq-based delivery-order check below defers to it on an
-    # exact tie: equal seqs are never a clean-stream state (append-only seqs
-    # strictly increase), so the equality is the reader's synthetic seq
-    # pre-claiming the delivery's real number (load_events' collision note
-    # covers it) or a hand-duplicated value (its non-increasing note covers
-    # it) — never evidence the delivery preceded its search end.
+    # File positions determine whether each delivery follows its search end.
+    # Corrupt or synthetic seq values cannot change this recorded order.
     positions = {id(event): pos for pos, event in enumerate(events)}
 
     for event in events:
@@ -567,14 +562,7 @@ def build_annotation_index(events: list[dict]) -> AnnotationIndex:
             delivery_seq, end_seq = event.get("seq"), search.end.get("seq")
             if not all(is_int(value) for value in (delivery_seq, end_seq)):
                 index.problems.append(f"delivery {delivery_id}: missing or non-integer seq")
-            elif delivery_seq < end_seq or (
-                # on an exact seq tie only the file position can call the order
-                # (see the positions map above): a delivery sitting AFTER its
-                # search end in the stream followed it — the tie is the synthetic
-                # collision's or a hand-duplicate's artifact, not a violation
-                delivery_seq == end_seq
-                and positions[id(event)] < positions[id(search.end)]
-            ):
+            if positions[id(event)] < positions[id(search.end)]:
                 index.problems.append(f"delivery {delivery_id}: recorded before its search end")
             resolved.append(search)
         memories = payload.get("memories")

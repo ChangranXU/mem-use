@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from memgraph.annotations import is_int
+from memgraph.annotations import AnnotationIndex, is_int
 from memgraph.model import MemoryOp
 
 
@@ -189,17 +189,16 @@ def discover_boundaries(events: list[dict[str, Any]], diagnostics: list[str]) ->
     return boundaries
 
 
-def session_boundaries(events: list[dict[str, Any]], information: list[str]) -> list[Boundary]:
-    """Fallback scope from explicitly episode-scoped memory_session events."""
+def session_boundaries(events: list[dict[str, Any]], information: list[str],
+                       annotations: AnnotationIndex) -> list[Boundary]:
+    """Use accepted episode sessions so rejected duplicates cannot split scope."""
     sessions: list[tuple[int, dict[str, Any], str | None, str | None]] = []
-    for index, event in enumerate(events):
-        if event.get("type") != "memory_session":
-            continue
+    for event in annotations.sessions.values():
         payload = _payload(event)
         episode_id = _as_str(payload.get("episode_id"))
-        if episode_id is None and payload.get("session_kind") != "episode":
+        if payload.get("session_kind") != "episode":
             continue
-        sessions.append((index, event, episode_id, _as_str(payload.get("trace_session_id"))))
+        sessions.append((event["_event_index"], event, episode_id, _as_str(payload.get("trace_session_id"))))
     out: list[Boundary] = []
     for i, (idx, event, episode_id, session_id) in enumerate(sessions):
         next_idx = sessions[i + 1][0] if i + 1 < len(sessions) else len(events)
@@ -236,16 +235,17 @@ def episode_for_index(boundaries: list[Boundary], index: int | None, event: dict
 
 
 def episode_scopes(events: list[dict[str, Any]], diagnostics: list[str],
-                   information: list[str]) -> list[Boundary]:
+                   information: list[str], annotations: AnnotationIndex) -> list[Boundary]:
     """Separate scope problems from the informational session fallback.
 
     A recorded identifier can contain any words, so consumers must not infer
     scope validity from the spelling of a diagnostic.
     """
-    return discover_boundaries(events, diagnostics) or session_boundaries(events, information)
+    return discover_boundaries(events, diagnostics) or session_boundaries(events, information, annotations)
 
 
-def episode_rows(events: list[dict[str, Any]], step_of_turn: dict[int, int], ops: list[MemoryOp]) -> list[dict]:
+def episode_rows(events: list[dict[str, Any]], step_of_turn: dict[int, int], ops: list[MemoryOp],
+                 annotations: AnnotationIndex) -> list[dict]:
     """The graph's episode rows, in scope order, and each op's `episode` (row index).
 
     A row's agent steps are those whose turn_start lies inside its scope —
@@ -254,7 +254,7 @@ def episode_rows(events: list[dict[str, Any]], step_of_turn: dict[int, int], ops
     anchor event supplies the scope. Scope diagnostics are not repeated here:
     injudge's preparation reports them, and the row's `status` marks review needs.
     """
-    scopes = episode_scopes(events, [], [])
+    scopes = episode_scopes(events, [], [], annotations)
     turn_index: dict[int, int] = {}
     for index, event in enumerate(events):
         if event.get("type") == "turn_start" and is_int(event.get("turn")):

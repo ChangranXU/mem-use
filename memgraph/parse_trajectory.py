@@ -268,31 +268,34 @@ class _TurnTable:
             if e.get("proxy_source") in side_lanes
         )
         self.agent_turns: list[int] = agent_turns(classified_msgs, memory_lanes, side_lanes)
-        self._classif_seq = {t: classified_msgs[t]["seq"] for t in self.agent_turns}
+        self._classif_index = {t: classified_msgs[t]["_event_index"] for t in self.agent_turns}
         self.step_of_turn = {t: i + 1 for i, t in enumerate(self.agent_turns)}
 
     @property
     def n_agent_turns(self) -> int:
         return len(self.agent_turns)
 
-    def step_after(self, seq: int) -> int | None:
-        """Step of the first agent turn classified at/after `seq`, else None
-        for a truncated tail. "First" is chronological: pipelined deferred
-        responses make classifying seqs non-monotonic in turn order."""
-        later = [t for t in self.agent_turns if self._classif_seq[t] >= seq]
+    def step_after(self, event_index: int) -> int | None:
+        """Step of the first agent turn classified at or after `event_index`.
+
+        File order controls attribution: deferred responses can arrive out
+        of turn order. Return None when no later classification is recorded.
+        """
+        later = [t for t in self.agent_turns if self._classif_index[t] >= event_index]
         if not later:
             return None
-        return self.step_of_turn[min(later, key=lambda t: self._classif_seq[t])]
+        return self.step_of_turn[min(later, key=lambda t: self._classif_index[t])]
 
-    def step_most_recent(self, seq: int) -> int | None:
-        """Step of the agent turn classified most recently before `seq`;
-        None when none has classified yet. "Most recent" is chronological
-        (classifying seq), never turn order — the same pipelining rule as
-        step_after, so the two never diverge under deferred recording."""
-        earlier = [t for t in self.agent_turns if self._classif_seq[t] < seq]
+    def step_most_recent(self, event_index: int) -> int | None:
+        """Step of the last agent turn classified before `event_index`.
+
+        Use file order, as in step_after, because responses can be deferred.
+        Return None when no earlier classification is recorded.
+        """
+        earlier = [t for t in self.agent_turns if self._classif_index[t] < event_index]
         if not earlier:
             return None
-        return self.step_of_turn[max(earlier, key=lambda t: self._classif_seq[t])]
+        return self.step_of_turn[max(earlier, key=lambda t: self._classif_index[t])]
 
 
 def _bound_turn(table: _TurnTable, ref: Any) -> int | None:
@@ -361,8 +364,8 @@ def _delivery_step(
     # the consuming turn has normally classified already — the most recently
     # classified agent turn, not the next one. Only when no agent turn has
     # classified yet (a deferred first response) is the consumer still upcoming.
-    recent = table.step_most_recent(event["seq"])
-    step = recent if recent is not None else table.step_after(event["seq"])
+    recent = table.step_most_recent(event["_event_index"])
+    step = recent if recent is not None else table.step_after(event["_event_index"])
     # the fallback is an attribution ASSUMPTION (the bridge commits the
     # delivery after the carrying call's response): name it so a reader can
     # see how much of a run depends on it
@@ -565,7 +568,7 @@ def _extract_op_from_generation(
         id=op_id,
         kind="extract",
         traj=traj_id,
-        step=table.step_most_recent(seq) or 0,
+        step=table.step_most_recent(anchor["_event_index"]) or 0,
         seq=seq,
         at=anchor.get("at"),
         turn=_bound_turn(table, end.get("terminal_call_ref")) if end else None,
@@ -936,6 +939,7 @@ def parse_trajectory(
                       model=model, started_at=started_at, status=status, run_usage=run_usage)
 
     index = build_annotation_index(events)
+    traj._annotation_index = index
     # one slot index for every locator resolution below (session task, each
     # recall op's query) — a per-lookup scan would be O(recalls × events)
     slots = slot_index(events)
@@ -1026,6 +1030,7 @@ def parse_trajectory(
     # The memory lanes injudge's step stream classifies against — the same
     # set the turn table below uses, so attribution stays consistent.
     traj.memory_lanes = memory_lanes
+    traj.main_lanes = main_side
     # The side lanes likewise (neither-step lanes the step stream must skip).
     traj.side_lanes = side_lanes
     first_session = next(iter(index.sessions.values()), None)
@@ -1083,7 +1088,7 @@ def parse_trajectory(
             traj.rewrites.append(
                 {
                     "seq": e["seq"],
-                    "step": table.step_most_recent(e["seq"]) or 0,
+                    "step": table.step_most_recent(e["_event_index"]) or 0,
                     "kept": e.get("kept"),
                     "dropped": e.get("dropped"),
                     "proxy_source": e.get("proxy_source"),
@@ -1104,9 +1109,10 @@ def parse_trajectory(
     ops: list[MemoryOp] = []
     usage = _CallUsage(traj_dir)
     n_extract = n_recall = 0
+    # Parsed positions preserve lifecycle order when recorded seq values regress.
     generations = sorted(
         (op for op in index.operations.values() if op.kind == "generation"),
-        key=lambda op: _op_anchor(op)["seq"],
+        key=lambda op: _op_anchor(op)["_event_index"],
     )
     # op ids are renamed to the final T-numbers only later, in
     # load_trajectories — cite the stable per-run ordinal instead
@@ -1194,8 +1200,9 @@ def parse_trajectory(
             **({"extensions": extensions} if isinstance(extensions, dict) and extensions else {}),
         })
 
-    ops.sort(key=lambda o: o.seq)
-    traj.episodes = episode_rows(events, table.step_of_turn, ops)
+    # The graph must apply memory changes in the same recorded order.
+    ops.sort(key=lambda o: o.source_event_index)
+    traj.episodes = episode_rows(events, table.step_of_turn, ops, index)
     traj.n_steps = table.n_agent_turns
     if table.n_turns != table.n_agent_turns + table.n_mem_turns + table.n_side_turns:
         warnings.append(

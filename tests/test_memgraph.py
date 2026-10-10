@@ -405,6 +405,70 @@ def test_appended_corrupt_seq_op_numbers_last(tmp_path):
     assert any("non-integer seq" in w for w in warnings)
 
 
+def test_regressed_generation_seq_preserves_the_latest_memory_revision(tmp_path):
+    builder = TrajBuilder().agent_turn(with_task=True)
+    builder.generate(produced=[cure_ref("item", "first")])
+    builder.generate(produced=[cure_ref("item", "second")])
+    ends = [event for event in builder.events if event["type"] == "memory_generate_end"]
+    ends[-1]["seq"] = ends[0]["seq"] - 1
+    graph = load_and_build([builder.write(tmp_path / "trace")])
+
+    assert [op["id"] for op in graph["ops"]] == ["T1:E1", "T1:E2"]
+    assert [op["candidates"][0]["value"] for op in graph["ops"]] == ["first", "second"]
+    assert graph["memories"][0]["value"] == "second"
+    assert graph["memories"][0]["created"]["op"] == "T1:E1"
+    assert graph["memories"][0]["updates"][0]["op"] == "T1:E2"
+    assert any("non-increasing seq" in note["msg"] for note in graph["validation"])
+
+
+@pytest.mark.parametrize("seq_delta", [-1, 0])
+def test_corrupt_seq_keeps_recall_before_later_generation(tmp_path, seq_delta):
+    builder = TrajBuilder().agent_turn(with_task=True)
+    memory = cure_ref("item", "value")
+    builder.recall(memory)
+    builder.generate(produced=[memory])
+    delivery = next(event for event in builder.events if event["type"] == "memory_delivery")
+    builder.events[-1]["seq"] = delivery["seq"] + seq_delta
+    _, ops, _ = parse(builder, tmp_path)
+
+    assert [op.kind for op in ops] == ["recall", "extract"]
+    assert ops[0].source_event_index < ops[1].source_event_index
+    assert [op.seq for op in ops] == [delivery["seq"], delivery["seq"] + seq_delta]
+
+
+@pytest.mark.parametrize("target", ["actions", "classification"])
+@pytest.mark.parametrize("seq", [1, 1_000_000])
+def test_corrupt_seq_preserves_recent_step_attribution(tmp_path, target, seq):
+    builder = TrajBuilder().agent_turn(with_task=True).agent_turn()
+    search_id = builder.search(returned=[cure_ref("item")])
+    builder.delivery(search_id, memories=[cure_ref("item")])
+    builder.generate(extraction_step="2")
+    builder.rewrite(replay_tool_ends=False)
+    builder.agent_turn()
+    for event in builder.events:
+        if target == "actions":
+            change = event["type"] in ("memory_delivery", "memory_generate_end", "history_rewritten")
+        else:
+            change = event["type"] == "message_end" and event.get("turn") == 2
+        if change:
+            event["seq"] = seq
+    trajectory, operations, _ = parse(builder, tmp_path)
+
+    assert [op.step for op in operations] == [2, 2]
+    assert trajectory.rewrites[0]["step"] == 2
+
+
+def test_corrupt_seq_preserves_first_later_consumer_fallback(tmp_path):
+    builder = TrajBuilder()
+    search_id = builder.search(returned=[cure_ref("item")])
+    builder.delivery(search_id, memories=[cure_ref("item")])
+    builder.events[-1]["seq"] = 1_000_000
+    builder.agent_turn(with_task=True).agent_turn()
+    _, operations, _ = parse(builder, tmp_path)
+
+    assert operations[0].step == 1
+
+
 def test_synthetic_seq_collision_is_not_reported_as_non_increasing(tmp_path):
     """A clean event whose real seq collides with the synthetic seq assigned
     to an earlier corrupt event never regressed — the reader pre-claimed its

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from memgraph.annotations import item_ident
+from memgraph.annotations import AnnotationIndex, item_ident
 
 
 def _linked_memory(entry: dict) -> dict:
@@ -31,12 +31,15 @@ class Trajectory:
     status: str | None = None
     # Internal billing snapshot: includes embedding calls with no chat events.
     run_usage: dict[str, object] = field(default_factory=dict)
+    # Reuse the parser's accepted annotations during episode preparation.
+    _annotation_index: AnnotationIndex = field(default_factory=AnnotationIndex, repr=False)
     n_steps: int = 0  # agent steps (non-memory-lane turns)
     # the single lane of the final memory-lanes set, after the shared-lane
     # guard; None when several lanes are bound or none survived it
     memory_lane: str | None = None
     # all bound memory-lane proxy_sources (internal; None = the unprefixed lane)
     memory_lanes: set[str | None] = field(default_factory=set)
+    main_lanes: set[str | None] = field(default_factory=set)
     # lanes bound as neither main nor memory whose turns count as neither
     # agent steps nor memory turns (internal, like memory_lanes)
     side_lanes: set[str | None] = field(default_factory=set)

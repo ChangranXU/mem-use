@@ -61,7 +61,7 @@ from injudge.agent import (
     resolve_config,
 )
 from injudge.evidence import build_episode_evidence, episode_dir_name, write_evidence
-from injudge.episodes import evidence_problem, prepare_trajectory
+from injudge.episodes import prepare_trajectory
 from injudge.gold import (
     harness_outcome,
     load_gold_patches,
@@ -756,7 +756,7 @@ def main(argv: list[str] | None = None) -> int:
         # share of the REAL prompt budget — every lane's billed usage,
         # including embedding calls that produce no conversation events.
         budget_warnings: list[str] = []
-        prompt_total = prompt_tokens_total(events, budget_warnings, t.run_usage)
+        prompt_total = prompt_tokens_total(events, budget_warnings, t.run_usage, bindings=t._annotation_index.binds)
         for w in budget_warnings:
             validation.append({"level": "warn", "msg": f"{run_id}: {w}"})
         extracts = [op for op in ops if op.kind == "extract"]
@@ -829,7 +829,7 @@ def main(argv: list[str] | None = None) -> int:
                 verdicts[i] = auto_verdict_empty(span)
             elif span.step_first is None:
                 verdicts[i] = auto_verdict_no_subsequent_turn(span)
-            elif problem := evidence_problem(episode):
+            elif problem := episode._evidence_problem:
                 verdicts[i] = blank_verdict()
                 verdicts[i]["error"] = f"unsafe episode evidence: {problem}"
                 validation.append({"level": "error", "msg": f"{span.id}: {verdicts[i]['error']}"})

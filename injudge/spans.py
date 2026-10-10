@@ -122,7 +122,7 @@ def group_spans(
     *, episode_execution_id: str | None = None, id_offset: int = 0,
     last_step: int | None = None, episode: EpisodeInput | None = None,
 ) -> list[InjectionSpan]:
-    """Maximal runs of same-treatment recall ops, in (step, seq) order.
+    """Group same-treatment recalls by consuming step, then recorded position.
 
     `warnings`, when given, receives the same-step delivery collision notes
     (a later span re-exposing one of this span's memories at this span's
@@ -154,7 +154,7 @@ def _merge_spans(
     Observed and unobserved consumers are separate populations. A missing
     consumer supplies no evidence that an earlier span's effect applies.
     """
-    ops = sorted(recall_ops, key=lambda o: (o.step is None, o.step or 0, o.seq))
+    ops = sorted(recall_ops, key=lambda o: (o.step is None, o.step or 0, o.source_event_index or 0))
     spans: list[InjectionSpan] = []
     steps_seen: list[list[int]] = []
     for op in ops:

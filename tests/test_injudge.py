@@ -18,6 +18,7 @@ import pytest
 from injudge import __main__ as injudge_main
 from injudge.agent import AgentConfig, judge_span as _episode_judge_span, resolve_config
 from injudge.aggregate import aggregate, policy_rollup
+from injudge.episodes import evidence_problem
 from injudge.evidence import build_span_evidence, span_dir_name, write_evidence
 from injudge.judge import (
     GOLD_SYSTEM_PROMPT,
@@ -317,13 +318,21 @@ def _pipelined_same_id_turns(b: TrajBuilder):
     b._emit("turn_end", turn=1, status="completed", proxy_source="MAIN")
 
 
-def test_turnless_same_id_closes_pair_in_reveal_order():
+@pytest.mark.parametrize("corrupt_seq", [False, True])
+@pytest.mark.parametrize("with_starts", [False, True])
+def test_turnless_same_id_closes_pair_in_reveal_order(corrupt_seq, with_starts):
     """Same-id turn-less closes pair with the earliest-REVEALED execution
     still pending a result (the recorder's own pairing rule): the first close
     claims the first-revealed turn, the second falls to the next — never the
     same turn twice, never a silently dropped distinct result."""
     b = TrajBuilder()
     _pipelined_same_id_turns(b)
+    if not with_starts:
+        b.events = [event for event in b.events if event["type"] != "tool_execution_start"]
+    if corrupt_seq:
+        for event in b.events:
+            if event.get("turn") == 1 and event["type"] in ("tool_execution_start", "message_end"):
+                event["seq"] = 1
     b._emit("tool_execution_end", proxy_source="MAIN", tool_call_id="call_1",
             name="bash", status="completed", result="result-for-turn-2")
     b._emit("tool_execution_end", proxy_source="MAIN", tool_call_id="call_1",
@@ -748,6 +757,23 @@ def test_spans_window_same_step_collision_three_carriers_disjoint(tmp_path):
     assert _acted_claim(spans[3], "m1", [5], 6) is not None
 
 
+def test_same_step_corrupt_seq_keeps_first_delivery_credit(tmp_path):
+    builder = TrajBuilder().agent_turn(with_task=True).agent_turn()
+    for refs in ([REF_A, REF_B], [REF_B, REF_A]):
+        search = builder.search(returned=refs)
+        builder.delivery(search, memories=refs, main_step=2)
+    builder.events[-1]["seq"] = 1
+    ops = _recall_ops(builder, tmp_path)
+    first, second = group_spans(list(reversed(ops)), "T1")
+
+    assert first.op_ids == [ops[0].id]
+    assert second.op_ids == [ops[1].id]
+    assert first.memory_window_starts == {}
+    assert second.memory_window_starts == {"m1": 3, "m2": 3}
+    assert _acted_claim(first, "m1", [2], 3) is None
+    assert _acted_claim(second, "m2", [2], 3) is not None
+
+
 _PREVIEW = cure_ref("kb-1", "Issue: stale cache reads after set()", item_id="kb-1")
 _FULL = cure_ref("kb-1", "Fix: drop the key from the memo inside set()", item_id="kb-1")
 
@@ -992,6 +1018,7 @@ def test_spans_seq_range_brackets_every_op(tmp_path):
     class _Op:
         def __init__(self, id, step, seq):
             self.id, self.step, self.seq = id, step, seq
+            self.source_event_index = seq
             self.memories = ops[0].memories
             self.exposure = []
             self.queries = []
@@ -1958,14 +1985,14 @@ def test_corrupt_run_usage_falls_back_to_live_message_billing(usage):
         {"type": "agent_end", "usage": usage},
     ]
     warnings = []
-    assert prompt_tokens_total(events, warnings) == 100
+    assert prompt_tokens_total(events, warnings, bindings={}) == 100
     assert any("agent_end" in w and "invalid" in w for w in warnings)
 
 
 def test_invalid_manifest_billing_uses_terminal_snapshot():
     warnings = []
     events = [{"type": "agent_end", "usage": {"prompt_tokens": 25}}]
-    assert prompt_tokens_total(events, warnings, {"prompt_tokens": True}) == 25
+    assert prompt_tokens_total(events, warnings, {"prompt_tokens": True}, bindings={}) == 25
     assert any("run.json" in w and "invalid" in w for w in warnings)
 
 
@@ -1975,7 +2002,7 @@ def test_billing_uses_the_largest_snapshot(manifest, ended):
                "usage": {"prompt_tokens": 100}},
               {"type": "agent_end", "usage": {"prompt_tokens": ended}}]
     warnings = []
-    assert prompt_tokens_total(events, warnings, {"prompt_tokens": manifest}) == 300
+    assert prompt_tokens_total(events, warnings, {"prompt_tokens": manifest}, bindings={}) == 300
     assert any("below another billing snapshot" in w for w in warnings)
 
 
@@ -1984,22 +2011,28 @@ def test_billing_snapshot_cannot_erase_observed_spend():
     events = [{"type": "message_end", "role": "assistant", "msg": 0,
                "usage": {"prompt_tokens": 100}},
               {"type": "agent_end", "usage": {"prompt_tokens": 90}}]
-    assert prompt_tokens_total(events, warnings, {"prompt_tokens": 80}) == 100
+    assert prompt_tokens_total(events, warnings, {"prompt_tokens": 80}, bindings={}) == 100
     assert len(warnings) == 2 and all("below live message usage" in w for w in warnings)
 
 
-def test_missing_embedding_billing_snapshot_warns_about_undercount():
+@pytest.mark.parametrize("recorded_session", [False, True])
+def test_embedding_billing_warning_uses_accepted_bindings(tmp_path, recorded_session):
     warnings = []
-    events = [{"type": "memory_role_bind", "payload": {"logical_role": "embedding"}}]
-    assert prompt_tokens_total(events, warnings) == 0
-    assert any("excludes embedding calls" in w for w in warnings)
+    builder = TrajBuilder()
+    session = builder.events[1]["payload"]["trace_session_id"] if recorded_session else "unknown-session"
+    builder.annotation("memory_role_bind", {
+        "trace_session_id": session, "logical_role": "embedding", "adapter": builder.adapter,
+    }, lane="EMBED")
+    trajectory, _operations, events = parse_trajectory(builder.write(tmp_path / "run"), [])
+    assert prompt_tokens_total(events, warnings, bindings=trajectory._annotation_index.binds) == 0
+    assert any("excludes embedding calls" in w for w in warnings) is recorded_session
 
 
 def test_negative_message_usage_cannot_cancel_observed_spend():
     warnings = []
     events = [{"type": "message_end", "role": "assistant", "msg": i,
                "usage": {"prompt_tokens": tokens}} for i, tokens in enumerate((100, -50))]
-    assert prompt_tokens_total(events, warnings) == 100
+    assert prompt_tokens_total(events, warnings, bindings={}) == 100
     assert any("corrupt slot or prompt_tokens value" in w for w in warnings)
 
 
@@ -2793,7 +2826,7 @@ def _test_episode(span, steps, task=None, gold=None):
     attachments = {}
     if gold is not None:
         attachments = {"golden": gold.golden, "correctness": gold.correctness}
-    return EpisodeInput(
+    episode = EpisodeInput(
         execution_identity={"execution_id": f"{span.traj}:test"},
         recorded_episode_identity={"episode_id": "test"},
         steps=steps,
@@ -2801,11 +2834,31 @@ def _test_episode(span, steps, task=None, gold=None):
                "source": {"event_index": 0}}] if task else [],
         attachments=attachments,
     )
+    episode._evidence_problem = evidence_problem(episode)
+    return episode
 
 
 def judge_span(span, steps, cfg, warnings, task=None, *, gold=None, **kwargs):
     return _episode_judge_span(span, _test_episode(span, steps, task, gold), cfg,
                                warnings, gold=gold, **kwargs)
+
+
+def test_judge_refuses_unprepared_episode_before_runner(monkeypatch, tmp_path):
+    span, steps = _judge_input_fixture()
+    episode = EpisodeInput(
+        execution_identity={"execution_id": "unprepared"},
+        recorded_episode_identity={"episode_id": "unprepared"},
+        steps=steps,
+        deliveries=[{"consumer": {"status": "observed", "turn": steps[0].turn},
+                     "placements": [{"source_resolution": {"status": "unknown"}}]}],
+    )
+    monkeypatch.setattr("injudge.agent._invoke_runner", lambda *args: pytest.fail("unexpected runner call"))
+    verdict = _episode_judge_span(
+        span, episode, _agent_cfg(), [],
+        evidence_root=tmp_path / "evidence", transcripts_root=tmp_path / "runs",
+    )
+    assert verdict["error"] == "unsafe episode evidence: episode evidence has not been prepared"
+    assert not (tmp_path / "evidence").exists()
 
 
 @pytest.mark.parametrize("timeout", [float("inf"), float("-inf"), float("nan")])

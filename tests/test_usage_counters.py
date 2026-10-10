@@ -42,7 +42,7 @@ def test_cache_subsets_survive_operation_and_trajectory_totals_without_double_co
     assert "if(o.cost) body.cost=o.cost;" in html
     warnings = []
     assert prompt_tokens_total([], warnings, {"prompt_tokens": 150, "cache_write_tokens": 20,
-                                               "cache_write_1h_tokens": 12}) == 150
+                                               "cache_write_1h_tokens": 12}, bindings={}) == 150
     assert warnings == []
 
 

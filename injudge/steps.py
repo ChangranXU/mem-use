@@ -130,6 +130,7 @@ def build_step_stream(
     real model calls but produce no agent steps."""
     turn_seq_start: dict[int, int] = {}
     turn_seq_end: dict[int, int] = {}
+    turn_end_positions: dict[int, int | None] = {}
     classified = classifying_messages(events)  # turn -> classifying message_end
     starts_by_turn: dict[int, list[dict]] = {}
     ends_by_turn: dict[int, list[dict]] = {}
@@ -143,6 +144,7 @@ def build_step_stream(
         elif etype == "turn_end":
             if (t := _turn_of(e)) is not None:
                 turn_seq_end.setdefault(t, e["seq"])
+                turn_end_positions.setdefault(t, e.get("_event_index"))
         elif etype == "tool_execution_start":
             if (t := _turn_of(e)) is not None:
                 starts_by_turn.setdefault(t, []).append(e)
@@ -152,25 +154,26 @@ def build_step_stream(
             else:
                 turnless_ends.append(e)
 
-    # (lane, tool_call_id) -> {turn: reveal seq} — every execution that
-    # revealed the id. A start records in the response fold that reveals the
-    # call, so its seq IS the reveal order; the classifying message's
-    # tool_calls fill in executions whose start is missing.
-    # classifying_messages already guarantees a None-or-str proxy_source, so
-    # the classified fill needs no lane guard.
+    # Each (lane, tool_call_id) maps turns to their reveal positions in the
+    # file. A start marks the response that reveals the call. If the start is
+    # missing, use the classifying message; its lane is already validated.
+    # File positions preserve reveal order when seq values are corrupt.
     reveals: dict[tuple[str | None, str], dict[int, int]] = {}
-    for turn, starts in starts_by_turn.items():
-        for s in starts:
-            if (k := _lane_key_of(s)) is not None:
-                per_turn = reveals.setdefault(k, {})
-                per_turn[turn] = min(s["seq"], per_turn.get(turn, s["seq"]))
-    for turn, msg in classified.items():
+    for position, event in enumerate(events):
+        turn = _turn_of(event)
+        if event.get("type") == "tool_execution_start" and turn is not None:
+            if (key := _lane_key_of(event)) is not None:
+                reveals.setdefault(key, {}).setdefault(turn, position)
+    for position, msg in enumerate(events):
+        turn = _turn_of(msg)
+        if classified.get(turn) is not msg:
+            continue
         src = msg.get("proxy_source")
         for tc in _tool_calls_of(msg):
             if isinstance(tc, dict):
                 tid = tc.get("id")
                 if isinstance(tid, str) and tid:
-                    reveals.setdefault((src, tid), {}).setdefault(turn, msg["seq"])
+                    reveals.setdefault((src, tid), {}).setdefault(turn, position)
 
     # A turn-scoped completed close answers its own turn's execution; an
     # execution without one is still pending a result (a no_result or
@@ -318,6 +321,7 @@ def build_step_stream(
                 reasoning=_reasoning_of(msg),
                 content=message_text(msg.get("content")),
                 tools=[execs[tid] for tid in order],
+                _end_event_index=turn_end_positions.get(turn),
             )
         )
     return steps
@@ -339,6 +343,7 @@ def _valid_tokens(value: object) -> bool:
 
 def prompt_tokens_total(
     events: list[dict], warnings: list[str], run_usage: dict[str, object] | None = None,
+    *, bindings: dict[str, dict[str, str | None]],
 ) -> int:
     """All-lane billed prompt budget: the largest valid run.json, agent_end,
     or live-message total. Embeddings have no message events; snapshots can
@@ -410,11 +415,7 @@ def prompt_tokens_total(
                     "using the larger total to avoid undercounting"
                 )
         return largest
-    if any(
-        e.get("type") == "memory_role_bind" and isinstance(e.get("payload"), dict)
-        and e["payload"].get("logical_role") == "embedding"
-        for e in events
-    ):
+    if any("embedding" in roles for roles in bindings.values()):
         warnings.append(
             "no valid run-level prompt-token total; message usage excludes embedding calls "
             "and may undercount the billed budget"

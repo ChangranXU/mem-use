@@ -66,6 +66,7 @@ class AgentStep:
     reasoning: str = ""  # assistant reasoning_content (or joined thinking_blocks)
     content: str = ""  # assistant content (content-parts lists joined to their text)
     tools: list[ToolExec] = field(default_factory=list)  # executions bearing this turn
+    _end_event_index: int | None = field(default=None, repr=False)
 
 
 @dataclass
@@ -154,6 +155,8 @@ class EpisodeInput:
     # Internal: step provenance for the renderer; never emitted as a second
     # public input contract or mixed into the judge's evidence root.
     _step_sources: dict[int, SourceRef] = field(default_factory=dict, repr=False)
+    # Cache the preparation check so every span uses the same evidence limit.
+    _evidence_problem: str | None = field(default="episode evidence has not been prepared", repr=False)
 
     @property
     def episode_id(self) -> str | None:
@@ -236,75 +239,21 @@ def _step_to_dict(step: AgentStep) -> dict[str, Any]:
 
 @dataclass
 class InjectionSpan:
-    """A maximal run of recall injections delivering identical content under
-    the same treatment.
+    """One judged unit with the same entries, order, placement, and exposure.
 
-    The judged unit: consecutive recall ops (in agent-step order) whose
-    canonical memory set, delivered order, placement presentation, and
-    per-entry exposure are all identical collapse into one span. Non-first
-    injections in the span are "restated" — re-deliveries of content already
-    in front of the agent — and roll up here rather than being judged
-    individually. A re-delivery whose exposure or presentation CHANGED is a
-    new treatment and starts a new span (merging it would lend the later
-    delivery's wider exposure to anchors that predate it).
+    Repeated deliveries share a span. Changed exposure starts a new span so
+    later text cannot support an earlier action. Deliveries with no observed
+    consumer stay separate; their step bounds are None.
 
-    `step_first`/`step_last` are None only when every op is unattributed (no
-    agent turn ever classified in the run — a memory-only or pre-first-response
-    recording).
-    `step_gaps` lists steps inside [step_first, step_last] where the memory
-    was NOT delivered. Earlier deliveries of the same items are stated per
-    entry in the judge's span.md, checked against the consumer's recorded
-    input (injudge.evidence). `memory_exposure` carries, per delivered entry, what the
-    placement actually showed of the canonical value (full /
-    whitespace-normalized full (prose-safe values only) / clipped with the
-    exposed prefix length / unknown — memgraph.annotations.exposure_state),
-    identical across the span's deliveries by construction (a changed
-    exposure splits the span): the judge scores the exposure,
-    never an unseen suffix.
-    `seq_first`/`seq_last` bracket the span's ops (min/max event seq).
-    Unobserved consumers never merge into an attributed span.
-    `queries` is the distinct recorded search queries that produced the
-    span's injections (in delivery order); `placements` keeps each rendered
-    slot's kind and full resolved text in recorded order, with the digest
-    retained when text is unavailable. `position`/`total` locate the span
-    among its episode's spans (0/0 when built directly, not via
-    group_spans). `memory_windows` bounds each delivered memory's judged
-    footprint window individually, keyed by the entry's span-local id
-    (memory_id; every delivered entry carries one) → the window's last
-    step, the first later RE-EXPOSURE of that ENTRY'S (namespace, item)
-    identity starting strictly after this span's last delivery step, minus
-    one (a delivery showing everything this entry showed supersedes — from
-    then on that content's influence is the newer span's to claim), or None
-    when none qualifies: overlapping re-deliveries are skipped, not
-    terminal. When no cleanly separated re-exposure exists, the prepared
-    episode's last step caps the window. The strict > keeps
-    the bound from ever cutting the span's own delivery steps. An entry
-    with no stable item identity matches by the canonical entry used for
-    span fingerprints, so fresh operation-local ids cannot reopen the same
-    content's window. Empty when built directly, not via group_spans.
-    `memory_variant_steps` lists, per entry, the in-window steps where the
-    same item was delivered with different or narrower verified text (a
-    preview after a full read, or the reverse): such a delivery leaves this
-    window open, and each delivery is credited only for the text it showed.
-    `memory_window_starts` holds the one exception to the default window
-    start (the span's first step): when a LATER span delivers a copy adding
-    no verified text at an earlier carrier's last delivery step (a same-step
-    delivery collision), the copies are indistinguishable, so the shared step
-    is allocated once — the earlier span keeps it, and this span's copy opens
-    at the step after. Different or wider verified text stays eligible at its
-    own consuming step. Only the bumped entries appear here.
-    `same_step_bound` (the step, or None) marks the other half: a LATER
-    span starting at this span's last delivery step (two memory blocks
-    placed in one call, or a declared step collision) that re-exposes one
-    of this span's entries caps that entry's window at that step inclusive,
-    even if already finitely bounded (the steps beyond are the re-exposing
-    carrier's to claim). The collision is named in the run's validation
-    notes.
-    `memory_followups` lists, per entry, explicit searches proven through
-    their tool-result hosts to actions using the exposed key and returning
-    the same portable item. Each record names the actual action `step`,
-    `delivery_step`, `tool_call_id`, and search `operation_id`; action steps
-    must lie inside the entry's window.
+    Each memory window uses the entry's local id. A later delivery ends the
+    window only if it shows all the earlier text. Different or narrower text
+    leaves the window open and is listed in `memory_variant_steps`. The
+    episode end caps every prepared window. Copies at the same step share
+    credit once through `memory_window_starts` and `same_step_bound`.
+
+    `memory_followups` records proven selection actions and their later
+    deliveries. These hints do not establish benefit. The full grouping and
+    window rules live in injudge.spans.
     """
 
     id: str  # f"{traj_id}:S{n}"

@@ -1397,10 +1397,11 @@ def test_side_lane_turns_count_as_neither_agent_nor_memory_steps(tmp_path):
 
 
 def test_delivery_recent_turn_fallback_is_chronological_under_pipelining(tmp_path):
-    """Same-lane pipelining can record an older turn's classifying response
-    after a younger one's (deferred recording): the most-recent-turn fallback
-    picks the turn classified LAST before the delivery commit by classifying
-    seq (turn 2), never the lowest turn number (turn 1)."""
+    """Deferred responses can arrive out of turn order within one lane.
+
+    The fallback uses the last classification before the delivery in file
+    order: turn 2, although turn 1 started first.
+    """
     b = AnnotatedBuilder()
     b.turn = 1
     b._emit("turn_start", turn=1, call_id="000001-x", proxy_source=MAIN)
@@ -2246,6 +2247,22 @@ def test_corrupt_seq_delivery_order_check_still_fires(tmp_path):
     assert any("recorded before its search end" in w for w in warnings)
 
 
+@pytest.mark.parametrize("before_end", [False, True])
+@pytest.mark.parametrize("seq", [1, 1_000_000])
+def test_delivery_search_order_uses_recorded_position(tmp_path, before_end, seq):
+    builder = AnnotatedBuilder().agent_turn(with_task=True)
+    search_id = builder.search()
+    builder.delivery(search_id, memories=[])
+    delivery = builder.events.pop()
+    delivery["seq"] = seq
+    end_index = next(i for i, event in enumerate(builder.events)
+                     if event["type"] == "memory_search_end")
+    builder.events.insert(end_index if before_end else end_index + 1, delivery)
+    _, _, warnings = parse(builder, tmp_path)
+
+    assert any("recorded before its search end" in note for note in warnings) == before_end
+
+
 def test_index_never_raises_on_a_delivery_without_seq():
     """The tool path fabricates positional synthetic seqs (load_events), but
     a direct caller can hand the index a seq-less delivery: the index keeps
@@ -2337,10 +2354,12 @@ def test_delivery_search_integrity_problems():
 
     v1 = {"version_id": "v1", "namespace": "ns"}
     v2 = {"version_id": "v2", "namespace": "ns"}
+    start, end = search_events("op-1", 5, [v1, v2])
     idx = build_annotation_index([
         *_structural_events(),
-        *search_events("op-1", 5, [v1, v2]),
+        start,
         delivery(4, "d-early", "op-1", []),  # before its search's end seq
+        end,
         delivery(6, "d-alien", "op-1", [{"version_id": "v9", "namespace": "ns"}]),
         delivery(7, "d-reordered", "op-1", [v2, v1]),  # right set, wrong order
         delivery(8, "d-ok", "op-1", [v2]),  # an in-order subset

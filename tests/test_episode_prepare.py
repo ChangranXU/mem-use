@@ -87,6 +87,49 @@ def test_missing_boundary_is_unassigned_and_does_not_guess(tmp_path):
     assert result.unassigned and result.unassigned[0]["reason"] == "no_episode_scope"
 
 
+@pytest.mark.parametrize("conflicting", [False, True])
+def test_repeated_session_keeps_one_episode_and_original_task(tmp_path, conflicting):
+    builder = AnnotatedBuilder().agent_turn(with_task=True)
+    memory = cure_ref("item", "Use the recorded task.")
+    builder.recall(memory)
+    session = next(event for event in builder.events if event["type"] == "memory_session")
+    repeated = json.loads(json.dumps(session))
+    builder.seq += 1
+    repeated["seq"] = builder.seq
+    if conflicting:
+        repeated["annotation_id"] = "conflicting-session"
+        repeated["payload"]["task"] = {"availability": "inline", "text": "INVALID TASK"}
+    builder.events.append(repeated)
+    builder.recall(memory)
+    trajectory, operations, events, warnings = _parse(tmp_path, builder)
+    result = prepare_trajectory(trajectory, events, operations)
+
+    assert len(trajectory.episodes) == len(result.episodes) == 1
+    episode = result.episodes[0]
+    assert [step.step for step in episode.steps] == [1, 2, 3]
+    assert len(episode.deliveries) == 2
+    assert len(group_spans(operations, trajectory.id, episode=episode)) == 1
+    assert all(item["content"] != "INVALID TASK" for item in episode.task)
+    assert any("duplicate recorded annotation_id" in note or "second memory_session" in note
+               for note in warnings)
+
+
+@pytest.mark.parametrize("damage", ["missing_id", "payload"])
+def test_invalid_session_does_not_supply_episode_scope(tmp_path, damage):
+    builder = AnnotatedBuilder().agent_turn(with_task=True)
+    session = next(event for event in builder.events if event["type"] == "memory_session")
+    if damage == "missing_id":
+        del session["payload"]["trace_session_id"]
+    else:
+        session["payload"] = []
+    trajectory, operations, events, warnings = _parse(tmp_path, builder)
+    result = prepare_trajectory(trajectory, events, operations)
+
+    assert warnings
+    assert not trajectory.episodes and not result.episodes
+    assert result.unassigned[0]["reason"] == "no_episode_scope"
+
+
 def test_context_replay_keeps_occurrence_identity_across_rewrite_and_retraction(tmp_path):
     builder = AnnotatedBuilder()
     _boundary(builder, "bridge_episode_open")
@@ -422,12 +465,34 @@ def test_replay_detects_missing_retained_slots_and_recovers_when_recorded(missin
     assert diagnostics == first.gaps  # recovery does not erase the earlier input's gap
 
 
-def test_replay_distinguishes_missing_slots_from_explicit_retractions():
+def test_valid_rewrite_and_late_refill_clear_stale_lane_gap():
+    events = [
+        {"type": "message_retracted", "msg": True},
+        {"type": "message_end", "role": "user", "msg": 0, "content": "task"},
+        {"type": "history_rewritten", "kept": 2},
+        {"type": "turn_start", "turn": 1},
+        {"type": "message_end", "role": "assistant", "msg": 1, "content": "late record"},
+        {"type": "turn_start", "turn": 2},
+    ]
+    events = [{**event, "seq": i + 1, "_event_index": i} for i, event in enumerate(events)]
+    views, _, diagnostics = _replay_context(events, [], {None})
+    incomplete, recovered = views.values()
+
+    assert incomplete.gaps == ["event 3: 1 unrecorded input message slot(s) in prefix 0..1"]
+    assert recovered.gaps == []
+    assert diagnostics == ["event 0: retraction has no visible message target", *incomplete.gaps]
+
+
+def test_replay_accepts_a_retracted_tail_but_not_a_hole_below_visible_input():
+    """The recorder refills a retracted slot with the next message.
+    Thus, only a retracted tail leaves a complete input."""
     events = [
         {"type": "message_end", "role": "user", "msg": 0, "content": "task"},
-        {"type": "message_end", "role": "assistant", "msg": 2, "content": "draft"},
+        {"type": "message_end", "role": "assistant", "msg": 1, "content": "draft"},
+        {"type": "message_retracted", "msg": 1},
         {"type": "turn_start", "turn": 1},
-        {"type": "message_end", "role": "assistant", "msg": 1, "content": "other draft"},
+        {"type": "message_end", "role": "assistant", "msg": 1, "content": "reply"},
+        {"type": "message_end", "role": "user", "msg": 2, "content": "result"},
         {"type": "message_retracted", "msg": 1},
         {"type": "turn_start", "turn": 2},
         {"type": "history_rewritten", "kept": 1},
@@ -435,10 +500,10 @@ def test_replay_distinguishes_missing_slots_from_explicit_retractions():
     ]
     events = [{**event, "seq": i + 1, "_event_index": i} for i, event in enumerate(events)]
     views, _, _ = _replay_context(events, [], {None})
-    missing, removed, rewritten = views.values()
-    assert missing.gaps
-    assert removed.gaps == [] and rewritten.gaps == []
-    assert removed.messages == [{"occurrence_id": "event:0"}, {"occurrence_id": "event:1"}]
+    tail, hole, rewritten = views.values()
+    assert tail.gaps == [] and tail.messages == [{"occurrence_id": "event:0"}]
+    assert hole.gaps == ["event 7: 1 unrecorded input message slot(s) in prefix 0..2"]
+    assert rewritten.gaps == []
 
 
 def test_missing_record_blocks_an_otherwise_proven_delivery_baseline(tmp_path):
@@ -493,6 +558,23 @@ def test_late_turnless_tool_result_is_not_episode_evidence(tmp_path):
                   msg=3, status="completed", result="LATER EPISODE SECRET")
     episode = prepare_trajectory(*_prepare_args(tmp_path, builder)).episodes[0]
     assert "LATER EPISODE SECRET" not in build_episode_evidence(episode)["steps/step_000001.md"]
+
+
+@pytest.mark.parametrize("late,result_seq", [(False, 1000), (True, 1), (True, None)])
+def test_tool_result_availability_uses_event_order(tmp_path, late, result_seq):
+    builder = AnnotatedBuilder().episode_open().agent_turn(with_task=True)
+    result = next(event for event in builder.events if event["type"] == "tool_execution_end")
+    turn_end = next(event for event in builder.events if event["type"] == "turn_end")
+    if late:
+        builder.events.remove(result)
+        builder.events.append(result)
+        result.pop("turn")
+    result["seq"] = turn_end["seq"] if result_seq is None else result_seq
+    builder.episode_close()
+    episode = prepare_trajectory(*_prepare_args(tmp_path, builder)).episodes[0]
+    text = build_episode_evidence(episode)["steps/step_000001.md"]
+    assert ("after this turn's end" in text) is late
+    assert "_end_event_index" not in episode.to_dict()["steps"][0]
 
 
 def test_episode_search_count_deduplicates_delivery_links(tmp_path):
@@ -757,6 +839,33 @@ def test_search_extensions_stay_in_audit_data_and_out_of_judge_evidence(tmp_path
     assert "extensions" not in search
 
 
+@pytest.mark.parametrize("accepted_later", [False, True])
+def test_rejected_search_start_cannot_claim_episode_search(tmp_path, accepted_later):
+    builder = AnnotatedBuilder().episode_open("first").agent_turn(with_task=True)
+    session = builder.events[1]["payload"]["trace_session_id"]
+    builder.annotation("memory_search_start", {
+        "trace_session_id": session, "operation_id": "rejected-search", "lane_id": "default",
+        "query": {"availability": "inline", "text": "Rejected query"}, "trigger": "explicit",
+    }, lane=builder.mem)
+    rejected = builder.events[-1]
+    rejected["annotation_id"] = builder.events[2]["annotation_id"]
+    builder.episode_close("first").episode_open("second").agent_turn()
+    query = "Accepted query in the second episode"
+    if accepted_later:
+        rejected["payload"]["operation_id"] = builder.search(query=query, returned=[])
+    builder.episode_close("second")
+    trajectory, operations, events, warnings = _parse(tmp_path, builder)
+    result = prepare_trajectory(trajectory, events, operations)
+
+    assert any("duplicate recorded annotation_id" in note for note in warnings)
+    assert not result.unassigned
+    assert not result.episodes[0].searches
+    assert [search["query"] for search in result.episodes[1].searches] == ([query] if accepted_later else [])
+    if accepted_later:
+        search = result.episodes[1].searches[0]
+        assert search["source_start"]["event_index"] > result.episodes[1].recorded_episode_identity["open_event_index"]
+
+
 @pytest.mark.parametrize("expired", [False, True])
 def test_participant_search_without_delivery_stays_inside_its_session_episode(tmp_path, expired):
     builder = AnnotatedBuilder().agent_turn(with_task=True)
@@ -781,3 +890,41 @@ def test_participant_search_without_delivery_stays_inside_its_session_episode(tm
     else:
         assert not result.unassigned
         assert [search["operation_id"] for search in result.episodes[0].searches] == [search_id]
+
+
+@pytest.mark.parametrize("rejected", ["duplicate", "unknown_session"])
+@pytest.mark.parametrize("completed", [False, True])
+def test_rejected_main_binding_cannot_add_helper_task_text(tmp_path, rejected, completed):
+    builder = AnnotatedBuilder().episode_open().agent_turn(with_task=True)
+    session = builder.events[1]["payload"]["trace_session_id"] if rejected == "duplicate" else "unknown-session"
+    builder.annotation("memory_role_bind", {
+        "trace_session_id": session, "logical_role": "main", "adapter": builder.adapter,
+    }, lane="HELPER")
+    builder._emit("message_end", proxy_source="HELPER", role="user", msg=0,
+                  content="Private helper task must not become the user task")
+    builder._emit("turn_start", proxy_source="HELPER", turn=99, call_id="helper-call")
+    if completed:
+        builder._emit("message_end", proxy_source="HELPER", role="assistant", msg=1, turn=99,
+                      content="Helper answer")
+    builder.episode_close()
+    trajectory, operations, events, warnings = _parse(tmp_path, builder)
+    episode = prepare_trajectory(trajectory, events, operations).episodes[0]
+    assert any("binds main twice" in note or "unrecorded session" in note for note in warnings)
+    assert [view.turn for view in episode.context] == [1]
+    assert all("Private helper task" not in item["content"] for item in episode.task)
+    assert "Private helper task" not in build_episode_evidence(episode)["task.md"]
+
+
+def test_other_session_with_episode_id_does_not_split_session_scope(tmp_path):
+    builder = AnnotatedBuilder().agent_turn(with_task=True)
+    builder.events[1]["payload"]["episode_id"] = "episode-1"
+    builder.annotation("memory_session", {
+        "trace_session_id": "helper-session", "session_kind": "other",
+        "episode_id": "episode-1", "adapter": builder.adapter,
+    }, lane=builder.main)
+    builder.agent_turn()
+    trajectory, operations, events, _warnings = _parse(tmp_path, builder)
+    result = prepare_trajectory(trajectory, events, operations)
+    assert len(trajectory.episodes) == len(result.episodes) == 1
+    assert [step.step for step in result.episodes[0].steps] == [1, 2]
+    assert not result.unassigned

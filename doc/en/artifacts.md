@@ -5,12 +5,14 @@ icon: box-archive
 
 # Artifacts
 
-Report v20 changes how influence is attributed: an action credits memory only
-when it uses content no pre-exposure record states, and influence null no
-longer means "another source explains it equally" (see
+The current schemas are report v21 and summary v18. Report v20 changed how
+influence is attributed: an action credits memory only when it uses content
+absent from the recorded input before exposure. Influence null no longer means
+"another source explains it equally" (see
 [Verdict derivation](verdict-derivation.md)). Influence, effect, and verdict
-counts from v19 and earlier are not comparable. The artifact shape and summary
-schema v17 are unchanged; v19 had removed the aggregate `headline` block.
+counts from v19 and earlier are not comparable with v20 or v21. The v20 change
+kept the artifact shape and summary schema v17; v19 had removed the aggregate
+`headline` block.
 A bundle can contain both useful and harmful entries, so its verdict cannot
 measure how many tokens helped.
 
@@ -18,8 +20,9 @@ The report and summary distinguish harm from memory guidance and failures in
 execution. A memory-misdirected detour that is abandoned or corrected without a
 used finding is harm. An agent typo, missing tool, or unrelated environment
 failure alone does not prove memory harm; follow corrected attempts to their
-results. Do not combine effect labels or rates from different scoring versions.
-Older reports remain historical artifacts; memgraph accepts only report v20.
+results. Report v17 introduced this distinction; harm counts from v16 are not
+directly comparable. Do not combine effect labels or rates from different scoring versions.
+Older reports remain historical artifacts; memgraph accepts only report v21.
 
 {% hint style="info" %}
 injudge writes all artifacts of a run to that run's own `<run-stamp>/` folder under the output container (`-o DIR`, default `output/`) — a run never overwrites another run's artifacts.
@@ -173,7 +176,7 @@ Overall only: spans carrying an `input` record — every span the agent ran for,
 
 ## summary.json Fields
 
-Summary v17 contains compact final statistics. Detailed entries, span records,
+Summary v18 contains compact final statistics. Detailed entries, span records,
 rubric notes, configuration, and provenance remain in `injudge-report.json`.
 
 | Section | Contents |

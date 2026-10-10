@@ -34,7 +34,6 @@ import {
 	type Model,
 	type Models,
 	type ProviderAuth,
-	type Usage,
 	type UserMessage,
 } from "@earendil-works/pi-ai";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
@@ -135,20 +134,6 @@ function textOf(message: { content: unknown }): string {
 
 function hasUsableText(message: { content: unknown }): boolean {
 	return textOf(message).trim() !== "";
-}
-
-function sumUsage(messages: readonly AgentMessage[]): AgentUsage {
-	const totals: AgentUsage = { input: 0, output: 0, cache_read: 0, cache_write: 0 };
-	for (const m of messages) {
-		const assistant = asAssistant(m);
-		const usage: Usage | undefined = assistant?.usage;
-		if (!usage) continue;
-		totals.input += usage.input ?? 0;
-		totals.output += usage.output ?? 0;
-		totals.cache_read += usage.cacheRead ?? 0;
-		totals.cache_write += usage.cacheWrite ?? 0;
-	}
-	return totals;
 }
 
 function lastAssistantText(messages: readonly AgentMessage[]): string {
@@ -304,18 +289,10 @@ async function main(): Promise<number> {
 
 	let error: string | null = null;
 	try {
-		// A one-call investigation must use its only call for the forced answer.
 		const opening: UserMessage = {
 			role: "user", content: [{ type: "text", text: job.opening }], timestamp: Date.now(),
 		};
 		const openingMessages: UserMessage[] = [opening];
-		if (cfg.max_steps === 1) {
-			budget.forced = { reason: "step_budget_forced", rollbackTail: 0 };
-			budget.forcedInjected = true;
-			openingMessages.push({
-				role: "user", content: [{ type: "text", text: job.forced_message }], timestamp: Date.now(),
-			});
-		}
 		const inputTokens = estimateInput({
 			systemPrompt: agent.state.systemPrompt,
 			tools: agent.state.tools,
@@ -351,15 +328,14 @@ async function main(): Promise<number> {
 	}, 0);
 	let stopReason: string = budget.stopReason ?? "no_answer";
 	if (error) stopReason = "error";
-	// Counts and usage cover the retained conversation, including prior
-	// phases. Python records the final cumulative totals, not a sum of ends.
+	// Call counts cover the retained conversation, including prior phases.
+	// Python records the final totals once.
 	const result: AgentResult = {
 		answer: lastAssistantText(messages.slice(job.history?.length ?? 0)),
 		stop_reason: stopReason,
 		forced: budget.forcedInjected,
 		llm_calls: assistantTurns,
 		tool_calls: toolCalls,
-		usage: sumUsage(messages),
 		executed_llm_calls: executedLlmCalls,
 		executed_tool_calls: executedToolCalls,
 		reported_usage: reportedUsage,
@@ -373,7 +349,6 @@ async function main(): Promise<number> {
 		forced: result.forced,
 		llm_calls: result.llm_calls,
 		tool_calls: result.tool_calls,
-		usage: result.usage,
 		executed_llm_calls: result.executed_llm_calls,
 		executed_tool_calls: result.executed_tool_calls,
 		reported_usage: result.reported_usage,

@@ -46,7 +46,7 @@ raw JSON panel. No response-body parser or rate-card estimate is used here.
 Two chronology notes — both valid input rather than errors:
 
 - A recalled memory with no observed creation in the loaded set is registered with `origin: "not_observed"`; the HTML gathers such memories under one dashed "created earlier" ▲ per lane. The store entry simply predates the loaded trajectories.
-- A recall whose timestamp (or, within one trajectory, seq) precedes the first observed creation is flagged `recalled_before_creation`: the store entry likely predates the loaded trajectories, or the lanes are misordered. The edge is still drawn; the warning is recorded in `validation`.
+- A recall whose timestamp (or, within one trajectory, file position) precedes the first observed creation is flagged `recalled_before_creation`: the store entry likely predates the loaded trajectories, or the lanes are misordered. The edge is still drawn; the warning is recorded in `validation`.
 
 ## HTML Features
 

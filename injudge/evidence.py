@@ -167,7 +167,7 @@ def _episode_step_text(episode: EpisodeInput, step: AgentStep, targets: set[str]
         # consumer's input. Match its baseline occurrence exactly.
         if is_int(index):
             lines.append(f"tool result [event:{index}], seq {tool.seq_end if tool.seq_end is not None else '?'}")
-        late = tool.seq_end is not None and step.seq_end is not None and tool.seq_end > step.seq_end
+        late = index is not None and step._end_event_index is not None and index > step._end_event_index
         avail = f", available from seq {tool.seq_end} — after this turn's end" if late else ""
         if index is not None and isinstance(close_index, int) and index > close_index:
             lines.append(f"result ({tool.status or '?'}): [recorded after episode close; unavailable in this episode input]")

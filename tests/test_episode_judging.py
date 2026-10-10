@@ -43,6 +43,24 @@ def _run(tmp_path, monkeypatch, builder, responses, extra=()):
 
 
 def test_three_spans_in_one_episode_have_independent_judges_and_graph_links(tmp_path, monkeypatch):
+    import injudge.episodes as preparation
+    import memgraph.parse_trajectory as parsing
+
+    checks = []
+    indexed = []
+    original_check = preparation.evidence_problem
+    original_index = parsing.build_annotation_index
+
+    def count_check(episode):
+        checks.append(episode.execution_id)
+        return original_check(episode)
+
+    def count_index(events):
+        indexed.append(len(events))
+        return original_index(events)
+
+    monkeypatch.setattr(preparation, "evidence_problem", count_check)
+    monkeypatch.setattr(parsing, "build_annotation_index", count_index)
     builder = AnnotatedBuilder().episode_open().agent_turn(with_task=True)
     for key in ("one", "two", "three"):
         builder.recall(cure_ref(key, f"{key} fact"))
@@ -53,6 +71,8 @@ def test_three_spans_in_one_episode_have_independent_judges_and_graph_links(tmp_
         extra=("--html",),
     )
     assert status == 0 and len(calls) == 3
+    assert len(checks) == 1
+    assert len(indexed) == 1
     assert (run_dir / "memgraph-verdicts.html").is_file()
     summary = json.loads((run_dir / "summary.json").read_text())
     assert summary["diagnostics"] == {
@@ -620,7 +640,8 @@ def test_known_prefix_reset_recovers_later_episode_after_corruption(tmp_path, mo
     if damage == "invalid_prefix":
         builder.history_rewrite(kept=None, dropped=5)
     elif damage == "missing_slot":
-        builder._emit("message_retracted", proxy_source=builder.main, msg=1)
+        # Later turns refill slots 1-4, never the retained system slot.
+        builder._emit("message_retracted", proxy_source=builder.main, msg=0)
     builder.history_rewrite(kept=kept, dropped=5)
     if type(kept) is int and kept == 0:
         builder._emit("message_end", proxy_source=builder.main, role="system", msg=0, content="")
