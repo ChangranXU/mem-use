@@ -583,7 +583,9 @@ def test_unresolved_placement_does_not_erase_independent_matching_text(tmp_path)
     assert memory in files["steps/step_000001.md"]
 
 
-@pytest.mark.parametrize("fault", ["missing_proof", "context_gap"])
+@pytest.mark.parametrize("fault", [
+    "missing_proof", "context_gap", "unbound_declared", "unbound_fallback", "invalid_call_ref",
+])
 def test_unresolved_evidence_blocks_paid_and_dry_run(tmp_path, monkeypatch, capsys, fault):
     builder = AnnotatedBuilder().episode_open().agent_turn(with_task=True)
     if fault == "context_gap":
@@ -591,6 +593,11 @@ def test_unresolved_evidence_blocks_paid_and_dry_run(tmp_path, monkeypatch, caps
     builder.recall(cure_ref("hint", "unsafe fact")).episode_close()
     if fault == "missing_proof":
         next(event for event in builder.events if event["type"] == "memory_delivery").pop("binding")
+    elif fault in ("unbound_declared", "unbound_fallback", "invalid_call_ref"):
+        delivery = next(event for event in builder.events if event["type"] == "memory_delivery")
+        delivery["terminal_call_ref"] = {} if fault == "invalid_call_ref" else None
+        if fault == "unbound_declared":
+            delivery["payload"]["main_step"] = 2
     status, report, run_dir, calls, source = _run(tmp_path, monkeypatch, builder, [])
     assert status == 2 and not calls
     assert "unsafe episode evidence" in report["operations"][0]["error"]
@@ -619,6 +626,22 @@ def test_informational_preparation_warning_does_not_block_judge(tmp_path, monkey
     status, report, _directory, calls, _source = _run(tmp_path, monkeypatch, builder, [_result(_answer())])
     assert status == 0 and len(calls) == 1
     assert report["operations"][0]["verdict"] == "neutral"
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_unjudged_delivery_without_input_does_not_block_sibling(tmp_path, monkeypatch, empty):
+    builder = AnnotatedBuilder().episode_open().agent_turn(with_task=True)
+    builder.recall(cure_ref("hint", "Use the recorded input."))
+    refs = [] if empty else [cure_ref("missing", "Unavailable consumer.")]
+    search = builder.search(returned=refs)
+    builder.delivery(search, memories=refs, placements=[],
+                     bind=None if empty else {"call_id": "unrecorded"})
+    builder.episode_close()
+    status, report, _directory, calls, _source = _run(tmp_path, monkeypatch, builder, [_result(_answer())])
+
+    assert status == 0 and len(calls) == 1
+    assert len(report["operations"]) == 2
+    assert sum(not operation.get("auto") for operation in report["operations"]) == 1
 
 
 @pytest.mark.parametrize(("kept", "system", "damage", "recovered"), [
@@ -689,13 +712,15 @@ def test_unverifiable_placement_declaration_does_not_establish_exposure(tmp_path
     assert "ownership" in report["operations"][0]["error"]
 
 
-def test_direct_judge_api_refuses_unresolved_ownership(tmp_path, monkeypatch):
+@pytest.mark.parametrize("fault", ["missing_proof", "unbound"])
+def test_direct_judge_api_refuses_unresolved_ownership(tmp_path, monkeypatch, fault):
     from injudge.agent import judge_span
     from test_injudge import _agent_cfg
 
     builder = AnnotatedBuilder().episode_open().agent_turn(with_task=True)
     builder.recall(cure_ref("hint", "fact")).episode_close()
-    next(event for event in builder.events if event["type"] == "memory_delivery").pop("binding")
+    delivery = next(event for event in builder.events if event["type"] == "memory_delivery")
+    delivery.pop("binding" if fault == "missing_proof" else "terminal_call_ref")
     source = builder.write(tmp_path / "trajectory")
     trajectories, operations, events, _ = load_trajectories([source])
     t = trajectories[0]
@@ -704,7 +729,7 @@ def test_direct_judge_api_refuses_unresolved_ownership(tmp_path, monkeypatch):
     calls = stub_runner(monkeypatch, [])
     verdict = judge_span(span, episode, _agent_cfg(), [], evidence_root=tmp_path / "evidence",
                          transcripts_root=tmp_path / "agent-runs")
-    assert verdict["verdict"] == "error" and "ownership" in verdict["error"]
+    assert verdict["verdict"] == "error" and "unsafe episode evidence" in verdict["error"]
     assert not calls and not verdict.get("input")
     assert not (tmp_path / "evidence").exists()
 

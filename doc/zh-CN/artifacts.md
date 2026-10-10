@@ -67,6 +67,7 @@ memgraph 的 `--json` 产物是 `{tool, trajectories, ops, memories, edges, vali
 还显示这些条目的 accuracy 与 novelty 分布计数，包括未知 novelty。最多列出
 十个非 neutral 或出错的区间（含 episode id 与评审分析或错误）供优先查看；最多列出
 三条不同的警告/错误诊断。输入诊断覆盖整份录制，包括选择范围外的 episode。
+评审和录制中的文本在 `summary.md` 中经过转义，显式的 Markdown 链接、图片和 HTML 均保留为文本。
 
 Episode 数与轨迹/区间数一起呈现。空投递和不可观察消费者分别计为 `empty`、
 `unassessable`，不进入判定比率分母。完整诊断、记忆身份、episode 行和区间记录
@@ -148,7 +149,13 @@ negative 记忆包可能有一条记忆帮助了任务，另一条造成损害�
 
 投递策略度量记忆系统注入的轻重：按轨迹与整体，对照该轨迹全部已计费的 prompt token 预算，所有泳道的用量记录都计入，包括记忆泳道的提取调用。
 
-计费预算在三个总量中取最大有效值：`run.json` 的 `usage.prompt_tokens`、`agent_end` 的 `usage.prompt_tokens`、所有 live assistant-message 的用量总和。两种快照均包含不产生对话轮次的 embedding 调用，替代消息总量而不与之相加。无效或较小的快照会警告；两种快照均缺失时，消息用量只是下界，已绑定 embedding 角色时会提示漏计风险。
+计费预算取 `run.json`、`agent_end` 和已记录的 assistant 消息中最大的有效 prompt-token 总量。
+两种快照均包含不产生对话轮次的 embedding 调用，用于替代消息总量，不与之相加。
+无效或较小的快照会产生警告。两种快照均缺失时，消息用量只是下界；
+已绑定 embedding 角色时会提示漏计风险。
+
+历史重写会从输入中移除消息，但保留这些消息的费用。消息撤回只取消该槽位当前记录的费用。
+槽位中后来的用户或工具消息不能取消更早的 assistant 费用。
 
 ### 置信度
 
@@ -227,6 +234,7 @@ empty、unassessable、error 和 unjudged 只保留计数，不进入判定比�
 `injudge-report.json` 的每个操作还带有：`kind`（`recall_injection_span`）、`traj`、`seq`、`n_injections`、`steps`（无投递归属到 step 时省略）、`payload_summary` 和 `delivery_cost`（`deliveries`、`content_chars_total`、`approx_tokens_total`）；`episode_execution_id` 与 `episode_last_step`；`memories`（带区间本地 id 的完整已录制引用）；`memory_exposure`——与 `memories` **按位置平行**的列表（下标 `i` 描述 `memories[i]`），每条为 `{state, exposed_chars, value_chars}`，state 取 `full`、`full_normalized`、`clipped` 或 `unknown`，未核实的规范值不会进入评审证据；以及逐条目的 `memory_windows`（全局步骤上界，至迟止于该 episode 的最后可用步骤；同 episode 的后续投递也可提前截断），`memory_window_starts` 记录同一步投递冲突的例外（未新增已核实文本的同步副本在共享步骤之后开窗），`memory_variant_steps` 记录窗口内同一记忆以不同或更窄文本再次投递的步骤（不会截断窗口），`memory_followups` 记录经过工具结果来源证明的显式选取 `{step, delivery_step, tool_call_id, operation_id}`，动作步骤与结果投递步骤分开记录。与 `memory_exposure` 不同，`rubric`、`memory_usage` 和 `memory_windows` 按区间本地 id 键控。评分 note、动作 `anchors`、`analysis`、`evidence`、`step_gaps`、`auto`、`error`、`judge_raw` 和适用时的 `pe_pairing_corrections` 仍保留。评审智能体实际运行的区间——含其自身的 error 结局——带有 `input`：`path: agent`、尝试次数、保留的 `llm_calls` / `tool_calls`、`read_steps`（完整文本仍保留在对话中的全局步骤，均来自步骤文件——每个被引用的锚点及结构化 evidence 步骤都必须在其中）、实际执行调用数、包括回滚调用的上报用量、上下文回滚、`any_phase_forced`，以及相对于运行文件夹的 transcript 路径；在智能体运行前就被拒的区间（episode 边界不安全或不完整，或父 episode 没有已录制任务）取 error 判定，没有 `input`、没有 evidence 文件夹、也没有 transcript。`gold` 与仅代表最终答案的 `forced` 在适用时出现。轨迹行带有 `id`、`run_id`、`path`、`instance_id`、`model`、`adapter`、`n_steps`、`n_injections`、`n_spans`、其 `episodes` 行以及该轨迹的 `policy`；episode 行记录边界、任务、附件与证据来源，但不产生 episode verdict。
 
 report 的 `tool` 块给出工具名（`name: "injudge"`）与其 `schema`，并带有已解析、无密钥的评审智能体配置（`config`，URL 规范化为 `scheme://host[:port][/path]`）以及 `judge_model`。
+若已知的评审凭证仍出现在保留的 URL 中，也会被打码。
 
 `injections` 数组列出每一次原始投递及其所属区间、该区间的 `episode_execution_id`（若有时）、`role`（`first` 或 `restated`）、`verdict`、`content_chars`，以及 `op_id` / `seq` / `step`。
 

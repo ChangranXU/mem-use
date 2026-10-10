@@ -45,9 +45,6 @@ class Trajectory:
     side_lanes: set[str | None] = field(default_factory=set)
     adapter: str | None = None  # memory adapter name@version
     instance_id: str | None = None  # from memory_session
-    # exact task statement from memory_session (internal: the judge input —
-    # like memory_lanes, never serialized into the artifacts)
-    task: str | None = None
     n_searches: int = 0  # memory searches with a recorded end (any status: completed/failed/partial)
     # every recorded search, delivered or not: {operation_id, lane_id, trigger,
     # query, status, error_codes, returned_count, delivered_by (recall op ids), cost,

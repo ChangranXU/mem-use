@@ -86,6 +86,12 @@ Attribution rules:
 
 A delivery naming a consumer call whose turn is missing or unclassified stays unattributable. It cannot fall back to an earlier or declared step.
 
+Graph attribution and input replay use the first `turn_start` for each turn.
+A call ID shared by distinct turns identifies no consumer. A graph step alone
+does not prove the consumer's input. A nonempty, attributed delivery needs a
+recorded consumer input. If that input is unavailable, judging stops before
+any paid call.
+
 ## Input Paths
 
 Each CLI path may be:

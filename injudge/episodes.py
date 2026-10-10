@@ -21,6 +21,7 @@ from injudge.steps import _tool_calls_of, build_step_stream
 from memgraph.annotations import AnnotationIndex, is_int, message_text, resolved_content_text
 from memgraph.episodes import Boundary, _as_str, _payload, episode_for_index, episode_scopes
 from memgraph.model import MemoryOp, Trajectory
+from memgraph.parse_trajectory import turn_start_maps
 
 
 def _as_int(value: object) -> int | None:
@@ -57,19 +58,11 @@ def _main_lanes(events: list[dict[str, Any]], trajectory: Trajectory) -> set[str
 
 
 def _turn_maps(events: list[dict[str, Any]], steps: list[AgentStep]) -> tuple[dict[int, int], dict[int, SourceRef], dict[str, tuple[int, int | None]]]:
-    turn_index: dict[int, int] = {}
-    for index, event in enumerate(events):
-        if event.get("type") == "turn_start" and is_int(event.get("turn")):
-            turn_index.setdefault(event["turn"], index)
+    starts, call_turns = turn_start_maps(events)
+    turn_index = {turn: event["_event_index"] for turn, event in starts.items()}
     step_by_turn = {step.turn: step.step for step in steps}
     sources = {step.turn: _source(events[turn_index[step.turn]]) for step in steps if step.turn in turn_index}
-    call_map: dict[str, tuple[int, int | None]] = {}
-    for event in events:
-        if event.get("type") != "turn_start" or not is_int(event.get("turn")):
-            continue
-        call_id = event.get("call_id")
-        if isinstance(call_id, str) and call_id:
-            call_map.setdefault(call_id, (event["turn"], step_by_turn.get(event["turn"])))
+    call_map = {call_id: (turn, step_by_turn.get(turn)) for call_id, turn in call_turns.items()}
     return turn_index, sources, call_map
 
 
@@ -129,6 +122,7 @@ def _replay_context(
     occurrences: dict[str, dict[str, Any]] = {}
     gaps: dict[str | None, list[str]] = {}
     step_by_turn = {step.turn: step.step for step in steps}
+    turn_starts, _ = turn_start_maps(events)
     diagnostics: list[str] = []
     for index, event in enumerate(events):
         typ, lane = event.get("type"), event.get("proxy_source")
@@ -170,7 +164,8 @@ def _replay_context(
             item = _occurrence(event)
             occurrences[item["occurrence_id"]] = item
             prior[msg] = item
-        elif typ == "turn_start" and is_int(event.get("turn")):
+        elif (typ == "turn_start" and is_int(event.get("turn"))
+              and turn_starts.get(event["turn"]) is event):
             visible = [prior[slot] for slot in sorted(prior)]
             view_gaps = list(gaps.get(lane, []))
             expected = max(retained_prefix.get(lane, 0), max(prior, default=-1) + 1)
@@ -392,13 +387,17 @@ def project_occurrence(item: dict[str, Any], deliveries: list[dict[str, Any]]) -
 
 
 def evidence_problem(episode: EpisodeInput) -> str | None:
-    """Block unsafe ownership/context, not every preparation diagnostic.
+    """Reject missing consumer inputs, visibility gaps, and unresolved ownership.
 
-    Unobserved consumers are mechanical skips. They need not prevent judging
-    a sibling with established input, unlike ambiguity in visible evidence.
+    A nonempty delivery with an attributed step needs a recorded input view.
+    Deliveries without a step do not by themselves block a sibling span.
     """
-    consumer_turns = {delivery["consumer"]["turn"] for delivery in episode.deliveries
-                      if delivery["consumer"]["status"] == "observed"}
+    judged_deliveries = [delivery for delivery in episode.deliveries
+                        if delivery["memories"] and delivery["step"] is not None]
+    consumer_turns = {delivery["consumer"]["turn"] for delivery in judged_deliveries}
+    if (any(delivery["consumer"]["status"] != "observed" for delivery in judged_deliveries)
+            or not consumer_turns.issubset(view.turn for view in episode.context)):
+        return "consumer input view is unavailable"
     if any(view.gaps for view in episode.context if view.turn in consumer_turns):
         return "consumer context has unresolved visibility gaps"
     for delivery in episode.deliveries:
@@ -507,7 +506,7 @@ def _delivery_projection(
         "entry_prefix": f"D{delivery_number}",
         "op_id": op.id,
         "seq": op.seq,
-        "step": consumer.get("step"),
+        "step": op.step,
         "turn": consumer.get("turn"),
         "consumer": consumer,
         "source": source.to_dict(),

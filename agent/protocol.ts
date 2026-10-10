@@ -1,11 +1,10 @@
 /**
- * The job/result contract between injudge (Python) and the agent runner.
+ * The job and result contract between Python and the pi runner.
  *
- * One job = one judge-agent conversation for one injection span. Python
- * materializes the span's evidence folder, assembles the prompts, and owns
- * the verdict contract; the runner only drives the conversation. The API key
- * never rides the job file — it travels in the JUDGE_API_KEY environment
- * variable and is passed straight through to the provider auth.
+ * Python owns evidence and verdict validation. The runner owns the span's
+ * conversation. The key and endpoint travel in JUDGE_API_KEY and
+ * JUDGE_BASE_URL. The job file omits both because a gateway path can
+ * contain a credential.
  */
 
 /** Wire format of the judge endpoint. */
@@ -14,7 +13,6 @@ export type JudgeApi = "openai-chat" | "anthropic";
 export interface AgentJobConfig {
 	model: string;
 	api: JudgeApi;
-	base_url: string;
 	/** Total LLM-call cap for this phase, forced final round included. */
 	max_steps: number;
 	/** Per-call output cap; continuations may use less to fit retained evidence. */
@@ -23,7 +21,7 @@ export interface AgentJobConfig {
 	context_window: number;
 	temperature: number;
 	thinking_level: string;
-	/** Per-call timeout in milliseconds. */
+	/** Timeout in milliseconds for each HTTP request, including retries. */
 	timeout_ms: number;
 }
 

@@ -30,7 +30,13 @@ When a forced answer also contains blocked tool calls, the runner records the re
 
 ## Budgets and Forced Answers
 
-Two budgets bound every conversation, and both end in a **forced final answer** instead of a failure:
+Before the first paid call, the runner estimates the opening, system prompt,
+tool schemas, and all `required_reads.always` text. It rejects the span if
+this estimate exceeds the input budget. The estimate excludes blank lines,
+read formatting, and optional evidence; passing this check does not prove that
+the full investigation will fit.
+
+Once a conversation starts, two budgets can end it with a **forced final answer**:
 
 - **Step budget** (`MAX_STEPS`): when the LLM-call count reaches the cap, the conversation is cut to one final round: the forced-answer message tells the agent its budget is exhausted and to stop calling tools and write its final answer now from the evidence already gathered, and any defiant tool call in the forced round is blocked.
 - **Context budget** (`CONTEXT_WINDOW`): the estimate uses the last applicable assistant usage plus trailing messages; without usable input usage (including output-only usage), it estimates that content from messages, the system prompt, and tool schemas. The watermark reserves `MAX_OUTPUT_TOKENS` and the forced message's estimated size. Crossing it rolls back the overflowing round and injects the forced message.
@@ -57,11 +63,26 @@ An answer cut at the output cap fails the contract parse and takes the follow-up
 
 - A runner-level failure mid-run (the subprocess fails to start, exits non-zero, exceeds its wall-clock bound, or writes no readable result) is that span's `error` verdict with a validation note; the run continues. It is not retried — an identical retry would re-pay the fault. A missing node, runner, or agent-package tree is setup misuse that fails fast with a targeted error before any paid call.
 - An agent-level error (endpoint auth, persistent transport failure) surfaces as the run's `error` field and becomes that span's error verdict the same way.
-- Per-call timeouts (`TIMEOUT`) and output caps (`MAX_OUTPUT_TOKENS`) are applied inside the runner on every stream call; there are no transport retries — a failed request surfaces as the run's `error`.
+- `TIMEOUT` applies to each HTTP request, and `MAX_OUTPUT_TOKENS` limits each model response. Before streaming starts, pi can retry a transient request failure up to twice. A failure after streaming starts is not retried. A requested retry delay above 60 seconds also fails. The runner's wall-clock bound includes the request timeouts and retry waits.
 
 ## Credentials
 
-The API key travels from Python to the runner only through the `JUDGE_API_KEY` environment variable — never through the job file, the result file, or any artifact — and is sent only to the configured endpoint. Endpoint output that echoes the request (an auth/proxy fault page reflecting the credential, in an HTTP error or a 200 answer alike) is masked before any of its text reaches a verdict, `judge_raw`, or a validation note: the raw key and every percent-encoded spelling, in either hex case. Masking also covers the key's literal JSON-serialized spelling. Transcript masking decodes the JSONL envelope and masks its string fields without decoding JSON-looking strings inside them; complete records without credential echoes remain unchanged. Incomplete or malformed records are discarded, and the retained transcript ends at a newline so the next attempt can append safely; if saving the masked transcript fails, the raw file is removed and the span records an error with its input diagnostics.
+The key and endpoint URL reach the runner through the `JUDGE_API_KEY` and
+`JUDGE_BASE_URL` environment variables. Neither is a configuration field in
+the job or result files. An endpoint path can contain a credential, so the
+URL also needs this protection. The key is sent only to the configured endpoint.
+
+Endpoint output that repeats the key is masked before it reaches a verdict,
+`judge_raw`, or a validation note. This applies to HTTP errors and successful
+responses. Masking covers the raw key, all percent-encoded spellings in either
+hex case, and the key's literal JSON-serialized spelling.
+
+Transcript masking decodes the JSONL envelope and masks its string fields.
+It does not decode JSON-looking strings inside those fields. Complete records
+without credential echoes remain unchanged. Incomplete or malformed records
+are discarded. The retained transcript ends at a newline so the next attempt
+can append safely. If the masked transcript cannot be saved, the raw file is
+removed and the span records an error with its input diagnostics.
 
 Each read returns one text block per file, headed `==> path <==`, and `details.files` holds per-file metadata (`path`, `lines_read`, `line_start`, `line_end`, `truncated`, or `error` for a path that could not be read) counting only text actually returned after the call's 200,000-character cap; files past the cap are marked unread. A read whose `limit` stops before the file's last non-blank line ends with a note giving the remaining line count and the next offset. Paged reads combine. `read_steps` certifies complete step text, not just file access: header-only reads, truncated lines, search hits and rolled-back reads do not qualify. Every answer requires the manifest's `required_reads.always` files completely: task and baseline files, `messages.md` and `gold.md` when present, the first consuming step, and its preceding episode step if present. The baseline index does not certify its referenced files: non-null novelty and acted-on influence also require every `required_reads.prior_sources` entry, or use null. None/referenced/selected require the full entry window; a non-null acted-on effect requires the episode remainder as well, because consequences can outlive an action window. Incomplete attribution or effect uses influence or positive_effect null. Complete coverage does not prove the judgment itself is correct.
 

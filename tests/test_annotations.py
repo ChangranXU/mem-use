@@ -14,6 +14,7 @@ import json
 import pytest
 
 from injudge.evidence import build_span_evidence, write_evidence
+from injudge.episodes import prepare_trajectory
 from injudge.model import EpisodeInput
 from injudge.spans import content_fingerprint, group_spans
 from injudge.steps import build_step_stream
@@ -181,13 +182,14 @@ def test_annotated_run_parses_from_annotations_alone(tmp_path):
     b.agent_turn()
     call = b.last_call
     b.delivery(search_id, memories=[cure_ref("k1", "durable fact")], bind=call)
-    traj, ops, warnings = parse(b, tmp_path)
+    warnings = []
+    traj, ops, events = parse_trajectory(b.write(tmp_path / "t1"), warnings)
 
     assert warnings == []
     assert (traj.memory_lane, traj.memory_lanes) == (MEM, {MEM})
     assert traj.adapter == "cure@0.1.0"
     assert traj.instance_id == "pydata__xarray-2905"
-    assert traj.task == TASK  # the session's exact task, for the judge input
+    assert prepare_trajectory(traj, events, ops).episodes[0].task[0]["content"] == TASK
     assert traj.n_steps == 13
     assert traj.n_searches == 1
 
@@ -718,7 +720,7 @@ def test_task_trajectory_message_locator_resolves_from_events(tmp_path):
     b = AnnotatedBuilder(task_ref=locator_task)
     b.agent_turn(with_task=True)
     traj, _, warnings = parse(b, tmp_path)
-    assert traj.task == TASK  # resolved from the main lane's user message
+    assert resolved_content_text(locator_task, b.events, {"main": MAIN}) == TASK
     assert not any("not resolvable" in w for w in warnings)
 
 
@@ -779,9 +781,7 @@ def test_delivery_placement_fields_and_the_redacted_guard(tmp_path):
     assert "placements" not in recalls[0].to_dict()
 
 
-def test_task_locator_to_unresolvable_content_warns(tmp_path):
-    """Locator kinds pointing outside trajectory.jsonl (call bodies, sidecar
-    artifacts) resolve to None — with a note, never a silent drop."""
+def test_task_locator_outside_trajectory_preserves_recorded_user_task(tmp_path):
     call_task = {
         "availability": "call_request",
         "sha256": "0" * 64,
@@ -790,10 +790,13 @@ def test_task_locator_to_unresolvable_content_warns(tmp_path):
                     "json_pointer": ""},
     }
     b = AnnotatedBuilder(task_ref=call_task)
-    b.agent_turn()
-    traj, _, warnings = parse(b, tmp_path)
-    assert traj.task is None
-    assert any("not resolvable from trajectory.jsonl" in w for w in warnings)
+    b.agent_turn(with_task=True)
+    warnings = []
+    traj, ops, events = parse_trajectory(b.write(tmp_path / "t1"), warnings)
+    assert resolved_content_text(call_task, events, {"main": MAIN}) is None
+    episode, = prepare_trajectory(traj, events, ops).episodes
+    assert any(item["content"] == TASK for item in episode.task)
+    assert not any("judge runs without a task statement" in warning for warning in warnings)
 
 
 def test_task_redacted_stays_none_without_a_warning(tmp_path):
@@ -802,7 +805,7 @@ def test_task_redacted_stays_none_without_a_warning(tmp_path):
     b = AnnotatedBuilder(task_ref={"availability": "redacted", "reason": "policy"})
     b.agent_turn()
     traj, _, warnings = parse(b, tmp_path)
-    assert traj.task is None
+    assert resolved_content_text({"availability": "redacted", "reason": "policy"}, b.events, {}) is None
     assert not any("task" in w for w in warnings)
 
 
@@ -820,7 +823,7 @@ def test_inline_json_value_renders_as_canonical_json(tmp_path):
                            "json_value": {"structured": "content"}}
     b.recall(ref=json_ref, query="q")
     traj, ops, warnings = parse(b, tmp_path)
-    assert traj.task == '{"a":[true,null],"b":1}'  # sorted keys, compact
+    assert resolved_content_text(json_task, b.events, {}) == '{"a":[true,null],"b":1}'
     assert not any("not resolvable" in w for w in warnings)
     (recall,) = [o for o in ops if o.kind == "recall"]
     assert recall.memories[0]["value"] == '{"structured":"content"}'
@@ -2132,7 +2135,7 @@ def test_task_locator_resolves_the_live_record_after_a_retraction(tmp_path):
             content="the rewritten task")
     b.agent_turn()
     traj, _, _ = parse(b, tmp_path)
-    assert traj.task == "the rewritten task"
+    assert resolved_content_text(locator_task, b.events, {"main": MAIN}) == "the rewritten task"
 
 
 def test_locator_resolves_the_declared_digest_record():
@@ -2186,8 +2189,9 @@ def test_corrupt_seq_retraction_keeps_its_stream_position(tmp_path):
     for e in b.events:
         if e["type"] == "message_retracted":
             del e["seq"]
-    traj, _, warnings = parse(b, tmp_path)
-    assert traj.task == "the rewritten task"
+    warnings = []
+    traj, _, events = parse_trajectory(b.write(tmp_path / "t1"), warnings)
+    assert resolved_content_text(locator_task, events, {"main": MAIN}) == "the rewritten task"
     assert any("non-integer seq" in w for w in warnings)
 
 

@@ -1859,7 +1859,7 @@ def test_cli_writes_results_first_summary(monkeypatch, tmp_path):
     assert "## Spans to inspect (1 of 1)" in readable
     assert "[injudge-report.json](injudge-report.json)" in readable
     assert "test-key-only" not in readable
-    assert "schema_version 9 is not 10" in readable
+    assert "schema\\_version 9 is not 10" in readable
     assert str(source) not in readable
 
 
@@ -2928,7 +2928,7 @@ def test_runner_job_uses_the_phase_step_limit(monkeypatch, tmp_path, continued, 
     def run(args, **kwargs):
         job = json.loads(Path(args[args.index("--job") + 1]).read_text())
         assert job["config"]["max_steps"] == expected
-        assert kwargs["timeout"] == max(300 * expected + 120, 600)
+        assert kwargs["timeout"] == max((300 * 3 + 120) * expected + 120, 600)
         Path(args[args.index("--out") + 1]).write_text(json.dumps(_result(GOOD)))
         return subprocess.CompletedProcess(args, 0, stdout=b"", stderr=b"")
 
@@ -2960,6 +2960,30 @@ def test_deeply_nested_runner_result_is_a_reported_failure(monkeypatch, tmp_path
     # Recursive decoders reject the nesting; newer Python decoders can read
     # it, then reject the result shape. Both must remain reported failures.
     assert any("no readable result" in w or "unusable result" in w for w in warnings)
+
+
+def test_runner_endpoint_with_a_path_credential_stays_in_environment(monkeypatch, tmp_path):
+    import subprocess
+    from pathlib import Path
+    from injudge.agent import _invoke_runner
+
+    cfg = _agent_cfg(api_key="sk-secret+key", base_url="http://judge.invalid/sk-secret%2bkey/v1")
+
+    def run(args, **kwargs):
+        job_text = Path(args[args.index("--job") + 1]).read_text()
+        assert "base_url" not in json.loads(job_text)["config"]
+        assert cfg.api_key not in job_text
+        assert "sk-secret%2bkey" not in job_text
+        assert kwargs["env"]["JUDGE_API_KEY"] == cfg.api_key
+        assert kwargs["env"]["JUDGE_BASE_URL"] == cfg.base_url
+        Path(args[args.index("--out") + 1]).write_text(json.dumps(_result(GOOD)))
+        return subprocess.CompletedProcess(args, 0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr("injudge.agent.subprocess.run", run)
+    warnings = []
+    result = _invoke_runner(cfg, tmp_path / "evidence", tmp_path / "trace.jsonl",
+                            1, "system", "message", None, warnings)
+    assert result["answer"] == GOOD and warnings == []
 
 
 def stub_runner(monkeypatch, results):

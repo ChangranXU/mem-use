@@ -77,6 +77,42 @@ def test_late_delivery_follows_bound_consumer_and_unknown_exposure_stays_hidden(
     assert "EXPOSURE UNVERIFIED" in files["deliveries.md"]
 
 
+@pytest.mark.parametrize("damage", ["shared_call_id", "later_call_alias"])
+def test_graph_and_preparation_share_unambiguous_call_bindings(tmp_path, damage):
+    builder = AnnotatedBuilder().episode_open("first").agent_turn(with_task=True)
+    builder.recall(cure_ref("hint", "Use the recorded input.")).episode_close("first")
+    builder.episode_open("second").agent_turn().episode_close("second")
+    starts = [event for event in builder.events if event["type"] == "turn_start"]
+    delivery = next(event for event in builder.events if event["type"] == "memory_delivery")
+    if damage == "shared_call_id":
+        starts[-1]["call_id"] = starts[1]["call_id"]
+    else:
+        duplicate = {**starts[1], "call_id": "later-alias"}
+        builder.events.insert(builder.events.index(delivery), duplicate)
+        delivery["terminal_call_ref"] = {**delivery["terminal_call_ref"], "call_id": "later-alias"}
+    trajectory, operations, events, _warnings = _parse(tmp_path, builder)
+    result = prepare_trajectory(trajectory, events, operations)
+    recall, = [op for op in operations if op.kind == "recall"]
+
+    assert recall.step is None and recall.turn is None
+    first, second = result.episodes
+    assert len(first.deliveries) == 1 and not second.deliveries
+    assert first.deliveries[0]["consumer"]["status"] == "known_unobserved"
+    assert first.deliveries[0]["consumer"]["turn"] is None
+    assert len(first.context) == 2
+
+
+def test_attributed_delivery_requires_a_consumer_input_view(tmp_path):
+    builder = AnnotatedBuilder().agent_turn(with_task=True)
+    builder.recall(cure_ref("hint", "Use the recorded input."))
+    trajectory, operations, events, _warnings = _parse(tmp_path, builder)
+    episode, = prepare_trajectory(trajectory, events, operations).episodes
+    assert evidence_problem(episode) is None
+
+    episode.context = [view for view in episode.context if view.step != 2]
+    assert evidence_problem(episode) == "consumer input view is unavailable"
+
+
 def test_missing_boundary_is_unassigned_and_does_not_guess(tmp_path):
     builder = AnnotatedBuilder()
     builder.events[1]["payload"]["session_kind"] = "other"

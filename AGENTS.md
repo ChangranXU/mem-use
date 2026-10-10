@@ -118,9 +118,11 @@ instructions alone does not require paid calibration.
 
 These are load-bearing; never weaken them.
 
-- The judge API key comes from `.env`, travels to the runner only through
-  the `JUDGE_API_KEY` environment variable (never the job/result temp
-  files), and is sent only to the judge endpoint. It must never appear in
+- The judge API key and endpoint come from `.env` and reach the runner only
+  through the `JUDGE_API_KEY` and `JUDGE_BASE_URL` environment variables.
+  An endpoint path can also contain the key. Keep both configuration values
+  out of job/result temp files, and send the key only to the judge endpoint.
+  The key must never appear in
   artifacts, reports, logs, or error messages: credential and URL config
   errors name keys, never values (enum/numeric knob errors show the
   offending literal, which is no credential). Endpoint output that echoes

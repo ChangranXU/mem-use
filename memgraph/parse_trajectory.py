@@ -180,6 +180,26 @@ def load_events(path: Path, warnings: list[str]) -> list[dict]:
     return events
 
 
+def turn_start_maps(events: list[dict]) -> tuple[dict[int, dict], dict[str, int]]:
+    """Use the first start for each turn; omit call IDs shared by distinct turns."""
+    starts: dict[int, dict] = {}
+    for event in events:
+        if event.get("type") == "turn_start" and is_int(event.get("turn")):
+            starts.setdefault(event["turn"], event)
+    calls: dict[str, int] = {}
+    ambiguous: set[str] = set()
+    for turn, event in starts.items():
+        call_id = event.get("call_id")
+        if not isinstance(call_id, str) or not call_id or call_id in ambiguous:
+            continue
+        if call_id in calls:
+            del calls[call_id]
+            ambiguous.add(call_id)
+        else:
+            calls[call_id] = turn
+    return starts, calls
+
+
 def classifying_messages(events: list[dict]) -> dict[int, dict]:
     """turn -> the FIRST turn-bearing assistant message_end classifying it.
 
@@ -245,20 +265,9 @@ class _TurnTable:
     """
 
     def __init__(self, events: list[dict], memory_lanes: set[str | None], side_lanes: set[str | None] = frozenset()):
-        self.turn_call: dict[int, str | None] = {}  # turn -> call_id (from turn_start)
-        for e in events:
-            if e.get("type") == "turn_start":
-                t = e.get("turn")
-                call_id = e.get("call_id")
-                if is_int(t):
-                    # a corrupt non-string call_id can never join a ref — and
-                    # an unhashable one would crash the call_turn keys below
-                    self.turn_call.setdefault(t, call_id if isinstance(call_id, str) else None)
+        starts, self.call_turn = turn_start_maps(events)
         classified_msgs = classifying_messages(events)
-        self.n_turns = len(self.turn_call)
-        self.call_turn: dict[str, int] = {  # reverse: call_id -> turn
-            call: turn for turn, call in self.turn_call.items() if call
-        }
+        self.n_turns = len(starts)
         self.n_mem_turns = sum(
             1 for e in classified_msgs.values()
             if e.get("proxy_source") in memory_lanes
@@ -940,8 +949,7 @@ def parse_trajectory(
 
     index = build_annotation_index(events)
     traj._annotation_index = index
-    # one slot index for every locator resolution below (session task, each
-    # recall op's query) — a per-lookup scan would be O(recalls × events)
+    # A shared slot index prevents a full event scan for each recall query.
     slots = slot_index(events)
     for problem in index.problems:
         warnings.append(f"{run_id}: annotation structure: {problem}")
@@ -1042,37 +1050,12 @@ def parse_trajectory(
         instance_id = payload.get("instance_id")
         if isinstance(instance_id, str):
             traj.instance_id = instance_id
-        # the exact task the memory system scoped against — the relevance
-        # rubric is judged on it. A locator-recorded task is carried too
-        # (schema v10 allows any ContentRef): a trajectory_message locator
-        # resolves against this event stream; the kinds pointing outside
-        # trajectory.jsonl resolve to None, with a note — never silent.
-        # Redacted/unavailable content stays None by design.
-        task_ref = payload.get("task")
-        if task_ref is not None:
-            traj.task = resolved_content_text(
-                task_ref, events,
-                index.binds.get(payload.get("trace_session_id"), {}), slots,
-            )
-            if traj.task is None:
-                availability = (
-                    task_ref.get("availability") if isinstance(task_ref, dict) else None
-                )
-                if availability not in ("redacted", "unavailable"):
-                    warnings.append(
-                        f"{run_id}: session task recorded as a {availability!r} "
-                        "content ref not resolvable from trajectory.jsonl; "
-                        "the judge runs without a task statement"
-                    )
-    # adapter/instance_id/task are per-run singulars projected from the FIRST
-    # recorded session; a later session CARRYING a different value is
-    # surfaced, never silently ignored (the judge's relevance rubric runs on
-    # the projected task). An absent field is no statement — it never notes.
+    # Adapter and instance ID label the trajectory; later differences need a warning.
     sessions = list(index.sessions.values())
     for session in sessions[1:]:
         other = session["payload"]
         sid = other.get("trace_session_id")
-        for field_name in ("adapter", "instance_id", "task"):
+        for field_name in ("adapter", "instance_id"):
             value = other.get(field_name)
             if value is not None and value != sessions[0]["payload"].get(field_name):
                 warnings.append(

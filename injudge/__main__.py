@@ -91,9 +91,7 @@ from memgraph.verdicts import apply_verdicts
 
 
 def _safe_endpoint(url: str) -> str:
-    """A shareable endpoint spelling for the run manifest: userinfo, query,
-    and fragment dropped — each can carry a secret (credentials in
-    user@host, a proxy token in ?key=)."""
+    """Remove URL userinfo, query, and fragment because they can contain credentials."""
     parts = urlsplit(url)
     return parts._replace(netloc=parts.netloc.rpartition("@")[2], query="", fragment="").geturl()
 
@@ -107,13 +105,10 @@ def _run_stamp() -> str:
 
 
 def _run_manifest(cfg: AgentConfig, judge_parallel: int) -> dict:
-    """The resolved, secret-free configuration the run actually judged
-    with: a saved report is replayable evidence only if its judge settings
-    are recoverable from it. Never the API key, never a URL's
-    userinfo/query (see _safe_endpoint)."""
+    """Save the judge settings needed to reproduce the run, without credentials."""
     return {
         "api": cfg.api,
-        "base_url": _safe_endpoint(cfg.base_url),
+        "base_url": _mask_key(_safe_endpoint(cfg.base_url), cfg.api_key),
         "timeout_s": cfg.timeout,
         "max_attempts": cfg.max_attempts,
         "max_steps": cfg.max_steps,
@@ -454,7 +449,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--env", type=Path, default=None,
                     help=f".env path (default: {_DEFAULT_ENV})")
     ap.add_argument("--timeout", type=float, default=None,
-                    help="per-LLM-call timeout seconds (default 300)")
+                    help="timeout seconds for each HTTP request (default 300)")
     ap.add_argument("--max-attempts", type=int, default=None,
                     help="runner phases per span: the investigation plus follow-ups "
                     "after a rejected answer (default: MAX_ATTEMPTS from .env, else 3)")

@@ -1,29 +1,16 @@
-"""The agentic judge: an LLM agent that searches a span's evidence folder.
+"""Run the pi judge against one span's recorded evidence.
 
-One span, one folder (injudge/evidence materializes it), one pi agent
-(agent/runner.ts) whose only tools are read/search scoped to that
-folder. The configuration is deliberately tiny — a model/endpoint triple,
-a max-steps cap, a context window, an output-token cap — because the
-agent loop absorbs what the one-shot architecture had to engineer around:
-oversized inputs become "the agent reads selectively", a cut answer
-becomes "the follow-up answers again", and both budgets end in a forced
-final round instead of an error.
+The runner can read and search only that span's evidence folder. Python
+validates the answer contract and retained evidence coverage. Rejected
+answers continue the same conversation with a short follow-up budget.
+MAX_ATTEMPTS bounds the number of phases; exhaustion remains an error.
 
-Python still owns the verdict contract: the runner reports the
-conversation's final assistant text, and _strict_parse /
-_verdict_semantics / _assemble_verdict (injudge.judge) decide whether it
-is a verdict, and every cited anchor must name a step file the retained
-conversation actually read (a nonzero read count alone does not ground a
-claim about step N). Every rejected answer — malformed, out of contract, or
-missing required reads — gets the same follow-up: the conversation continues
-with the rejection reason and the evidence tools under a short budget.
-MAX_ATTEMPTS bounds the phases; exhaustion stays a visible error verdict,
-never a silent neutral.
+The runner checks required input before its first paid call. During the
+conversation, step and context budgets can force a final answer.
 
-The API key reaches the runner only through the JUDGE_API_KEY environment
-variable; it never rides the job/result temp files. Everything the
-endpoint produced (answers, error strings) is masked before it lands in
-any artifact, like every other echo path.
+The key and endpoint reach the runner through JUDGE_API_KEY and JUDGE_BASE_URL.
+The job file omits both because an endpoint path can contain a credential.
+Endpoint echoes are masked before they enter saved artifacts.
 """
 
 from __future__ import annotations
@@ -383,7 +370,6 @@ def _invoke_runner(
             "config": {
                 "model": cfg.model,
                 "api": cfg.api,
-                "base_url": cfg.base_url,
                 "max_steps": max_steps,
                 "max_output_tokens": cfg.max_output_tokens,
                 "context_window": cfg.context_window,
@@ -399,15 +385,15 @@ def _invoke_runner(
             proc = subprocess.run(
                 ["node", str(_RUNNER), "--job", str(job_path), "--out", str(out_path)],
                 capture_output=True,
-                # the structural bound: every call gets the per-call timeout,
-                # and the conversation cannot exceed max_steps calls
-                timeout=max(cfg.timeout * max_steps + 120.0, 600.0),
-                env={**os.environ, "JUDGE_API_KEY": cfg.api_key},
+                # Each model call allows three requests and two waits of up to 60 seconds.
+                timeout=max((cfg.timeout * 3 + 120.0) * max_steps + 120.0, 600.0),
+                env={**os.environ, "JUDGE_API_KEY": cfg.api_key, "JUDGE_BASE_URL": cfg.base_url},
             )
         except subprocess.TimeoutExpired:
             warnings.append(
                 "the agent runner exceeded its wall-clock bound "
-                f"({cfg.timeout:.0f}s x {max_steps} steps + slack)"
+                f"({cfg.timeout:.0f}s per request, up to 3 requests per step, "
+                f"{max_steps} steps + retry waits and slack)"
             )
             return None
         except OSError as e:

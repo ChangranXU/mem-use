@@ -345,39 +345,49 @@ def prompt_tokens_total(
     events: list[dict], warnings: list[str], run_usage: dict[str, object] | None = None,
     *, bindings: dict[str, dict[str, str | None]],
 ) -> int:
-    """All-lane billed prompt budget: the largest valid run.json, agent_end,
-    or live-message total. Embeddings have no message events; snapshots can
-    lag each other. These totals replace the message sum, never add to it.
-    Invalid or smaller snapshots warn so corruption cannot erase known spend.
+    """Use the largest valid run, agent-end, or recorded message prompt total.
 
-    The recorder lets exactly one LIVE message_end carry a call's billed
-    usage: a message_retracted annuls the record it replaces, and a turn-less
-    recovery re-record carries the usage of the failed original, so summing
-    only turn-bearing records would bill the retracted and miss the
-    recovered. The stream alternates record/retraction per slot, so a
-    retraction following a retraction annuls nothing.
+    Run snapshots include calls without messages, such as embeddings. They
+    replace the message sum. Invalid or smaller snapshots produce warnings.
+    A retraction annuls only the current record at its slot. A history rewrite
+    removes slot ownership, but keeps the charge for calls already made.
     """
-    live: dict[tuple, list[dict]] = {}  # (proxy_source, msg) -> unannulled records
-    last: dict[tuple, str] = {}  # slot -> its latest record/retraction type
+    charged: dict[int, dict] = {}
+    # Track every role so a retraction cannot annul an older assistant charge.
+    current: dict[tuple[str | None, int], int] = {}
     corrupt = unmatched = 0
-    for e in events:
-        record = e.get("type") == "message_end" and e.get("role") == "assistant"
-        if not record and e.get("type") != "message_retracted":
+    for index, e in enumerate(events):
+        typ = e.get("type")
+        if typ == "history_rewritten":
+            lane, kept = e.get("proxy_source"), e.get("kept")
+            if lane is not None and not isinstance(lane, str):
+                corrupt += 1
+                continue
+            if not is_int(kept) or kept < 0:
+                corrupt += 1
+                # Unknown rewrite bounds invalidate slot ownership, not past charges.
+                kept = 0
+            current = {key: value for key, value in current.items()
+                       if key[0] != lane or key[1] < kept}
+            continue
+        if typ not in ("message_end", "tool_execution_end", "message_retracted"):
             continue
         key = _usage_key(e)
+        assistant = typ == "message_end" and e.get("role") == "assistant"
         if key is None:
-            corrupt += 1
-        elif record:
-            live.setdefault(key, []).append(e)
-            last[key] = "message_end"
+            if assistant or typ == "message_retracted":
+                corrupt += 1
+        elif typ != "message_retracted":
+            current[key] = index
+            if assistant:
+                charged[index] = e
         else:
-            if last.get(key) == "message_end":
-                live[key].pop()
+            if key in current:
+                charged.pop(current.pop(key), None)
             else:
                 unmatched += 1
-            last[key] = "message_retracted"
     total = 0
-    for e in (e for stack in live.values() for e in stack):
+    for e in charged.values():
         usage = e.get("usage")
         tokens = usage.get("prompt_tokens") if isinstance(usage, dict) else None
         if _valid_tokens(tokens):
@@ -386,12 +396,12 @@ def prompt_tokens_total(
             corrupt += 1
     if corrupt:
         warnings.append(
-            f"{corrupt} usage record(s) or retraction(s) carry a corrupt slot or "
-            "prompt_tokens value; excluded, so the prompt-token total may be inexact"
+            f"{corrupt} record(s) carry a corrupt slot or prompt_tokens value, "
+            "or an invalid history prefix; the prompt-token total may be inexact"
         )
     if unmatched:
         warnings.append(
-            f"{unmatched} message_retracted event(s) matched no live usage record "
+            f"{unmatched} message_retracted event(s) matched no current recorded message "
             "(out-of-order or duplicate); the prompt-token total may overcount"
         )
     ended = next((e.get("usage") for e in reversed(events) if e.get("type") == "agent_end"), None)

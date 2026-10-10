@@ -1,20 +1,15 @@
 /**
- * One judge-agent conversation over one span's evidence folder.
+ * One judge conversation over one span's evidence folder.
  *
  * Usage: node agent/runner.ts --job <job.json> --out <result.json>
- * (JUDGE_API_KEY in the environment carries the credential; it never
- * touches the job/result files.)
+ * JUDGE_API_KEY and JUDGE_BASE_URL carry the key and endpoint in the
+ * environment. The job file omits both: a gateway path can contain a key.
  *
- * The agent is a plain pi Agent with exactly the two evidence tools —
- * no filesystem, no bash. Two budgets bound the conversation, both ending
- * in a FORCED final round instead of a crash (the pattern the collection
- * harness uses): the LLM-call cap (max_steps) and the context-window
- * watermark (context_window minus output and forced-message reserves). When a
- * budget trips, the overflowing round is rolled back, the job's
- * forced_message is appended, and any defiant tool call in the forced
- * round is blocked. The conversation's final assistant text is the judge
- * answer; Python owns the verdict contract. A follow-up phase restores
- * job.history and continues the same conversation under its own budget.
+ * The pi agent has two read-only evidence tools. Required input must fit
+ * the estimated budget before the first model call. During investigation,
+ * the step and context budgets can force a final answer and block tools.
+ * Python validates the final assistant text. A follow-up restores job.history
+ * and continues the same conversation under its own budget.
  */
 
 import * as fs from "node:fs";
@@ -40,7 +35,7 @@ import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completio
 import { anthropicMessagesApi } from "@earendil-works/pi-ai/api/anthropic-messages.lazy";
 import { estimateContextTokens, estimateTextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import type { AgentJob, AgentResult, AgentUsage } from "./protocol.ts";
-import { createEvidenceTools } from "./evidence-tools.ts";
+import { createEvidenceTools, resolveInside } from "./evidence-tools.ts";
 import { TrajectoryLog } from "./trajectory.ts";
 
 const PROVIDER_ID = "injudge";
@@ -72,7 +67,7 @@ function parseArgs(argv: string[]): { job: string; out: string } {
 	return { job, out };
 }
 
-function buildModel(job: AgentJob, apiKey: string): { model: Model<any>; models: Models } {
+function buildModel(job: AgentJob, apiKey: string, baseUrl: string): { model: Model<any>; models: Models } {
 	const cfg = job.config;
 	const auth: ProviderAuth = {
 		apiKey: {
@@ -84,7 +79,7 @@ function buildModel(job: AgentJob, apiKey: string): { model: Model<any>; models:
 		id: cfg.model,
 		name: cfg.model,
 		provider: PROVIDER_ID,
-		baseUrl: cfg.base_url,
+		baseUrl,
 		reasoning: cfg.thinking_level !== "off",
 		input: ["text"] as ("text" | "image")[],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -98,7 +93,7 @@ function buildModel(job: AgentJob, apiKey: string): { model: Model<any>; models:
 			createProvider({
 				id: PROVIDER_ID,
 				name: "injudge anthropic endpoint",
-				baseUrl: cfg.base_url,
+				baseUrl,
 				auth,
 				models: [model],
 				api: anthropicMessagesApi(),
@@ -111,7 +106,7 @@ function buildModel(job: AgentJob, apiKey: string): { model: Model<any>; models:
 		createProvider({
 			id: PROVIDER_ID,
 			name: "injudge OpenAI-compatible endpoint",
-			baseUrl: cfg.base_url,
+			baseUrl,
 			auth,
 			models: [model],
 			api: openAICompletionsApi(),
@@ -171,8 +166,13 @@ async function main(): Promise<number> {
 		console.error("error: JUDGE_API_KEY is not set in the environment");
 		return 2;
 	}
+	const baseUrl = process.env.JUDGE_BASE_URL ?? "";
+	if (!baseUrl) {
+		console.error("error: JUDGE_BASE_URL is not set in the environment");
+		return 2;
+	}
 	const cfg = job.config;
-	const { model, models } = buildModel(job, apiKey);
+	const { model, models } = buildModel(job, apiKey, baseUrl);
 	const tools: AgentTool<any>[] = createEvidenceTools(job.evidence_dir);
 	const trajectory = new TrajectoryLog(job.trajectory_path);
 
@@ -205,6 +205,7 @@ async function main(): Promise<number> {
 				maxTokens: maxOutputTokens,
 				temperature: cfg.temperature,
 				timeoutMs: cfg.timeout_ms,
+				maxRetries: 2,
 			});
 		},
 		shouldStopAfterTurn: ({ message, toolResults, context }) => {
@@ -307,6 +308,17 @@ async function main(): Promise<number> {
 		}
 		if (maxOutputTokens <= 0 || inputTokens > watermark) {
 			throw new Error(`opening context (${inputTokens} estimated tokens) exceeds the input budget (${Math.min(watermark, cfg.context_window - forcedReserve)}) before any judge call`);
+		}
+		if (!job.history?.length) {
+			const manifest = JSON.parse(fs.readFileSync(resolveInside(job.evidence_dir, "manifest.json"), "utf8"));
+			const required = [...new Set<string>(manifest.required_reads.always)];
+			// Omit blank lines and read formatting to estimate only required input text.
+			const text = required.map((rel) => fs.readFileSync(resolveInside(job.evidence_dir, rel), "utf8")
+				.split("\n").filter((line) => line.trim()).join("")).join("");
+			const requiredTokens = inputTokens + estimateTextTokens(text);
+			if (requiredTokens > watermark) {
+				throw new Error(`required evidence (${requiredTokens} estimated input tokens) exceeds the input budget (${watermark}) before any judge call`);
+			}
 		}
 		// A rejected saved answer has an assistant tail: bare continue()
 		// rejects it. prompt() appends the follow-up without resetting history.

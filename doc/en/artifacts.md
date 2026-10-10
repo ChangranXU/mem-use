@@ -78,6 +78,8 @@ up to ten non-neutral or error spans to inspect, each with its episode id and th
 judge analysis or error. It lists up to three unique warning/error diagnostics.
 Input diagnostics cover whole recordings,
 including episodes outside the selection.
+Text from the judge and recordings is escaped in `summary.md`.
+Explicit Markdown links, images, and HTML remain text.
 
 Episode counts appear alongside trajectory/span counts. Empty deliveries and
 unobserved consumers use separate classes (`empty`, `unassessable`), outside
@@ -164,7 +166,16 @@ or extra cost against a no-memory run.
 
 Delivery policy measures how heavily the memory system injects, per trajectory and overall, against the trajectory's whole billed prompt-token budget: every lane's usage records count, including the memory lane's extraction calls.
 
-The billed budget takes the largest valid total across `run.json`'s `usage.prompt_tokens`, `agent_end`, and live assistant-message usage. The recorder's contract has both snapshots include embedding calls that produce no conversation turns; they replace, rather than add to, the message sum. Invalid totals and smaller snapshots warn; without either snapshot, message usage is a lower bound, with an undercount warning when an embedding role is bound.
+The billed budget uses the largest valid prompt-token total from `run.json`,
+`agent_end`, or recorded assistant messages. Both snapshots include embedding
+calls without conversation turns. A snapshot replaces the message sum; it is
+not added to that sum. Invalid or smaller snapshots produce warnings. Without
+either snapshot, message usage is a lower bound; a bound embedding role adds
+an undercount warning.
+
+A history rewrite removes messages from the input but preserves their charges.
+A message retraction annuls only the current record at its slot. A later user
+or tool message at that slot cannot cancel an earlier assistant charge.
 
 ### Confidence
 
@@ -247,6 +258,7 @@ nulls remain. Estimate notes appear once at the top level.
 `injudge-report.json` additionally carries, per operation: `kind` (`recall_injection_span`), `traj`, `seq`, `n_injections`, `steps` (omitted when no delivery has an attributed step), `payload_summary`, and `delivery_cost` (`deliveries`, `content_chars_total`, `approx_tokens_total`); `episode_execution_id` and `episode_last_step`; `memories` (full recorded refs stamped with span-local ids); `memory_exposure` — a **positional** list parallel to `memories` (index `i` describes `memories[i]`), each entry `{state, exposed_chars, value_chars}` with state `full`, `full_normalized`, `clipped`, or `unknown`, unverified canonical values withheld from judge evidence; and `memory_windows` (per-entry global end steps, capped at the episode's last eligible step or the next same-episode delivery), with `memory_window_starts` recording same-step collision exceptions (a same-step copy adding no verified text opens after the shared step), `memory_variant_steps` the in-window steps where the same memory was delivered with different or narrower text (which leaves the window open), and `memory_followups` the proven explicit selections `{step, delivery_step, tool_call_id, operation_id}` (actual action and result-delivery steps recorded separately). Unlike `memory_exposure`, `rubric`, `memory_usage`, and `memory_windows` are keyed by span-local ids. The operation also retains rubric notes and action `anchors`, `analysis`, `evidence`, `step_gaps`, `auto`, `error`, `judge_raw`, and `pe_pairing_corrections` when present. Spans the judge agent ran for — its own error outcomes included — carry `input`: `path: agent`, attempts, retained `llm_calls` / `tool_calls`, `read_steps` (global steps whose complete text was retained from the step files — every cited anchor and structured evidence step must be one of them), executed call counts, reported usage including rolled-back calls, context rollbacks, `any_phase_forced`, and the transcript path relative to the run folder; a span rejected before the agent ran (an unsafe or incomplete episode boundary, or a parent episode with no recorded task) takes an error verdict with no `input`, no evidence folder, and no transcript. `gold` and final-answer `forced` appear when applicable. Trajectory rows carry `id`, `run_id`, `path`, `instance_id`, `model`, `adapter`, `n_steps`, `n_injections`, `n_spans`, their `episodes` rows, and the trajectory's `policy`; episode rows record boundary, task, attachment, and evidence provenance without an episode verdict.
 
 The report's `tool` block names the tool (`name: "injudge"`) and its `schema`, and carries the resolved, secret-free judge-agent configuration (`config`, URLs sanitized to `scheme://host[:port][/path]`) with `judge_model`.
+The known judge credential is also masked if it appears in the remaining URL.
 
 The `injections` array lists every raw delivery with its span, its `episode_execution_id` when the span has one, `role` (`first` or `restated`), `verdict`, `content_chars`, and its `op_id` / `seq` / `step`.
 

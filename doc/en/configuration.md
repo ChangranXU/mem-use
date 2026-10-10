@@ -30,7 +30,9 @@ npm --prefix agent install    # TS side once (node >= 22.19 required on PATH)
 
 ## The Two Budgets
 
-Both budgets end in a **forced final answer** — the agent is told to stop calling tools and answer from what it has gathered — never a mid-run failure.
+During a conversation, either budget can trigger a **forced final answer** from the evidence already read.
+Before the first paid call, the runner estimates the size of the opening and required evidence.
+It rejects a span that exceeds the input budget. See [Judge agent](judge-client.md#budgets-and-forced-answers).
 
 | Key | Default | Purpose |
 |---|---|---|
@@ -45,7 +47,7 @@ A verdict cut mid-answer is not a failure class: the answer simply fails the con
 | Key | Default | Purpose |
 |---|---|---|
 | `MAX_ATTEMPTS` | `3` | Total runner phases per span: the investigation plus a follow-up after each rejected answer. `--max-attempts` overrides. |
-| `TIMEOUT` | `300` | Per-LLM-call timeout seconds. `--timeout` overrides. |
+| `TIMEOUT` | `300` | Timeout in seconds for each HTTP request, including retries. `--timeout` overrides. |
 | `JUDGE_PARALLEL` | `1` | Spans judged in parallel across all input trajectories (cap 32). Each in-flight span is one agent conversation. |
 
 ## CLI Flags
@@ -54,7 +56,7 @@ A verdict cut mid-answer is not a failure class: the answer simply fails the con
 |---|---|---|
 | `--env PATH` | checkout `.env` | Alternate env file |
 | `--judge-model` | `MODEL` | Override the judge model |
-| `--timeout` | `300` | Per-LLM-call timeout seconds |
+| `--timeout` | `300` | Timeout in seconds for each HTTP request |
 | `--max-attempts` | `MAX_ATTEMPTS` | Total runner phases per span (investigation plus follow-ups) |
 | `--judge-max-tokens` | `MAX_OUTPUT_TOKENS` | Per-call output cap |
 | `--episode ID` | unset | Judge only episodes whose recorded episode id, benchmark identity, or execution id equals *ID* (repeatable). Other spans retain compact `unjudged` audit records and are excluded from aggregate statistics, summary counts, and dry-run span counts. Policy totals cover whole recordings. An unmatched *ID* fails fast before any call. Not combinable with `--prepare-only`. |

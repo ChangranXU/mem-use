@@ -9,6 +9,89 @@ from memgraph.html import render_html
 from memgraph.parse_trajectory import parse_trajectory
 
 
+@pytest.mark.parametrize("record", [
+    {"type": "message_end", "role": "user"},
+    {"type": "message_end", "role": "system"},
+    {"type": "message_end", "role": "tool"},
+    {"type": "tool_execution_end", "result": "ok"},
+])
+def test_nonassistant_retractions_match_the_recorded_slot(record):
+    events = [
+        {"type": "message_end", "role": "assistant", "msg": 0, "usage": {"prompt_tokens": 100}},
+        {**record, "msg": 1},
+        {"type": "message_retracted", "msg": 1},
+    ]
+    warnings = []
+    assert prompt_tokens_total(events, warnings, bindings={}) == 100
+    assert warnings == []
+
+
+@pytest.mark.parametrize("record", [
+    {"type": "message_end", "role": "user"},
+    {"type": "tool_execution_end", "result": "ok"},
+])
+def test_reused_slot_retraction_preserves_usage_from_before_rewrite(record):
+    events = [
+        {"type": "message_end", "role": "assistant", "msg": 1, "usage": {"prompt_tokens": 100}},
+        {"type": "history_rewritten", "kept": 1},
+        {**record, "msg": 1},
+        {"type": "message_retracted", "msg": 1},
+        {"type": "message_end", "role": "assistant", "msg": 1, "usage": {"prompt_tokens": 50}},
+    ]
+    warnings = []
+    assert prompt_tokens_total(events, warnings, bindings={}) == 150
+    assert warnings == []
+
+
+@pytest.mark.parametrize("kept,expected", [(0, 150), (2, 50)])
+def test_rewrite_controls_retractable_slots_without_refunding_usage(kept, expected):
+    events = [
+        {"type": "message_end", "role": "assistant", "msg": 1, "usage": {"prompt_tokens": 100}},
+        {"type": "history_rewritten", "kept": kept},
+        {"type": "message_retracted", "msg": 1},
+        {"type": "message_end", "role": "assistant", "msg": 1, "usage": {"prompt_tokens": 50}},
+    ]
+    warnings = []
+    assert prompt_tokens_total(events, warnings, bindings={}) == expected
+    assert len(warnings) == int(kept == 0)
+
+
+def test_duplicate_retraction_does_not_remove_older_billing():
+    events = [
+        {"type": "message_end", "role": "assistant", "msg": 0, "usage": {"prompt_tokens": 100}},
+        {"type": "history_rewritten", "kept": 0},
+        {"type": "message_end", "role": "assistant", "msg": 0, "usage": {"prompt_tokens": 50}},
+        {"type": "message_retracted", "msg": 0},
+        {"type": "message_retracted", "msg": 0},
+    ]
+    warnings = []
+    assert prompt_tokens_total(events, warnings, bindings={}) == 100
+    assert len(warnings) == 1 and "message_retracted" in warnings[0]
+
+
+def test_rewrite_does_not_invalidate_another_lanes_retraction():
+    events = [
+        {"type": "message_end", "role": "assistant", "proxy_source": "A", "msg": 1,
+         "usage": {"prompt_tokens": 100}},
+        {"type": "history_rewritten", "proxy_source": "B", "kept": 0},
+        {"type": "message_retracted", "proxy_source": "A", "msg": 1},
+    ]
+    warnings = []
+    assert prompt_tokens_total(events, warnings, bindings={}) == 0
+    assert warnings == []
+
+
+def test_invalid_rewrite_prefix_cannot_refund_an_earlier_call():
+    events = [
+        {"type": "message_end", "role": "assistant", "msg": 1, "usage": {"prompt_tokens": 100}},
+        {"type": "history_rewritten", "kept": True},
+        {"type": "message_retracted", "msg": 1},
+    ]
+    warnings = []
+    assert prompt_tokens_total(events, warnings, bindings={}) == 100
+    assert len(warnings) == 2
+
+
 def _fixture(tmp_path, usages):
     builder = AnnotatedBuilder().agent_turn(with_task=True)
     calls = []

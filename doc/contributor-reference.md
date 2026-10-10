@@ -56,7 +56,9 @@ package is written before the command returns status 2 for review.
 
 Judge credentials live in the checkout `.env` (copy `.env.example`; never
 commit `.env`). Every key the tools consume is validated; the API key
-reaches the runner only through the `JUDGE_API_KEY` environment variable.
+and endpoint reach the runner through `JUDGE_API_KEY` and `JUDGE_BASE_URL`
+environment variables. Both stay out of job files because endpoint paths can
+contain credentials.
 `--dry-run` needs no `.env`, no node, and makes no calls.
 
 `uv sync` creates `.venv` from `pyproject.toml` (runtime `tqdm`; tests use
@@ -147,7 +149,7 @@ The optional `embedding` role binds a distinct proxy lane. An operation-end
 `embedding_after_role_call_index` requires `embedding_binding_status` and
 `embedding_call_refs` (including an explicit empty list for `no_call`). These
 refs never replace memory-call attribution or create agent steps. Billing
-uses the largest valid prompt-token total from run.json, agent_end, and live
+uses the largest valid prompt-token total from run.json, agent_end, and recorded
 message usage; inconsistent smaller snapshots warn. Without snapshots,
 message usage misses embedding calls and warns when that role is bound.
 Duplicate search links remain visible but contribute query/matched once per
@@ -439,8 +441,8 @@ Easy to get wrong:
   folder; the memory's `memory_type` label is withheld alongside
   confidence). The judged evidence never exceeds what the agent could have
   seen.
-- The API key travels to the runner only via the JUDGE_API_KEY
-  environment variable — never in the job/result files — and endpoint
+- The API key and endpoint travel to the runner via the JUDGE_API_KEY and
+  JUDGE_BASE_URL environment variables, never as fields in the job/result files. Endpoint
   output that echoes it is masked before any text reaches a verdict,
   `judge_raw`, or validation note (raw key and every percent-encoded
   spelling in either hex case, plus literal JSON-serialized spellings; a key shorter than 8 characters is no

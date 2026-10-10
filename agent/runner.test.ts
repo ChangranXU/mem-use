@@ -13,21 +13,29 @@ type RequestBody = {
 	max_tokens?: number;
 	max_completion_tokens?: number;
 };
-type Reply = { content?: string; tool_calls?: unknown[]; usage?: object };
+type Reply = { content?: string; tool_calls?: unknown[]; usage?: object; status?: number };
 
 async function fixture(t: TestContext, replies: Reply[]) {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "judge-runner-"));
 	fs.mkdirSync(path.join(root, "steps"));
 	fs.writeFileSync(path.join(root, "steps/step_000001.md"), "previous step-one evidence");
 	fs.writeFileSync(path.join(root, "steps/step_000002.md"), "new step-two evidence");
+	fs.writeFileSync(path.join(root, "manifest.json"), JSON.stringify({ required_reads: { always: [] } }));
 	const requests: RequestBody[] = [];
+	const requestPaths: (string | undefined)[] = [];
 	const server = http.createServer(async (req, res) => {
 		let body = "";
 		for await (const chunk of req) body += chunk;
 		requests.push(JSON.parse(body));
+		requestPaths.push(req.url);
 		const reply = replies.shift();
 		if (!reply) {
 			res.writeHead(500).end("unexpected extra model call");
+			return;
+		}
+		if (reply.status) {
+			res.writeHead(reply.status, { "Content-Type": "application/json", "retry-after-ms": "1" })
+				.end(JSON.stringify({ error: { message: reply.content ?? "provider failure" } }));
 			return;
 		}
 		res.writeHead(200, { "Content-Type": "text/event-stream" });
@@ -51,7 +59,7 @@ async function fixture(t: TestContext, replies: Reply[]) {
 		evidence_dir: root, system: "test", opening: "judge the evidence", forced_message: "answer now",
 		attempt: 1, trajectory_path: path.join(root, "trace.jsonl"),
 		config: {
-			api: "openai-chat", base_url: `http://127.0.0.1:${address.port}/v1`, model: "test-model",
+			api: "openai-chat", model: "test-model",
 			max_steps: 4, max_output_tokens: 1000, context_window: 100000,
 			temperature: 0, thinking_level: "off", timeout_ms: 1000,
 		},
@@ -62,7 +70,8 @@ async function fixture(t: TestContext, replies: Reply[]) {
 		fs.writeFileSync(input, JSON.stringify({ ...job, ...overrides }));
 		const child = spawn(process.execPath, [path.join(import.meta.dirname, "runner.ts"),
 			"--job", input, "--out", output], {
-			env: { ...process.env, JUDGE_API_KEY: "test-key-only" },
+			env: { ...process.env, JUDGE_API_KEY: "test-key-only",
+				JUDGE_BASE_URL: `http://127.0.0.1:${address.port}/test-key-only/v1` },
 			stdio: ["ignore", "ignore", "pipe"],
 		});
 		let stderr = "";
@@ -74,13 +83,21 @@ async function fixture(t: TestContext, replies: Reply[]) {
 		assert.equal(code, 0, stderr);
 		return JSON.parse(fs.readFileSync(output, "utf8"));
 	}
-	return { run, requests, root, config: job.config };
+	return { run, requests, requestPaths, root, config: job.config };
 }
 
 const readStepTwo = {
 	index: 0, id: "read-two", type: "function",
 	function: { name: "read_evidence", arguments: '{"paths":["steps/step_000002.md"]}' },
 };
+
+test("an endpoint credential stays out of the job file", async (t) => {
+	const { run, root, requestPaths } = await fixture(t, [{ content: '{"done":true}' }]);
+	const result = await run();
+	assert.equal(result.error, null);
+	assert.deepEqual(requestPaths, ["/test-key-only/v1/chat/completions"]);
+	assert.ok(!fs.readFileSync(path.join(root, "job.json"), "utf8").includes("test-key-only"));
+});
 
 test("a follow-up continues the conversation with tools and keeps prior evidence exactly once", async (t) => {
 	const { run, requests, root } = await fixture(t, [
@@ -145,6 +162,62 @@ test("oversized opening is rejected before a paid request", async (t) => {
 	assert.match(result.error ?? "", /opening context .* exceeds the input budget/);
 	assert.equal(result.executed_llm_calls, 0);
 	assert.equal(requests.length, 0);
+});
+
+test("required evidence is checked with the system and tools before a paid request", async (t) => {
+	const { run, requests, root, config } = await fixture(t, []);
+	fs.writeFileSync(path.join(root, "steps/step_000002.md"), "evidence ".repeat(600));
+	fs.writeFileSync(path.join(root, "manifest.json"), JSON.stringify({
+		required_reads: { always: ["steps/step_000002.md"] },
+	}));
+	const result = await run({ system: "scoring instructions ".repeat(100),
+		config: { ...config, context_window: 3000 } });
+	assert.match(result.error ?? "", /required evidence .* exceeds the input budget .* before any judge call/);
+	assert.equal(result.executed_llm_calls, 0);
+	assert.equal(result.executed_tool_calls, 0);
+	assert.equal(requests.length, 0);
+});
+
+test("optional evidence and blank lines do not block a feasible required read", async (t) => {
+	const { run, requests, root, config } = await fixture(t, [{ content: '{"done":true}' }]);
+	fs.writeFileSync(path.join(root, "steps/step_000001.md"), "\n".repeat(100_000) + "required text");
+	fs.writeFileSync(path.join(root, "steps/step_000002.md"), "optional prior source ".repeat(100_000));
+	fs.writeFileSync(path.join(root, "manifest.json"), JSON.stringify({ required_reads: {
+		always: ["steps/step_000001.md"], prior_sources: ["steps/step_000002.md"],
+	} }));
+	const result = await run({ config: { ...config, context_window: 3000 } });
+	assert.equal(result.error, null);
+	assert.equal(requests.length, 1);
+});
+
+for (const status of [429, 503]) {
+	test(`a transient HTTP ${status} retries the failed request and keeps evidence`, async (t) => {
+		const { run, requests } = await fixture(t, [
+			{ tool_calls: [readStepTwo] }, { status }, { content: '{"done":true}' },
+		]);
+		const result = await run();
+		assert.equal(result.error, null);
+		assert.equal(result.answer, '{"done":true}');
+		assert.equal(result.executed_llm_calls, 2);
+		assert.equal(result.executed_tool_calls, 1);
+		assert.equal(requests.length, 3);
+		assert.deepEqual(requests[1], requests[2]);
+		assert.ok(JSON.stringify(requests[2]).includes("new step-two evidence"));
+	});
+}
+
+test("provider retry stops after two retries", async (t) => {
+	const { run, requests } = await fixture(t, [{ status: 503 }, { status: 503 }, { status: 503 }]);
+	const result = await run();
+	assert.match(result.error ?? "", /provider failure/);
+	assert.equal(requests.length, 3);
+});
+
+test("authentication failures are not retried", async (t) => {
+	const { run, requests } = await fixture(t, [{ status: 401 }]);
+	const result = await run();
+	assert.match(result.error ?? "", /provider failure/);
+	assert.equal(requests.length, 1);
 });
 
 test("a follow-up keeps evidence when the prior answer consumed reserved output room", async (t) => {

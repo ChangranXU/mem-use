@@ -396,10 +396,11 @@ def build_summary(artifact: dict) -> dict:
 
 
 def _short(text: object, cap: int) -> str:
-    """One Markdown-safe line: whitespace collapsed, angle brackets escaped."""
+    """Keep recorded text from adding Markdown links, images, or HTML."""
     line = " ".join(str(text).split())
     line = line[:cap - 3] + "..." if len(line) > cap else line
-    return line.replace("<", "&lt;").replace(">", "&gt;")
+    line = "".join("\\" + char if char in "\\`*_{}[]()#+-.!|~:/@" else char for char in line)
+    return line.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def _counts(values: dict, labels: tuple[tuple[str, str], ...]) -> str:
@@ -418,7 +419,7 @@ def render_summary(artifact: dict, inspect_cap: int = 10) -> str:
     lines = [
         "# Memory influence summary", "",
         f"Run: {summary['generated_at']}. "
-        f"Judge model: {summary['tool'].get('judge_model') or 'not recorded'}.",
+        f"Judge model: {_short(summary['tool'].get('judge_model') or 'not recorded', 200)}.",
         f"Scope: {counts.get('n_episodes', 0):,} episodes, "
         f"{counts['n_injections']:,} deliveries, {counts['n_spans']:,} spans.",
         f"Judged: {verdicts['judged_spans']:,} of {counts['n_spans']:,} spans. " + _counts(tally, (
@@ -474,7 +475,7 @@ def render_summary(artifact: dict, inspect_cap: int = 10) -> str:
                   "injudge-report.json.", ""]
         for op in inspect[:inspect_cap]:
             why = op.get("error") if op["verdict"] == "error" else op.get("analysis")
-            lines.append(f"- {op['operation_id']} ({episode_of.get(op['operation_id']) or 'no episode'}): "
+            lines.append(f"- {op['operation_id']} ({_short(episode_of.get(op['operation_id']) or 'no episode', 200)}): "
                          f"**{op['verdict']}**. {_short(why or 'No analysis recorded.', 500)}")
     if judge := overall.get("judge"):
         def count(key: str) -> str:

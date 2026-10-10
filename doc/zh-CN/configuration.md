@@ -30,7 +30,7 @@ npm --prefix agent install    # TS 侧执行一次（需要 PATH 上有 node >= 
 
 ## 两个预算
 
-两个预算都以**强制作答**收尾——智能体会被要求停止调用工具、基于已收集的证据作答——绝不会在运行中途失败。
+对话开始后，任一预算都可以触发基于已读证据的**强制作答**。首次付费调用前，若开场消息或必读证据超过估算的输入预算，运行器就会拒绝该区间；见[评审智能体](judge-client.md#预算与强制作答)。
 
 | 键 | 默认值 | 用途 |
 |---|---|---|
@@ -45,7 +45,7 @@ npm --prefix agent install    # TS 侧执行一次（需要 PATH 上有 node >= 
 | 键 | 默认值 | 用途 |
 |---|---|---|
 | `MAX_ATTEMPTS` | `3` | 每个区间的运行器阶段总数：首次调查，加上每次答案被拒后的跟进。`--max-attempts` 可覆盖。 |
-| `TIMEOUT` | `300` | 单次 LLM 调用超时（秒）。`--timeout` 可覆盖。 |
+| `TIMEOUT` | `300` | 每次 HTTP 请求的超时秒数，包括重试请求。`--timeout` 可覆盖。 |
 | `JUDGE_PARALLEL` | `1` | 跨所有输入轨迹并行评判的区间数（上限 32）。每个在飞区间是一条独立的智能体对话。 |
 
 ## 命令行参数
@@ -54,7 +54,7 @@ npm --prefix agent install    # TS 侧执行一次（需要 PATH 上有 node >= 
 |---|---|---|
 | `--env PATH` | checkout 的 `.env` | 指定另一份 env 文件 |
 | `--judge-model` | `MODEL` | 覆盖评审模型 |
-| `--timeout` | `300` | 单次 LLM 调用超时（秒） |
+| `--timeout` | `300` | 每次 HTTP 请求的超时秒数 |
 | `--max-attempts` | `MAX_ATTEMPTS` | 每区间的运行器阶段总数（调查加跟进） |
 | `--judge-max-tokens` | `MAX_OUTPUT_TOKENS` | 单次调用输出上限 |
 | `--episode ID` | 不设 | 只评判已录制 episode id、benchmark 身份或执行 id 等于 *ID* 的 episode（可重复）。其余区间保留紧凑的 `unjudged` 审计记录，不计入汇总统计、summary 计数和 dry-run 区间计数。policy 总量仍覆盖完整轨迹。无匹配的 *ID* 在任何调用前快速失败。不可与 `--prepare-only` 同用。 |
