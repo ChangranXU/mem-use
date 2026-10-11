@@ -425,6 +425,11 @@ Easy to get wrong:
   do not certify their source files, so non-null novelty and acted_on influence
   also require every `prior_sources` entry (a delivery section by its manifest
   line range; the target's text is already in the opening).
+  Identical placement text proven in the same host occurrence uses the earliest
+  known consumer's section once; repeated residency annotations add no baseline
+  text. Different host occurrences or placement text remain separate sources.
+  Consumer order takes precedence over annotation arrival order. All deliveries
+  remain in the evidence and audit records.
   Later spans can have more prior sources. Under a fixed context budget,
   this can increase their null labels even when memory quality is unchanged.
   Keep coverage checks and report this limit when comparing judgments.

@@ -580,6 +580,40 @@ def test_repeated_resident_placement_preserves_task_and_system_context(tmp_path)
     assert host["memory_delivery_refs"] == ["D1", "D2"]
 
 
+@pytest.mark.parametrize("other_host", [False, True])
+def test_baseline_keeps_distinct_placement_text_or_hosts(tmp_path, other_host):
+    first = "First resident advice."
+    second = first if other_host else "Different resident advice."
+    host = first if other_host else first + "\n" + second
+    builder = AnnotatedBuilder().episode_open()
+    ref = cure_ref("first", first)
+    search = builder.search(returned=[ref])
+    builder.user_message(host).agent_turn()
+    _proven_delivery(builder, search, ref, first, host)
+    ref = cure_ref("second", second)
+    search = builder.search(returned=[ref])
+    if other_host:
+        builder.user_message(second, msg=4)
+    builder.agent_turn()
+    delivery = _proven_delivery(builder, search, ref, second, second if other_host else host)
+    if other_host:
+        delivery["binding"]["proofs"][0]["msg_index"] = 4
+    target = cure_ref("target", "New target advice.")
+    msg = 5 if other_host else 4
+    search, text = _deliver(builder, [target], msg)
+    _bind(builder, search, [target], text, msg)
+    builder.episode_close()
+    trajectories, ops, events, _ = load_trajectories([builder.write(tmp_path / "trajectory")])
+    trajectory, = trajectories
+    episode, = prepare_trajectory(trajectory, events[trajectory.id], ops[trajectory.id]).episodes
+    assert episode._evidence_problem is None
+    spans = group_spans([op for op in ops[trajectory.id] if op.kind == "recall"],
+                       trajectory.id, episode=episode)
+    files = build_span_evidence(spans[-1], episode)
+    assert json.loads(files["manifest.json"])["required_reads"]["prior_sources"] == [
+        "deliveries.md#D1", "deliveries.md#D2"]
+
+
 def test_unresolved_placement_does_not_erase_independent_matching_text(tmp_path):
     builder = AnnotatedBuilder().episode_open()
     memory = "Independently established prior fact with identical wording."

@@ -392,6 +392,56 @@ def test_visible_prior_delivery_gap_resumes_investigation(monkeypatch, tmp_path)
     assert verdict["verdict"] == "positive" and verdict["input"]["attempts"] == 2
 
 
+@pytest.mark.parametrize("delayed", [False, True])
+def test_resident_reinjections_need_one_baseline_read(monkeypatch, tmp_path, delayed):
+    builder = AnnotatedBuilder().episode_open().agent_turn(with_task=True)
+    prior = cure_ref("resident", "The prior parser plan.")
+    builder.recall(prior)
+    original = builder.events[-1]
+    first = len(builder.events)
+    builder.recall(cure_ref("target", "New parser advice."))
+    for event in builder.events[first:]:
+        if event.get("msg") == 4:
+            event["msg"] = 5
+        for proof in event.get("binding", {}).get("proofs", []):
+            proof["msg_index"] = 5
+    for _ in range(20):
+        builder.agent_turn().delivery(original["payload"]["searches"], memories=[prior],
+                                      bind=builder.last_call,
+                                      placements=copy.deepcopy(original["payload"]["placements"]))
+        builder.events[-1]["binding"] = copy.deepcopy(original["binding"])
+    if delayed:
+        builder.events.remove(original)
+        builder.seq += 1
+        builder.events.append({**original, "seq": builder.seq})
+    builder.episode_close()
+    trajectories, ops, events, _ = load_trajectories([builder.write(tmp_path / "trajectory")])
+    trajectory, = trajectories
+    episode, = prepare_trajectory(trajectory, events[trajectory.id], ops[trajectory.id]).episodes
+    assert episode._evidence_problem is None
+    spans = group_spans([op for op in ops[trajectory.id] if op.kind == "recall"],
+                       trajectory.id, episode=episode)
+    span = next(span for span in spans if span.step_first == 3)
+    files = build_span_evidence(span, episode)
+    ref = next(delivery["entry_prefix"] for delivery in episode.deliveries if delivery["step"] == 2)
+    manifest = json.loads(files["manifest.json"])
+    assert manifest["required_reads"]["prior_sources"] == [f"deliveries.md#{ref}"]
+    sections = next(entry["sections"] for entry in manifest["files"] if entry["path"] == "deliveries.md")
+    section = next(section for section in sections if section["ref"] == ref)
+    reads = [_read(files, path) for path in files if path != "deliveries.md"]
+    answer = json.loads(GOOD)
+    answer["memories"] = answer["memories"][:1]
+    answer["memories"][0]["anchors"] = [span.step_first]
+    answer["evidence"] = []
+    assert _baseline_error(answer, files, _read_files(reads, files)) is not None
+    reads.append(_read(files, "deliveries.md", section["line_start"], section["line_end"]))
+    assert "deliveries.md" not in _read_files(reads, files)
+    calls = stub_runner(monkeypatch, [_result(json.dumps(answer), messages=reads)])
+    verdict = judge_episode_span(span, episode, _agent_cfg(), [],
+                                 evidence_root=tmp_path / "evidence", transcripts_root=tmp_path / "runs")
+    assert len(calls) == 1 and verdict["verdict"] == "positive"
+
+
 @pytest.mark.parametrize("incomplete", ["header", "search", "truncated", "rolled_back"])
 def test_prior_delivery_coverage_requires_retained_section_text(tmp_path, incomplete):
     span, _episode, files = _visible_prior_delivery(tmp_path)

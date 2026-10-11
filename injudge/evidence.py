@@ -199,6 +199,32 @@ def _episode_step_text(episode: EpisodeInput, step: AgentStep, targets: set[str]
     return prefix + "\n".join(lines)
 
 
+def _baseline_deliveries(episode: EpisodeInput) -> list[dict]:
+    """Read a resident placement once, using its earliest known consumer.
+
+    Re-injections can prove the same text in the same host on every turn.
+    Requiring all of those sections adds no input evidence, but can exhaust
+    the judge's read budget. Distinct hosts or placement text remain separate.
+    """
+    seen: set[tuple[str, str]] = set()
+    deliveries = []
+    for delivery in sorted(episode.deliveries, key=lambda item: (
+            item["step"] if is_int(item.get("step")) else float("inf"), item["source"]["event_index"])):
+        placements = []
+        for placement in delivery["placements"]:
+            proof, text = placement["source_resolution"], placement.get("text")
+            host = proof.get("occurrence_id")
+            if proof.get("status") == "resolved" and isinstance(host, str) and isinstance(text, str):
+                key = (host, text)
+                if key in seen:
+                    continue
+                seen.add(key)
+            placements.append(placement)
+        if placements:
+            deliveries.append({**delivery, "placements": placements})
+    return deliveries
+
+
 def span_baseline(episode: EpisodeInput, span: InjectionSpan,
                   files: dict[str, str]) -> tuple[dict, str]:
     """The consumer's visible input, excluding proven memory placements.
@@ -216,7 +242,8 @@ def span_baseline(episode: EpisodeInput, span: InjectionSpan,
     consumer = (delivery or {}).get("consumer") or {}
     view = next((item for item in episode.context if item.turn == consumer.get("turn")), None)
     occurrences = {item["occurrence_id"]: item for item in episode.message_occurrences}
-    visible = [project_occurrence(occurrences[ref["occurrence_id"]], episode.deliveries)
+    deliveries = _baseline_deliveries(episode)
+    visible = [project_occurrence(occurrences[ref["occurrence_id"]], deliveries)
                for ref in view.messages if ref.get("occurrence_id") in occurrences] if view else []
     # Occurrences that still carry text once placement text moved out; a host
     # holding only memory text stays visible as a marker without text. An
