@@ -660,7 +660,7 @@ def test_spans_window_same_step_collision_closes_only_carried_entries(tmp_path):
     # (the later span carrying A starts at 3) closes the open window AT 3 —
     # inclusive, so the span's own delivery steps stay creditable
     assert spans[0].memory_windows == {"m1": 3}
-    assert spans[0].same_step_bound == 3
+    assert spans[0].same_step_bounds == {"m1"}
     # B is delivered by no later span: the same-step spans bound nothing
     # for it (an unrelated memory keeps the rest of the stream)
     assert spans[1].memory_windows == {"m1": None}
@@ -711,7 +711,7 @@ def test_spans_window_same_step_collision_opens_later_span_despite_finite_bound(
     # was open — both cap at the shared step, and the colliding span's
     # entries open after it (A superseded from 4, so its window is empty)
     assert spans[0].memory_windows == {"m1": 3, "m2": 3}
-    assert spans[0].same_step_bound == 3
+    assert spans[0].same_step_bounds == {"m1", "m2"}
     assert any("same-step delivery collision" in w for w in warnings)
     assert spans[1].memory_window_starts == {"m1": 4, "m2": 4}
     assert spans[1].memory_windows == {"m1": None, "m2": 3}
@@ -719,6 +719,25 @@ def test_spans_window_same_step_collision_opens_later_span_despite_finite_bound(
     # the shared step anchors A in the FIRST span only
     assert _acted_claim(spans[0], "m1", [3], 5) is None
     assert _acted_claim(spans[1], "m2", [3], 5) is not None
+
+
+def test_span_window_reason_is_specific_to_each_entry(tmp_path):
+    b = TrajBuilder().agent_turn(with_task=True)
+    for _ in range(5):
+        b.agent_turn()
+    for refs, step in (([REF_A, REF_B], 5), ([REF_B], 5), ([REF_A], 6)):
+        search = b.search(returned=refs)
+        text = "\n".join(ref["content"]["text"] for ref in refs)
+        b.delivery(search, memories=refs, main_step=step, content=text)
+    spans = group_spans(_recall_ops(b, tmp_path), "T1", last_step=6)
+    assert spans[0].memory_windows == {"m1": 5, "m2": 5}
+    assert spans[0].same_step_bounds == {"m2"}
+    header = _render_span_header(spans[0], MEMORIES_NOTE)
+    windows = header.split("Footprint windows: ", 1)[1].split("\n", 1)[0]
+    first, second = windows.split("; m2", 1)
+    assert "re-exposed from step 6" in first
+    assert "at this same step" not in first
+    assert "at this same step" in second
 
 
 def test_spans_window_same_step_collision_three_carriers_disjoint(tmp_path):
@@ -828,7 +847,7 @@ def test_spans_window_survives_a_later_narrower_redelivery(tmp_path):
 @pytest.mark.parametrize("fault", [None, "key_ends_sentence", "scheduled", "hidden_key",
                                   "hidden_key_prefix", "hidden_key_version", "wrong_store", "pre_exposure",
                                   "unproven_host", "unrelated_host", "different_local_content"])
-def test_spans_record_only_proven_candidate_followups(tmp_path, fault):
+def test_spans_record_only_proven_candidate_followups(tmp_path, monkeypatch, fault):
     """A delayed result cannot move its issuing action to delivery minus one,
     and an automatic/key-matching search alone never proves selection."""
     import hashlib
@@ -880,6 +899,10 @@ def test_spans_record_only_proven_candidate_followups(tmp_path, fault):
     b.episode_close()
     t, ops, events = parse_trajectory(b.write(tmp_path / "run"), [])
     ep = prepare_trajectory(t, events, ops).episodes[0]
+    if fault == "scheduled":
+        def unexpected_exposure(*args, **kwargs):
+            raise AssertionError("unrelated searches must not scan placement exposure")
+        monkeypatch.setattr("injudge.spans.exposure_state", unexpected_exposure)
     if fault == "pre_exposure":
         ep.steps[2].step = 1  # recorded action predates the preview; a later result does not rescue it
     spans = group_spans([o for o in ops if o.kind == "recall"], t.id, last_step=5, episode=ep)
@@ -1714,7 +1737,7 @@ def test_summary_is_statistics_only():
     before = json.dumps(artifact)
     summary = build_summary(artifact)
     assert summary["tool"] == {"name": "injudge", "schema": "injudge.summary/v18",
-                               "source_report_schema": "injudge.report/v21", "judge_model": "judge"}
+                               "source_report_schema": "injudge.report/v22", "judge_model": "judge"}
     assert summary["report"] == "injudge-report.json"
     assert summary["generated_at"] == artifact["generated_at"]
     assert summary["diagnostics"] == {"error": 0, "warn": 1, "info": 0}
@@ -1834,7 +1857,7 @@ def test_cli_writes_results_first_summary(monkeypatch, tmp_path):
     (source / "run.json").write_text(json.dumps(metadata))
     env = tmp_path / ".env"
     env.write_text("BASE_URL=https://judge.invalid\nAPI_KEY=test-key-only\nMODEL=test-judge\n")
-    monkeypatch.setattr("injudge.agent._check_runner", lambda: None)
+    monkeypatch.setattr("injudge.agent._check_runner", lambda: 4096)
     calls = stub_runner(monkeypatch, [_result(GOOD)])
     output = tmp_path / "output"
     assert injudge_main.main([str(source), "--env", str(env), "-o", str(output)]) == 0
@@ -1928,7 +1951,7 @@ def test_readable_summary_path_is_checked_before_judging(monkeypatch, tmp_path):
     source = builder.write(tmp_path / "trajectory")
     env = tmp_path / ".env"
     env.write_text("BASE_URL=https://judge.invalid\nAPI_KEY=test-key-only\nMODEL=test-judge\n")
-    monkeypatch.setattr("injudge.agent._check_runner", lambda: None)
+    monkeypatch.setattr("injudge.agent._check_runner", lambda: 4096)
     calls = stub_runner(monkeypatch, [])
     check_writable = injudge_main.check_writable
 
@@ -1960,7 +1983,7 @@ def test_cli_counts_embedding_billing_without_golden_answers(monkeypatch, tmp_pa
         manifest.write_text(json.dumps(meta))
     env = tmp_path / ".env"
     env.write_text("BASE_URL=https://judge.invalid\nAPI_KEY=test-key-only\nMODEL=test-judge\n")
-    monkeypatch.setattr("injudge.agent._check_runner", lambda: None)
+    monkeypatch.setattr("injudge.agent._check_runner", lambda: 4096)
     calls = stub_runner(monkeypatch, [_result(GOOD)])
     output = tmp_path / "output"
     assert injudge_main.main([str(source), "--env", str(env), "-o", str(output)]) == 0
@@ -2047,7 +2070,7 @@ def test_cli_runs_share_the_container_without_clobbering(monkeypatch, tmp_path):
     source = b.write(tmp_path / "trajectory")
     env = tmp_path / ".env"
     env.write_text("BASE_URL=https://judge.invalid\nAPI_KEY=test-key-only\nMODEL=test-judge\n")
-    monkeypatch.setattr("injudge.agent._check_runner", lambda: None)
+    monkeypatch.setattr("injudge.agent._check_runner", lambda: 4096)
     calls = stub_runner(monkeypatch, [_result(GOOD), _result(GOOD)])
     output = tmp_path / "output"
     assert injudge_main.main([str(source), "--env", str(env), "-o", str(output)]) == 0
@@ -2057,7 +2080,7 @@ def test_cli_runs_share_the_container_without_clobbering(monkeypatch, tmp_path):
     assert len(run_dirs) == 2  # distinct stamps even for same-second runs
     for run_dir in run_dirs:
         report = json.loads((run_dir / "injudge-report.json").read_text())
-        assert report["tool"]["schema"] == "injudge.report/v21"
+        assert report["tool"]["schema"] == "injudge.report/v22"
         assert (run_dir / "summary.json").is_file()
         (span_evidence,) = (run_dir / "evidence").iterdir()
         assert (span_evidence / "manifest.json").is_file()
@@ -2639,7 +2662,7 @@ def test_render_steps_reports_the_recorded_close_status():
                  seq_start=5),  # truncated: no close at all
     ]
     from injudge.evidence import _episode_step_text
-    text = _episode_step_text(_test_episode(InjectionSpan(id="T1:S1", traj="T1"), [step]), step, set())
+    text = _episode_step_text(_test_episode(InjectionSpan(id="T1:S1", traj="T1"), [step]), step, set(), {})
     assert "result (interrupted): (none recorded)" in text
     assert "result: (never observed)" in text  # the truly unclosed one
 
@@ -2863,7 +2886,7 @@ def test_judge_refuses_unprepared_episode_before_runner(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("timeout", [float("inf"), float("-inf"), float("nan")])
 def test_cli_timeout_override_must_be_finite(monkeypatch, timeout):
-    monkeypatch.setattr("injudge.agent._check_runner", lambda: None)
+    monkeypatch.setattr("injudge.agent._check_runner", lambda: 4096)
     with pytest.raises(SystemExit, match="timeout must be a positive finite"):
         resolve_config({"BASE_URL": "https://judge.invalid", "API_KEY": "test-key-only",
                         "MODEL": "test"}, timeout=timeout)
@@ -2928,17 +2951,17 @@ def test_runner_job_uses_the_phase_step_limit(monkeypatch, tmp_path, continued, 
     def run(args, **kwargs):
         job = json.loads(Path(args[args.index("--job") + 1]).read_text())
         assert job["config"]["max_steps"] == expected
-        assert kwargs["timeout"] == max((300 * 3 + 120) * expected + 120, 600)
+        assert "timeout" not in kwargs
         Path(args[args.index("--out") + 1]).write_text(json.dumps(_result(GOOD)))
         return subprocess.CompletedProcess(args, 0, stdout=b"", stderr=b"")
 
-    monkeypatch.setattr("injudge.agent.subprocess.run", run)
+    monkeypatch.setattr("injudge.agent._run_process", run)
     cfg = _agent_cfg(max_steps=configured)
     warnings = []
     result = _invoke_runner(cfg, tmp_path / "evidence", tmp_path / "trace.jsonl",
                             3 if continued else 1, "system", "message",
                             [{"role": "assistant"}] if continued else None,
-                            warnings)
+                            warnings, 32)
     assert result["answer"] == GOOD and warnings == []
     assert cfg.max_steps == configured  # the shared initial config is not mutated
 
@@ -2952,10 +2975,10 @@ def test_deeply_nested_runner_result_is_a_reported_failure(monkeypatch, tmp_path
         Path(args[args.index("--out") + 1]).write_text("[" * 2000 + "0" + "]" * 2000)
         return subprocess.CompletedProcess(args, 0, stdout=b"", stderr=b"")
 
-    monkeypatch.setattr("injudge.agent.subprocess.run", run)
+    monkeypatch.setattr("injudge.agent._run_process", run)
     warnings = []
     result = _invoke_runner(_agent_cfg(), tmp_path / "evidence", tmp_path / "trace.jsonl",
-                            1, "system", "message", None, warnings)
+                            1, "system", "message", None, warnings, 32)
     assert result is None
     # Recursive decoders reject the nesting; newer Python decoders can read
     # it, then reject the result shape. Both must remain reported failures.
@@ -2979,23 +3002,23 @@ def test_runner_endpoint_with_a_path_credential_stays_in_environment(monkeypatch
         Path(args[args.index("--out") + 1]).write_text(json.dumps(_result(GOOD)))
         return subprocess.CompletedProcess(args, 0, stdout=b"", stderr=b"")
 
-    monkeypatch.setattr("injudge.agent.subprocess.run", run)
+    monkeypatch.setattr("injudge.agent._run_process", run)
     warnings = []
     result = _invoke_runner(cfg, tmp_path / "evidence", tmp_path / "trace.jsonl",
-                            1, "system", "message", None, warnings)
+                            1, "system", "message", None, warnings, 32)
     assert result["answer"] == GOOD and warnings == []
 
 
 def stub_runner(monkeypatch, results):
-    """Replace the runner subprocess with canned results consumed in call
-    order; records every (message, history) invocation for assertions. Like
-    the real runner, the stub records a trajectory JSONL at the given path
-    (attempt marker, one message line per history entry, attempt_end with
-    the diagnostics), raw — masking stays Python's half."""
+    """Return canned results in call order and record each invocation.
+
+    The stub writes unmasked JSONL to test Python's secondary repair check.
+    The real runner masks each record before it writes it.
+    """
     calls = []
 
     def _fake(cfg, evidence_dir, trajectory_path, attempt, system, message,
-              history, warnings):
+              history, warnings, minimum_output_tokens):
         calls.append({"message": message, "history": history, "followup": history is not None,
                       "system": system, "evidence_dir": evidence_dir,
                       "trajectory_path": trajectory_path, "attempt": attempt})
@@ -3234,6 +3257,8 @@ def test_agent_runner_failure_after_repair_does_not_report_partial_totals(monkey
     assert verdict["input"]["attempts"] == 2
     assert verdict["input"]["executed_llm_calls"] is None
     assert verdict["input"]["executed_tool_calls"] is None
+    assert verdict["input"]["llm_calls"] is None
+    assert verdict["input"]["tool_calls"] is None
     assert all(value is None for value in verdict["input"]["reported_usage"].values())
     from injudge.report import print_summary
     op = operation_record(span, verdict, {})
@@ -3277,10 +3302,10 @@ def test_context_rollback_repair_cannot_erase_missing_investigation(monkeypatch,
     # the rollback took every step read out of the retained conversation
     unread = [{"role": "user"}, {"role": "assistant"}]
     first = {**_result(GOOD, forced=True, messages=unread), "context_rollbacks": 1,
-             "retained_evidence": 0, "executed_llm_calls": 2,
+             "executed_llm_calls": 2,
              "executed_tool_calls": 1,
              "reported_usage": {"input": 100, "output": 20, "cache_read": 0, "cache_write": 0}}
-    repair = {**_result(GOOD, messages=unread), "retained_evidence": 0,
+    repair = {**_result(GOOD, messages=unread),
               "executed_llm_calls": 1, "executed_tool_calls": 0,
               "context_rollbacks": 0,
               "reported_usage": {"input": 50, "output": 10, "cache_read": 0, "cache_write": 0}}
@@ -3298,8 +3323,7 @@ def test_context_rollback_repair_cannot_erase_missing_investigation(monkeypatch,
 
 
 def test_forced_answer_with_retained_investigation_can_be_valid(monkeypatch, tmp_path):
-    result = {**_result(GOOD, forced=True), "context_rollbacks": 1,
-              "retained_evidence": 1}
+    result = {**_result(GOOD, forced=True), "context_rollbacks": 1}
     stub_runner(monkeypatch, [result])
     span, steps = _judge_input_fixture()
     verdict = judge_span(span, steps, _agent_cfg(), [], evidence_root=tmp_path,
@@ -3309,10 +3333,7 @@ def test_forced_answer_with_retained_investigation_can_be_valid(monkeypatch, tmp
 
 
 def test_agent_trajectory_masks_an_echoed_credential(monkeypatch, tmp_path):
-    """The runner records its trajectory raw (it holds the credential and
-    cannot fork the masking implementation); Python rewrites the file
-    masked after each attempt — the KEPT artifact never carries the key,
-    in any echo spelling."""
+    """Python's secondary check removes credential echoes from a saved record."""
     key = "sk-secret+key"
     echo = f"auth failed: Bearer {key} (logged as {key.replace('+', '%2B')})"
     canned = _result(
@@ -3426,13 +3447,13 @@ def test_config_rejects_a_non_latin1_key_before_any_paid_call(monkeypatch):
     """The key rides an HTTP header, so a mangled paste carrying non-latin-1
     characters can never be sent: fail fast naming the KEY (never its
     value). The runner check is stubbed out (its inputs exist here)."""
-    monkeypatch.setattr("injudge.agent._check_runner", lambda: None)
+    monkeypatch.setattr("injudge.agent._check_runner", lambda: 4096)
     with pytest.raises(SystemExit, match="latin-1"):
         resolve_config({"BASE_URL": "http://x", "API_KEY": "sk-中 文", "MODEL": "m"})
 
 
 def test_config_validates_the_budget_knobs(monkeypatch):
-    monkeypatch.setattr("injudge.agent._check_runner", lambda: None)
+    monkeypatch.setattr("injudge.agent._check_runner", lambda: 4096)
     base = {"BASE_URL": "http://x", "API_KEY": "sk-aaaaaaaa", "MODEL": "m"}
     with pytest.raises(SystemExit, match="max_steps"):
         resolve_config({**base, "MAX_STEPS": "1"})
@@ -3477,7 +3498,7 @@ def test_agent_unknown_novelty_preserves_independent_signals(
     path = tmp_path / "report.json"
     path.write_text(json.dumps(artifact))
     saved = json.loads(path.read_text())
-    assert saved["tool"]["schema"] == "injudge.report/v21"
+    assert saved["tool"]["schema"] == "injudge.report/v22"
     assert saved["operations"][0]["rubric"]["m1"]["novelty"]["value"] is None
     rub = saved["aggregates"]["overall"]["rubric"]
     assert rub["deliveries"] == 2
@@ -3566,7 +3587,7 @@ def test_deeply_nested_repair_is_a_contract_error_with_input_record(monkeypatch,
     assert result["input"]["attempts"] == len(calls) == 2
 
 
-@pytest.mark.parametrize("failure", ["exit", "timeout", "missing_result"])
+@pytest.mark.parametrize("failure", ["exit", "missing_result"])
 def test_failed_subprocess_still_masks_its_transcript(monkeypatch, tmp_path, failure):
     import subprocess
     from pathlib import Path
@@ -3575,11 +3596,9 @@ def test_failed_subprocess_still_masks_its_transcript(monkeypatch, tmp_path, fai
     def run(args, **kwargs):
         job = json.loads(Path(args[args.index("--job") + 1]).read_text())
         Path(job["trajectory_path"]).write_text(json.dumps({"answer": key}) + "\n")
-        if failure == "timeout":
-            raise subprocess.TimeoutExpired(args, 1)
         return subprocess.CompletedProcess(args, 1 if failure == "exit" else 0,
                                            stdout=b"", stderr=key.encode())
-    monkeypatch.setattr("injudge.agent.subprocess.run", run)
+    monkeypatch.setattr("injudge.agent._run_process", run)
     span, steps = _judge_input_fixture()
     warnings = []
     result = judge_span(span, steps, _agent_cfg(api_key=key), warnings,
@@ -3593,7 +3612,7 @@ def test_failed_subprocess_still_masks_its_transcript(monkeypatch, tmp_path, fai
 @pytest.mark.parametrize("url", ["secret-in-invalid-url", "https://host:secret-port",
                                   "https://host:99999", "https://[broken"])
 def test_config_rejects_bad_urls_without_echoing_values(monkeypatch, url):
-    monkeypatch.setattr("injudge.agent._check_runner", lambda: None)
+    monkeypatch.setattr("injudge.agent._check_runner", lambda: 4096)
     with pytest.raises(SystemExit) as exc:
         resolve_config({"BASE_URL": url, "API_KEY": "test-key", "MODEL": "m"})
     assert "BASE_URL" in str(exc.value)
@@ -3658,7 +3677,7 @@ def test_unknown_novelty_does_not_relax_anchor_validation(
 def test_config_reserves_the_forced_answer_message(monkeypatch):
     from injudge.agent import _FORCED
 
-    monkeypatch.setattr("injudge.agent._check_runner", lambda: None)
+    monkeypatch.setattr("injudge.agent._check_runner", lambda: 4096)
     env = {"BASE_URL": "https://judge.invalid", "API_KEY": "test-key-only", "MODEL": "test",
            "MAX_OUTPUT_TOKENS": "1000", "CONTEXT_WINDOW": str(1000 + (len(_FORCED) + 3) // 4)}
     with pytest.raises(SystemExit, match="forced message"):
@@ -3723,8 +3742,161 @@ def test_transcript_masking_failure_keeps_an_error_input_record(monkeypatch, tmp
 
 
 @pytest.mark.parametrize("url,safe", [
-    ("https://user:secret@judge.example:8443/v1?key=token#frag", "https://judge.example:8443/v1"),
-    ("http://[::1]:8000/v1", "http://[::1]:8000/v1"),
+    ("https://user:secret@judge.example:8443/v1?key=token#frag", "https://judge.example:8443"),
+    ("http://[::1]:8000/v1", "http://[::1]:8000"),
 ])
 def test_run_manifest_endpoint_drops_secret_bearing_parts(url, safe):
     assert injudge_main._safe_endpoint(url) == safe
+
+
+def test_runner_masks_jobs_and_drops_ambient_provider_config(monkeypatch, tmp_path):
+    import subprocess
+    from pathlib import Path
+    from injudge.agent import _invoke_runner
+
+    cfg = _agent_cfg(api_key='sk-secret+key')
+    for name in ('OPENAI_ORG_ID', 'OPENAI_PROJECT_ID', 'ANTHROPIC_CUSTOM_HEADERS',
+                 'ANTHROPIC_AUTH_TOKEN', 'OPENAI_LOG'):
+        monkeypatch.setenv(name, 'ambient-sensitive-value')
+    monkeypatch.setenv('HTTPS_PROXY', 'http://local-proxy.invalid')
+    history = [{'role': 'assistant', 'content': [{'type': 'text', 'text': cfg.api_key}]}]
+
+    def run(args, **kwargs):
+        job = json.loads(Path(args[args.index('--job') + 1]).read_text())
+        assert job['history'][0]['content'][0]['text'] == '***'
+        assert job['opening'] == 'echo ***'
+        assert all(not name.startswith(('OPENAI_', 'ANTHROPIC_')) for name in kwargs['env'])
+        assert kwargs['env']['HTTPS_PROXY'] == 'http://local-proxy.invalid'
+        assert kwargs['env']['JUDGE_API_KEY'] == cfg.api_key
+        assert kwargs['env']['JUDGE_BASE_URL'] == cfg.base_url
+        Path(args[args.index('--out') + 1]).write_text(json.dumps(_result(GOOD)))
+        return subprocess.CompletedProcess(args, 0, stdout=b'', stderr=b'')
+
+    monkeypatch.setattr('injudge.agent._run_process', run)
+    warnings = []
+    result = _invoke_runner(cfg, tmp_path / 'evidence', tmp_path / 'trace.jsonl',
+                            2, 'system', 'echo sk-secret%2bkey', history, warnings, 32)
+    assert result['answer'] == GOOD and warnings == []
+    assert history[0]['content'][0]['text'] == cfg.api_key
+
+
+def test_followup_preserves_template_tokens_inside_rejected_model_values(monkeypatch, tmp_path):
+    bad = json.loads(GOOD)
+    bad['memories'][0]['accuracy']['value'] = '@max_steps@'
+    calls = stub_runner(monkeypatch, [_result(json.dumps(bad)), _result(GOOD)])
+    span, steps = _judge_input_fixture()
+    verdict = judge_span(span, steps, _agent_cfg(), [], evidence_root=tmp_path,
+                         transcripts_root=tmp_path / 'runs')
+    assert verdict['verdict'] == 'positive'
+    assert 'JSON string "@max_steps@" outside the contract' in calls[1]['message']
+    assert 'at most 4 model calls' in calls[1]['message']
+
+
+@pytest.mark.parametrize('value', [None, True, -1, 'many', [], 1.5, 0, 7])
+def test_retained_call_counts_accept_only_nonnegative_integers(monkeypatch, tmp_path, value):
+    stub_runner(monkeypatch, [_result(GOOD, llm_calls=value, tool_calls=value)])
+    span, steps = _judge_input_fixture()
+    verdict = judge_span(span, steps, _agent_cfg(), [], evidence_root=tmp_path,
+                         transcripts_root=tmp_path / 'runs')
+    assert verdict['verdict'] == 'positive'
+    expected = value if type(value) is int and value >= 0 else None
+    for key in ('llm_calls', 'tool_calls'):
+        assert verdict['input'][key] == expected
+    assert 'retained_llm_calls' not in verdict['input']
+    assert 'retained_tool_calls' not in verdict['input']
+    op = operation_record(span, verdict, {})
+    artifact = build_artifact({}, [{'id': span.traj}], [op], [], [])
+    json.dumps(build_summary(artifact), allow_nan=False)
+
+
+@pytest.mark.parametrize("spelling", ["raw", "percent", "json"])
+def test_masked_evidence_keeps_read_coverage(monkeypatch, tmp_path, spelling):
+    from urllib.parse import quote
+    from injudge.agent import _mask_value
+    from injudge.prompts import content_digest
+
+    key = 'sk-test-"key\\ending'
+    value = {"raw": key, "percent": quote(key, safe=""),
+             "json": json.dumps(key)[1:-1]}[spelling]
+    span, steps = _judge_input_fixture()
+    steps[1].content = "recorded text " + value
+    span.memories[0]["value"] = value
+    span.placements = [{"content": value}]
+    calls = []
+
+    def run(cfg, directory, trajectory, attempt, system, message, history, warnings, minimum_output_tokens):
+        files = {str(path.relative_to(directory)): path.read_text()
+                 for path in directory.rglob("*") if path.is_file()}
+        assert value not in "\n".join(files.values()) + message
+        assert "***" in files["steps/step_000002.md"]
+        for entry in json.loads(files["manifest.json"])["files"]:
+            assert entry["chars"] == len(files[entry["path"]])
+        calls.append(files)
+        return _mask_value(_fill_reads(_result(GOOD), directory), cfg.api_key)
+
+    monkeypatch.setattr("injudge.agent._invoke_runner", run)
+    result = judge_span(span, steps, _agent_cfg(api_key=key), [], task=value,
+                        evidence_root=tmp_path / "evidence", transcripts_root=tmp_path / "runs")
+    assert result["verdict"] == "positive"
+    assert result["input"]["attempts"] == len(calls) == 1
+    assert result["input"]["read_steps"] == [1, 2]
+    assert result["input"]["evidence_sha256"] == content_digest(calls[0])
+    assert steps[1].content.endswith(value)
+
+
+@pytest.mark.parametrize('version', ['v20.19.0', 'v22.18.0', 'not-a-version'])
+def test_runner_check_rejects_unsupported_node_before_package_probe(monkeypatch, tmp_path, version):
+    import subprocess
+    from injudge.agent import _check_runner
+    (tmp_path / "node_modules").mkdir()
+    monkeypatch.setattr("injudge.agent._AGENT_DIR", tmp_path)
+    monkeypatch.setattr("injudge.agent.shutil.which", lambda _: "/fake/node")
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout=version, stderr='')
+
+    monkeypatch.setattr('injudge.agent.subprocess.run', run)
+    with pytest.raises(SystemExit, match='node.*22.19'):
+        _check_runner()
+    assert calls == [['node', '--version']]
+
+
+def test_runner_check_reads_context_reserve_from_installed_library(monkeypatch, tmp_path):
+    import subprocess
+    from injudge.agent import _check_runner
+    responses = iter(['v22.19.0', '4096'])
+    (tmp_path / "node_modules").mkdir()
+    monkeypatch.setattr("injudge.agent._AGENT_DIR", tmp_path)
+    monkeypatch.setattr("injudge.agent.shutil.which", lambda _: "/fake/node")
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout=next(responses), stderr='')
+
+    monkeypatch.setattr('injudge.agent.subprocess.run', run)
+    assert _check_runner() == 4096
+    assert 'clampMaxTokensToContext' in calls[1][-1]
+
+
+def test_config_includes_the_library_context_reserve(monkeypatch):
+    monkeypatch.setattr('injudge.agent._check_runner', lambda: 4096)
+    with pytest.raises(SystemExit, match="pi's context reserve"):
+        resolve_config({'BASE_URL': 'https://judge.invalid', 'API_KEY': 'test-key-only',
+                        'MODEL': 'test', 'MAX_OUTPUT_TOKENS': '32000', 'CONTEXT_WINDOW': '36000'})
+
+
+def test_impossible_library_budget_fails_before_cli_input_work(monkeypatch, tmp_path):
+    import injudge.__main__ as cli
+
+    env = tmp_path / '.env'
+    env.write_text('BASE_URL=https://judge.invalid\nAPI_KEY=test-key-only\nMODEL=test\n'
+                   'MAX_OUTPUT_TOKENS=32000\nCONTEXT_WINDOW=36000\n')
+    monkeypatch.setattr('injudge.agent._check_runner', lambda: 4096)
+    monkeypatch.setattr(cli, 'load_trajectories', lambda *_: pytest.fail('parsed input'))
+    output = tmp_path / 'output'
+    with pytest.raises(SystemExit, match="pi's context reserve"):
+        cli.main([str(tmp_path), '--env', str(env), '-o', str(output)])
+    assert not output.exists()

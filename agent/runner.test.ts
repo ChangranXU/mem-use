@@ -13,9 +13,10 @@ type RequestBody = {
 	max_tokens?: number;
 	max_completion_tokens?: number;
 };
-type Reply = { content?: string; tool_calls?: unknown[]; usage?: object; status?: number };
+type Reply = { content?: string; tool_calls?: unknown[]; usage?: object; status?: number;
+	headersDelayMs?: number; streamChunks?: number; streamDelayMs?: number };
 
-async function fixture(t: TestContext, replies: Reply[]) {
+async function fixture(t: TestContext, replies: Reply[], onRequest?: (count: number, root: string) => void) {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "judge-runner-"));
 	fs.mkdirSync(path.join(root, "steps"));
 	fs.writeFileSync(path.join(root, "steps/step_000001.md"), "previous step-one evidence");
@@ -28,11 +29,14 @@ async function fixture(t: TestContext, replies: Reply[]) {
 		for await (const chunk of req) body += chunk;
 		requests.push(JSON.parse(body));
 		requestPaths.push(req.url);
+		onRequest?.(requests.length, root);
 		const reply = replies.shift();
 		if (!reply) {
 			res.writeHead(500).end("unexpected extra model call");
 			return;
 		}
+		if (reply.headersDelayMs) await new Promise((resolve) => setTimeout(resolve, reply.headersDelayMs));
+		if (res.destroyed) return;
 		if (reply.status) {
 			res.writeHead(reply.status, { "Content-Type": "application/json", "retry-after-ms": "1" })
 				.end(JSON.stringify({ error: { message: reply.content ?? "provider failure" } }));
@@ -43,8 +47,13 @@ async function fixture(t: TestContext, replies: Reply[]) {
 			id: "test", object: "chat.completion.chunk", created: 0, model: "test-model",
 			choices: [{ index: 0, delta, finish_reason }],
 		});
-		const { usage, ...delta } = reply;
+		const { usage, headersDelayMs, streamChunks, streamDelayMs, ...delta } = reply;
 		res.write(`data: ${JSON.stringify({ ...chunk({ role: "assistant", ...delta }, null), usage })}\n\n`);
+		for (let i = 0; i < (streamChunks ?? 0); i++) {
+			await new Promise((resolve) => setTimeout(resolve, streamDelayMs ?? 20));
+			if (res.destroyed) return;
+			res.write(`data: ${JSON.stringify(chunk({ content: "more" }, null))}\n\n`);
+		}
 		res.write(`data: ${JSON.stringify(chunk({}, reply.tool_calls ? "tool_calls" : "stop"))}\n\n`);
 		res.end("data: [DONE]\n\n");
 	});
@@ -55,12 +64,13 @@ async function fixture(t: TestContext, replies: Reply[]) {
 	});
 	const address = server.address();
 	assert.ok(address && typeof address !== "string");
+	const port = address.port;
 	const job: AgentJob = {
 		evidence_dir: root, system: "test", opening: "judge the evidence", forced_message: "answer now",
 		attempt: 1, trajectory_path: path.join(root, "trace.jsonl"),
 		config: {
 			api: "openai-chat", model: "test-model",
-			max_steps: 4, max_output_tokens: 1000, context_window: 100000,
+			max_steps: 4, max_output_tokens: 1000, minimum_output_tokens: 4, context_window: 100000,
 			temperature: 0, thinking_level: "off", timeout_ms: 1000,
 		},
 	};
@@ -71,7 +81,7 @@ async function fixture(t: TestContext, replies: Reply[]) {
 		const child = spawn(process.execPath, [path.join(import.meta.dirname, "runner.ts"),
 			"--job", input, "--out", output], {
 			env: { ...process.env, JUDGE_API_KEY: "test-key-only",
-				JUDGE_BASE_URL: `http://127.0.0.1:${address.port}/test-key-only/v1` },
+				JUDGE_BASE_URL: `http://127.0.0.1:${port}/test-key-only/v1` },
 			stdio: ["ignore", "ignore", "pipe"],
 		});
 		let stderr = "";
@@ -97,6 +107,56 @@ test("an endpoint credential stays out of the job file", async (t) => {
 	assert.equal(result.error, null);
 	assert.deepEqual(requestPaths, ["/test-key-only/v1/chat/completions"]);
 	assert.ok(!fs.readFileSync(path.join(root, "job.json"), "utf8").includes("test-key-only"));
+});
+
+test("completed messages are masked on disk while the live conversation retains evidence", async (t) => {
+	let checked = false;
+	const { run, requests, root } = await fixture(t, [
+		{ tool_calls: [readStepTwo] }, { content: "test-key-only" },
+	], (count, root) => {
+		if (count !== 2) return;
+		const trace = fs.readFileSync(path.join(root, "trace.jsonl"), "utf8");
+		assert.ok(!trace.includes("test-key-only"));
+		assert.ok(trace.includes("***"));
+		checked = true;
+	});
+	fs.writeFileSync(path.join(root, "steps/step_000002.md"), "test-key-only");
+	const result = await run();
+	assert.ok(checked);
+	assert.ok(JSON.stringify(requests[1]).includes("test-key-only"));
+	assert.equal(result.answer, "***");
+	assert.ok(!fs.readFileSync(path.join(root, "result.json"), "utf8").includes("test-key-only"));
+	assert.ok(!fs.readFileSync(path.join(root, "trace.jsonl"), "utf8").includes("test-key-only"));
+});
+
+test("request timeout permits a steady response stream beyond its idle limit", async (t) => {
+	const { run, requests, config } = await fixture(t, [{ content: "partial", streamChunks: 30 }]);
+	const result = await run({ config: { ...config, timeout_ms: 100 } });
+	assert.equal(result.error, null);
+	assert.equal(result.stop_reason, "answer");
+	assert.equal(requests.length, 1);
+	assert.equal(result.answer, "partial" + "more".repeat(30));
+});
+
+test("request timeout bounds an idle response stream", async (t) => {
+	const { run, requests, config } = await fixture(t, [
+		{ content: "partial", streamChunks: 1, streamDelayMs: 500 },
+	]);
+	const result = await run({ config: { ...config, timeout_ms: 100 } });
+	assert.equal(result.stop_reason, "error");
+	assert.ok(result.error);
+	assert.equal(requests.length, 1);
+	assert.equal(result.answer, "partial");
+});
+
+test("each retry receives a new deadline while waiting for headers", async (t) => {
+	const { run, requests, config } = await fixture(t, [
+		{ content: "too late", headersDelayMs: 500 }, { content: "recovered" },
+	]);
+	const result = await run({ config: { ...config, timeout_ms: 100 } });
+	assert.equal(result.error, null);
+	assert.equal(result.answer, "recovered");
+	assert.equal(requests.length, 2);
 });
 
 test("a follow-up continues the conversation with tools and keeps prior evidence exactly once", async (t) => {
@@ -133,7 +193,7 @@ test("first-round context rollback retains the opening and a replayable forced a
 		{ content: '{"done":true}', tool_calls: [{ ...readStepTwo, id: "blocked" }] },
 	]);
 	fs.writeFileSync(path.join(root, "steps/step_000002.md"), "evidence ".repeat(1000));
-	const result = await run({ config: { ...config, context_window: 2500 } });
+	const result = await run({ config: { ...config, context_window: 6600 } });
 	assert.equal(result.error, null);
 	assert.equal(result.answer, '{"done":true}');
 	assert.equal(result.stop_reason, "context_budget_forced");
@@ -159,7 +219,15 @@ test("oversized opening is rejected before a paid request", async (t) => {
 	const { run, requests, config } = await fixture(t, []);
 	const result = await run({ opening: "target evidence ".repeat(4000),
 		config: { ...config, context_window: 2300 } });
-	assert.match(result.error ?? "", /opening context .* exceeds the input budget/);
+	assert.match(result.error ?? "", /opening context.*before any judge call/);
+	assert.equal(result.executed_llm_calls, 0);
+	assert.equal(requests.length, 0);
+});
+
+test("provider context reserve is included before a paid request", async (t) => {
+	const { run, requests, config } = await fixture(t, []);
+	const result = await run({ config: { ...config, context_window: 3700 } });
+	assert.match(result.error ?? "", /opening context.*before any judge call/);
 	assert.equal(result.executed_llm_calls, 0);
 	assert.equal(requests.length, 0);
 });
@@ -171,7 +239,7 @@ test("required evidence is checked with the system and tools before a paid reque
 		required_reads: { always: ["steps/step_000002.md"] },
 	}));
 	const result = await run({ system: "scoring instructions ".repeat(100),
-		config: { ...config, context_window: 3000 } });
+		config: { ...config, context_window: 7100 } });
 	assert.match(result.error ?? "", /required evidence .* exceeds the input budget .* before any judge call/);
 	assert.equal(result.executed_llm_calls, 0);
 	assert.equal(result.executed_tool_calls, 0);
@@ -185,7 +253,7 @@ test("optional evidence and blank lines do not block a feasible required read", 
 	fs.writeFileSync(path.join(root, "manifest.json"), JSON.stringify({ required_reads: {
 		always: ["steps/step_000001.md"], prior_sources: ["steps/step_000002.md"],
 	} }));
-	const result = await run({ config: { ...config, context_window: 3000 } });
+	const result = await run({ config: { ...config, context_window: 7100 } });
 	assert.equal(result.error, null);
 	assert.equal(requests.length, 1);
 });
@@ -227,13 +295,83 @@ test("a follow-up keeps evidence when the prior answer consumed reserved output 
 	]);
 	const judged = await run();
 	const result = await run({ attempt: 2, history: judged.messages,
-		config: { ...config, context_window: 3700 } });
+		config: { ...config, context_window: 7800 } });
 	assert.equal(result.error, null);
 	assert.equal(result.answer, '{"done":true}');
 	assert.ok(JSON.stringify(result.messages).includes("new step-two evidence"));
 	assert.equal(requests.length, 3);
 	const outputLimit = requests[2].max_completion_tokens!;
-	assert.ok(outputLimit > 0 && outputLimit < config.max_output_tokens);
+	assert.ok(outputLimit > 1 && outputLimit < config.max_output_tokens);
+});
+
+test("a follow-up keeps a feasible new read by updating its output budget", async (t) => {
+	const { run, requests, config } = await fixture(t, [
+		{ tool_calls: [readStepTwo] }, { content: "invalid answer ".repeat(700) },
+		{ tool_calls: [{ ...readStepTwo, id: "read-one", function: {
+			name: "read_evidence", arguments: '{"paths":["steps/step_000001.md"]}',
+		} }] }, { content: '{"done":true}' },
+	]);
+	const judged = await run();
+	const result = await run({ attempt: 2, history: judged.messages,
+		config: { ...config, context_window: 7800 } });
+	assert.equal(result.error, null);
+	assert.equal(result.forced, false);
+	assert.equal(result.context_rollbacks, 0);
+	assert.equal(requests.length, 4);
+	assert.ok(JSON.stringify(requests[3]).includes("previous step-one evidence"));
+	assert.ok(requests[3].max_completion_tokens! > 1);
+	assert.ok(requests[3].max_completion_tokens! < requests[2].max_completion_tokens!, JSON.stringify(requests.map((request) => request.max_completion_tokens)));
+});
+
+test("a follow-up with less than its answer floor stops before another paid call", async (t) => {
+	const { run, requests, config } = await fixture(t, [{ content: "invalid answer ".repeat(700) }]);
+	const judged = await run();
+	const result = await run({ attempt: 2, history: judged.messages,
+		config: { ...config, context_window: 7800, minimum_output_tokens: 1000 } });
+	assert.match(result.error ?? "", /minimum answer estimate.*before any judge call/);
+	assert.equal(result.executed_llm_calls, 0);
+	assert.equal(requests.length, 1);
+});
+
+test("a follow-up rolls back a new read before it consumes the answer floor", async (t) => {
+	const { run, requests, root, config } = await fixture(t, [
+		{ content: "invalid answer ".repeat(700) },
+		{ tool_calls: [readStepTwo] }, { content: '{"done":true}' },
+	]);
+	fs.writeFileSync(path.join(root, "steps/step_000002.md"), "extra evidence ".repeat(100));
+	const judged = await run();
+	const result = await run({ attempt: 2, history: judged.messages,
+		config: { ...config, context_window: 7800, minimum_output_tokens: 500 } });
+	assert.equal(result.error, null);
+	assert.equal(result.stop_reason, "context_budget_forced");
+	assert.equal(result.context_rollbacks, 1);
+	assert.equal(requests.length, 3);
+	assert.ok(requests.slice(1).every((request) => request.max_completion_tokens! >= 500));
+	assert.ok(!JSON.stringify(requests[2]).includes("extra evidence"));
+});
+
+test("a configured output cap below the answer floor fails before payment", async (t) => {
+	const { run, requests, config } = await fixture(t, []);
+	const result = await run({ config: { ...config, minimum_output_tokens: 1001 } });
+	assert.match(result.error ?? "", /configured output cap.*minimum answer estimate.*before any judge call/);
+	assert.equal(requests.length, 0);
+});
+
+test("a follow-up still rolls back a read that leaves no output room", async (t) => {
+	const { run, requests, root, config } = await fixture(t, [
+		{ content: "invalid answer ".repeat(700) },
+		{ tool_calls: [readStepTwo] }, { content: '{"done":true}' },
+	]);
+	fs.writeFileSync(path.join(root, "steps/step_000002.md"), "overflow evidence ".repeat(2000));
+	const judged = await run();
+	const result = await run({ attempt: 2, history: judged.messages,
+		config: { ...config, context_window: 7800 } });
+	assert.equal(result.error, null);
+	assert.equal(result.stop_reason, "context_budget_forced");
+	assert.equal(result.context_rollbacks, 1);
+	assert.equal(requests.length, 3);
+	assert.ok(!JSON.stringify(requests[2]).includes("overflow evidence"));
+	assert.ok(requests.every((request) => request.max_completion_tokens! > 0));
 });
 
 test("context watermark includes the system and evidence tool schemas without usage", async (t) => {
@@ -242,7 +380,7 @@ test("context watermark includes the system and evidence tool schemas without us
 	]);
 	fs.writeFileSync(path.join(root, "steps/step_000002.md"), "evidence ".repeat(400));
 	const result = await run({ system: "scoring instructions ".repeat(200),
-		config: { ...config, context_window: 3000 } });
+		config: { ...config, context_window: 7100 } });
 	assert.equal(result.error, null);
 	assert.equal(result.stop_reason, "context_budget_forced");
 	assert.equal(requests.length, 2);
@@ -255,7 +393,7 @@ test("output-only usage cannot replace the context prefix estimate", async (t) =
 	]);
 	fs.writeFileSync(path.join(root, "steps/step_000002.md"), "evidence ".repeat(400));
 	const result = await run({ system: "scoring instructions ".repeat(200),
-		config: { ...config, context_window: 3000 } });
+		config: { ...config, context_window: 7100 } });
 	assert.equal(result.error, null);
 	assert.equal(result.stop_reason, "context_budget_forced");
 	assert.equal(requests.length, 2);
@@ -268,7 +406,7 @@ test("output-only history cannot bypass continuation preflight", async (t) => {
 	]);
 	const prior = await run();
 	const result = await run({ attempt: 2, history: prior.messages,
-		config: { ...config, context_window: 3000 } });
+		config: { ...config, context_window: 7100 } });
 	assert.match(result.error ?? "", /before any judge call/);
 	assert.equal(result.executed_llm_calls, 0);
 	assert.equal(requests.length, 1);

@@ -20,7 +20,7 @@ npm --prefix agent install
 uv run -m injudge <paths> --dry-run --limit 3
 ```
 
-进度经 tqdm 输出到 stderr：终端上是轨迹条加当前轨迹的区间条；管道输出时每完成一条轨迹打一行检查点。
+进度在 stderr 报告已评区间：终端上显示 tqdm 进度条；管道输出时每完成一个区间输出一行。
 
 ## 产物
 
@@ -28,8 +28,10 @@ uv run -m injudge <paths> --dry-run --limit 3
 
 | 文件 | 内容 |
 |---|---|
-| `injudge-report.json` | 运行时评审记录（`injudge.report/v21`），付费调用前写入并将待评区间标为 `unjudged`；每个区间完成后保存，包括并行完成的结果 |
+| `injudge-report.json` | 评审记录（`injudge.report/v22`）：付费调用前写出初始快照，运行结束时写出完整快照 |
+| `injudge-checkpoints.jsonl` | 每个已完成区间的记录，包括并行完成的结果；完整快照写出前，报告指向此日志 |
 | `summary.json` | 最终统计（`injudge.summary/v18`）：计数、比率、投递估算、评审运行总量 |
+| `summary.md` | 最终统计的可读摘要，列出待查看区间、诊断，并链接到 JSON 文件 |
 | `memgraph-verdicts.html` | 仅在 `--html` 时产出：召回节点按判定着色的 memgraph |
 | `evidence/` | 每个送入评审智能体的区间一个文件夹（含运行失败产生的 error 判定）：只包含目标 `span.md`，加上其父 episode 已准备的文件与可选附件 |
 | `agent-runs/` | 每个送入评审智能体的区间一条轨迹 JSONL：判定如何得出的 pi 事件流记录 |
@@ -40,7 +42,14 @@ uv run -m injudge <paths> --dry-run --limit 3
 
 区间在评审前被拒绝的情形：其父 episode 的边界或归属不是 `prepared`，或一个带投递且已归属步骤的区间在其父 episode 中没有已录制的任务。此时该区间得到 `error` 判定，且没有智能体运行——没有证据文件夹、没有轨迹记录、也没有 `input` 记录。
 
-可评区间还会因 episode 中未解析的 placement 归属、无法分离的 placement 与宿主文本，或 delivery consumer 上下文的可见性缺口而被拒绝。Dry-run 使用同一检查并返回 2；单纯的信息性诊断不会阻止评审，空区间和 consumer 不可观察的区间仍按规则跳过。`summary.json` 仅在运行完成后写入；中断时的 report 保留已完成结果和显式待评区间。中断会取消尚在队列中的并行任务，已经运行的任务可能继续完成。完成结果立即保存，validation 诊断仍按源区间顺序排列。
+证据检查作用于整个 episode。只要存在未解析的 placement 归属、无法分离的 placement 与宿主文本，或任一 delivery consumer 的已记录输入存在缺口，就会拒绝该 episode 的所有可评区间。这也包括自身消费者输入完整的更早区间。Dry-run 使用同一检查并返回 2；单纯的信息性诊断不会阻止评审，空区间和 consumer 不可观察的区间仍按规则跳过。
+
+`summary.json` 仅在运行完成后写入。每个完成结果先保存到日志；正常完成或中断被
+处理时，写出保留已完成结果和显式待评区间的完整报告。若进程被强制结束，应将
+初始报告与日志一起保留；memgraph 和 calibration 会自动重放日志。格式见[产物](artifacts.md)。
+第一次中断会取消排队任务，等待正在运行的任务结束，并保存其结果后再写出完整报告，单 worker 也如此。
+第二次中断会停止活动运行器，未完成区间保持 `unjudged`。Python 进程被终止时，运行器也会停止，
+并删除自己的临时作业和结果文件。已写入日志的结果仍可恢复。validation 诊断按源区间顺序排列。
 
 ## 离线准备
 
@@ -74,6 +83,8 @@ uv run -m injudge <paths> --dry-run --limit 3
 ## Golden Answer 与 Correctness
 
 评分调用可携带两类可选附件，二者在 `--limit` 筛选付费区间**之前**就连接到 episode。`--golden` 和 `--correctness` 要求恰好一个已发现的 episode。按 benchmark 身份带键的元数据可附着到多个 episode；未带键的轨迹边车仅在该轨迹恰好只有一个 episode 时适用。优先级为：命令行值 → 带键连接 → 可用的边车。
+
+单 episode 要求针对完整输入。`--episode` 和 `--limit` 不会使多 episode 输入满足这两个参数的要求；这种输入应使用带键的元数据。
 
 | 附件 | 来源 | 作用 |
 |---|---|---|

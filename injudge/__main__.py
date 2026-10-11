@@ -1,30 +1,20 @@
 """CLI: python3 -m injudge <path>... [options]
 
-Judge recall injections in gate trajectories: prepare episode scopes, group
-same-treatment re-injections into spans within each episode, then score each
-target span's delivered memories on a five-signal
-rubric (relevance / accuracy / novelty / influence / positive_effect). The judge
-is an AGENT, not one prompt: each agent-judged span's target and parent-episode
-evidence (task, context, deliveries, optional gold, original global steps) is materialized
-into a folder under <output>/<run-stamp>/evidence/, and a pi agent with
-read-only tools scoped to that folder searches it and answers with the
-rubric JSON. Two simple budgets bound every conversation — a max-steps LLM-call cap and
-the context window — and both end in a forced final answer, never a
-mid-run failure. The span verdict is derived in code from the rubric —
-never asked of the LLM, never read off the final task result.
+Prepare episodes and group matching recall deliveries into spans. A pi agent
+reads each span's evidence folder and returns five rubric signals. Python
+derives the verdict from those signals. The final task result is not a verdict.
+Step and context budgets can force a final answer. Rejected answers continue
+the same conversation within a smaller follow-up budget.
 
-One agent conversation per judged span (plus corrective retries that continue
-the same conversation). Each run writes its own <run-stamp>/ folder under
-the -o/--output container (default output/): injudge-report.json (the
-runtime report), summary.json (the rubric statistics), plus evidence/ and
-agent-runs/ entries for spans sent to the agent (the judged folder and one
-transcript JSONL per span — the audit trail of how each verdict was reached),
-and memgraph-verdicts.html with
---html. No two runs share a folder, so consecutive or concurrent runs
-over different inputs never overwrite or mix artifacts, and the folder
-name traces every artifact to its run. --dry-run prints the evidence
-document and file index for each span that would use the agent, without
-network access or file writes.
+Each run has its own <output>/<run-stamp>/ folder. injudge-report.json starts
+with pending spans. Each completed agent run appends to injudge-checkpoints.jsonl
+until a full report is written. Final statistics are in summary.json and
+summary.md. Evidence files and agent-runs/ transcripts preserve the inputs and
+conversation for each attempted span. --html adds memgraph-verdicts.html.
+Separate run folders prevent concurrent runs from mixing artifacts.
+
+--dry-run prints each eligible span's evidence, file index, and opening without
+judge calls or file writes.
 """
 
 from __future__ import annotations
@@ -32,8 +22,8 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -55,6 +45,9 @@ from injudge.agent import (
     MAX_PARALLEL,
     AgentConfig,
     _int_config,
+    _mask_value,
+    begin_runner_run,
+    cancel_runners,
     dry_run_print,
     judge_span,
     load_env,
@@ -84,6 +77,7 @@ from injudge.report import (
 )
 from injudge.spans import group_spans
 from injudge.steps import prompt_tokens_total
+from injudge.checkpoints import CHECKPOINT_FILE, append_checkpoint
 from memgraph.graph import build_graph, load_trajectories
 from memgraph.html import render_html
 from memgraph.model import MemoryOp, Trajectory
@@ -91,9 +85,9 @@ from memgraph.verdicts import apply_verdicts
 
 
 def _safe_endpoint(url: str) -> str:
-    """Remove URL userinfo, query, and fragment because they can contain credentials."""
+    """Keep only the endpoint origin; any path segment can contain a secret."""
     parts = urlsplit(url)
-    return parts._replace(netloc=parts.netloc.rpartition("@")[2], query="", fragment="").geturl()
+    return parts._replace(netloc=parts.netloc.rpartition("@")[2], path="", query="", fragment="").geturl()
 
 
 def _run_stamp() -> str:
@@ -105,7 +99,7 @@ def _run_stamp() -> str:
 
 
 def _run_manifest(cfg: AgentConfig, judge_parallel: int) -> dict:
-    """Save the judge settings needed to reproduce the run, without credentials."""
+    """Save non-secret judge settings and the endpoint origin for audit."""
     return {
         "api": cfg.api,
         "base_url": _mask_key(_safe_endpoint(cfg.base_url), cfg.api_key),
@@ -207,12 +201,12 @@ def _prepare_attachment_scope(
         if not golden.strip():
             raise SystemExit(f"error: golden answer file {args.golden} is empty")
         if len(episodes) != 1:
-            raise SystemExit("error: --golden requires exactly one episode before --limit")
+            raise SystemExit("error: --golden requires exactly one input episode before --episode or --limit selection; use --gold-metadata for multiple episodes")
         episodes[0].attachments.update({"golden": golden, "gold_join": "global"})
 
     if args.correctness is not None:
         if len(episodes) != 1:
-            raise SystemExit("error: --correctness requires exactly one episode before --limit")
+            raise SystemExit("error: --correctness requires exactly one input episode before --episode or --limit selection; use --harness-report for multiple episodes")
         episodes[0].attachments.update({
             "correctness": {"resolved": args.correctness == "resolved"},
             "outcome_status": args.correctness,
@@ -372,7 +366,7 @@ def _prepare_only_main(args: argparse.Namespace) -> int:
     package = {
         "schema": EPISODE_INPUT_SCHEMA,
         "tool": {"name": "injudge", "schema": EPISODE_INPUT_SCHEMA, "mode": "prepare-only"},
-        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "episodes": index_episodes,
         "unassigned": all_unassigned,
         "diagnostics": validation,
@@ -449,7 +443,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--env", type=Path, default=None,
                     help=f".env path (default: {_DEFAULT_ENV})")
     ap.add_argument("--timeout", type=float, default=None,
-                    help="timeout seconds for each HTTP request (default 300)")
+                    help="idle timeout seconds for response headers or the next stream chunk (default 300)")
     ap.add_argument("--max-attempts", type=int, default=None,
                     help="runner phases per span: the investigation plus follow-ups "
                     "after a rejected answer (default: MAX_ATTEMPTS from .env, else 3)")
@@ -511,13 +505,11 @@ def main(argv: list[str] | None = None) -> int:
         "--output",
         type=Path,
         default=Path("output"),
-        help="output container for the artifacts (default: output/) — each "
-        "run writes its own <run-stamp>/ subfolder holding "
-        "injudge-report.json (the runtime report), summary.json (the "
-        "rubric statistics), and summary.md (the readable summary); "
-        "spans sent to the agent add evidence/ folders "
-        "and agent-runs/ transcript JSONL files; "
-        "memgraph-verdicts.html with --html",
+        help="artifact container (default: output/); each run has a <run-stamp>/ "
+        "folder with injudge-report.json, a completion journal "
+        "(injudge-checkpoints.jsonl), final summary.json and summary.md, "
+        "evidence/ files, and agent-runs/ transcripts; --html adds "
+        "memgraph-verdicts.html",
     )
     ap.add_argument(
         "--html",
@@ -532,6 +524,8 @@ def main(argv: list[str] | None = None) -> int:
     # (the free inspection workflow is --dry-run)
     if args.limit is not None and args.limit < 1:
         raise SystemExit("error: --limit must be a positive integer")
+    if args.dry_run and args.html:
+        raise SystemExit("error: --dry-run cannot be combined with --html")
 
     if args.prepare_only:
         if args.dry_run:
@@ -612,11 +606,9 @@ def main(argv: list[str] | None = None) -> int:
     html_path = run_dir / "memgraph-verdicts.html"
     evidence_root = run_dir / "evidence"
     transcripts_root = run_dir / "agent-runs"
+    checkpoint_path = run_dir / CHECKPOINT_FILE
     if not args.dry_run:
-        # fail fast on an unwritable output folder, before any paid judge
-        # call: flush() rewrites the report artifact after each judged span,
-        # so an output that cannot be written would abort the run mid-way
-        # and lose the completed judging.
+        # Check output access before spending on a judge call.
         try:
             run_dir.mkdir(parents=True, exist_ok=True)
         except OSError as e:
@@ -633,16 +625,21 @@ def main(argv: list[str] | None = None) -> int:
     taken = 0  # spans that consumed the --limit budget (judged; printed in dry-run)
     artifact: dict = {}
 
-    def flush() -> None:
-        """Rewrite the report artifact after each completed span so a crash keeps
-        completed work (the contract's incremental artifact; summary.json is
-        the FINAL statistics set, written once after the loop); keeps
-        `artifact` current for the final report."""
+    def flush(*, initial: bool = False) -> None:
+        """Write the initial snapshot or a full report after judging stops.
+
+        The journal protects results between these writes. Only the initial
+        snapshot needs its pointer; a full report contains the results itself.
+        """
         nonlocal artifact
         if args.dry_run:
             return
+        validation[validation_start:] = [note for j in sorted(outcome_notes) for note in outcome_notes[j]]
         artifact = build_artifact(tool_cfg(), trajectories, operations, injections, validation)
-        atomic_write(report_path, json.dumps(artifact, indent=1, ensure_ascii=False) + "\n")
+        if initial and pending:
+            checkpoint_path.touch(exist_ok=False)
+            artifact["checkpoint_journal"] = CHECKPOINT_FILE
+        atomic_write(report_path, json.dumps(_mask_value(artifact, cfg.api_key), indent=1, ensure_ascii=False) + "\n")
 
     def tool_cfg() -> dict:
         if cfg is None:
@@ -804,7 +801,7 @@ def main(argv: list[str] | None = None) -> int:
         # per-span routing is decided serially — rule-judged auto-neutral,
         # --limit-cutoff and dry-run spans are instant and order-fixed; only
         # the judge_span calls (each independent: its own evidence folder,
-        # its own agent conversation) go to the pool when JUDGE_PARALLEL > 1
+        # its own agent conversation) use the pool, including with one worker
         verdicts: dict[int, dict] = {}
         for i, span in enumerate(spans):
             episode = episode_by_span.get(span.id)
@@ -850,11 +847,12 @@ def main(argv: list[str] | None = None) -> int:
         for row in injection_rollup(spans, ops_by_id, verdict_by_span, content_chars):
             injection_index[row["op_id"]] = len(injections)
             injections.append(row)
-    flush()
+    validation_start = len(validation)
+    outcome_notes: dict[int, list[dict]] = {}
+    flush(initial=True)
 
     def _judge(span: InjectionSpan) -> tuple[dict, list[str], str | None]:
-        """One span's judging on a pool worker: its own evidence folder
-        and agent conversation, sharing nothing mutable with siblings."""
+        """Keep each worker's conversation and output files inside its span."""
         episode = episode_by_span[span.id]
         gold = GoldInput(golden=episode.attachments.get("golden"),
                          correctness=episode.attachments.get("correctness"))
@@ -879,9 +877,8 @@ def main(argv: list[str] | None = None) -> int:
             error_note = f"{span.id}: {verdict['error']}"
         return verdict, span_warnings, error_note
 
-    validation_start = len(validation)
-    outcome_notes: dict[int, list[dict]] = {}
     progress = _Progress(len(pending)) if pending else None
+    retained: set[int] = set()
 
     def retain(k: int, outcome: tuple[dict, list[str], str | None]) -> None:
         verdict, span_warnings, error_note = outcome
@@ -889,33 +886,62 @@ def main(argv: list[str] | None = None) -> int:
         outcome_notes[k].extend({"level": "warn", "msg": w} for w in span_warnings)
         # Persist completions immediately, but keep diagnostics in source
         # span order regardless of worker scheduling.
-        validation[validation_start:] = [note for j in sorted(outcome_notes) for note in outcome_notes[j]]
         span = pending[k]
         verdict_by_span[span.id] = verdict
         operations[operation_index[span.id]] = operation_record(span, verdict, span_costs[span.id])
-        for row in injection_rollup([span], ops_by_id, verdict_by_span, content_chars):
+        rows = injection_rollup([span], ops_by_id, verdict_by_span, content_chars)
+        for row in rows:
             injections[injection_index[row["op_id"]]] = row
-        flush()
+        append_checkpoint(checkpoint_path, _mask_value(operations[operation_index[span.id]], cfg.api_key),
+                          _mask_value(rows, cfg.api_key), _mask_value(outcome_notes[k], cfg.api_key))
+        retained.add(k)
         progress.advance(span.id, verdict["verdict"])
 
-    if judge_parallel <= 1 or len(pending) <= 1:
-        for k, span in enumerate(pending):
-            retain(k, _judge(span))
-    else:
-        pool = ThreadPoolExecutor(max_workers=judge_parallel)
-        try:
-            futures = {pool.submit(_judge, span): k for k, span in enumerate(pending)}
-            for future in as_completed(futures):
-                retain(futures[future], future.result())
-        except BaseException:
-            # A context manager would wait and drain the paid queue on
-            # Ctrl-C. Running jobs may finish; queued jobs must not start.
-            pool.shutdown(wait=False, cancel_futures=True)
-            raise
-        else:
-            pool.shutdown(wait=True)
-    if progress is not None:
-        progress.close()
+    try:
+        if pending:
+            begin_runner_run()
+            pool = ThreadPoolExecutor(max_workers=judge_parallel)
+            futures: dict[Future[tuple[dict, list[str], str | None]], int] = {}
+
+            def retain_finished(future: Future[tuple[dict, list[str], str | None]]) -> None:
+                if future.cancelled() or futures[future] in retained:
+                    return
+                try:
+                    outcome = future.result()
+                except KeyboardInterrupt:
+                    return
+                retain(futures[future], outcome)
+
+            try:
+                for k, span in enumerate(pending):
+                    futures[pool.submit(_judge, span)] = k
+                for future in as_completed(futures):
+                    retain(futures[future], future.result())
+            except KeyboardInterrupt:
+                print_safe("Stopping queued work. Waiting for active judges; press Ctrl+C again to stop them.",
+                           err=True)
+                # Keep paid work that is already running, including with one worker.
+                pool.shutdown(wait=False, cancel_futures=True)
+                try:
+                    for future in as_completed([item for item in futures if not item.cancelled()]):
+                        retain_finished(future)
+                except KeyboardInterrupt:
+                    # A second interrupt stops active runners; unfinished spans stay unjudged.
+                    cancel_runners()
+                    pool.shutdown(wait=True, cancel_futures=True)
+                    for future in futures:
+                        retain_finished(future)
+                raise
+            except BaseException:
+                cancel_runners()
+                pool.shutdown(wait=True, cancel_futures=True)
+                raise
+            else:
+                pool.shutdown(wait=True)
+    finally:
+        flush()
+        if progress is not None:
+            progress.close()
 
     if args.dry_run:
         scoped = [op for op in operations if not _outside_selection(op)]
@@ -948,10 +974,11 @@ def main(argv: list[str] | None = None) -> int:
         # render cannot explain its own error verdicts
         graph["validation"] = validation + merge_notes
         validation.extend(merge_notes)
-        atomic_write(report_path, json.dumps(artifact, indent=1, ensure_ascii=False) + "\n")
-        atomic_write(html_path, render_html(graph))
+        atomic_write(report_path, json.dumps(_mask_value(artifact, cfg.api_key), indent=1, ensure_ascii=False) + "\n")
+        atomic_write(html_path, render_html(_mask_value(graph, cfg.api_key)))
     # The HTML merge can add validation notes. Build the summary from
     # the final list so its counts match the report.
+    artifact = _mask_value(artifact, cfg.api_key)
     atomic_write(
         summary_path,
         json.dumps(build_summary(artifact), indent=2, ensure_ascii=False) + "\n",

@@ -10,14 +10,16 @@ from test_injudge import _op
 
 
 @pytest.mark.parametrize("encoded", [False, True])
-def test_run_manifest_masks_a_known_key_in_the_endpoint_path(encoded):
+@pytest.mark.parametrize("gateway_secret", [None, "other-gateway+secret/456"])
+def test_run_manifest_omits_endpoint_paths(encoded, gateway_secret):
     key = "sk-path+secret/123"
-    spelling = quote(key, safe="") if encoded else key
+    secret = gateway_secret or key
+    spelling = quote(secret, safe="") if encoded else secret
     config = AgentConfig(base_url=f"https://gateway.invalid/{spelling}/v1", api_key=key, model="judge")
     manifest = _run_manifest(config, 4)
 
-    assert manifest["base_url"] == "https://gateway.invalid/***/v1"
-    assert key not in json.dumps(manifest) and spelling not in json.dumps(manifest)
+    assert manifest["base_url"] == "https://gateway.invalid"
+    assert key not in json.dumps(manifest) and secret not in json.dumps(manifest) and spelling not in json.dumps(manifest)
     assert config.base_url == f"https://gateway.invalid/{spelling}/v1"
 
 

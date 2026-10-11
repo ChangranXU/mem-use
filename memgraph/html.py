@@ -56,6 +56,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .dot { display:inline-block; width:9px; height:9px; border-radius:50%; flex:0 0 auto; }
   .muted { color:var(--muted); font-weight:400; }
   .warn { color:#b54708; }
+  .error { color:var(--flag); }
   .link { cursor:pointer; }
   .link:hover { text-decoration:underline; }
   #main { flex:1; display:flex; min-height:0; }
@@ -89,6 +90,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
   footer { border-top:1px solid var(--line); padding:5px 16px; font-size:12px; max-height:30vh; overflow:auto; }
   footer ul { margin:4px 0; padding-left:18px; color:var(--muted); }
   footer li.warn { color:#b54708; }
+  footer li.error { color:var(--flag); }
   /* graph */
   svg text { user-select:none; font-size:9px; fill:var(--muted); }
   .tick { fill:#98a2b3; text-anchor:middle; }
@@ -925,8 +927,9 @@ document.addEventListener("keydown",ev=>{
     // the judged verdicts; unjudged and mechanical skips are not targets)
     out.push(`<span class="vd">${TALLY.filter(v=>vc[v]).map(v=>`<span title="${VD_TIP[v]}${VD_COLOR[v]?" — click to jump to each":""}"${VD_COLOR[v]?` class="link" data-vd="${v}"`:""}><i class="dot" style="background:${TALLY_COLOR[v]}"></i> ${vc[v]} ${v}</span>`).join("")}</span>`);
   }
-  const nWarn=G.validation.filter(v=>v.level==="warn").length;
-  if(nWarn) out.push(`<span class="link warn" id="vjump">⚠ ${nWarn} warning${nWarn===1?"":"s"}</span>`);
+  const nWarn=G.validation.filter(v=>v.level==="warn").length, nError=G.validation.filter(v=>v.level==="error").length;
+  const issues=[nError?`${nError} error${nError===1?"":"s"}`:"", nWarn?`${nWarn} warning${nWarn===1?"":"s"}`:""].filter(Boolean).join(", ");
+  if(issues) out.push(`<span class="link ${nError?"error":"warn"}" id="vjump">⚠ ${issues}</span>`);
   const summary=document.getElementById("summary");
   summary.innerHTML=out.join("");
   // each click selects the next drawn recall with that verdict, zoomed in far
@@ -942,10 +945,11 @@ document.addEventListener("keydown",ev=>{
     showOp(lead); locate(lead);
   });
   const foot=document.querySelector("footer details");
-  if(nWarn) document.getElementById("vjump").onclick=()=>{ foot.open=true; foot.scrollIntoView(); };
-  document.getElementById("vsum").textContent=`Validation notes (${G.validation.length}${nWarn?`, ${nWarn} warnings`:""})`;
-  document.getElementById("vlist").innerHTML=[...G.validation].sort((a,b)=>(b.level==="warn")-(a.level==="warn"))
-    .map(v=>`<li${v.level==="warn"?' class="warn"':""}>${esc(v.msg)}</li>`).join("");
+  if(issues) document.getElementById("vjump").onclick=()=>{ foot.open=true; foot.scrollIntoView(); };
+  document.getElementById("vsum").textContent=`Validation notes (${G.validation.length}${issues?`, ${issues}`:""})`;
+  const severity=level=>level==="error"?2:level==="warn"?1:0;
+  document.getElementById("vlist").innerHTML=[...G.validation].sort((a,b)=>severity(b.level)-severity(a.level))
+    .map(v=>`<li${v.level==="error"?' class="error"':v.level==="warn"?' class="warn"':""}>${esc(v.msg)}</li>`).join("");
 }
 
 zoom(0);

@@ -278,13 +278,8 @@ def aggregate(operations: list[dict], n_injections: int, n_trajectories: int | N
     }
     if n_trajectories is not None:
         out["n_trajectories"] = n_trajectories
-        # the judging regime (every LLM-judged span runs the agent) and the
-        # two rubric regimes (gold vs plain), counted over judged spans
-        # only — visible before anyone compares memory systems off the
-        # aggregate; the forced answers count too: a span whose verdict came
-        # from the budget-exhausted final round is its own judge-quality
-        # regime, and the per-operation marker is invisible without the
-        # tally
+        # Count attempted runs, including errors, so failed work stays visible.
+        # Mechanical and unjudged spans have no input record.
         gate = [o["input"] for o in operations if o.get("input")]
         out["input_paths"] = {
             "agent": sum(1 for i in gate if i.get("path") == "agent"),

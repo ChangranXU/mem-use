@@ -32,7 +32,7 @@ The JSON artifact — the same dict embedded in the HTML — is:
 | `trajectories` | One row per loaded run; `memory_cost` totals the op costs as `{generation, search}` (every search once, delivered or not). `searches` lists every recorded search, delivered or not: `operation_id`, `lane_id`, `trigger`, resolved `query`, `status`, `returned_count`, `delivered_by` (the recall ops that placed it), `cost`, and opaque `extensions`. An agent-directed read whose result never reached the model has an empty `delivered_by`. `episodes` lists the recorded episode scopes in order — `episode_id`, `sequence_id`, `status` (`prepared` / `needs_review` / `incomplete`), and the global `first_step` / `last_step` — from the bridge `bridge_episode_open`/`close` events (else episode-scoped `memory_session` events), the same scope rule injudge prepares from; it is empty when the recording names no episode. |
 | `memories` | One record per stable item identity: normally `(namespace, item_id)`, otherwise the documented display-key or content-digest fallback. Each record carries origin, creation site, later updates, recalls, and deletion history — `deletions` lists every observed deletion (a re-creation marks `revived` and never erases it), while `deleted` is the terminal state. |
 | `edges` | Relationships from an op to a memory: `creates`, `supersedes`, `deletes`, `recalls`. |
-| `validation` | The run's `{level, msg}` notes (`info` / `warn`) for corrupt or skipped input, attribution gaps, and verdict-join mismatches. |
+| `validation` | The run's `{level, msg}` notes (`error` / `warn` / `info`) for corrupt or skipped input, attribution gaps, and verdict-join mismatches. |
 
 Memory-call costs also preserve the recorder's `cached_tokens` (cache reads),
 `cache_write_tokens`, `cache_write_1h_tokens` (the one-hour subset of writes),
@@ -50,9 +50,13 @@ Two chronology notes — both valid input rather than errors:
 
 ## HTML Features
 
+Errors have a separate header count and appear before warnings in validation
+details. A warning from the loader and the verdict overlay appears once when
+both report the same problem.
+
 The rendered page provides:
 
-- A header summary (runs, episodes and sequences, memories, writes, recalls, warnings) and a one-line key; hover a key item for its full meaning
+- A header summary (runs, episodes and sequences, memories, writes, recalls, errors, warnings) and a one-line key; hover a key item for its full meaning
 - Rows grouped by structure. A run that records several episodes gets a header, then a header per sequence (click it to fold its episodes), then one row per episode with x = step within the episode, so episodes line up and stay readable without zooming. A run of one episode or none is a single row on its own steps. Runs are ordered by `run.json` `started_at` when it parses, else the directory name's `YYYYMMDD-HHMMSS` timestamp prefix, else the plain resolved directory name. The step axis fits the window by default
 - Writes (▲, extraction ops) above each row's line and recalls (▼) below; consecutive-step recalls with the same delivered memory set collapse into ×n pills (never across episodes), and an empty delivery is a hollow ▼
 - Tracing instead of a tangle: hover a node to see where its memories came from (a recall) or where they were recalled later (a write), across episodes; hovering or selecting a memory traces all its recalls plus its dashed update/deletion chain. "All links" draws every creation → recall link at once
@@ -69,7 +73,7 @@ The rendered page provides:
 |---|---|
 | `-o PATH` | HTML output path (default `memory-graph.html`) |
 | `--json PATH` | Also write the machine-readable graph artifact |
-| `--verdicts PATH` | Merge an `injudge.report/v21` file before rendering |
+| `--verdicts PATH` | Merge an `injudge.report/v22` file before rendering |
 
 ## Verdict Overlay
 
@@ -97,5 +101,8 @@ Recall nodes are colored by `span_verdict`:
 With verdicts merged, unjudged recalls fade to light blue so judged spans stand out, and the header gains a verdict tally that keeps mechanical skips (`unassessable`, `empty`) apart; clicking a judged verdict's count zooms to each span with that verdict in turn. Clicking a verdict in the key line filters the rows to the episodes holding a recall with that verdict (several can be picked; click again to clear). While a memory is selected or a node is open in the detail panel, the episodes linked to it stay visible with a dashed outline, and they disappear when the selection clears. A recall's detail panel shows each covered span's verdict, the judge's analysis, one row per delivered entry (usage plus R/A/N/I/P rubric marks), the cited evidence, and the span's input record (the `agent` path, with gold / forced markers and the attempt count).
 
 {% hint style="info" %}
-Unmatched or ambiguous joins are validation notes, never errors. An ambiguous key — a `run_id` shared by several loaded trajectories, or one `(run_id, seq)` claimed by several report injections or several recall ops — is skipped rather than cross-annotated. The graph still renders.
+Unmatched or ambiguous joins produce validation notes. If multiple trajectories share a `run_id` in either the loaded graph or the report, all joins for that run are skipped, even when their sequence numbers differ. A `(run_id, seq)` claimed by multiple report injections or recall ops is also skipped. The graph still renders. Invalid report IDs or references fail before the merge.
 {% endhint %}
+
+Plain graph rendering and completed-report overlays do not load judge prompts.
+Recovery of an unfinished report loads the report builder to rebuild totals.

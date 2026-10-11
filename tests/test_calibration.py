@@ -4,6 +4,8 @@ disagreement instead of picking an answer."""
 import copy
 import json
 
+import pytest
+
 from calibration import CASES, build, case_id, expected_labels, score
 from injudge.__main__ import main
 from test_injudge import _result, _fill_reads
@@ -37,10 +39,10 @@ def _judge_cases(tmp_path, monkeypatch, roots=None):
     build(root)
     env = tmp_path / ".env"
     env.write_text("BASE_URL=https://judge.invalid\nAPI_KEY=test-key-only\nMODEL=test-judge\n")
-    monkeypatch.setattr("injudge.agent._check_runner", lambda: None)
+    monkeypatch.setattr("injudge.agent._check_runner", lambda: 4096)
 
     def fake(cfg, evidence_dir, trajectory_path, attempt, system, message, history,
-             warnings):
+             warnings, minimum_output_tokens):
         if roots is not None:
             roots.append(evidence_dir)
         span = (evidence_dir / "span.md").read_text()
@@ -153,6 +155,21 @@ def test_calibration_cli_builds_and_scores_all_cases(tmp_path, monkeypatch, caps
     total = sum(len(labels) for labels in expected_labels().values())
     assert f"{total}/{total} expected labels agree" in output
     assert "unscored" not in output
+
+
+@pytest.mark.parametrize("report", [
+    '{"tool":{"schema":"injudge.report/v20"}}',
+    '{"tool":{"schema":"unrelated/v1"}}',
+    '[' * 2000 + '0' + ']' * 2000,
+])
+def test_calibration_cli_rejects_invalid_reports(tmp_path, report, capsys):
+    from calibration.__main__ import main as calibration_main
+
+    path = tmp_path / "report.json"
+    path.write_text(report)
+    with pytest.raises(SystemExit, match="error:"):
+        calibration_main(["score", str(path)])
+    assert capsys.readouterr().out == ""
 
 
 def test_recorded_followup_cases_have_real_host_links_and_separate_credit(tmp_path, monkeypatch):

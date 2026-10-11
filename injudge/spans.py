@@ -47,7 +47,7 @@ it showed. When either text is unverifiable, the item-level convention
 stands. A later span starting at this span's last delivery step (two memory
 blocks placed in one call, or a declared step collision) consumed both
 deliveries in one turn: a re-exposure caps this window at that step
-inclusive (`same_step_bound`), with the collision noted in warnings. A copy
+inclusive (the entry is in `same_step_bounds`), with a warning for the collision. A copy
 showing new verified text is eligible at that step too; one adding nothing
 verifiable — indistinguishable, so creditable once — opens after it
 (`memory_window_starts`).
@@ -247,6 +247,16 @@ def _exposed_text(memory: dict, exposure: dict | None) -> str | None:
     return value[:shown] if isinstance(shown, int) and not isinstance(shown, bool) else None
 
 
+def exposed_key(memory: dict, placements: list[dict]) -> str | None:
+    key = memory.get("key")
+    if not isinstance(key, str) or not key:
+        return None
+    # A longer identifier or path must not expose a hidden key.
+    shown_key = re.compile(rf"(?<![\w./-]){re.escape(key)}(?![\w/-]|\.\w)")
+    return key if any(isinstance(p.get("text"), str) and shown_key.search(p["text"])
+                      for p in placements) else None
+
+
 def _reexposes(later: tuple[dict, dict | None], earlier: tuple[dict, dict | None]) -> bool:
     """Whether a later delivery of the same item showed everything the
     earlier one did. Only verified texts can prove a narrower or different
@@ -307,7 +317,7 @@ def _stamp_windows(
                     end = first - 1
                     break
                 end = first
-                span.same_step_bound = first
+                span.same_step_bounds.add(mid)
                 colliding.append(spans[k].id)
                 break
             windows[mid] = end
@@ -338,26 +348,22 @@ def _stamp_followups(spans: list[InjectionSpan], episode: EpisodeInput) -> None:
     for span in spans:
         if span.step_first is None:
             continue
-        texts = [p.get("text") for p in span.placements if isinstance(p.get("text"), str)]
         for a, m in enumerate(span.memories):
-            key = m.get("key")
-            if not isinstance(key, str) or not key:
-                continue
-            # A hidden kb-7 is not exposed by a visible kb-70, store/kb-7, or
-            # kb-7.1; sentence punctuation after the key ("see kb-7.") is.
-            shown_key = re.compile(rf"(?<![\w./-]){re.escape(key)}(?![\w/-]|\.\w)")
-            if not any(shown_key.search(t) for t in texts):
+            key = exposed_key(m, span.placements)
+            if key is None:
                 continue
             mid = memory_id(a)
             start = span.memory_window_starts.get(mid, span.step_first)
             end = span.memory_windows.get(mid)
             for delivery in episode.deliveries:
+                searches = [s for s in delivery["searches"]
+                            if s.get("trigger") == "explicit" and s.get("query") == key]
+                if not searches:
+                    continue
                 shown = [ref["exposure"].get("shown") for ref in delivery["memories"]
                          if entry_ident(ref["audit"]) == entry_ident(m)]
                 if not shown:
                     continue
-                searches = [s for s in delivery["searches"]
-                            if s.get("trigger") == "explicit" and s.get("query") == key]
                 for placement in delivery["placements"]:
                     # The same delivery can have several hosts. A proof for an
                     # unrelated slot cannot attribute this item's follow-up.

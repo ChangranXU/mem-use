@@ -32,7 +32,9 @@ from collections import Counter
 from pathlib import Path
 
 from injudge import REPORT_SCHEMA
+from injudge.checkpoints import recover_checkpoints
 from memgraph.annotations import is_int
+from memgraph.model import AMBIGUOUS_RUN_WARNING
 
 
 def load_verdict_report(path: Path) -> dict:
@@ -48,7 +50,9 @@ def load_verdict_report(path: Path) -> dict:
         )
     try:
         _check_report_links(report)
-    except ValueError as e:
+        report = recover_checkpoints(report, Path(path).parent)
+        _check_report_links(report)
+    except (OSError, ValueError, RecursionError, KeyError, TypeError) as e:
         raise SystemExit(f"error: invalid verdicts report {path}: {e}") from e
     return report
 
@@ -101,23 +105,29 @@ def apply_verdicts(graph: dict, report: dict, source: str = "") -> None:
     """Annotate the graph's recall ops with verdicts, in place.
 
     The report loader checks its schema, IDs, and references. Missing matches
-    in the loaded graph produce notes. A join key claimed twice on either
-    side annotates neither op.
+    in the loaded graph produce notes. A run_id shared by multiple trajectories
+    on either side blocks all joins for that run. A repeated (run_id, seq)
+    blocks that key. Ambiguous records must not assign a verdict to another run.
     """
     validation = graph.setdefault("validation", [])
+    existing_notes = {(item["level"], item["msg"]) for item in validation}
 
     def note(level: str, msg: str) -> None:
-        validation.append({"level": level, "msg": msg})
+        key = (level, msg)
+        if key not in existing_notes:
+            validation.append({"level": level, "msg": msg})
+            existing_notes.add(key)
 
     spans = {o["operation_id"]: o for o in report.get("operations", [])}
     traj_run = {t["id"]: t["run_id"] for t in report.get("trajectories", [])}
-    # (run_id, seq) -> injection. A key claimed twice — a corrupt log's
-    # synthetic seq colliding with a real one, or one run judged twice in
-    # one report — annotates neither op.
+    report_shared = {run_id for run_id, count in Counter(traj_run.values()).items() if count > 1}
+    # Duplicate sequence numbers cannot identify a single injection.
     claimed: dict[tuple[str, int], dict] = {}
     ambiguous: set[tuple[str, int]] = set()
     for entry in report.get("injections", []):
         key = (traj_run[spans[entry["span_id"]]["traj"]], entry["seq"])
+        if key[0] in report_shared:
+            continue
         if key in claimed:
             ambiguous.add(key)
         claimed[key] = entry
@@ -139,9 +149,8 @@ def apply_verdicts(graph: dict, report: dict, source: str = "") -> None:
             note("warn", f"{run_id}: {len(by_run[run_id])} report injection(s) matched no "
                          f"loaded trajectory ({_seqs(set(by_run[run_id]))})")
     shared = {run_id for run_id, n in graph_runs.items() if n > 1}
-    for run_id in sorted(shared):
-        note("warn", f"{run_id}: run_id shared by multiple loaded trajectories; the verdict "
-                     "join is ambiguous — no verdicts annotated for it")
+    for run_id in sorted(shared | report_shared):
+        note("warn", AMBIGUOUS_RUN_WARNING.format(run_id=run_id))
 
     recalls: dict[str, list[dict]] = {}
     for op in graph.get("ops", []):
@@ -151,7 +160,7 @@ def apply_verdicts(graph: dict, report: dict, source: str = "") -> None:
     for traj in graph.get("trajectories", []):
         run_id, ops = traj["run_id"], recalls.get(traj["id"], [])
         seq_map = by_run.get(run_id)
-        if run_id in shared:
+        if run_id in shared or run_id in report_shared:
             continue
         if seq_map is None:
             if ops:

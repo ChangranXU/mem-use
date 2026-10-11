@@ -6,7 +6,7 @@ icon: sliders
 # 配置
 
 {% hint style="info" %}
-只有 injudge 需要配置，通过 `.env` 文件（memgraph 只用命令行参数）。复制 `.env.example`——完整注释见该文件——并填写；每个键都会被读取和校验，没有无效旋钮。评审是一个智能体，因此旋钮刻意很少：端点与线格式、采样与思考层级、两个预算、重试、单次调用超时与区间并行。
+只有 injudge 需要配置，通过 `.env` 文件（memgraph 只用命令行参数）。复制 `.env.example`——完整注释见该文件——并填写；每个键都会被读取和校验，没有无效旋钮。评审是一个智能体，因此旋钮刻意很少：端点与线格式、采样与思考层级、两个预算、重试、空闲超时与区间并行。
 {% endhint %}
 
 ## 安装
@@ -35,8 +35,8 @@ npm --prefix agent install    # TS 侧执行一次（需要 PATH 上有 node >= 
 | 键 | 默认值 | 用途 |
 |---|---|---|
 | `MAX_STEPS` | `40` | 首次调查的 LLM 调用上限（含最终作答轮）。答案被拒后的每次跟进最多 `min(MAX_STEPS, 4)` 次调用。 |
-| `CONTEXT_WINDOW` | `131072` | 评审模型的上下文窗口（token）。水位线（窗口减 `MAX_OUTPUT_TOKENS` 和强制作答消息的估算大小）在上下文溢出前触发强制作答。 |
-| `MAX_OUTPUT_TOKENS` | `32768` | 每次 LLM 调用的输出 token 上限。上下文水位线会为输出预留这部分空间，因此输入证据的可用空间相应减少；计费仍按实际生成量。加上强制作答消息估算后，须在 `CONTEXT_WINDOW` 内为输入留出空间；无效配置在加载轨迹前拒绝。`--judge-max-tokens` 可覆盖。 |
+| `CONTEXT_WINDOW` | `131072` | 评审模型的上下文窗口（token）。水位线扣除 pi 的上下文预留、`MAX_OUTPUT_TOKENS` 和强制作答消息的估算大小，再触发最终作答。 |
+| `MAX_OUTPUT_TOKENS` | `32768` | 每次 LLM 调用的输出 token 上限。上下文水位线会为输出预留这部分空间，因此输入证据的可用空间相应减少；计费仍按实际生成量。加上 pi 的上下文预留和强制作答消息估算后，须在 `CONTEXT_WINDOW` 内为输入留出空间；无效设置或超限的必读输入在付费调用前拒绝。`--judge-max-tokens` 可覆盖。 |
 
 中途被截断的判定不是失败类别：该答案只是无法通过契约解析，纠正重试会继续同一对话重新作答。
 
@@ -45,7 +45,7 @@ npm --prefix agent install    # TS 侧执行一次（需要 PATH 上有 node >= 
 | 键 | 默认值 | 用途 |
 |---|---|---|
 | `MAX_ATTEMPTS` | `3` | 每个区间的运行器阶段总数：首次调查，加上每次答案被拒后的跟进。`--max-attempts` 可覆盖。 |
-| `TIMEOUT` | `300` | 每次 HTTP 请求的超时秒数，包括重试请求。`--timeout` 可覆盖。 |
+| `TIMEOUT` | `300` | 等待响应头或下一个正文块的最大空闲秒数。持续返回数据的流可以运行更久，不设总耗时上限。每次重试重新计时。`--timeout` 可覆盖。 |
 | `JUDGE_PARALLEL` | `1` | 跨所有输入轨迹并行评判的区间数（上限 32）。每个在飞区间是一条独立的智能体对话。 |
 
 ## 命令行参数
@@ -54,12 +54,12 @@ npm --prefix agent install    # TS 侧执行一次（需要 PATH 上有 node >= 
 |---|---|---|
 | `--env PATH` | checkout 的 `.env` | 指定另一份 env 文件 |
 | `--judge-model` | `MODEL` | 覆盖评审模型 |
-| `--timeout` | `300` | 每次 HTTP 请求的超时秒数 |
+| `--timeout` | `300` | 等待响应头或下一个正文块的空闲超时秒数 |
 | `--max-attempts` | `MAX_ATTEMPTS` | 每区间的运行器阶段总数（调查加跟进） |
 | `--judge-max-tokens` | `MAX_OUTPUT_TOKENS` | 单次调用输出上限 |
 | `--episode ID` | 不设 | 只评判已录制 episode id、benchmark 身份或执行 id 等于 *ID* 的 episode（可重复）。其余区间保留紧凑的 `unjudged` 审计记录，不计入汇总统计、summary 计数和 dry-run 区间计数。policy 总量仍覆盖完整轨迹。无匹配的 *ID* 在任何调用前快速失败。不可与 `--prepare-only` 同用。 |
 | `--limit N` | 不设 | 最多用智能体评判 *N* 个 episode 内、非空的区间；先校验全部 episode 与附件的适用范围。`--prepare-only` 则改为限制物化的 episode 数量。小于 1 的值会快速失败。 |
-| `--dry-run` | 关 | 打印每个付费区间任务的目标文档、文件索引与开场消息；不发起调用、不写文件 |
+| `--dry-run` | 关 | 打印每个付费区间任务的目标文档、文件索引与开场消息；不发起调用、不写文件。不可与 `--html` 同用。 |
 | `--golden PATH` | 不设 | 只适用于恰好一个 episode 的 golden answer；其他情况请用带键的元数据 |
 | `--correctness resolved\|unresolved` | 不设 | 只适用于恰好一个 episode 的已记录结果，仅作佐证 |
 | `--gold-metadata PATH` | 不设 | verified-metadata.json：按已记录的 episode benchmark 身份连接 gold patch |

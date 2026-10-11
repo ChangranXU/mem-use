@@ -20,7 +20,7 @@ npm --prefix agent install
 uv run -m injudge <paths> --dry-run --limit 3
 ```
 
-Progress renders on stderr with tqdm: a trajectories bar plus the current trajectory's span bar on a TTY, and one checkpoint line per finished trajectory when piped.
+Progress reports judged spans on stderr: a tqdm bar on a TTY, or one line per completed span when piped.
 
 ## Outputs
 
@@ -28,8 +28,10 @@ Each run writes its own `<run-stamp>/` folder (`YYYYMMDD-HHMMSS-<hex>`) under `-
 
 | File | Contents |
 |---|---|
-| `injudge-report.json` | The runtime judging record (`injudge.report/v21`), written before paid work with pending spans marked `unjudged`, then checkpointed after each completed span, including parallel completions |
+| `injudge-report.json` | The judging record (`injudge.report/v22`): an initial snapshot before paid work, then a full snapshot when the run ends |
+| `injudge-checkpoints.jsonl` | Each completed span, including parallel completions; the report points to this journal until the full snapshot is written |
 | `summary.json` | The final statistics (`injudge.summary/v18`): counts, rates, delivery estimates, judge execution totals |
+| `summary.md` | A readable view of the final statistics, with spans to inspect, diagnostics, and links to the JSON files |
 | `memgraph-verdicts.html` | Only with `--html`: memgraph with recall nodes colored by verdict |
 | `evidence/` | One folder per span sent to the judge agent (error verdicts from a failed run included): target `span.md` plus only its parent's prepared episode files and optional attachments |
 | `agent-runs/` | One trajectory JSONL per span sent to the judge agent: the pi event-sourced recording of how each verdict was reached |
@@ -40,7 +42,19 @@ The process exits `2` if any span ended in `error` or any validation note carrie
 
 A span is rejected before judging when its parent episode's boundary or assignment is not `prepared`, or when a span with deliveries and an attributed step has no recorded task in its parent episode: it takes an `error` verdict with no agent run — no evidence folder, no transcript, and no `input` record.
 
-Assessable spans are also rejected when the episode has unresolved placement ownership, inseparable placement/host text, or visibility gaps in a delivery consumer's context. Dry-run uses the same guard and exits 2. Informational preparation diagnostics alone do not block judging; empty and unobserved spans still use their mechanical skip paths. `summary.json` is written only when the run finishes; an interrupted run's report retains completed results and explicit pending spans. Interruption cancels queued parallel jobs; already-running jobs may finish. Checkpoints persist completion immediately while validation notes retain source span order.
+The evidence check applies to the whole episode. Unresolved placement ownership, inseparable placement/host text, or a gap in any delivery consumer's recorded input rejects every assessable span in that episode. This includes earlier spans whose own consumer input has no gap. Dry-run uses the same check and exits 2. Informational preparation diagnostics alone do not block judging; empty and unobserved spans still use their mechanical skip paths.
+
+`summary.json` is written only when the run finishes. Each completion is saved
+in the journal. Normal completion or a handled interruption writes a full
+report with completed results and explicit pending spans. If the process is
+killed, keep the initial report and journal together; memgraph and calibration
+replay the journal automatically. See [Artifacts](artifacts.md) for the format.
+The first interruption cancels queued jobs, waits for active jobs, and saves
+their results before writing the full report. This also applies with one worker.
+A second interruption stops active runners; unfinished spans stay `unjudged`.
+If the Python process is terminated, its runners also stop and remove their
+temporary job and result files. Results already saved in the journal remain recoverable.
+Validation notes retain source span order.
 
 ## Offline Preparation
 
@@ -78,6 +92,10 @@ Budgets, forced answers, and the conversation's retry/failure behavior are in [J
 ## Golden Answer and Correctness
 
 The scoring call accepts two optional attachments, joined to episodes **before** `--limit` selects paid spans. `--golden` and `--correctness` require exactly one discovered episode. Benchmark-keyed metadata can attach to several episodes; an unkeyed trajectory sidecar applies only when that trajectory has exactly one episode. Precedence is CLI value → keyed join → eligible sidecar.
+
+The one-episode requirement applies to the complete input. `--episode` and
+`--limit` do not make a multi-episode input eligible for these two flags.
+Use keyed metadata for that input.
 
 | Attachment | Source | Effect |
 |---|---|---|

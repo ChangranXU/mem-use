@@ -52,6 +52,7 @@ from typing import Any
 
 from injudge.model import InjectionSpan, memory_id, step_range
 from injudge.prompts import load_prompt
+from injudge.spans import exposed_key
 from memgraph.annotations import is_int
 
 
@@ -144,23 +145,16 @@ class GoldInput:
     correctness: dict[str, Any] | None = None
 
 
-def _memory_line(m: dict, mid: str, exposure: dict | None) -> str:
-    """One delivered memory on the judge-visible evidence, labelled with its
-    span-local id and grounded to what the placement actually exposed. The
-    memory system's self-assessment (confidence, needs_verification) AND its
-    annotation-only type label are withheld: type names like `pitfall` or
-    `procedure` can prime an effect story. Text actually present in the
-    delivered placement is retained as observed, not filtered by vocabulary. Exposure
-    markers keep the judged evidence inside what the agent could have seen:
-    a clipped entry carries ONLY the exposed prefix — the unshown remainder
-    is not the agent's to use and not the judge's to credit — and an
-    unverified one WITHHOLDS the canonical value: a warning alone is not an
-    information boundary (hidden content would still prime the explanation
-    or the selection of supporting steps), so the judge scores only what the
-    step stream itself shows the agent had. The canonical value stays in the
-    report artifact, separated from the judge-visible evidence. No exposure
-    record at all (a span built directly) shows the canonical value bare."""
-    label = f"- [{mid}] {m.get('key') or '(unkeyed)'}"
+def _memory_line(m: dict, mid: str, exposure: dict | None, key: str | None) -> str:
+    """Limit judge evidence to the text the placement exposed.
+
+    Hidden keys, type labels, and confidence can bias the explanation, so
+    they are withheld. A clipped entry shows only its exposed prefix. An
+    unverified entry withholds the canonical value; a warning is not enough
+    to prevent the judge from using hidden text. Canonical values stay in
+    the report. A directly built span with no exposure record shows its value.
+    """
+    label = f"- [{mid}]" + (f" {key}" if key else "")
     value = m.get("value")
     if exposure is None:
         return f"{label}: {value}"
@@ -255,7 +249,8 @@ def _render_span_header(span: InjectionSpan, memories_note: str, earlier: str | 
             mid = memory_id(i)
             start = span.memory_window_starts.get(mid, span.step_first)
             end = span.memory_windows.get(mid)
-            label = m.get("key") or "(unkeyed)"
+            key = exposed_key(m, span.placements)
+            label = f"{mid} ({key})" if key else mid
             bump = ""
             if start != span.step_first:
                 # an earlier span delivered this memory to the same consuming
@@ -270,18 +265,18 @@ def _render_span_header(span: InjectionSpan, memories_note: str, earlier: str | 
                 reason = (f"episode ends at step {end}" if end == span.episode_last_step
                           else f"re-exposed from step {end + 1}")
                 frags.append(
-                    f"{mid} ({label}) — no eligible action steps{bump} "
+                    f"{label} — no eligible action steps{bump} "
                     f"({reason})"
                 )
             elif end is not None:
-                if span.same_step_bound == end and start == span.step_first:
+                if mid in span.same_step_bounds and start == span.step_first:
                     # the bound came from a same-step collision (a later
                     # span re-exposed this memory at this span's last delivery
                     # step), not from a cleanly separated re-delivery — saying
                     # "re-delivered from step N" would name a step separation
                     # the recording does not carry
                     frags.append(
-                        f"{mid} ({label}) — {step_range(start, end)}{bump} "
+                        f"{label} — {step_range(start, end)}{bump} "
                         "(another span re-exposed this memory at this same step; "
                         "steps beyond it are that span's to claim)"
                     )
@@ -289,12 +284,12 @@ def _render_span_header(span: InjectionSpan, memories_note: str, earlier: str | 
                     reason = ("episode's last eligible step" if end == span.episode_last_step
                               else f"re-exposed from step {end + 1}; later steps belong to that span")
                     frags.append(
-                        f"{mid} ({label}) — {step_range(start, end)}{bump} "
+                        f"{label} — {step_range(start, end)}{bump} "
                         f"({reason})"
                     )
             else:
                 frags.append(
-                    f"{mid} ({label}) — steps {start} onward{bump} (not re-exposed in a later span)"
+                    f"{label} — steps {start} onward{bump} (not re-exposed in a later span)"
                 )
             variants = span.memory_variant_steps.get(mid)
             if variants:
@@ -306,7 +301,7 @@ def _render_span_header(span: InjectionSpan, memories_note: str, earlier: str | 
                 )
         parts.append("Footprint windows: " + "; ".join(frags) + ".")
         followups = [
-            f"{memory_id(i)} ({m.get('key')}) — "
+            (f"{memory_id(i)} ({key})" if (key := exposed_key(m, span.placements)) else memory_id(i)) + " — "
             + "; ".join(f"action step {hit['step']}, result delivery step {hit['delivery_step']}"
                         for hit in span.memory_followups[memory_id(i)])
             for i, m in enumerate(span.memories) if memory_id(i) in span.memory_followups
@@ -320,7 +315,7 @@ def _render_span_header(span: InjectionSpan, memories_note: str, earlier: str | 
             )
     parts.append(memories_note)
     parts.extend(
-        _memory_line(m, memory_id(i), exp)
+        _memory_line(m, memory_id(i), exp, exposed_key(m, span.placements))
         for i, (m, exp) in enumerate(span.iter_exposed())
     )
     return "\n".join(parts)

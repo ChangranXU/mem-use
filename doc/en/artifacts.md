@@ -1,20 +1,28 @@
 ---
-description: "injudge.report/v21, injudge.summary/v18, every field, and how every rate is counted."
+description: "injudge.report/v22, injudge.summary/v18, every field, and how every rate is counted."
 icon: box-archive
 ---
 
 # Artifacts
 
-The current schemas are report v21 and summary v18. Report v20 changed how
+The current schemas are report v22 and summary v18. Report v22 stores each
+completed span in a checkpoint journal until the final report is written.
+The rubric rules are unchanged. Report v20 changed how
 influence is attributed: an action credits memory only when it uses content
 absent from the recorded input before exposure. Influence null no longer means
 "another source explains it equally" (see
 [Verdict derivation](verdict-derivation.md)). Influence, effect, and verdict
-counts from v19 and earlier are not comparable with v20 or v21. The v20 change
+counts from v19 and earlier are not comparable with v20 and later. The v20 change
 kept the artifact shape and summary schema v17; v19 had removed the aggregate
 `headline` block.
 A bundle can contain both useful and harmful entries, so its verdict cannot
 measure how many tokens helped.
+
+Report v22 also removes the duplicate `input.retained_llm_calls` and
+`input.retained_tool_calls` fields. `llm_calls` and `tool_calls` count the
+conversation retained after the last phase. Their values are null when that
+phase has no result. Executed counts still include all phases and discarded
+rounds.
 
 The report and summary distinguish harm from memory guidance and failures in
 execution. A memory-misdirected detour that is abandoned or corrected without a
@@ -22,7 +30,8 @@ used finding is harm. An agent typo, missing tool, or unrelated environment
 failure alone does not prove memory harm; follow corrected attempts to their
 results. Report v17 introduced this distinction; harm counts from v16 are not
 directly comparable. Do not combine effect labels or rates from different scoring versions.
-Older reports remain historical artifacts; memgraph accepts only report v21.
+Older reports remain historical artifacts; memgraph and calibration accept
+only report v22.
 
 {% hint style="info" %}
 injudge writes all artifacts of a run to that run's own `<run-stamp>/` folder under the output container (`-o DIR`, default `output/`) — a run never overwrites another run's artifacts.
@@ -30,12 +39,30 @@ injudge writes all artifacts of a run to that run's own `<run-stamp>/` folder un
 
 | File | Schema | Role |
 |---|---|---|
-| `injudge-report.json` | `injudge.report/v21` | Runtime judging record. Checkpointed after each completed span, with pending spans marked `unjudged`, so interruption within a multi-episode trajectory keeps completed work. Feed it to memgraph with `--verdicts`. |
+| `injudge-report.json` | `injudge.report/v22` | Initial snapshot with pending spans marked `unjudged`, then a complete snapshot when the run ends. During judging, `checkpoint_journal` names the file with completed results. Feed the report to memgraph with `--verdicts`. |
+| `injudge-checkpoints.jsonl` | `injudge.checkpoint/v1` | One appended record per completed span. Required while the report has a `checkpoint_journal` field; retained for audit after completion. |
 | `summary.json` | `injudge.summary/v18` | Compact final statistics: counts, rates, delivery estimates, and judge execution totals. |
 | `summary.md` | — | Short readable summary of the same totals, the spans to inspect first, diagnostic counts, and links to the JSON files. |
 | `memgraph-verdicts.html` | — | Only with `--html` (off by default): memgraph with recall nodes colored by span verdict. |
 | `evidence/<span-dir>/` | — | One folder per span the judge agent ran for: the exact files available to it. |
 | `agent-runs/<span-dir>.jsonl` | — | One trajectory per span sent to the judge agent: the pi event-sourced recording of the judging conversation (see [Judge agent](judge-client.md#trajectory-recording)). |
+
+Each checkpoint record contains `schema`, `generated_at`, the completed
+`operation`, its `injections`, and its `validation` notes. A completion appends
+only that span's data. It does not rebuild or rewrite the full report.
+
+Report, checkpoint, and offline-package `generated_at` timestamps use UTC.
+Summaries copy the report timestamp. Run-folder names use the local clock.
+
+On completion or a handled interruption, injudge writes the full report and
+removes `checkpoint_journal`. That report is standalone; its saved journal is
+no longer applied. If the process is killed before that write, keep the initial
+report and adjacent journal together. The shared reader used by memgraph and
+calibration applies complete journal records, restores notes in source span
+order, and rebuilds aggregates once. It ignores a final line without a newline.
+An invalid complete record fails loading. The recovered report is returned in
+memory; loading does not rewrite files. A direct JSON read without journal
+replay sees the initial snapshot until the full report is written.
 
 An offline preparation run writes a different package under its own run folder:
 
@@ -85,7 +112,7 @@ Episode counts appear alongside trajectory/span counts. Empty deliveries and
 unobserved consumers use separate classes (`empty`, `unassessable`), outside
 verdict-rate denominators. The report keeps complete diagnostics, memory
 identities, episode rows, and span records. `memgraph --verdicts` accepts only
-`injudge.report/v21`.
+`injudge.report/v22`.
 
 ### The Report's Aggregates
 
@@ -199,7 +226,7 @@ rubric notes, configuration, and provenance remain in `injudge-report.json`.
 | `selection` | Source report selection, when present. |
 | `notes` | Brief estimate and verdict-scope explanations. |
 | `report` | `injudge-report.json`, the detailed record in the same run folder. |
-| `generated_at` | Source report timestamp. |
+| `generated_at` | Source report timestamp in UTC, copied without conversion. |
 | `tool` | Only `name`, `schema`, `source_report_schema`, and `judge_model`. |
 
 Rates are numeric fractions. Unknown values remain `null`; they are not zero.
@@ -257,8 +284,9 @@ nulls remain. Estimate notes appear once at the top level.
 
 `injudge-report.json` additionally carries, per operation: `kind` (`recall_injection_span`), `traj`, `seq`, `n_injections`, `steps` (omitted when no delivery has an attributed step), `payload_summary`, and `delivery_cost` (`deliveries`, `content_chars_total`, `approx_tokens_total`); `episode_execution_id` and `episode_last_step`; `memories` (full recorded refs stamped with span-local ids); `memory_exposure` — a **positional** list parallel to `memories` (index `i` describes `memories[i]`), each entry `{state, exposed_chars, value_chars}` with state `full`, `full_normalized`, `clipped`, or `unknown`, unverified canonical values withheld from judge evidence; and `memory_windows` (per-entry global end steps, capped at the episode's last eligible step or the next same-episode delivery), with `memory_window_starts` recording same-step collision exceptions (a same-step copy adding no verified text opens after the shared step), `memory_variant_steps` the in-window steps where the same memory was delivered with different or narrower text (which leaves the window open), and `memory_followups` the proven explicit selections `{step, delivery_step, tool_call_id, operation_id}` (actual action and result-delivery steps recorded separately). Unlike `memory_exposure`, `rubric`, `memory_usage`, and `memory_windows` are keyed by span-local ids. The operation also retains rubric notes and action `anchors`, `analysis`, `evidence`, `step_gaps`, `auto`, `error`, `judge_raw`, and `pe_pairing_corrections` when present. Spans the judge agent ran for — its own error outcomes included — carry `input`: `path: agent`, attempts, retained `llm_calls` / `tool_calls`, `read_steps` (global steps whose complete text was retained from the step files — every cited anchor and structured evidence step must be one of them), executed call counts, reported usage including rolled-back calls, context rollbacks, `any_phase_forced`, and the transcript path relative to the run folder; a span rejected before the agent ran (an unsafe or incomplete episode boundary, or a parent episode with no recorded task) takes an error verdict with no `input`, no evidence folder, and no transcript. `gold` and final-answer `forced` appear when applicable. Trajectory rows carry `id`, `run_id`, `path`, `instance_id`, `model`, `adapter`, `n_steps`, `n_injections`, `n_spans`, their `episodes` rows, and the trajectory's `policy`; episode rows record boundary, task, attachment, and evidence provenance without an episode verdict.
 
-The report's `tool` block names the tool (`name: "injudge"`) and its `schema`, and carries the resolved, secret-free judge-agent configuration (`config`, URLs sanitized to `scheme://host[:port][/path]`) with `judge_model`.
-The known judge credential is also masked if it appears in the remaining URL.
+The report's `tool` block names the tool (`name: "injudge"`) and its `schema`, and carries the resolved, secret-free judge-agent configuration (`config`, endpoint URLs reduced to their origin, `scheme://host[:port]`) with `judge_model`.
+Paths, queries, fragments, and userinfo are omitted because they can contain secrets.
+The known judge credential is also masked if it appears in the origin.
 
 The `injections` array lists every raw delivery with its span, its `episode_execution_id` when the span has one, `role` (`first` or `restated`), `verdict`, `content_chars`, and its `op_id` / `seq` / `step`.
 

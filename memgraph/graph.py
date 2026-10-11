@@ -15,11 +15,12 @@ the loaded set), never an error.
 from __future__ import annotations
 
 import re
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
 from memgraph.annotations import item_ident, version_identity
-from memgraph.model import Edge, MemoryOp, MemoryUnit, Trajectory
+from memgraph.model import AMBIGUOUS_RUN_WARNING, Edge, MemoryOp, MemoryUnit, Trajectory
 from memgraph.parse_trajectory import parse_trajectory
 
 _TS_PREFIX = re.compile(r"^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})")
@@ -418,6 +419,9 @@ def load_trajectories(
         trajectories.append(traj)
         ops_by_traj[traj.id] = ops
         events_by_traj[traj.id] = events
+    for run_id, count in Counter(traj.run_id for traj in trajectories).items():
+        if count > 1:
+            warnings.append(AMBIGUOUS_RUN_WARNING.format(run_id=run_id))
     return trajectories, ops_by_traj, events_by_traj, warnings
 
 

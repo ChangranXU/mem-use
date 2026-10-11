@@ -244,17 +244,37 @@ def episode_scopes(events: list[dict[str, Any]], diagnostics: list[str],
     return discover_boundaries(events, diagnostics) or session_boundaries(events, information, annotations)
 
 
+def episode_participants(boundaries: list[Boundary], annotations: AnnotationIndex) -> dict[str, str]:
+    """Keep recorded participant sessions consistent across graph and judge scope."""
+    participants: dict[str, str] = {}
+    for session_id, event in annotations.sessions.items():
+        if _payload(event).get("session_kind") != "other":
+            continue
+        boundary = episode_for_index(boundaries, event["_event_index"])
+        if boundary and boundary.open_event.get("type") == "memory_session" and boundary.session_id:
+            participants[session_id] = boundary.session_id
+    return participants
+
+
+def delivery_episode(boundaries: list[Boundary], op: MemoryOp, event: dict[str, Any],
+                     turn_index: dict[int, int], participants: dict[str, str]) -> Boundary | None:
+    """Give the bound consumer priority; unbound deliveries keep source constraints."""
+    if op.turn is not None:
+        return episode_for_index(boundaries, turn_index.get(op.turn, op.source_event_index))
+    return episode_for_index(boundaries, op.source_event_index, event, participants)
+
+
 def episode_rows(events: list[dict[str, Any]], step_of_turn: dict[int, int], ops: list[MemoryOp],
                  annotations: AnnotationIndex) -> list[dict]:
-    """The graph's episode rows, in scope order, and each op's `episode` (row index).
+    """Use the judge's scope rules for graph rows and operation membership.
 
-    A row's agent steps are those whose turn_start lies inside its scope —
-    injudge's step assignment. A recall's bound turn establishes its episode
-    even when its annotation arrives after the episode closes; otherwise the
-    anchor event supplies the scope. Scope diagnostics are not repeated here:
-    injudge's preparation reports them, and the row's `status` marks review needs.
+    Agent steps follow their turn_start positions. A recall's bound consumer
+    takes priority over a late annotation. An unbound recall uses its source
+    position, recorded episode/session, and accepted participant mapping.
+    Scope notes stay in preparation diagnostics; row status marks review needs.
     """
     scopes = episode_scopes(events, [], [], annotations)
+    participants = episode_participants(scopes, annotations)
     turn_index: dict[int, int] = {}
     for index, event in enumerate(events):
         if event.get("type") == "turn_start" and is_int(event.get("turn")):
@@ -265,9 +285,10 @@ def episode_rows(events: list[dict[str, Any]], step_of_turn: dict[int, int], ops
         if scope is not None:
             steps.setdefault(scope.ordinal, []).append(step)
     for op in ops:
-        source_index = (turn_index.get(op.turn) if op.kind == "recall" and op.turn is not None
-                        else op.source_event_index)
-        scope = episode_for_index(scopes, source_index)
+        source_index = op.source_event_index
+        event = events[source_index] if source_index is not None else {}
+        scope = (delivery_episode(scopes, op, event, turn_index, participants) if op.kind == "recall"
+                 else episode_for_index(scopes, source_index))
         op.episode = scope.ordinal if scope is not None else None
     return [{
         "episode_id": scope.episode_id,

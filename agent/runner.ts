@@ -13,6 +13,7 @@
  */
 
 import * as fs from "node:fs";
+import * as path from "node:path";
 import {
 	Agent,
 	type AgentContext,
@@ -33,10 +34,12 @@ import {
 } from "@earendil-works/pi-ai";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { anthropicMessagesApi } from "@earendil-works/pi-ai/api/anthropic-messages.lazy";
+import { clampMaxTokensToContext } from "@earendil-works/pi-ai/api/simple-options";
 import { estimateContextTokens, estimateTextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import type { AgentJob, AgentResult, AgentUsage } from "./protocol.ts";
 import { createEvidenceTools, resolveInside } from "./evidence-tools.ts";
 import { TrajectoryLog } from "./trajectory.ts";
+import { createCredentialMask } from "./credential-mask.ts";
 
 const PROVIDER_ID = "injudge";
 
@@ -158,8 +161,52 @@ function estimateInput(context: AgentContext): number {
 	return estimateContextTokens({ ...context, messages }).tokens;
 }
 
+function idleTimeoutFetch(timeoutMs: number): typeof fetch {
+	return async (input, init) => {
+		const controller = new AbortController();
+		const response = await fetch(input, {
+			...init,
+			signal: AbortSignal.any([controller.signal, ...(init?.signal ? [init.signal] : [])]),
+		});
+		if (!response.body) return response;
+		const reader = response.body.getReader();
+		const body = new ReadableStream<Uint8Array>({
+			async pull(stream) {
+				const timer = setTimeout(() => controller.abort(new Error("response stream timed out")), timeoutMs);
+				try {
+					const { done, value } = await reader.read();
+					if (done) stream.close();
+					else stream.enqueue(value);
+				} catch (error) {
+					stream.error(error);
+				} finally {
+					clearTimeout(timer);
+				}
+			},
+			cancel(reason) {
+				controller.abort(reason);
+				return reader.cancel(reason);
+			},
+		});
+		return new Response(body, {
+			status: response.status, statusText: response.statusText, headers: response.headers,
+		});
+	};
+}
+
 async function main(): Promise<number> {
 	const { job: jobPath, out: outPath } = parseArgs(process.argv);
+	// The owner pipe closes if Python exits, including a forced parent stop.
+	if (process.env.JUDGE_PARENT_WATCH === "1") {
+		process.stdin.on("end", () => {
+			for (const file of [jobPath, outPath]) {
+				try { fs.rmSync(file, { force: true }); } catch {}
+			}
+			try { fs.rmdirSync(path.dirname(jobPath)); } catch {}
+			process.exit(130);
+		});
+		process.stdin.resume();
+	}
 	const job: AgentJob = JSON.parse(fs.readFileSync(jobPath, "utf8"));
 	const apiKey = process.env.JUDGE_API_KEY ?? "";
 	if (!apiKey) {
@@ -174,7 +221,8 @@ async function main(): Promise<number> {
 	const cfg = job.config;
 	const { model, models } = buildModel(job, apiKey, baseUrl);
 	const tools: AgentTool<any>[] = createEvidenceTools(job.evidence_dir);
-	const trajectory = new TrajectoryLog(job.trajectory_path);
+	const mask = createCredentialMask(apiKey);
+	const trajectory = new TrajectoryLog(job.trajectory_path, mask);
 
 	const budget: BudgetState = {
 		llmCalls: 0,
@@ -187,8 +235,18 @@ async function main(): Promise<number> {
 	let contextRollbacks = 0;
 	const reportedUsage: AgentUsage = { input: 0, output: 0, cache_read: 0, cache_write: 0 };
 	const forcedReserve = estimateTextTokens(job.forced_message);
+	// Use pi's context reserve so its stream wrapper cannot silently shrink output.
+	const inputLimit = clampMaxTokensToContext(model, { messages: [] }, cfg.context_window);
 	let maxOutputTokens = cfg.max_output_tokens;
-	let watermark = cfg.context_window - maxOutputTokens - forcedReserve;
+	let watermark = inputLimit - maxOutputTokens - forcedReserve;
+	const fitContinuationOutput = (inputTokens: number) => {
+		if (!job.history?.length) return;
+		const remaining = inputLimit - inputTokens - forcedReserve;
+		if (remaining >= cfg.minimum_output_tokens) {
+			maxOutputTokens = Math.min(cfg.max_output_tokens, remaining);
+			watermark = inputLimit - maxOutputTokens - forcedReserve;
+		}
+	};
 
 	const agent = new Agent({
 		initialState: {
@@ -205,6 +263,7 @@ async function main(): Promise<number> {
 				maxTokens: maxOutputTokens,
 				temperature: cfg.temperature,
 				timeoutMs: cfg.timeout_ms,
+				fetch: idleTimeoutFetch(cfg.timeout_ms),
 				maxRetries: 2,
 			});
 		},
@@ -231,7 +290,9 @@ async function main(): Promise<number> {
 			budget.llmCalls += 1;
 			// context.messages already carries this turn's assistant message
 			// and tool results — the exact request the next call would send
-			if (estimateInput(context) > watermark) {
+			const inputTokens = estimateInput(context);
+			fitContinuationOutput(inputTokens);
+			if (inputTokens > watermark) {
 				budget.forced = { reason: "context_budget_forced", rollbackTail: 1 + toolResults.length };
 				return false;
 			}
@@ -302,12 +363,15 @@ async function main(): Promise<number> {
 		// A rejected final answer can consume some of the reserved output
 		// room. Keep its evidence and cap the follow-up's output to the
 		// remaining room instead of rejecting a recoverable verdict.
-		if (job.history?.length) {
-			maxOutputTokens = Math.min(maxOutputTokens, cfg.context_window - inputTokens - forcedReserve);
-			watermark = cfg.context_window - maxOutputTokens - forcedReserve;
+		fitContinuationOutput(inputTokens);
+		if (maxOutputTokens < cfg.minimum_output_tokens) {
+			throw new Error(`configured output cap (${maxOutputTokens}) is below the minimum answer estimate (${cfg.minimum_output_tokens}) before any judge call`);
 		}
-		if (maxOutputTokens <= 0 || inputTokens > watermark) {
-			throw new Error(`opening context (${inputTokens} estimated tokens) exceeds the input budget (${Math.min(watermark, cfg.context_window - forcedReserve)}) before any judge call`);
+		if (inputTokens + forcedReserve + cfg.minimum_output_tokens > inputLimit) {
+			throw new Error(`opening context leaves less than the minimum answer estimate (${cfg.minimum_output_tokens} output tokens) before any judge call`);
+		}
+		if (inputTokens > watermark) {
+			throw new Error(`opening context (${inputTokens} estimated tokens) exceeds the input budget (${Math.min(watermark, inputLimit - forcedReserve)}) before any judge call`);
 		}
 		if (!job.history?.length) {
 			const manifest = JSON.parse(fs.readFileSync(resolveInside(job.evidence_dir, "manifest.json"), "utf8"));
@@ -367,7 +431,7 @@ async function main(): Promise<number> {
 		context_rollbacks: result.context_rollbacks,
 		error,
 	});
-	fs.writeFileSync(outPath, JSON.stringify(result));
+	fs.writeFileSync(outPath, JSON.stringify(mask(result)));
 	// diagnostics only; the result file is the contract
 	console.error(`runner: stop=${stopReason} llm_calls=${assistantTurns} tool_calls=${toolCalls}`);
 	return 0;
@@ -376,6 +440,7 @@ async function main(): Promise<number> {
 main()
 	.then((code) => process.exit(code))
 	.catch((e) => {
-		console.error(`error: ${e instanceof Error ? e.message : String(e)}`);
+		console.error(createCredentialMask(process.env.JUDGE_API_KEY ?? "")(
+			`error: ${e instanceof Error ? e.message : String(e)}`));
 		process.exit(2);
 	});

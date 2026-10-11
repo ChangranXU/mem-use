@@ -86,9 +86,9 @@ memgraph/parse_trajectory.py  # trajectory.jsonl → ops; shared step rule
 memgraph/episodes.py       # shared episode-scope rule (bridge boundaries) + graph episode rows
 memgraph/graph.py          # path discovery, cross-trajectory linking, validation
 memgraph/html.py           # self-contained HTML (template + embedded graph JSON)
-memgraph/verdicts.py       # merge injudge.report/v21 onto recall ops
+memgraph/verdicts.py       # merge injudge.report/v22 onto recall ops
 memgraph/__main__.py       # python3 -m memgraph
-injudge/__init__.py        # REPORT_SCHEMA / SUMMARY_SCHEMA (writer + memgraph reader)
+injudge/__init__.py        # REPORT_SCHEMA / SUMMARY_SCHEMA / EPISODE_INPUT_SCHEMA / CHECKPOINT_SCHEMA
 injudge/model.py           # AgentStep / ToolExec / InjectionSpan
 injudge/steps.py           # agent-lane step stream + all-lane billed prompt tokens
 injudge/episodes.py        # offline episode preparation and source assignments
@@ -100,12 +100,14 @@ injudge/agent.py           # .env → AgentConfig, runner subprocess, corrective
 injudge/gold.py            # golden-answer / correctness sidecars and CLI joins
 injudge/prompts.py         # loads prompts/ (never inline prompts in code)
 injudge/aggregate.py       # verdict counts/rates, per-memory usage roll-ups
-injudge/report.py          # injudge.report/v21 + injudge.summary/v18 + summary.md + stdout
+injudge/report.py          # injudge.report/v22 + injudge.summary/v18 + summary.md + stdout
+injudge/checkpoints.py     # completed-span journal writes and report recovery
 injudge/__main__.py        # python3 -m injudge
 agent/                     # TS judge agent: runner.ts (pi Agent + budgets),
                            # evidence-tools.ts (scoped read-only tools),
                            # trajectory.ts (pi event-sourced recording), protocol.ts
-agent/package.json         # pi-agent-core + pi-ai + typebox; node >= 22.19; node --test
+agent/credential-mask.ts   # mask saved values before JSON serialization
+agent/package.json         # pi-agent-core + pi-ai + typebox; node >= 22.19; tsc + node --test
 agent/tsconfig.json        # noEmit; node strips types at runtime, no build step
 agent/*.test.ts            # node:test for evidence-tool path scoping and the runner
 prompts/                   # every LLM prompt, grouped by tool/purpose
@@ -207,6 +209,8 @@ adapter vocabulary.
     `memory_variant_steps`; unverifiable text keeps the item convention.
     Deliveries reaching one consuming turn are all eligible there; only a
     same-step copy adding no verified text opens after the shared step.
+    Each entry has its own end reason. A same-step collision for one entry
+    does not change the reason for another entry's window.
     Overlapping credit is surfaced as `rubric.shared_anchors`, never
     prevented by falsifying when content was visible.
 - **`extensions.cure`** is a display projection only (key, memory_type,
@@ -224,6 +228,9 @@ Both tools attribute steps through one rule:
 Episode scope is likewise one rule, `memgraph.episodes.episode_scopes`
 (bridge open/close pairs by event position, else episode-scoped sessions):
 injudge prepares episodes from it and memgraph lays out its rows by it.
+Both use `episode_participants` and `delivery_episode` for recall membership.
+A bound consumer takes priority; an unbound delivery must satisfy its source
+episode/session constraints and the accepted participant mapping.
 Session boundaries and task text use the sessions accepted by
 `build_annotation_index`. Rejected duplicates and invalid session records
 cannot create another episode or add task text.
@@ -376,8 +383,9 @@ does not preserve entries from another retracted slot.
 Request-pointer placement proofs are checked against the bound call's recorded
 request and JSON-value digest, then matched uniquely to the consumer's visible
 host occurrence; wire indexes never stand in for recorder message slots.
-Unresolved placement ownership or gaps in delivery consumers' context block
-assessable spans before a paid call (and make dry-run exit 2), so a judged
+Unresolved placement ownership, inseparable host text, or gaps in any delivery
+consumer's context block every assessable span in that episode before a paid
+call (and make dry-run exit 2), including spans before the fault. Thus a judged
 `baseline.md` is the consumer's complete recorded input. Slots are positions
 in the client's contiguous message list and the recorder refills a retracted
 slot, so every input must hold each slot through its highest visible slot and
@@ -391,8 +399,8 @@ notes alone do not block judging; empty/unobserved spans retain mechanical skips
 judging; recorder validity does not establish exposure ownership.
 Two budgets bound the conversation, both ending in a FORCED final answer
 (the harness pattern), never a mid-run failure: MAX_STEPS caps LLM calls,
-and the CONTEXT_WINDOW watermark (minus MAX_OUTPUT_TOKENS and the forced
-message's estimated size) rolls back the overflowing round and injects the
+and the CONTEXT_WINDOW watermark (minus pi's context reserve,
+MAX_OUTPUT_TOKENS, and the forced message's estimated size) rolls back the overflowing round and injects the
 forced message. Context estimates include system/tools; output-only usage
 cannot stand in for measured input. Python rejects configurations that leave
 no input room after both reservations before parsing trajectories. A defiant
@@ -401,7 +409,9 @@ tool call in the forced round is blocked.
 Easy to get wrong:
 
 - The judge contract keys every rubric entry by a span-local memory id
-  (`m1`, `m2`, … per delivered entry). Display keys are labels only.
+  (`m1`, `m2`, … per delivered entry). Display keys are labels only. A judge
+  label includes a key only when its recorded placement shows that exact
+  identifier. Hidden keys remain in the canonical audit and report records.
 - Python owns the contract: the runner reports the final assistant text,
   and `_strict_parse` + `_verdict_semantics` (injudge/judge.py) decide
   whether it is a verdict — exact id coverage, action anchors (acted-on/
@@ -415,6 +425,9 @@ Easy to get wrong:
   do not certify their source files, so non-null novelty and acted_on influence
   also require every `prior_sources` entry (a delivery section by its manifest
   line range; the target's text is already in the opening).
+  Later spans can have more prior sources. Under a fixed context budget,
+  this can increase their null labels even when memory quality is unchanged.
+  Keep coverage checks and report this limit when comparing judgments.
   None/referenced/selected require the complete footprint window; a non-null acted-on effect requires reading from its start
   through the episode end, since consequences can outlive action credit. Incomplete investigation must use
   influence (or effect) null, not fabricate neutrality or benefit. Harm in any
@@ -442,16 +455,23 @@ Easy to get wrong:
   confidence). The judged evidence never exceeds what the agent could have
   seen.
 - The API key and endpoint travel to the runner via the JUDGE_API_KEY and
-  JUDGE_BASE_URL environment variables, never as fields in the job/result files. Endpoint
+  JUDGE_BASE_URL environment variables, never as fields in the job/result files.
+  The child environment omits ambient OPENAI_* and ANTHROPIC_* variables so
+  provider defaults cannot change request headers or endpoints. Python masks
+  job content before writing it; the runner masks transcript and result
+  strings before serialization. Endpoint
   output that echoes it is masked before any text reaches a verdict,
   `judge_raw`, or validation note (raw key and every percent-encoded
   spelling in either hex case, plus literal JSON-serialized spellings; a key shorter than 8 characters is no
   credential). A runner-level failure mid-run (the subprocess fails to
-  start, exits non-zero, exceeds its wall-clock bound, or writes no
+  start, exits non-zero, or writes no
   readable result) is that span's error verdict with a note, not a
   retry; a missing node, runner, or agent-package tree is setup misuse
   that fails fast with a targeted SystemExit before any paid call
   (`_check_runner`).
+- TIMEOUT limits idle waits for response headers and each body chunk. Active
+  streams can take longer; there is no total elapsed deadline. Each native
+  retry starts a new wait.
 - Shape and semantic violations, empty final texts, and output-budget cuts
   take the same follow-up as missing reads.
 
@@ -459,8 +479,8 @@ Easy to get wrong:
 
 Bump the report schema version deliberately, and call out any
 artifact-format change in the PR. Schema strings live in
-`injudge/__init__.py` (`REPORT_SCHEMA`, `SUMMARY_SCHEMA`) so the writer and
-the memgraph reader cannot desync.
+`injudge/__init__.py`: `REPORT_SCHEMA`, `SUMMARY_SCHEMA`, `EPISODE_INPUT_SCHEMA`,
+and `CHECKPOINT_SCHEMA`. Writers and readers use these shared names.
 
 **memgraph** (`--json`; also embedded verbatim in the HTML) is `{tool,
 trajectories, ops, memories, edges, validation}`. Recall ops carry `searches`
@@ -492,12 +512,22 @@ The HTML colors rewrite markers by each marker's own `on_memory_lane` flag,
 computed at parse time against the final lane set. Do not prune a field
 from one consumer only.
 
-**injudge** writes `injudge.report/v21` (`{tool, generated_at, trajectories,
-operations, injections, aggregates, validation}`), checkpointed after every
-completed span (including parallel completions), with pending spans explicitly
-`unjudged`, so interruption within a multi-episode trajectory keeps completed
-work. Interruptions cancel queued parallel work; in-flight jobs may finish.
-Validation notes retain span order even when completion order differs.
+**injudge** writes `injudge.report/v22` (`{tool, generated_at, trajectories,
+operations, injections, aggregates, validation}`). Before paid work, the initial
+snapshot marks pending spans `unjudged` and sets `checkpoint_journal` to
+`injudge-checkpoints.jsonl`. Each completion appends one `injudge.checkpoint/v1`
+record with `schema`, `generated_at`, `operation`, `injections`, and `validation`.
+It does not rebuild the full report. Normal completion or a handled interruption
+writes a full standalone report and removes the pointer; the journal stays for
+audit. The shared memgraph/calibration reader recovers a killed run from complete
+journal lines and rebuilds aggregates once. It ignores a final line without a
+newline and rejects invalid complete records. The first interruption cancels
+queued jobs, waits for active jobs, and saves their results before the full
+report is written, including with one worker. A second interruption stops the
+runners and leaves unfinished spans unjudged. Node runs in a separate session;
+loss of its parent-owned pipe stops it and removes its temporary job/result
+files. A direct parent kill needs journal recovery, not a final report flush.
+Validation notes retain source span order even when completion order differs.
 All of a run's artifacts land
 in that run's own `<output>/<run-stamp>/` folder — no run overwrites or
 mixes another run's artifacts, and the folder name traces every artifact
@@ -517,14 +547,16 @@ to its run.
   provenance, global step bounds, and their span ids. Operations carry parent
   `episode_execution_id` and `episode_last_step`; memgraph keeps these links.
 - `tool.config` is the resolved, secret-free judge-agent configuration
-  (URLs sanitized to `scheme://host[:port][/path]`). `tool.provenance` hashes
+  (endpoint URLs reduced to `scheme://host[:port]`). `tool.provenance` hashes
   the implementation and prompt files. Each judge input hashes the composed
   system prompt and exact evidence files; no credential is part of these hashes.
 - Each operation the agent ran for carries an `input` record (error
   outcomes included):
   `{"path": "agent", "attempts", "llm_calls", "tool_calls", "transcript"}`
-  plus executed/retained call counts and evidence, reported usage including
-  rolled-back calls, context rollbacks, and any-phase forced status. `"gold"`
+  `llm_calls` and `tool_calls` count the conversation retained after the last
+  phase; they are null when that phase has no result. Executed counts and
+  reported usage cover all phases, including rolled-back calls. Context
+  rollbacks and any-phase forced status are also recorded. `"gold"`
   and `"forced"` appear when they apply (`forced`: the
   conversation's final answer came from a budget-exhausted forced round).
   Only mechanically counted empty/unattributable spans and unjudged spans
@@ -550,8 +582,8 @@ to its run.
   as they happen, `tombstone` lines for budget rollbacks, the injected
   forced message, per-phase `attempt_end` diagnostics with cumulative
   retained-conversation counts/usage; `attempt` 1 is the investigation and
-  later attempts are follow-ups; recorded raw by
-  the runner, rewritten masked by Python after every attempt; `seq` is
+  later attempts are follow-ups; masked by the runner before each write,
+  checked again by Python after every attempt; `seq` is
   attempt-local). `<span-dir>` is the span id made filesystem-safe
   (non-`[A-Za-z0-9._-]` replaced by `_`, capped at 80 chars) plus an
   8-char digest suffix — `evidence.span_dir_name`.
@@ -578,12 +610,14 @@ including episodes outside the judge selection. It retains policy metrics and
 residency estimates, without raw resident-character totals.
 `diagnostics` counts error/warning/info records; optional `selection` retains
 the source selection. `report` points to `injudge-report.json`. `generated_at`
-is the source report's time. `tool` contains only name, schema,
+is the source report's UTC time, copied without conversion. `tool` contains only name, schema,
 source_report_schema, and judge_model. `notes` states that delivery/residency
 estimates use chars divided by four and are not billing or overhead relative
 to a no-memory run. Span verdicts measure
 memory influence, not benchmark task success.
-Report v21 drops the runner's duplicate `retained_evidence` count
+Report v22 adds journal checkpoints and removes the duplicate
+`retained_llm_calls` / `retained_tool_calls` input fields. Rubric rules are unchanged. Report v21
+dropped the runner's duplicate `retained_evidence` count
 (`read_steps` is the certified list) and replaces the tool-free repair with one
 follow-up path; the evidence folders drop `context.json` and the manifest gains
 `required_reads` and `target_baseline`. Judge labels and rules are those of
@@ -595,14 +629,14 @@ contain useful and harmful entries, so costs by verdict do not measure
 per-memory token benefit. Summary v18 renames `spans_with_repairs` to
 `spans_with_followups`.
 Summary has no span or episode index, memory lists, confidence
-means/buckets, configuration, or provenance. Those details remain in report v21.
+means/buckets, configuration, or provenance. Those details remain in report v22.
 Empty/unassessable/error/unjudged spans stay outside verdict-rate denominators.
 Rates are omitted when no spans were judged; rubric is omitted without judged
 entries, and judge counters without agent runs. JSON uses two-space indentation.
 
 memgraph joins the report by `(run_id, op seq)`. Unmatched entries in
 either direction are validation notes, never errors. An ambiguous join key
-— a run_id shared by several loaded trajectories, or one `(run_id, seq)`
+— a run_id shared by several loaded or report trajectories, or one `(run_id, seq)`
 claimed by several report injections or several recall ops — is skipped
 with a warning, never cross-annotated.
 
@@ -613,11 +647,10 @@ Fixtures are synthetic schema-v10 trajectories from
 stub the agent runner by monkeypatching `injudge.agent._invoke_runner`
 with canned results (the corrective loop, input records, and evidence
 folders all run for real). Assert on artifacts written to disk. The TS
-evidence tools' path-scoping is security-bearing and tested under
-`node --test` in `agent/` (`agent/evidence-tools.test.ts`,
-`agent/runner.test.ts`), driven from pytest by
-`tests/test_agent_tools.py` (skipped when node or the packages are
-missing).
+evidence tools' path-scoping is security-bearing. `npm --prefix agent test`
+checks types with `tsc`, then runs `node --test` in `agent/`, driven from pytest by
+`tests/test_agent_tools.py` (skipped when Node, npm, or the installed
+TypeScript compiler is missing).
 
 Name tests `test_<behavior>`. When a test is warranted, hit a real failure
 point (corrupt input, step attribution, verdict joins, retry routing),

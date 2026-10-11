@@ -249,7 +249,7 @@ class InjectionSpan:
     window only if it shows all the earlier text. Different or narrower text
     leaves the window open and is listed in `memory_variant_steps`. The
     episode end caps every prepared window. Copies at the same step share
-    credit once through `memory_window_starts` and `same_step_bound`.
+    credit once through `memory_window_starts` and per-entry `same_step_bounds`.
 
     `memory_followups` records proven selection actions and their later
     deliveries. These hints do not establish benefit. The full grouping and
@@ -276,7 +276,7 @@ class InjectionSpan:
     memory_window_starts: dict[str, int] = field(default_factory=dict)
     memory_variant_steps: dict[str, list[int]] = field(default_factory=dict)
     memory_followups: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
-    same_step_bound: int | None = None
+    same_step_bounds: set[str] = field(default_factory=set)
     episode_execution_id: str | None = None
     episode_last_step: int | None = None
 

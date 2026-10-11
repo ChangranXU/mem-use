@@ -107,6 +107,9 @@ Generation 的 `retired` 引用补充 delete-change 记录，同一版本只计�
 跟随其 consumer call，即使注释在 episode 关闭后才写入；未绑定 delivery
 保留可观察的 episode 范围，但不会伪造 consumer step。
 
+图与评审都对未绑定投递应用已记录的 episode/session 约束和已接受的参与者映射。
+仅有源位置不能覆盖这些已记录身份。
+
 Placement proof 只在绑定 consumer 的输入中解析，不会匹配后续复用同一消息槽
 的内容。Placement 可以只占据消息的一部分：已证实的 placement 会从其宿主出现
 中投影出来，与槽位名无关（录制器的 `input_prefix` 与 `system_suffix` 槽位也

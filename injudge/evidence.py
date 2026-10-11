@@ -27,12 +27,12 @@ import shutil
 from pathlib import Path
 
 from util import atomic_write, utf8_safe
-from injudge.judge import MEMORIES_NOTE, _render_span_header, _cmd_of
+from injudge.judge import MEMORIES_NOTE, _render_span_header, _cmd_of, _mask_key
 from injudge import EPISODE_INPUT_SCHEMA
 from injudge.episodes import project_occurrence
 from injudge.model import AgentStep, EpisodeInput, InjectionSpan, memory_id
 from injudge.prompts import load_prompt
-from injudge.spans import _exposed_text, entry_ident
+from injudge.spans import _exposed_text, entry_ident, exposed_key
 from memgraph.annotations import exposure_state, is_int
 
 _SPAN_CONTEXT = load_prompt("injudge/scoring/span_context")
@@ -122,11 +122,12 @@ def _remaining_messages(episode: EpisodeInput, files: dict[str, str],
     return "# Other recorded input messages\n\n" + "\n\n".join(blocks) + "\n" if blocks else None
 
 
-def _episode_memory_line(entry: dict) -> str:
+def _episode_memory_line(entry: dict, placements: list[dict]) -> str:
     """Render only placement-grounded memory text for judge-readable files."""
     audit = entry.get("audit") if isinstance(entry.get("audit"), dict) else {}
     exposure = entry.get("exposure") if isinstance(entry.get("exposure"), dict) else {}
-    label = f"- [{entry.get('entry_id') or '?'}] {audit.get('key') or '(unkeyed)'}"
+    key = exposed_key(audit, placements)
+    label = f"- [{entry.get('entry_id') or '?'}]" + (f" {key}" if key else "")
     state = exposure.get("state")
     shown = exposure.get("shown")
     if state == "unknown" or shown is None:
@@ -147,7 +148,8 @@ def _episode_memory_line(entry: dict) -> str:
     return f"{label}: {shown}"
 
 
-def _episode_step_text(episode: EpisodeInput, step: AgentStep, targets: set[str]) -> str:
+def _episode_step_text(episode: EpisodeInput, step: AgentStep, targets: set[str],
+                       occurrences: dict[int, dict]) -> str:
     """Keep tool-result ownership and availability tied to the shared parser.
     `targets` names the span's own deliveries, whose text span.md holds."""
     seq_end = step.seq_end if step.seq_end is not None else "?"
@@ -158,7 +160,6 @@ def _episode_step_text(episode: EpisodeInput, step: AgentStep, targets: set[str]
         # Say so when a step has only tool calls: a reader must not search
         # for text that the recording does not have.
         lines.append(f"content: {step.content or '(no assistant text recorded)'}")
-    occurrences = {item["source"]["event_index"]: item for item in episode.message_occurrences}
     close_index = episode.recorded_episode_identity.get("close_event_index")
     for tool in step.tools:
         lines.append(f"command: {tool.name} — {_cmd_of(tool.args)}")
@@ -337,7 +338,9 @@ def _earlier_deliveries(span: InjectionSpan, episode: EpisodeInput, baseline: di
         if not still_visible:
             notes.extend(same_input)
         if notes:
-            lines.append(f"- {memory_id(i)} ({memory.get('key') or '(unkeyed)'}): " + "; ".join(notes) + ".")
+            key = exposed_key(memory, span.placements)
+            label = f"{memory_id(i)} ({key})" if key else memory_id(i)
+            lines.append(f"- {label}: " + "; ".join(notes) + ".")
     if not lines:
         return None
     gaps = baseline["visibility_gaps"]
@@ -375,7 +378,7 @@ def _delivery_location(delivery: dict) -> str:
             f"consumed at global step {delivery.get('step') or '?'}")
 
 
-def build_span_evidence(span: InjectionSpan, episode: EpisodeInput) -> dict[str, str]:
+def build_span_evidence(span: InjectionSpan, episode: EpisodeInput, *, api_key: str = "") -> dict[str, str]:
     """The span folder. Its manifest records the visible-input audit and the
     reads a verdict requires (`required_reads`), which agent.py checks and
     the opening lists, so the instruction and its check share one source."""
@@ -415,9 +418,9 @@ def build_span_evidence(span: InjectionSpan, episode: EpisodeInput) -> dict[str,
     manifest["files"][:0] = [_file_entry("span.md", "target", files), _file_entry("baseline.md", "baseline", files)]
     # atomic_write escapes lone JSON surrogates. Coverage and hashes must
     # describe those actual saved bytes, not an unwritable in-memory spelling.
-    files = {path: utf8_safe(text).decode("utf-8") for path, text in files.items()}
+    files = {path: utf8_safe(_mask_key(text, api_key)).decode("utf-8") for path, text in files.items()}
     manifest["files"] = [{**entry, "chars": len(files[entry["path"]])} for entry in manifest["files"]]
-    files["manifest.json"] = utf8_safe(_records_json(manifest)).decode("utf-8")
+    files["manifest.json"] = utf8_safe(_mask_key(_records_json(manifest), api_key)).decode("utf-8")
     return files
 
 
@@ -449,10 +452,11 @@ def build_episode_evidence(episode: EpisodeInput, target_ops: set[str] | None = 
     files["task.md"] = "\n".join(task_lines) + "\n"
 
     targets = {item["entry_prefix"] for item in episode.deliveries if item["op_id"] in (target_ops or ())}
+    occurrences = {item["source"]["event_index"]: item for item in episode.message_occurrences}
     step_files = {}
     for step in episode.steps:
         step_files[step.turn] = f"steps/step_{step.step:06d}.md"
-        files[step_files[step.turn]] = _episode_step_text(episode, step, targets)
+        files[step_files[step.turn]] = _episode_step_text(episode, step, targets, occurrences)
 
     if messages := _remaining_messages(episode, files, step_files):
         files["messages.md"] = messages
@@ -491,7 +495,7 @@ def build_episode_evidence(episode: EpisodeInput, target_ops: set[str] | None = 
             memories = delivery.get("memories") or []
             if memories:
                 delivery_lines.append("delivered entries:")
-                delivery_lines.extend(_episode_memory_line(entry) for entry in memories)
+                delivery_lines.extend(_episode_memory_line(entry, delivery["placements"]) for entry in memories)
             elif not delivery.get("placements"):
                 delivery_lines.append("(empty delivery: no memories and no placement slots)")
             delivery_lines.append("")

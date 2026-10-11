@@ -547,13 +547,23 @@ def test_missing_record_blocks_an_otherwise_proven_delivery_baseline(tmp_path):
                .recall(cure_ref("hint", "Use the existing helper.")).agent_turn().episode_close())
     missing = next(event for event in builder.events if event.get("type") == "tool_execution_end")
     builder.events.remove(missing)
-    episode, = prepare_trajectory(*_prepare_args(tmp_path, builder)).episodes
+    result = prepare_trajectory(*_prepare_args(tmp_path, builder))
+    episode, = result.episodes
     delivery, = episode.deliveries
     assert delivery["placements"][0]["source_resolution"]["status"] == "resolved"
     consumer = next(view for view in episode.context if view.turn == delivery["consumer"]["turn"])
     assert any("1 unrecorded input message slot" in gap for gap in consumer.gaps)
     assert evidence_problem(episode) == "consumer context has unresolved visibility gaps"
     assert episode.context[-1].gaps == []  # a later record cannot repair the earlier input
+    assert not any("unrecorded input message slot" in note for note in result.diagnostics)
+    assert sum("unrecorded input message slot" in note for note in episode.diagnostics) == 1
+
+
+def test_replay_gap_without_an_episode_input_remains_in_recording_diagnostics(tmp_path):
+    builder = AnnotatedBuilder().agent_turn(with_task=True).episode_open().agent_turn().episode_close()
+    builder.events.remove(next(event for event in builder.events if event.get("msg") == 0))
+    result = prepare_trajectory(*_prepare_args(tmp_path, builder))
+    assert any("unrecorded input message slot" in note for note in result.diagnostics)
 
 
 @pytest.mark.parametrize("large_index", ["msg", "kept"])
@@ -738,6 +748,8 @@ def test_prepare_warning_payload_does_not_decide_review_status(tmp_path, value):
     output = tmp_path / "output"
     assert cli.main([str(source), "--prepare-only", "-o", str(output)]) == 0
     package = json.loads(next(output.glob("*/episode-inputs.json")).read_text())
+    from datetime import datetime, timedelta
+    assert datetime.fromisoformat(package["generated_at"]).utcoffset() == timedelta(0)
     assert package["counts"]["needs_review"] == 0
     assert package["episodes"][0]["status"] == "prepared"
     notes = [n for n in package["diagnostics"] if "missing or corrupt tool_call_id" in n["msg"]]
@@ -964,3 +976,47 @@ def test_other_session_with_episode_id_does_not_split_session_scope(tmp_path):
     assert len(trajectory.episodes) == len(result.episodes) == 1
     assert [step.step for step in result.episodes[0].steps] == [1, 2]
     assert not result.unassigned
+
+
+@pytest.mark.parametrize("constraint", ["episode", "session"])
+@pytest.mark.parametrize("bound", [False, True])
+def test_graph_and_judge_share_delivery_scope_constraints(tmp_path, constraint, bound):
+    from annotated_fixtures import SID
+
+    builder = AnnotatedBuilder().episode_open(session_id="foreign-scope" if constraint == "session" else SID)
+    builder.agent_turn(with_task=True).recall(cure_ref("hint", "Use the existing helper.")).episode_close()
+    delivery = next(event for event in builder.events if event["type"] == "memory_delivery")
+    if constraint == "episode":
+        delivery["payload"]["episode_id"] = "foreign-episode"
+    if not bound:
+        delivery.pop("terminal_call_ref")
+        delivery["call_refs"] = []
+        delivery["binding_status"] = "not_requested"
+    trajectory, operations, events, _ = _parse(tmp_path, builder)
+    result = prepare_trajectory(trajectory, events, operations)
+    recall, = [op for op in operations if op.kind == "recall"]
+    assert recall.episode == (0 if bound else None)
+    assert bool(result.episodes[0].deliveries) is bound
+    assert any(row["kind"] == "delivery" for row in result.unassigned) is (not bound)
+
+
+@pytest.mark.parametrize("expired", [False, True])
+def test_graph_and_judge_share_unbound_participant_delivery_scope(tmp_path, expired):
+    builder = AnnotatedBuilder().agent_turn(with_task=True)
+    child = "participant"
+    builder.annotation("memory_session", {"trace_session_id": child, "session_kind": "other",
+                       "adapter": builder.adapter}, lane=builder.main)
+    for role, lane in (("main", builder.main), ("memory", builder.mem)):
+        builder.annotation("memory_role_bind", {"trace_session_id": child, "logical_role": role,
+                           "adapter": builder.adapter}, lane=lane)
+    if expired:
+        builder.annotation("memory_session", {"trace_session_id": "next-episode", "session_kind": "episode",
+                           "adapter": builder.adapter}, lane=builder.main)
+    builder.delivery([], memories=[cure_ref("hint", "Use the existing helper.")])
+    builder.events[-1]["payload"]["trace_session_id"] = child
+    trajectory, operations, events, _ = _parse(tmp_path, builder)
+    result = prepare_trajectory(trajectory, events, operations)
+    recall, = [op for op in operations if op.kind == "recall"]
+    assert recall.episode == (None if expired else 0)
+    assert sum(len(episode.deliveries) for episode in result.episodes) == (0 if expired else 1)
+    assert any(row["kind"] == "delivery" for row in result.unassigned) is expired

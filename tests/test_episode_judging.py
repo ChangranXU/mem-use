@@ -34,7 +34,7 @@ def _run(tmp_path, monkeypatch, builder, responses, extra=()):
     source = builder.write(tmp_path / "trajectory")
     env = tmp_path / ".env"
     env.write_text("BASE_URL=https://judge.invalid\nAPI_KEY=test-key-only\nMODEL=test-judge\n")
-    monkeypatch.setattr("injudge.agent._check_runner", lambda: None)
+    monkeypatch.setattr("injudge.agent._check_runner", lambda: 4096)
     calls = stub_runner(monkeypatch, responses)
     status = main([str(source), "--env", str(env), "-o", str(tmp_path / "output"), *extra])
     (run_dir,) = (tmp_path / "output").iterdir()
@@ -48,8 +48,11 @@ def test_three_spans_in_one_episode_have_independent_judges_and_graph_links(tmp_
 
     checks = []
     indexed = []
+    snapshots = []
     original_check = preparation.evidence_problem
     original_index = parsing.build_annotation_index
+    from injudge import __main__ as cli
+    original_write = cli.atomic_write
 
     def count_check(episode):
         checks.append(episode.execution_id)
@@ -59,8 +62,14 @@ def test_three_spans_in_one_episode_have_independent_judges_and_graph_links(tmp_
         indexed.append(len(events))
         return original_index(events)
 
+    def count_snapshot(path, text):
+        if path.name == "injudge-report.json":
+            snapshots.append(json.loads(text))
+        return original_write(path, text)
+
     monkeypatch.setattr(preparation, "evidence_problem", count_check)
     monkeypatch.setattr(parsing, "build_annotation_index", count_index)
+    monkeypatch.setattr(cli, "atomic_write", count_snapshot)
     builder = AnnotatedBuilder().episode_open().agent_turn(with_task=True)
     for key in ("one", "two", "three"):
         builder.recall(cure_ref(key, f"{key} fact"))
@@ -73,6 +82,10 @@ def test_three_spans_in_one_episode_have_independent_judges_and_graph_links(tmp_
     assert status == 0 and len(calls) == 3
     assert len(checks) == 1
     assert len(indexed) == 1
+    assert len(snapshots) == 3
+    assert snapshots[0]["checkpoint_journal"] == "injudge-checkpoints.jsonl"
+    assert "checkpoint_journal" not in snapshots[-1]
+    assert len((run_dir / "injudge-checkpoints.jsonl").read_text().splitlines()) == 3
     assert (run_dir / "memgraph-verdicts.html").is_file()
     summary = json.loads((run_dir / "summary.json").read_text())
     assert summary["diagnostics"] == {
@@ -743,15 +756,12 @@ def test_completed_spans_survive_interruption_with_pending_entries(tmp_path, mon
     for episode_id in ("first", "second"):
         builder.episode_open(episode_id).agent_turn(with_task=True)
         builder.recall(cure_ref(episode_id, episode_id + " fact")).episode_close(episode_id)
-    real_judge, real_write, real_env = cli.judge_span, cli.atomic_write, cli.load_env
+    real_judge, real_append, real_env = cli.judge_span, cli.append_checkpoint, cli.load_env
     checkpointed = threading.Event()
 
-    def write(path, text):
-        real_write(path, text)
-        if path.name == "injudge-report.json":
-            verdicts = [op["verdict"] for op in json.loads(text)["operations"]]
-            if verdicts == (["unjudged", "neutral"] if parallel else ["neutral", "unjudged"]):
-                checkpointed.set()
+    def append(path, operation, injections, validation):
+        real_append(path, operation, injections, validation)
+        checkpointed.set()
 
     def judge(span, *args, **kwargs):
         interrupt = span.id.endswith(":S1") if parallel else span.id.endswith(":S2")
@@ -760,7 +770,7 @@ def test_completed_spans_survive_interruption_with_pending_entries(tmp_path, mon
             raise KeyboardInterrupt("simulated process interruption")
         return real_judge(span, *args, **kwargs)
 
-    monkeypatch.setattr(cli, "atomic_write", write)
+    monkeypatch.setattr(cli, "append_checkpoint", append)
     monkeypatch.setattr(cli, "judge_span", judge)
     monkeypatch.setattr(cli, "load_env", lambda path: {**real_env(path), "JUDGE_PARALLEL": "2" if parallel else "1"})
     with pytest.raises(KeyboardInterrupt):
@@ -776,7 +786,7 @@ def test_completed_spans_survive_interruption_with_pending_entries(tmp_path, mon
     assert (directory / finished["input"]["transcript"]).is_file()
 
 
-def test_parallel_interrupt_cancels_queued_spans(tmp_path, monkeypatch):
+def test_parallel_interrupt_cancels_queue_and_retains_running_spans(tmp_path, monkeypatch):
     import threading
     from concurrent.futures import ThreadPoolExecutor
     from injudge import __main__ as cli
@@ -788,7 +798,7 @@ def test_parallel_interrupt_cancels_queued_spans(tmp_path, monkeypatch):
     submitted = threading.Event()
     release = threading.Event()
     futures, pools, started = [], [], []
-    real_judge, real_write, real_env = cli.judge_span, cli.atomic_write, cli.load_env
+    real_judge, real_append, real_env = cli.judge_span, cli.append_checkpoint, cli.load_env
 
     class Pool(ThreadPoolExecutor):
         def __init__(self, **kwargs):
@@ -802,33 +812,46 @@ def test_parallel_interrupt_cancels_queued_spans(tmp_path, monkeypatch):
                 submitted.set()
             return future
 
+        def shutdown(self, *, wait=True, cancel_futures=False):
+            super().shutdown(wait=wait, cancel_futures=cancel_futures)
+            if cancel_futures:
+                release.set()
+
     def judge(span, *args, **kwargs):
         started.append(span.id)
         if span.id.endswith(":S1"):
             assert submitted.wait(5)
             return real_judge(span, *args, **kwargs)
-        assert release.wait(5), "interrupt waited for in-flight work"
-        return cli._unjudged("already running at interruption")
+        assert release.wait(5)
+        return real_judge(span, *args, **kwargs)
 
-    def write(path, text):
-        real_write(path, text)
-        if path.name == "injudge-report.json" and json.loads(text)["operations"][0]["verdict"] == "neutral":
+    interrupted = False
+
+    def append(path, operation, injections, validation):
+        nonlocal interrupted
+        real_append(path, operation, injections, validation)
+        if operation["operation_id"] == "T1:S1" and not interrupted:
+            interrupted = True
             raise KeyboardInterrupt("interrupt after the first checkpoint")
 
     monkeypatch.setattr(cli, "ThreadPoolExecutor", Pool)
     monkeypatch.setattr(cli, "judge_span", judge)
-    monkeypatch.setattr(cli, "atomic_write", write)
+    monkeypatch.setattr(cli, "append_checkpoint", append)
     monkeypatch.setattr(cli, "load_env", lambda path: {**real_env(path), "JUDGE_PARALLEL": "2"})
     try:
         with pytest.raises(KeyboardInterrupt):
-            _run(tmp_path, monkeypatch, builder, [_result(_answer())])
+            _run(tmp_path, monkeypatch, builder, [_result(_answer()) for _ in range(10)])
         # The freed worker may already have taken a third job; the rest must
         # be cancelled without entering the judge, not merely left unreported.
         assert len(started) <= 3
         assert sum(future.cancelled() for future in futures) >= 7
         (directory,) = (tmp_path / "output").iterdir()
         report = json.loads((directory / "injudge-report.json").read_text())
-        assert [op["verdict"] for op in report["operations"]] == ["neutral"] + ["unjudged"] * 9
+        finished = {op["operation_id"] for op in report["operations"] if op["verdict"] == "neutral"}
+        assert finished == set(started)
+        assert report["aggregates"]["overall"]["unjudged"] == 10 - len(started)
+        journal = (directory / "injudge-checkpoints.jsonl").read_text().splitlines()
+        assert {json.loads(line)["operation"]["operation_id"] for line in journal} == finished
     finally:
         release.set()
         for pool in pools:
@@ -844,7 +867,7 @@ def test_parallel_checkpoints_keep_validation_in_span_order(tmp_path, monkeypatc
         builder.recall(cure_ref(key, key + " fact"))
     builder.episode_close()
     second_saved = threading.Event()
-    real_judge, real_write, real_env = cli.judge_span, cli.atomic_write, cli.load_env
+    real_judge, real_append, real_env = cli.judge_span, cli.append_checkpoint, cli.load_env
 
     def judge(span, episode, cfg, warnings, **kwargs):
         if span.id.endswith(":S1"):
@@ -852,15 +875,13 @@ def test_parallel_checkpoints_keep_validation_in_span_order(tmp_path, monkeypatc
         warnings.append(f"review diagnostic for {span.id}")
         return real_judge(span, episode, cfg, warnings, **kwargs)
 
-    def write(path, text):
-        real_write(path, text)
-        if path.name == "injudge-report.json":
-            report = json.loads(text)
-            if report["operations"][1]["verdict"] == "neutral":
-                second_saved.set()
+    def append(path, operation, injections, validation):
+        real_append(path, operation, injections, validation)
+        if operation["operation_id"] == "T1:S2":
+            second_saved.set()
 
     monkeypatch.setattr(cli, "judge_span", judge)
-    monkeypatch.setattr(cli, "atomic_write", write)
+    monkeypatch.setattr(cli, "append_checkpoint", append)
     monkeypatch.setattr(cli, "load_env", lambda path: {**real_env(path), "JUDGE_PARALLEL": "2"})
     status, report, _directory, _calls, _source = _run(
         tmp_path, monkeypatch, builder, [_result(_answer()), _result(_answer())],
@@ -892,7 +913,7 @@ def test_parallel_pool_spans_trajectories(tmp_path, monkeypatch):
 
     env = tmp_path / ".env"
     env.write_text("BASE_URL=https://judge.invalid\nAPI_KEY=test-key-only\nMODEL=test-judge\n")
-    monkeypatch.setattr("injudge.agent._check_runner", lambda: None)
+    monkeypatch.setattr("injudge.agent._check_runner", lambda: 4096)
     stub_runner(monkeypatch, [_result(_answer()), _result(_answer())])
     monkeypatch.setattr(cli, "judge_span", judge)
     monkeypatch.setattr(cli, "load_env", lambda path: {**real_env(path), "JUDGE_PARALLEL": "2"})
@@ -911,7 +932,7 @@ def test_global_attachment_rejects_multiple_episodes_before_limit(tmp_path):
     source = builder.write(tmp_path / "trajectory")
     golden = tmp_path / "gold.md"
     golden.write_text("one episode only")
-    with pytest.raises(SystemExit, match="exactly one episode before --limit"):
+    with pytest.raises(SystemExit, match="exactly one input episode before --episode or --limit selection"):
         main([str(source), "--dry-run", "--golden", str(golden), "--limit", "1"])
 
 
@@ -948,6 +969,37 @@ def _span_docs(tmp_path, builder):
 
 _KB_A = cure_ref("kb-a", "Cached index maps go stale after a removal; rebuild them.")
 _KB_B = cure_ref("kb-b", "Retry limits are inherited from the base profile.")
+
+
+@pytest.mark.parametrize("placement", [
+    "Use a virtual environment for package installation.",
+    "The retrieved entry was transformed into a short summary.",
+])
+def test_hidden_memory_keys_are_omitted_from_all_judge_files(tmp_path, placement):
+    key = "pitfall-sudo-pip-breaks-system-python"
+    memory = cure_ref(key, "Use a virtual environment for package installation.")
+    builder = AnnotatedBuilder().episode_open().agent_turn(with_task=True)
+    search, text = _deliver(builder, [memory], msg=4, text=placement)
+    _bind(builder, search, [memory], text, 4)
+    search, text = _deliver(builder, [memory, _KB_B], msg=5,
+                            text=placement + "\n" + _KB_B["content"]["text"])
+    _bind(builder, search, [memory, _KB_B], text, 5)
+    builder.agent_turn().episode_close()
+    source = builder.write(tmp_path / "trajectory")
+    trajectories, ops_by_traj, events_by_traj, _ = load_trajectories([source])
+    trajectory = trajectories[0]
+    ops = ops_by_traj[trajectory.id]
+    (episode,) = prepare_trajectory(trajectory, events_by_traj[trajectory.id], ops).episodes
+    recalls = {op.id: op for op in ops if op.kind == "recall"}
+    spans = group_spans([recalls[item["op_id"]] for item in episode.deliveries], trajectory.id,
+                        episode_execution_id=episode.execution_id, last_step=episode.steps[-1].step)
+    assert len(spans) == 2
+    for span in spans:
+        assert span.memories[0]["key"] == key
+        files = build_span_evidence(span, episode)
+        assert all(key not in content for content in files.values())
+        assert "[m1]" in files["span.md"]
+    assert episode.deliveries[0]["memories"][0]["audit"]["key"] == key
 
 
 @pytest.mark.parametrize("retract,expected", [
@@ -1047,3 +1099,74 @@ def test_earlier_visibility_checks_the_entrys_surviving_placement(tmp_path, reta
                       "(exposure unverified)",
     }[retained]
     assert f"- m1 (kb-a): D1.E1 consumed from step 2, {expected}." in target
+
+
+@pytest.mark.parametrize("spelling", ["test-key-only", "%74est-key-only"])
+def test_paid_artifacts_mask_credentials_from_source(tmp_path, monkeypatch, spelling):
+    builder = AnnotatedBuilder().episode_open().agent_turn(with_task=True)
+    builder.recall(cure_ref("hint", "recorded fact " + spelling)).episode_close()
+    write = builder.write
+    monkeypatch.setattr(builder, "write", lambda directory: write(directory, run_id=spelling))
+    from injudge import __main__ as cli
+    render = cli.render_html
+
+    def check_graph(graph):
+        recalls = [op for op in graph["ops"] if op["kind"] == "recall"]
+        assert recalls and all(op.get("verdict") == "neutral" for op in recalls)
+        return render(graph)
+
+    monkeypatch.setattr(cli, "render_html", check_graph)
+    status, report, directory, calls, source = _run(
+        tmp_path, monkeypatch, builder, [_result(_answer())], extra=("--html",),
+    )
+    assert status == 0 and len(calls) == 1
+    for path in directory.rglob("*"):
+        if path.is_file():
+            text = path.read_text()
+            assert "test-key-only" not in text and spelling not in text, str(path)
+    assert "***" in json.dumps(report["operations"][0]["memories"])
+    assert spelling in (source / "trajectory.jsonl").read_text()
+
+
+def test_interrupt_during_retention_keeps_the_completed_result(tmp_path, monkeypatch):
+    from injudge import __main__ as cli
+
+    builder = AnnotatedBuilder()
+    for name in ("first", "second"):
+        builder.episode_open(name).agent_turn(with_task=True)
+        builder.recall(cure_ref(name, name + " fact")).episode_close(name)
+    real_record, real_env = cli.operation_record, cli.load_env
+    interrupted = False
+
+    def record(span, verdict, costs):
+        nonlocal interrupted
+        if verdict["verdict"] == "neutral" and not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt("interrupt during retention")
+        return real_record(span, verdict, costs)
+
+    monkeypatch.setattr(cli, "operation_record", record)
+    monkeypatch.setattr(cli, "load_env", lambda path: {**real_env(path), "JUDGE_PARALLEL": "2"})
+    with pytest.raises(KeyboardInterrupt):
+        _run(tmp_path, monkeypatch, builder, [_result(_answer()), _result(_answer())])
+    directory, = (tmp_path / "output").iterdir()
+    report = json.loads((directory / "injudge-report.json").read_text())
+    assert [op["verdict"] for op in report["operations"]] == ["neutral", "neutral"]
+
+
+def test_dry_run_rejects_html_before_loading(tmp_path):
+    with pytest.raises(SystemExit, match="--dry-run cannot be combined with --html"):
+        main([str(tmp_path / "absent"), "--dry-run", "--html"])
+
+
+@pytest.mark.parametrize("flag", ["--golden", "--correctness"])
+def test_global_attachment_error_names_episode_selection(tmp_path, flag):
+    builder = AnnotatedBuilder()
+    for name in ("first", "second"):
+        builder.episode_open(name).agent_turn(with_task=True).episode_close(name)
+    source = builder.write(tmp_path / "trajectory")
+    golden = tmp_path / "gold.md"
+    golden.write_text("fixed reference")
+    value = str(golden) if flag == "--golden" else "resolved"
+    with pytest.raises(SystemExit, match="before --episode or --limit selection"):
+        main([str(source), "--dry-run", "--episode", "first", flag, value])

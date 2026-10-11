@@ -6,7 +6,7 @@ icon: sliders
 # Configuration
 
 {% hint style="info" %}
-Only injudge is configured, via a `.env` file (memgraph takes CLI flags alone). Copy `.env.example` — it carries full comments — and fill it in; every key is read and validated, there are no dead knobs. The judge is an agent, so the knobs are deliberately few: the endpoint and wire format, sampling and thinking level, two budgets, retries, the per-call timeout, and span parallelism.
+Only injudge is configured, via a `.env` file (memgraph takes CLI flags alone). Copy `.env.example` — it carries full comments — and fill it in; every key is read and validated, there are no dead knobs. The judge is an agent, so the knobs are deliberately few: the endpoint and wire format, sampling and thinking level, two budgets, retries, the idle timeout, and span parallelism.
 {% endhint %}
 
 ## Setup
@@ -37,8 +37,8 @@ It rejects a span that exceeds the input budget. See [Judge agent](judge-client.
 | Key | Default | Purpose |
 |---|---|---|
 | `MAX_STEPS` | `40` | Initial investigation’s LLM-call cap, forced final round included. Each follow-up after a rejected answer gets `min(MAX_STEPS, 4)` calls. |
-| `CONTEXT_WINDOW` | `131072` | The judge model's context window in tokens. The watermark (context window minus `MAX_OUTPUT_TOKENS` and the forced message estimate) trips the forced answer before the context overflows. |
-| `MAX_OUTPUT_TOKENS` | `32768` | Max output tokens per LLM call. The context watermark reserves this space for output, leaving less room for input evidence; billing is on tokens actually generated. Together with the forced message estimate, must leave input room inside `CONTEXT_WINDOW`; invalid configurations fail before trajectory loading. `--judge-max-tokens` overrides. |
+| `CONTEXT_WINDOW` | `131072` | The judge model's context window in tokens. The watermark subtracts pi's context reserve, `MAX_OUTPUT_TOKENS`, and the forced-message estimate before forcing a final answer. |
+| `MAX_OUTPUT_TOKENS` | `32768` | Max output tokens per LLM call. The context watermark reserves this space for output, leaving less room for input evidence; billing is on tokens actually generated. Together with pi's context reserve and the forced-message estimate, it must leave input room inside `CONTEXT_WINDOW`. Invalid settings or required input fail before paid calls. `--judge-max-tokens` overrides. |
 
 A verdict cut mid-answer is not a failure class: the answer simply fails the contract parse and the corrective retry answers again, continuing the same conversation.
 
@@ -47,7 +47,7 @@ A verdict cut mid-answer is not a failure class: the answer simply fails the con
 | Key | Default | Purpose |
 |---|---|---|
 | `MAX_ATTEMPTS` | `3` | Total runner phases per span: the investigation plus a follow-up after each rejected answer. `--max-attempts` overrides. |
-| `TIMEOUT` | `300` | Timeout in seconds for each HTTP request, including retries. `--timeout` overrides. |
+| `TIMEOUT` | `300` | Maximum idle wait in seconds for response headers or the next body chunk. Active streams can run longer; there is no total elapsed deadline. Each retry starts a new wait. `--timeout` overrides. |
 | `JUDGE_PARALLEL` | `1` | Spans judged in parallel across all input trajectories (cap 32). Each in-flight span is one agent conversation. |
 
 ## CLI Flags
@@ -56,12 +56,12 @@ A verdict cut mid-answer is not a failure class: the answer simply fails the con
 |---|---|---|
 | `--env PATH` | checkout `.env` | Alternate env file |
 | `--judge-model` | `MODEL` | Override the judge model |
-| `--timeout` | `300` | Timeout in seconds for each HTTP request |
+| `--timeout` | `300` | Idle timeout in seconds for response headers or the next body chunk |
 | `--max-attempts` | `MAX_ATTEMPTS` | Total runner phases per span (investigation plus follow-ups) |
 | `--judge-max-tokens` | `MAX_OUTPUT_TOKENS` | Per-call output cap |
 | `--episode ID` | unset | Judge only episodes whose recorded episode id, benchmark identity, or execution id equals *ID* (repeatable). Other spans retain compact `unjudged` audit records and are excluded from aggregate statistics, summary counts, and dry-run span counts. Policy totals cover whole recordings. An unmatched *ID* fails fast before any call. Not combinable with `--prepare-only`. |
 | `--limit N` | unset | Judge at most *N* episode-scoped, nonempty spans with the agent; validate all episode and attachment scopes first. `--prepare-only` instead limits materialized episodes. A value below 1 fails fast. |
-| `--dry-run` | off | Print each paid span job's target document, file index, and opening message; no calls or files |
+| `--dry-run` | off | Print each paid span job's target document, file index, and opening message; no calls or files. Cannot be combined with `--html`. |
 | `--golden PATH` | unset | Golden answer for exactly one episode; use keyed metadata otherwise |
 | `--correctness resolved\|unresolved` | unset | Recorded outcome for exactly one episode, corroboration only |
 | `--gold-metadata PATH` | unset | verified-metadata.json patches joined by recorded episode benchmark identity |

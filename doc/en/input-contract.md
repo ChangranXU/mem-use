@@ -120,6 +120,10 @@ bound delivery follows its consumer call even when the annotation was
 written after the episode close; an unbound delivery retains its observed
 scope but has no manufactured consumer step.
 
+Both graph and judge apply the recorded episode/session constraints and the
+accepted participant mapping to an unbound delivery. Source position alone
+cannot override those recorded identities.
+
 Placement proofs resolve only within the bound consumer's input, never against
 a later reuse of the same message slot. A placement can occupy part of a
 message: a proven placement is projected out of its host occurrence,

@@ -22,8 +22,10 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO
 from urllib.parse import urlsplit
 from urllib.request import Request
 
@@ -31,6 +33,8 @@ from util import atomic_write, print_safe
 from injudge.evidence import build_span_evidence, span_dir_name, write_evidence
 from injudge.judge import (
     GoldInput,
+    RUBRIC_SIGNALS,
+    _ACCURACY,
     _assemble_verdict,
     _error_verdict,
     _mask_key,
@@ -41,13 +45,63 @@ from injudge.judge import (
     _verdict_semantics,
     blank_verdict,
 )
-from injudge.model import EpisodeInput, InjectionSpan
+from injudge.model import EpisodeInput, InjectionSpan, memory_id
 from injudge.prompts import content_digest, load_prompt
 from memgraph.annotations import is_int
 
 # The checkout's TS half: the pi agent runner the judge spawns per span.
 _AGENT_DIR = Path(__file__).resolve().parents[1] / "agent"
 _RUNNER = _AGENT_DIR / "runner.ts"
+_RUNNER_OWNERS: dict[subprocess.Popen[bytes], BinaryIO] = {}
+_RUNNER_LOCK = threading.Lock()
+_RUNNER_CANCELLED = False
+
+
+def begin_runner_run() -> None:
+    """Allow a new CLI run after any earlier cancellation."""
+    global _RUNNER_CANCELLED
+    with _RUNNER_LOCK:
+        _RUNNER_CANCELLED = False
+
+
+def cancel_runners() -> None:
+    """Stop active runners and prevent another follow-up from starting."""
+    global _RUNNER_CANCELLED
+    with _RUNNER_LOCK:
+        _RUNNER_CANCELLED = True
+        for proc, owner in _RUNNER_OWNERS.items():
+            owner.close()
+            if proc.poll() is None:
+                proc.kill()
+
+
+def _run_process(args: list[str], *, env: dict[str, str]) -> subprocess.CompletedProcess[bytes]:
+    """Let the first interrupt drain work; loss of the owner pipe stops Node."""
+    with _RUNNER_LOCK:
+        if _RUNNER_CANCELLED:
+            raise KeyboardInterrupt
+        proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, start_new_session=True,
+                                env={**env, "JUDGE_PARENT_WATCH": "1"})
+        owner = proc.stdin
+        assert owner is not None
+        proc.stdin = None
+        _RUNNER_OWNERS[proc] = owner
+    try:
+        stdout, stderr = proc.communicate()
+    except BaseException:
+        proc.kill()
+        proc.wait()
+        raise
+    finally:
+        with _RUNNER_LOCK:
+            _RUNNER_OWNERS.pop(proc, None)
+            owner.close()
+        if proc.poll() is None:
+            proc.wait()
+    if _RUNNER_CANCELLED and proc.returncode != 0:
+        raise KeyboardInterrupt
+    return subprocess.CompletedProcess(args, proc.returncode, stdout, stderr)
 
 # The fan-out cap JUDGE_PARALLEL gets: each in-flight span is one node
 # subprocess plus its live LLM calls, so the ceiling is named once here.
@@ -81,6 +135,8 @@ def _opening_message(span_id: str, files: dict[str, str]) -> str:
     index = json.loads(files["manifest.json"])
     navigation = [f"{entry['path']} ({entry['chars']} chars) — {entry['description']}"
                   for entry in index["files"] if entry.get("kind") != "step"]
+    navigation.insert(0, f"manifest.json ({len(files['manifest.json'])} chars) — "
+                      "episode identity, file index, and required reads")
     if missing := [name for name in ("gold.md", "outcome.json") if name not in files]:
         navigation.append("Optional attachments not provided: " + ", ".join(missing) + ".")
     step_files = [entry["path"] for entry in index["files"] if entry.get("kind") == "step"]
@@ -192,7 +248,7 @@ class AgentConfig:
     context_window: int = 131072  # the model's context window in tokens
     temperature: float = 0.0
     max_attempts: int = 3  # runner phases per span: investigation plus follow-ups
-    timeout: float = 300.0  # per LLM call, seconds
+    timeout: float = 300.0  # idle seconds before headers or the next body chunk
     thinking_level: str = "off"
 
 
@@ -224,10 +280,8 @@ def _check_base_url(base_url: str, keys: str) -> None:
         raise SystemExit(f"error: {keys} must be an http(s) URL")
 
 
-def _check_runner() -> None:
-    """The TS half must be runnable before any paid call: a missing node or
-    an un-installed agent/package tree is setup misuse, not a per-span
-    failure."""
+def _check_runner() -> int:
+    """Check Node and pi before input work; return pi's context reserve."""
     if shutil.which("node") is None:
         raise SystemExit(
             "error: node (>= 22.19) is required on PATH for the agentic judge"
@@ -239,6 +293,25 @@ def _check_runner() -> None:
             f"error: the agent packages are not installed — run `npm install` "
             f"in {_AGENT_DIR} first"
         )
+    try:
+        version = subprocess.run(["node", "--version"], capture_output=True,
+                                 text=True, check=True, timeout=10).stdout.strip()
+        parts = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", version)
+        if parts is None or tuple(map(int, parts.groups())) < (22, 19, 0):
+            raise SystemExit("error: node (>= 22.19) is required on PATH for the agentic judge")
+        probe = subprocess.run(
+            ["node", "--input-type=module", "--eval",
+             'import {clampMaxTokensToContext as clamp} from "@earendil-works/pi-ai/api/simple-options";'
+             'const limit = Number.MAX_SAFE_INTEGER;'
+             'process.stdout.write(String(limit - clamp({contextWindow: limit}, {messages: []}, limit)));'],
+            cwd=_AGENT_DIR, capture_output=True, text=True, check=True, timeout=10,
+        )
+        reserve = int(probe.stdout)
+        if reserve < 0:
+            raise ValueError
+        return reserve
+    except (OSError, subprocess.SubprocessError, ValueError):
+        raise SystemExit("error: cannot inspect the installed node and pi runtime") from None
 
 
 def resolve_config(
@@ -323,7 +396,12 @@ def resolve_config(
             f"budget and forced message ({forced_tokens} estimated tokens) "
             "must leave room for input"
         )
-    _check_runner()
+    reserve = _check_runner()
+    if cfg.max_output_tokens + forced_tokens + reserve >= cfg.context_window:
+        raise SystemExit(
+            "error: MAX_OUTPUT_TOKENS, the forced message, and pi's context reserve "
+            "must leave room for input inside CONTEXT_WINDOW"
+        )
     return cfg
 
 
@@ -348,6 +426,7 @@ def _invoke_runner(
     message: str,
     history: list | None,
     warnings: list[str],
+    minimum_output_tokens: int,
 ) -> dict | None:
     """One runner subprocess = one agent conversation round. Writes the job
     (secret-free), runs node (the runner records its own trajectory JSONL at
@@ -372,6 +451,7 @@ def _invoke_runner(
                 "api": cfg.api,
                 "max_steps": max_steps,
                 "max_output_tokens": cfg.max_output_tokens,
+                "minimum_output_tokens": minimum_output_tokens,
                 "context_window": cfg.context_window,
                 "temperature": cfg.temperature,
                 "thinking_level": cfg.thinking_level,
@@ -380,22 +460,14 @@ def _invoke_runner(
         }
         if history is not None:
             job["history"] = history
-        job_path.write_text(json.dumps(job), encoding="utf-8")
+        job_path.write_text(json.dumps(_mask_value(job, cfg.api_key)), encoding="utf-8")
         try:
-            proc = subprocess.run(
+            proc = _run_process(
                 ["node", str(_RUNNER), "--job", str(job_path), "--out", str(out_path)],
-                capture_output=True,
-                # Each model call allows three requests and two waits of up to 60 seconds.
-                timeout=max((cfg.timeout * 3 + 120.0) * max_steps + 120.0, 600.0),
-                env={**os.environ, "JUDGE_API_KEY": cfg.api_key, "JUDGE_BASE_URL": cfg.base_url},
+                env={**{key: value for key, value in os.environ.items()
+                        if not key.startswith(("OPENAI_", "ANTHROPIC_"))},
+                     "JUDGE_API_KEY": cfg.api_key, "JUDGE_BASE_URL": cfg.base_url},
             )
-        except subprocess.TimeoutExpired:
-            warnings.append(
-                "the agent runner exceeded its wall-clock bound "
-                f"({cfg.timeout:.0f}s per request, up to 3 requests per step, "
-                f"{max_steps} steps + retry waits and slack)"
-            )
-            return None
         except OSError as e:
             warnings.append(f"the agent runner could not start: {e}")
             return None
@@ -414,6 +486,18 @@ def _invoke_runner(
         if result is None:
             warnings.append("the agent runner wrote an unusable result body")
         return result
+
+
+def _minimum_output_tokens(span: InjectionSpan) -> int:
+    """Estimate a span-sized output floor from mandatory answer fields."""
+    values = dict.fromkeys(RUBRIC_SIGNALS)
+    values.update(relevance=True, accuracy=min(_ACCURACY, key=len))
+    answer = {"confidence": 0, "memories": [
+        {"id": memory_id(i), "anchors": [],
+         **{signal: {"value": value} for signal, value in values.items()}}
+        for i in range(len(span.memories))
+    ]}
+    return math.ceil(len(json.dumps(answer, separators=(",", ":"))) / 4)
 
 
 def _read_files(messages: list, files: dict[str, str]) -> set[str]:
@@ -562,21 +646,23 @@ def _input_record(
     gold: GoldInput, attempts: int, result: dict | None, transcript: str | None,
     health: dict | None = None,
 ) -> dict:
-    """The agent-run record on a judged span's verdict: which regime it ran
-    under, what the conversation cost (attempts, LLM/tool calls, the
-    forced-answer marker when a budget ended it), and where its transcript
-    landed — the audit trail for HOW the verdict was reached."""
+    """Record an attempted judge run, including errors.
+
+    Retained counts describe the conversation after the last phase. Executed
+    counts include all phases, including calls removed from the conversation.
+    """
     record: dict = {"path": "agent", "attempts": attempts}
     if result is not None:
-        record["llm_calls"] = result.get("llm_calls") if isinstance(result.get("llm_calls"), int) else 0
-        record["tool_calls"] = result.get("tool_calls") if isinstance(result.get("tool_calls"), int) else 0
+        for key in ("llm_calls", "tool_calls"):
+            record[key] = _add_known(0, result.get(key))
         if result.get("forced"):
             record["forced"] = True
     if health:
         record.update(health)
     if result is None:
         # Without a phase result, earlier totals do not cover the full run.
-        for key in ("executed_llm_calls", "executed_tool_calls", "context_rollbacks"):
+        for key in ("executed_llm_calls", "executed_tool_calls", "context_rollbacks",
+                    "llm_calls", "tool_calls"):
             record[key] = None
         record["reported_usage"] = dict.fromkeys(("input", "output", "cache_read", "cache_write"))
     if transcript is not None:
@@ -591,31 +677,28 @@ def _transcript_name(span_dir: str) -> str:
     return f"{span_dir}.jsonl"
 
 
+def _mask_value(value: object, api_key: str) -> object:
+    if isinstance(value, str):
+        return _mask_key(value, api_key)
+    if isinstance(value, list):
+        return [_mask_value(item, api_key) for item in value]
+    if isinstance(value, dict):
+        return {_mask_key(key, api_key): _mask_value(item, api_key) for key, item in value.items()}
+    return value
+
+
 def _mask_trajectory_file(path: Path, api_key: str) -> None:
-    """Mask the trajectory the runner just recorded. The runner writes its
-    conversation raw — it holds the credential in memory and could not mask
-    every echo spelling without forking the one masking implementation — so
-    Python, which owns that implementation, rewrites the file masked after
-    each attempt returns. The file's on-disk window between the runner's
-    append and this rewrite lives in the run's own output folder, the same
-    trust domain as the runner's result file; the KEPT artifact is always
-    masked. A missing file is harmless; a failed masking write removes the
-    raw transcript and surfaces an error rather than silently keeping secrets.
+    """Repair the transcript after a runner exit, including an interrupted write.
+
+    The runner masks records before it writes them. This second check removes
+    incomplete records and masks any remaining key. A missing file is harmless.
+    If the rewrite fails, remove the file and report the error.
     """
     try:
         # A killed runner can leave its final UTF-8 write incomplete.
         text = path.read_text(encoding="utf-8", errors="replace")
     except FileNotFoundError:
         return
-
-    def mask_value(value: object) -> object:
-        if isinstance(value, str):
-            return _mask_key(value, api_key)
-        if isinstance(value, list):
-            return [mask_value(item) for item in value]
-        if isinstance(value, dict):
-            return {_mask_key(key, api_key): mask_value(item) for key, item in value.items()}
-        return value
 
     # Decode only the JSONL envelope, never strings inside it. An answer can
     # itself contain JSON text, so masking serialized bytes alone misses keys
@@ -627,7 +710,7 @@ def _mask_trajectory_file(path: Path, api_key: str) -> None:
             continue
         try:
             record = json.loads(line)
-            masked_record = mask_value(record)
+            masked_record = _mask_value(record, api_key)
         except (ValueError, RecursionError):
             # An incomplete envelope can hide another layer of key escaping.
             # It cannot be replayed; discard that record, keeping complete ones.
@@ -684,16 +767,13 @@ def judge_span(
     evidence_root: Path,
     transcripts_root: Path,
 ) -> dict:
-    """Judge one span with the evidence-searching agent.
+    """Judge one span with bounded evidence and a recorded conversation.
 
-    A rejected answer continues the same conversation (job.history) with the
-    rejection reason and the evidence tools, under a short budget, until
-    MAX_ATTEMPTS phases are spent. The runner records each phase in a pi
-    event-sourced trajectory (every appended message, budget-rollback
-    tombstones, the forced-answer injection, per-phase diagnostics) under
-    `transcripts_root` — one JSONL per span, replaced per judging run like the
-    evidence folder, masked after each phase. A runner-level failure (setup
-    fault, endpoint auth) is that span's error verdict; the run continues.
+    Mask evidence before writing it, hashing it, or checking read coverage.
+    The runner masks transcript records before each write; Python checks the
+    file again after each phase. Rejected answers continue with evidence tools
+    under a short budget, up to MAX_ATTEMPTS phases. A runner failure produces
+    an error for this span while the rest of the run continues.
     """
     problem = episode._evidence_problem
     if problem is not None:
@@ -702,10 +782,10 @@ def judge_span(
         warnings.append(f"{span.id}: {verdict['error']}")
         return verdict
     gold = gold or GoldInput()
-    system = _scoring_system(gold)
+    system = _mask_key(_scoring_system(gold), cfg.api_key)
     span_dir = span_dir_name(span.id)
     dest = evidence_root / span_dir
-    files = build_span_evidence(span, episode)
+    files = build_span_evidence(span, episode, api_key=cfg.api_key)
     write_evidence(dest, files)
     # one trajectory per judging run: a re-judged span never mixes its old
     # conversation into the new audit trail
@@ -731,10 +811,11 @@ def judge_span(
         attempt += 1
         mask_error = None
         try:
-            result = _invoke_runner(cfg, dest, trajectory_path, attempt, system, message, history, warnings)
+            result = _invoke_runner(cfg, dest, trajectory_path, attempt, system, message, history, warnings,
+                                    _minimum_output_tokens(span))
         finally:
-            # A timeout/nonzero exit can leave a partial transcript containing
-            # endpoint echoes even though no result file ever became readable.
+            # A failed process can leave an incomplete final record even when
+            # it masked the text before writing. Repair the file on every exit.
             try:
                 _mask_trajectory_file(trajectory_path, cfg.api_key)
             except OSError as e:
@@ -747,8 +828,6 @@ def judge_span(
             for key, previous in health["reported_usage"].items():
                 health["reported_usage"][key] = _add_known(previous, usage.get(key))
             health["any_phase_forced"] = health["any_phase_forced"] or bool(result.get("forced"))
-            health["retained_llm_calls"] = result.get("llm_calls", 0)
-            health["retained_tool_calls"] = result.get("tool_calls", 0)
         if mask_error is not None:
             verdict = blank_verdict()
             verdict["error"] = f"cannot mask judge transcript: {mask_error}"
@@ -782,8 +861,8 @@ def judge_span(
             verdict["input"] = _input_record(gold, attempt, result, transcript, health)
             return verdict
         history = result["messages"]
-        message = (_FOLLOWUP.replace("@error@", last_error)
-                   .replace("@max_steps@", str(min(cfg.max_steps, _FOLLOWUP_MAX_STEPS))))
+        message = (_FOLLOWUP.replace("@max_steps@", str(min(cfg.max_steps, _FOLLOWUP_MAX_STEPS)))
+                   .replace("@error@", last_error))
     # the attempt budget exhausted on rejected answers: the honest failure
     # record, raw text kept (masked) — never a silent neutral
     verdict = _error_verdict(

@@ -8,11 +8,11 @@ then `score` the resulting injudge-report.json files together.
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 
 from util import print_safe
 from calibration import CASES, build, score
+from memgraph.verdicts import load_verdict_report
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -30,12 +30,7 @@ def main(argv: list[str] | None = None) -> int:
         for path in build(args.dir, args.case):
             print_safe(f"wrote {path}")
         return 0
-    reports = []
-    for path in args.reports:
-        try:
-            reports.append(json.loads(path.read_text(encoding="utf-8")))
-        except (OSError, ValueError) as e:
-            raise SystemExit(f"error: cannot read report {path}: {e}") from e
+    reports = [load_verdict_report(path) for path in args.reports]
     for line in score(reports, args.case):
         print_safe(line)
     return 0

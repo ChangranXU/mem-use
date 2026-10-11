@@ -19,7 +19,9 @@ from typing import Any
 from injudge.model import AgentStep, ContextView, EpisodeInput, PreparationResult, SourceRef
 from injudge.steps import _tool_calls_of, build_step_stream
 from memgraph.annotations import AnnotationIndex, is_int, message_text, resolved_content_text
-from memgraph.episodes import Boundary, _as_str, _payload, episode_for_index, episode_scopes
+from memgraph.episodes import (
+    Boundary, _as_str, _payload, delivery_episode, episode_for_index, episode_participants, episode_scopes,
+)
 from memgraph.model import MemoryOp, Trajectory
 from memgraph.parse_trajectory import turn_start_maps
 
@@ -558,20 +560,10 @@ def prepare_episodes(
             scope_needs_review=scope_needs_review,
         )
 
-    # Non-episode sessions opened inside an explicit session episode are
-    # participants of that episode. Their undelivered searches have no
-    # consumer turn to establish ownership; retain their recorded scope.
-    participant_episodes: dict[str, str] = {}
-    for session_id, session_event in annotation_index.sessions.items():
-        if _payload(session_event).get("session_kind") != "other":
-            continue
-        boundary = episode_for_index(boundaries, session_event["_event_index"])
-        if boundary and boundary.open_event.get("type") == "memory_session" and boundary.session_id:
-            participant_episodes[session_id] = boundary.session_id
+    participant_episodes = episode_participants(boundaries, annotation_index)
     main_lanes = _main_lanes(events, trajectory)
     turn_index, step_sources, call_map = _turn_maps(events, steps)
     views, occurrences, replay_diagnostics = _replay_context(events, steps, main_lanes)
-    diagnostics.extend(f"{trajectory.run_id}: {note}" for note in replay_diagnostics)
     unassigned: list[dict[str, Any]] = []
 
     episode_data: dict[int, EpisodeInput] = {}
@@ -672,12 +664,7 @@ def prepare_episodes(
             continue
         ref = event.get("terminal_call_ref")
         call_id = ref.get("call_id") if isinstance(ref, dict) else None
-        boundary: Boundary | None = None
-        if isinstance(call_id, str) and call_id in call_map:
-            turn, _step = call_map[call_id]
-            boundary = episode_for_index(boundaries, turn_index.get(turn, source_index))
-        else:
-            boundary = episode_for_index(boundaries, source_index, event, participant_episodes)
+        boundary = delivery_episode(boundaries, op, event, turn_index, participant_episodes)
         if boundary is None:
             diagnostics.append(f"{trajectory.run_id}: delivery {op.id} has ambiguous episode membership")
             unassigned.append({
@@ -809,6 +796,9 @@ def prepare_episodes(
         if episode.diagnostics and episode.preparation_status == "prepared":
             episode.preparation_status = "needs_review"
 
+    # Episode diagnostics already carry these gaps; do not repeat them globally.
+    assigned_gaps = {gap for episode in episode_data.values() for view in episode.context for gap in view.gaps}
+    diagnostics.extend(f"{trajectory.run_id}: {note}" for note in replay_diagnostics if note not in assigned_gaps)
     return PreparationResult(
         episodes=list(episode_data.values()),
         unassigned=unassigned,

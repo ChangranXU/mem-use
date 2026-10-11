@@ -32,7 +32,7 @@ JSON 产物——嵌在 HTML 里的是同一个 dict——的形状是：
 | `trajectories` | 每个已加载运行一行；`memory_cost` 按 `{generation, search}` 汇总操作成本（每个搜索只计一次，无论是否投递）。`searches` 列出所有已记录的搜索（无论是否投递）：`operation_id`、`lane_id`、`trigger`、解析后的 `query`、`status`、`returned_count`、`delivered_by`（投递它的召回操作）、`cost` 与原样保留的 `extensions`。结果未到达模型的智能体主动读取，其 `delivered_by` 为空。`episodes` 按顺序列出已记录的 episode 范围——`episode_id`、`sequence_id`、`status`（`prepared` / `needs_review` / `incomplete`）以及全局 `first_step` / `last_step`——取自 bridge 的 `bridge_episode_open`/`close` 事件（否则取 episode 级 `memory_session` 事件），与 injudge 准备 episode 所用的范围规则相同；记录未命名任何 episode 时为空。 |
 | `memories` | 每个稳定条目身份一条记录：通常是 `(namespace, item_id)`，否则采用输入约定中的显示键或内容摘要回退。每条记录包含来源、创建位置、后续更新、召回与删除历史——`deletions` 列出每一次观察到的删除（重新创建会标记 `revived`，绝不抹除历史），`deleted` 是终态。 |
 | `edges` | 从操作指向记忆的关系：`creates`、`supersedes`、`deletes`、`recalls`。 |
-| `validation` | 本次运行的 `{level, msg}` 说明（`info` / `warn`），覆盖损坏或被跳过的输入、归属缺失，以及判定连接不匹配。 |
+| `validation` | 本次运行的 `{level, msg}` 说明（`error` / `warn` / `info`），覆盖损坏或被跳过的输入、归属缺失，以及判定连接不匹配。 |
 
 记忆模型调用的成本还保留 recorder 的 `cached_tokens`（缓存读取）、
 `cache_write_tokens`、`cache_write_1h_tokens`（写入中的一小时缓存部分）和
@@ -49,9 +49,12 @@ injudge 的输入预算中。recorder 可以省略零值的缓存读取和推理
 
 ## HTML 功能
 
+错误在页眉单独计数，并在诊断详情中排在警告之前。加载器与判定叠加报告同一个问题时，
+只显示一次警告。
+
 页面提供：
 
-- 页眉摘要（轨迹、episode 与 sequence、记忆、写入、召回、警告数）与一行图例；悬停图例项可看完整含义
+- 页眉摘要（轨迹、episode 与 sequence、记忆、写入、召回、错误数与警告数）与一行图例；悬停图例项可看完整含义
 - 按结构分组的行。记录了多个 episode 的轨迹先有一个标题行，再按 sequence 各有一个标题行（点击可折叠其 episode），然后每个 episode 一行，横轴为 episode 内的步骤，因此各 episode 对齐、无需缩放即可阅读。只有一个或没有 episode 的轨迹为单独一行，横轴为其自身步骤。轨迹排序依次依据：能解析的 `run.json` `started_at`；否则目录名中的 `YYYYMMDD-HHMMSS` 时间戳前缀；再否则解析出的纯目录名。步骤轴默认适配窗口宽度
 - 写入（▲，提取操作）位于行线上方，召回（▼）位于下方；相邻步骤中投递同一记忆集合的召回折叠为 ×n 胶囊（不跨 episode），空投递画为空心 ▼
 - 以描线代替缠绕：悬停某个节点可看到其记忆从何而来（召回）或之后在哪里被召回（写入），可跨 episode；悬停或选中某条记忆会描出它的全部召回及虚线的更新/删除链。“all links” 一次画出全部创建 → 召回连线
@@ -68,7 +71,7 @@ injudge 的输入预算中。recorder 可以省略零值的缓存读取和推理
 |---|---|
 | `-o PATH` | HTML 输出路径（默认 `memory-graph.html`） |
 | `--json PATH` | 同时写出机器可读的图产物 |
-| `--verdicts PATH` | 渲染前合并一份 `injudge.report/v21` 文件 |
+| `--verdicts PATH` | 渲染前合并一份 `injudge.report/v22` 文件 |
 
 ## 判定叠加
 
@@ -96,5 +99,7 @@ injudge 的输入预算中。recorder 可以省略零值的缓存读取和推理
 合并判定后，未评审的召回淡化为浅蓝色以突出已评审区间；页眉加上判定计数，并把机械跳过（`unassessable`、`empty`）单独列出；点击某个已评审判定的计数会依次放大定位到该判定的每个区间。点击图例行中的某个判定会把行过滤为含有该判定召回的 episode（可多选，再次点击取消）。选中某条记忆或在详情面板打开某个节点时，与之关联的 episode 也会以虚线框显示；取消选择后它们随之消失。召回的详情面板展示所覆盖各区间的判定、评审分析、每条投递条目一行（使用情况与 R/A/N/I/P 评分标记）、引用的证据，以及该区间的输入记录（`agent` 路径，含 gold / forced 标记与尝试次数）。
 
 {% hint style="info" %}
-未匹配或歧义的连接记为 validation 说明，绝不报错。歧义键——多个已加载轨迹共享同一 `run_id`，或同一 `(run_id, seq)` 被多条报告注入或多条召回操作占用——会被跳过，而不是交叉标注。图仍会渲染。
+未匹配或有歧义的连接记为 validation 说明。已加载的图或报告中若有多条轨迹共享同一 `run_id`，就会跳过该 run 的全部连接，即使序号各不相同。同一 `(run_id, seq)` 被多条报告注入或召回操作占用时，也会跳过该键。图仍会渲染。报告的 ID 或引用无效时，在合并前失败。
 {% endhint %}
+
+普通图渲染和完整报告叠加不加载评审提示词。恢复未完成报告时，才加载报告构建器来重建汇总。

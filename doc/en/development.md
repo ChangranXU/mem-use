@@ -15,7 +15,7 @@ uv run pytest tests/test_injudge.py -q # single file
 ```
 
 {% hint style="info" %}
-The suite does not use the network. Python tests stub paid judge calls with canned results. The TypeScript runner and evidence tools run under `node --test` (skipped when node or the installed agent packages are missing). Fixtures are synthetic schema-v10 trajectories built by `tests/annotated_fixtures.py`.
+The suite does not use the network. Python tests stub paid judge calls with canned results. `npm --prefix agent test` checks TypeScript types, then runs the runner and evidence-tool tests under `node --test`. Pytest invokes the same command (skipped when Node, npm, or the installed TypeScript compiler is missing). Fixtures are synthetic schema-v10 trajectories built by `tests/annotated_fixtures.py`.
 {% endhint %}
 
 ## Project Layout
@@ -26,7 +26,10 @@ The suite does not use the network. Python tests stub paid judge calls with cann
 | `util.py` | Shared helpers (atomic artifact writes, safe printing) |
 | `memgraph/` | Annotation index, parsing, linking, HTML renderer, verdict merge, CLI (`python3 -m memgraph`) |
 | `injudge/` | Step stream, injection spans, verdict contract and judge prompts (`judge.py`), evidence folders (`evidence.py`), the agent-runner client and corrective loop (`agent.py`), gold sidecars (`gold.py`), aggregates, report writer, CLI (`python3 -m injudge`) |
+| `injudge/checkpoints.py` | Save completed spans and recover reports from their journals |
+| `injudge/__init__.py` | Shared report, summary, episode-input, and checkpoint schema constants |
 | `agent/` | TypeScript judge agent: pi runner with budgets and forced answers (`runner.ts`), read-only evidence tools (`evidence-tools.ts`), event-sourced recording (`trajectory.ts`), job/result protocol (`protocol.ts`) |
+| `agent/credential-mask.ts` | Mask credentials in saved values before JSON serialization |
 | `prompts/` | Every LLM prompt as a file, grouped by tool and purpose (loaded via `injudge/prompts.py`) |
 | `calibration/` | Controlled judge-calibration cases and report scoring (`python3 -m calibration`) |
 | `tests/` | pytest suite and shared schema-v10 fixture builder |
@@ -64,7 +67,9 @@ uv run -m calibration score output/calibration/*/injudge-report.json
 ```
 
 `score` reports every disagreement, per-label stability across repeats, and
-matched-pair novelty consistency. It also breaks agreement down by signal and
+matched-pair novelty consistency. It accepts only the current report schema
+and checks report IDs and references before scoring. Unsupported or malformed
+reports fail instead of producing agreement scores. It also breaks agreement down by signal and
 by expected effect in acted-on cases (improved, harmed, no effect, unknown),
 so unused entries with null effects cannot dominate the effect score. Effect
 stability is reported separately. Judge health reports forced answers in any
@@ -103,6 +108,14 @@ fixed-input repeatability. The 32,768-token default reserves more space for evid
 the 131,072-token context. An existing `.env` value still overrides it; use
 `--judge-max-tokens 32768` for an explicit experiment. Check output cuts, errors,
 and agreement as well as fewer forced answers before claiming improvement.
+
+Finite context can affect which labels remain known. Later spans can have
+more visible prior sources, all of which must be read for non-null novelty
+or acted-on influence. A fixed budget can therefore produce more nulls in
+later spans, even when their memories have the same quality. Keep the coverage
+checks. Report missing reads, nulls, forced answers, and context rollbacks
+alongside agreement, and compare spans with similar evidence requirements.
+A budget limit does not establish that an entry lacked novelty or influence.
 
 ## Comparing memory systems and reviewing stored items
 

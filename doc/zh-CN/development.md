@@ -15,7 +15,7 @@ uv run pytest tests/test_injudge.py -q # 单个文件
 ```
 
 {% hint style="info" %}
-测试套件不走网络。Python 测试用预制结果替换付费评审调用。TypeScript 运行器与证据工具在 `node --test` 下运行（缺 node 或尚未安装 agent 包时跳过）。夹具由 `tests/annotated_fixtures.py` 合成 schema-v10 轨迹。
+测试套件不走网络。Python 测试用预制结果替换付费评审调用。`npm --prefix agent test` 先做 TypeScript 类型检查，再通过 `node --test` 运行运行器和证据工具测试。Pytest 调用同一命令（缺 Node、npm 或已安装的 TypeScript 编译器时跳过）。夹具由 `tests/annotated_fixtures.py` 合成 schema-v10 轨迹。
 {% endhint %}
 
 ## 项目结构
@@ -26,7 +26,10 @@ uv run pytest tests/test_injudge.py -q # 单个文件
 | `util.py` | 共享工具（原子写产物、安全打印） |
 | `memgraph/` | 注解索引、解析、链接、HTML 渲染、判定合并、CLI（`python3 -m memgraph`） |
 | `injudge/` | 步骤流、注入区间、判定契约与评审提示词（`judge.py`）、证据文件夹（`evidence.py`）、智能体运行器客户端与纠正循环（`agent.py`）、gold 边车（`gold.py`）、聚合、报告、CLI（`python3 -m injudge`） |
+| `injudge/checkpoints.py` | 保存已完成区间，并从日志恢复报告 |
+| `injudge/__init__.py` | 共享的 report、summary、episode-input 和 checkpoint schema 常量 |
 | `agent/` | TypeScript 评审智能体：带预算与强制作答的 pi 运行器（`runner.ts`）、只读证据工具（`evidence-tools.ts`）、事件流记录（`trajectory.ts`）、作业/结果协议（`protocol.ts`） |
+| `agent/credential-mask.ts` | JSON 序列化前对待保存值中的凭证打码 |
 | `prompts/` | 所有 LLM 提示词文件，按工具与用途分目录（经 `injudge/prompts.py` 加载） |
 | `calibration/` | 受控的评审校准用例与报告打分（`python3 -m calibration`） |
 | `tests/` | pytest 测试套件与共享的 schema-v10 合成轨迹构造器 |
@@ -50,6 +53,8 @@ uv run -m calibration score output/calibration/*/injudge-report.json
 ```
 
 `score` 报告每处分歧、重复运行的逐标签稳定性，以及匹配用例的新颖性一致性。
+它只接受当前 report schema，并在评分前检查报告 ID 和引用；不支持或格式错误的报告
+直接失败，不产生一致率。
 同时按信号和 acted_on 用例的预期效果（改善、有害、无效果、未知）分别计算一致率，
 避免未使用条目的 null 效果主导总分；单独报告效果稳定性、任意阶段强制作答、有跟进的区间、
 实际调用数、上下文回滚和上报的输入/输出/缓存 token。实际用量包括被回滚的调用。
@@ -72,6 +77,11 @@ case/read；缺失或失败的目标保留为不可评估。控制案例覆盖�
 仍标记为不可评估。改变提示词或预算属于敏感性实验；相同设置重复才测可重复性，
 scorer 会提示配置或来源哈希不一致。默认输出上限改为 32768，但已有 `.env` 显式值仍优先；
 实验可用 `--judge-max-tokens 32768` 覆盖。减少强制作答并不自动证明判断更准确。
+
+有限上下文会影响哪些标签仍可确定。较晚区间可能有更多可见的先前来源；要给出非空
+novelty 或 acted_on 影响，必须读完这些来源。即使记忆质量相同，固定预算也可能使
+较晚区间出现更多 null。保留覆盖检查，同时报告必读内容缺失、null、强制作答和
+上下文回滚，并比较证据需求相近的区间。预算不足不能证明条目缺少新颖性或影响。
 
 ## 比较记忆系统与反向审查存储条目
 

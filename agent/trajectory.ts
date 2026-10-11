@@ -6,6 +6,7 @@
  * removed lines), the injected forced-answer message (which fires no
  * event, since the budget injects it by context rewrite), and the
  * per-attempt diagnostics at the end.
+ * Records are masked before serialization. The live messages stay unchanged.
  *
  * `seq` is attempt-local: each runner process starts its counter at 0
  * (an `attempt` marker line opens the process's lines), and tombstone
@@ -30,16 +31,18 @@ export class TrajectoryLog {
 	private logged: { message: AgentMessage; seq: number }[] = [];
 
 	private readonly filePath: string;
+	private readonly mask: (value: unknown) => unknown;
 
-	constructor(filePath: string) {
+	constructor(filePath: string, mask: (value: unknown) => unknown) {
 		// a plain field assignment, not a parameter property: node's
 		// type-stripping mode rejects non-erasable syntax at runtime
 		this.filePath = filePath;
+		this.mask = mask;
 		fs.mkdirSync(path.dirname(filePath), { recursive: true });
 	}
 
 	private append(record: Omit<TrajectoryRecord, "seq">): void {
-		fs.appendFileSync(this.filePath, JSON.stringify({ seq: this.seq++, ...record }) + "\n");
+		fs.appendFileSync(this.filePath, JSON.stringify(this.mask({ seq: this.seq++, ...record })) + "\n");
 	}
 
 	attempt(n: number): void {

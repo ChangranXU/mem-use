@@ -17,11 +17,13 @@ export interface AgentJobConfig {
 	max_steps: number;
 	/** Per-call output cap; continuations may use less to fit retained evidence. */
 	max_output_tokens: number;
+	/** Estimated token floor for the shortest allowed answer shape for this span. */
+	minimum_output_tokens: number;
 	/** The model's context window in tokens; the budget forces an answer before it overflows. */
 	context_window: number;
 	temperature: number;
 	thinking_level: string;
-	/** Timeout in milliseconds for each HTTP request, including retries. */
+	/** Idle wait in milliseconds for response headers or the next body chunk. */
 	timeout_ms: number;
 }
 
@@ -34,7 +36,7 @@ export interface AgentJob {
 	opening: string;
 	/** Injected as a user message when the step/context budget is exhausted. */
 	forced_message: string;
-	/** Prior conversation to continue across phases; seeds the agent state verbatim. */
+	/** Credential-masked prior messages used to continue the conversation. */
 	history?: unknown[];
 	/** 1-based attempt number, recorded in the trajectory. */
 	attempt: number;
@@ -60,13 +62,15 @@ export interface AgentResult {
 	 */
 	stop_reason: string;
 	forced: boolean;
+	/** Model calls still present in the retained conversation. */
 	llm_calls: number;
+	/** Tool calls still present in the retained conversation. */
 	tool_calls: number;
 	executed_llm_calls: number;
 	executed_tool_calls: number;
 	reported_usage: AgentUsage;
 	context_rollbacks: number;
-	/** The full conversation, for the caller's corrective continuation. */
+	/** Credential-masked conversation for the next phase. */
 	messages: unknown[];
 	/** Runner/endpoint failure text; null on a completed conversation. */
 	error: string | null;

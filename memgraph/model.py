@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 
 from memgraph.annotations import AnnotationIndex, item_ident
 
+AMBIGUOUS_RUN_WARNING = "run_id {run_id!r} names multiple trajectories and cannot identify one recording"
+
 
 def _linked_memory(entry: dict) -> dict:
     """Graph references keep recorded identity and carry the registry join

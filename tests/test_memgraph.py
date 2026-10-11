@@ -6,6 +6,9 @@ never from prompt text or label conventions.
 """
 
 import json
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -1897,47 +1900,55 @@ def test_apply_verdicts_duplicate_run_id_is_ambiguous_not_contaminating(tmp_path
     graph = load_and_build([tmp_path])
     recalls = [o for o in graph["ops"] if o["kind"] == "recall"]
     assert len(recalls) == 2
+    assert any("names multiple trajectories" in item["msg"] for item in graph["validation"])
     apply_verdicts(
         graph, verdict_report("same-run", "T99:S1", [(recalls[0]["seq"], 2, "first")]))
     assert all("verdict" not in o for o in recalls)
     assert "verdicts" not in graph["tool"]
-    assert any("ambiguous" in v["msg"] for v in graph["validation"])
+    assert sum("names multiple trajectories" in v["msg"] for v in graph["validation"]) == 1
 
 
-def test_apply_verdicts_duplicate_report_run_id_merges_with_warning(tmp_path):
-    """A report covering one run_id twice (e.g. the same run judged twice)
-    merges both trajectories' seq maps — but one seq claimed by TWO
-    injections makes the (run_id, seq) join ambiguous, and an ambiguous key
-    annotates neither op (never one judging's verdict onto the other),
-    while non-colliding seqs merge through. Both the merge and the
-    ambiguity is warned about, never silent."""
-    from memgraph.verdicts import apply_verdicts
+@pytest.mark.parametrize("overlapping", [False, True])
+def test_apply_verdicts_duplicate_report_run_ids_refuse_all_joins(tmp_path, overlapping):
+    from memgraph.verdicts import apply_verdicts, load_verdict_report
 
     b = TrajBuilder().agent_turn(with_task=True).recall().recall()
     b.write(tmp_path / "t1", run_id="run-1")
     graph = load_and_build([tmp_path])
     seqs = [o["seq"] for o in graph["ops"] if o["kind"] == "recall"]
     report = verdict_report("run-1", "T99:S1", [(seqs[0], 2, "first")])
-    # a second judging of the same run: collides on seqs[0], adds seqs[1]
-    other = verdict_report("run-1", "T88:S1",
-                           [(seqs[0], 2, "first"), (seqs[1], 3, "restated")],
-                           verdict="positive")
+    injections = [(seqs[1], 3, "first")]
+    if overlapping:
+        injections.insert(0, (seqs[0], 2, "first"))
+    other = verdict_report("run-1", "T88:S1", injections, verdict="positive")
     other["trajectories"] = [{"id": "T88", "run_id": "run-1"}]
     other["operations"][0]["traj"] = "T88"
-    report["trajectories"] += other["trajectories"]
-    report["operations"] += other["operations"]
-    report["injections"] += other["injections"]
-    apply_verdicts(graph, report)
+    for field in ("trajectories", "operations", "injections"):
+        report[field] += other[field]
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps(report))
+    apply_verdicts(graph, load_verdict_report(path))
     recalls = [o for o in graph["ops"] if o["kind"] == "recall"]
-    assert "verdict" not in recalls[0]  # the colliding seq annotated neither op
-    assert "verdict_span" not in recalls[0]
-    assert recalls[1]["verdict"] == "restated"  # non-colliding seqs merge through
-    assert recalls[1]["span_verdict"] == "positive"
-    msgs = [v["msg"] for v in graph["validation"]]
-    assert any(
-        "two injections at seq" in m and "ambiguous" in m and str(seqs[0]) in m
-        for m in msgs
-    )
+    assert all("verdict" not in recall and "verdict_span" not in recall for recall in recalls)
+    assert "verdicts" not in graph["tool"]
+    assert any("names multiple trajectories" in item["msg"]
+               and "cannot identify one recording" in item["msg"] for item in graph["validation"])
+
+
+def test_shared_run_id_has_one_warning_across_load_and_both_join_sides(tmp_path):
+    from memgraph.verdicts import apply_verdicts
+
+    for name in ("first", "second"):
+        TrajBuilder().agent_turn(with_task=True).recall().write(tmp_path / name, run_id="shared")
+    graph = load_and_build([tmp_path])
+    report = verdict_report("shared", "T99:S1", [(graph["ops"][0]["seq"], 2, "first")])
+    report["trajectories"].append({"id": "T88", "run_id": "shared"})
+    apply_verdicts(graph, report)
+    notes = [item for item in graph["validation"] if "run_id 'shared'" in item["msg"]]
+    assert len(notes) == 1
+    assert notes[0]["level"] == "warn"
+    assert "cannot identify one recording" in notes[0]["msg"]
+    assert all("verdict" not in op for op in graph["ops"] if op["kind"] == "recall")
 
 
 def test_apply_verdicts_graph_side_seq_collision_annotates_neither(tmp_path):
@@ -2075,6 +2086,63 @@ def test_cli_verdicts_flag_merges_through_main(tmp_path):
     g = graph_payload(out.read_text())
     (gop,) = [o for o in g["ops"] if o["kind"] == "recall"]
     assert gop["verdict"] == "neutral" and g["tool"]["verdicts"] == str(report)
+
+
+@pytest.mark.parametrize("overlay", [False, True])
+def test_memgraph_cli_and_completed_overlay_do_not_require_prompts(tmp_path, overlay):
+    root = Path(__file__).resolve().parents[1]
+    isolated = tmp_path / "isolated"
+    isolated.mkdir()
+    for package in ("memgraph", "injudge"):
+        shutil.copytree(root / package, isolated / package, ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copy(root / "util.py", isolated / "util.py")
+    builder = TrajBuilder().agent_turn(with_task=True).recall()
+    source = builder.write(tmp_path / "input", run_id="run-1")
+    command = [sys.executable, "-m", "memgraph", str(source), "-o", str(tmp_path / "graph.html")]
+    if overlay:
+        graph = load_and_build([source])
+        op = next(op for op in graph["ops"] if op["kind"] == "recall")
+        report = tmp_path / "report.json"
+        report.write_text(json.dumps(verdict_report("run-1", "T99:S1", [(op["seq"], 2, "first")])))
+        command.extend(["--verdicts", str(report)])
+    result = subprocess.run(command, cwd=isolated, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "graph.html").exists()
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+@pytest.mark.parametrize("with_warning", [False, True])
+def test_html_validation_prioritizes_errors_and_opens_details(with_warning):
+    from memgraph.html import render_html
+
+    notes = [{"level": "info", "msg": "information"},
+             {"level": "error", "msg": "failed <image>"}]
+    if with_warning:
+        notes.insert(1, {"level": "warn", "msg": "warning"})
+    graph = {"trajectories": [], "ops": [], "memories": [], "validation": notes}
+    html = render_html(graph)
+    escape = html.split("function esc(s)", 1)[1].split("\n", 1)[0]
+    block = html.split("// ---------- header summary, verdict key, validation ----------", 1)[1].split("\nzoom(0);", 1)[0]
+    script = "const G=" + json.dumps(graph) + ";\nfunction esc(s)" + escape + "\n" + r'''
+const idle=[], rows=[], outline=[];
+const elements=Object.create(null), foot={scrollIntoView(){this.scrolled=true;}};
+const document={getElementById(id){return elements[id]??=( {addEventListener(){}} );},querySelector(){return foot;}};
+''' + block + r'''
+elements.vjump.onclick();
+console.log(JSON.stringify({elements,foot}));
+'''
+    result = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    rendered = json.loads(result.stdout)
+    nodes = rendered["elements"]
+    assert 'class="link error"' in nodes["summary"]["innerHTML"]
+    assert "1 error" in nodes["summary"]["innerHTML"]
+    assert "1 error" in nodes["vsum"]["textContent"]
+    assert nodes["vlist"]["innerHTML"].startswith('<li class="error">failed &lt;image&gt;</li>')
+    if with_warning:
+        assert "1 warning" in nodes["summary"]["innerHTML"]
+        assert nodes["vlist"]["innerHTML"].index('class="warn"') < nodes["vlist"]["innerHTML"].index("information")
+    assert rendered["foot"] == {"open": True, "scrolled": True}
 
 
 def test_render_html_without_verdicts_has_no_verdict_payload(tmp_path):
