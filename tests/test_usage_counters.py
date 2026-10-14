@@ -144,3 +144,16 @@ def test_unknown_cache_write_part_keeps_total_unknown_without_body_reparsing(tmp
     assert operations[1].cost[field] is None
     assert trajectory.memory_cost["generation"][field] is None
     assert trajectory.memory_cost["generation"]["prompt_tokens"] == 200
+
+
+def test_bounded_billing_excludes_retained_context_and_whole_run_snapshots():
+    events = [
+        {"type": "message_end", "role": "assistant", "msg": 0,
+         "usage": {"prompt_tokens": 300}, "_context_only": True},
+        {"type": "message_retracted", "msg": 0},
+        {"type": "message_end", "role": "assistant", "msg": 0, "usage": {"prompt_tokens": 700}},
+        {"type": "agent_end", "usage": {"prompt_tokens": 1000}},
+    ]
+    warnings = []
+    assert prompt_tokens_total(events, warnings, {"prompt_tokens": 1000}, bindings={}, include_snapshots=False) == 700
+    assert warnings == []

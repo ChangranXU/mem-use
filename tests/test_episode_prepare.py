@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import shutil
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,7 @@ from injudge.episodes import _replay_context, evidence_problem, prepare_trajecto
 from injudge.evidence import build_episode_evidence, build_span_evidence
 from injudge.spans import group_spans
 from memgraph.parse_trajectory import parse_trajectory
+from memgraph.graph import load_trajectories
 
 
 def _parse(tmp_path: Path, builder: AnnotatedBuilder):
@@ -391,6 +393,37 @@ def _pointer_fixture(tmp_path, shape="responses"):
     return builder, source, request_path, proof, memory, task
 
 
+def _recovery_copy(source):
+    recovered = source.parent / "recovered"
+    shutil.copytree(source, recovered, ignore=shutil.ignore_patterns("calls"))
+    (recovered / "calls").symlink_to(source / "calls", target_is_directory=True)
+    meta = json.loads((recovered / "run.json").read_text())
+    meta["annotation_recovery"] = {"source": str(source)}
+    (recovered / "run.json").write_text(json.dumps(meta))
+    return recovered
+
+
+@pytest.mark.parametrize("shape", ["responses", "chat_tool", "mixed_message", "parts", "system_string", "system_blocks"])
+def test_recovery_copy_request_pointer_preserves_judge_evidence(tmp_path, shape):
+    _builder, source, _request, _proof, _memory, _task = _pointer_fixture(tmp_path, shape)
+    recovered = _recovery_copy(source)
+    selected = tmp_path / "evaluation-attempts.json"
+    selected.write_text(json.dumps({
+        "schema_version": "memory-bridge.evaluation/v1",
+        "segments": [{"recording": recovered.name, "through_seq": None}],
+    }))
+    evidence = []
+    for path in (source, selected):
+        (trajectory,), ops, events, _warnings = load_trajectories([path])
+        episode = prepare_trajectory(trajectory, events[trajectory.id], ops[trajectory.id]).episodes[0]
+        assert episode.preparation_status == "prepared" and evidence_problem(episode) is None
+        assert episode.deliveries[0]["placements"][0]["source_resolution"]["status"] == "resolved"
+        (span,) = group_spans(ops[trajectory.id], trajectory.id, last_step=episode.steps[-1].step)
+        files = build_span_evidence(span, episode)
+        evidence.append({name: files[name] for name in ("baseline.md", "task.md", "span.md")})
+    assert evidence[0] == evidence[1]
+
+
 @pytest.mark.parametrize("shape", ["responses", "chat_tool", "mixed_message", "parts", "system_string", "system_blocks"])
 def test_request_pointer_excludes_target_from_baseline_and_preserves_task(tmp_path, shape):
     _builder, source, _request, _proof, memory, task = _pointer_fixture(tmp_path, shape)
@@ -419,8 +452,9 @@ def test_system_pointer_does_not_resolve_against_user_text(tmp_path):
     assert evidence_problem(episode) is not None
 
 
-@pytest.mark.parametrize("fault", ["missing", "malformed", "digest", "pointer", "huge_index", "negative_index", "leading_zero", "symlink", "duplicate", "future"])
-def test_request_proof_failures_remain_unresolved(tmp_path, fault):
+@pytest.mark.parametrize("fault", ["missing", "malformed", "digest", "pointer", "huge_index", "negative_index", "leading_zero", "symlink", "request_symlink", "duplicate", "future"])
+@pytest.mark.parametrize("recovered", [False, True])
+def test_request_proof_failures_remain_unresolved(tmp_path, fault, recovered):
     builder, source, path, proof, memory, _task = _pointer_fixture(tmp_path)
     if fault == "missing":
         path.unlink()
@@ -433,12 +467,15 @@ def test_request_proof_failures_remain_unresolved(tmp_path, fault):
     elif fault in ("huge_index", "negative_index", "leading_zero"):
         index = {"huge_index": "9" * 5000, "negative_index": "-1", "leading_zero": "01"}[fault]
         proof["pointer"] = f"/input/{index}/output"
-    elif fault == "symlink":
+    elif fault in ("symlink", "request_symlink"):
         outside = tmp_path / "outside"
         outside.mkdir()
         path.rename(outside / "request.json")
-        path.parent.rmdir()
-        path.parent.symlink_to(outside, target_is_directory=True)
+        if fault == "symlink":
+            path.parent.rmdir()
+            path.parent.symlink_to(outside, target_is_directory=True)
+        else:
+            path.symlink_to(outside / "request.json")
     else:
         tool = next(event for event in builder.events if event.get("type") == "tool_execution_end")
         starts = [event for event in builder.events if event.get("type") == "turn_start"]
@@ -449,6 +486,8 @@ def test_request_proof_failures_remain_unresolved(tmp_path, fault):
             builder.events.remove(tool)
             builder.events.append(tool)
     builder.write(source)
+    if recovered:
+        source = _recovery_copy(source)
     trajectory, ops, events = parse_trajectory(source, [])
     episode = prepare_trajectory(trajectory, events, ops).episodes[0]
     assert episode.deliveries[0]["placements"][0]["source_resolution"]["status"] == "unknown"

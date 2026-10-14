@@ -137,6 +137,8 @@ def build_step_stream(
     turnless_ends: list[dict] = []  # late closings, resolved by tool_call_id below
 
     for e in events:
+        if e.get("_context_only"):
+            continue
         etype = e.get("type")
         if etype == "turn_start":
             if (t := _turn_of(e)) is not None:
@@ -343,14 +345,15 @@ def _valid_tokens(value: object) -> bool:
 
 def prompt_tokens_total(
     events: list[dict], warnings: list[str], run_usage: dict[str, object] | None = None,
-    *, bindings: dict[str, dict[str, str | None]],
+    *, bindings: dict[str, dict[str, str | None]], include_snapshots: bool = True,
 ) -> int:
-    """Use the largest valid run, agent-end, or recorded message prompt total.
+    """Count selected message usage, using whole-run snapshots when applicable.
 
     Run snapshots include calls without messages, such as embeddings. They
     replace the message sum. Invalid or smaller snapshots produce warnings.
     A retraction annuls only the current record at its slot. A history rewrite
     removes slot ownership, but keeps the charge for calls already made.
+    Bounded views exclude whole-run snapshots and context-only prefix charges.
     """
     charged: dict[int, dict] = {}
     # Track every role so a retraction cannot annul an older assistant charge.
@@ -379,7 +382,7 @@ def prompt_tokens_total(
                 corrupt += 1
         elif typ != "message_retracted":
             current[key] = index
-            if assistant:
+            if assistant and not e.get("_context_only"):
                 charged[index] = e
         else:
             if key in current:
@@ -406,7 +409,8 @@ def prompt_tokens_total(
         )
     ended = next((e.get("usage") for e in reversed(events) if e.get("type") == "agent_end"), None)
     snapshots: dict[str, int] = {}
-    for source, usage in (("run.json", run_usage), ("agent_end", ended)):
+    sources = (("run.json", run_usage), ("agent_end", ended)) if include_snapshots else ()
+    for source, usage in sources:
         if usage is None or (isinstance(usage, dict) and "prompt_tokens" not in usage):
             continue
         tokens = usage.get("prompt_tokens") if isinstance(usage, dict) else None
@@ -426,8 +430,9 @@ def prompt_tokens_total(
                 )
         return largest
     if any("embedding" in roles for roles in bindings.values()):
+        basis = ("no valid run-level prompt-token total" if include_snapshots
+                 else "whole-run snapshots excluded by interval selection")
         warnings.append(
-            "no valid run-level prompt-token total; message usage excludes embedding calls "
-            "and may undercount the billed budget"
+            f"{basis}; message usage excludes embedding calls and may undercount the billed budget"
         )
     return total

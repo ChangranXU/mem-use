@@ -22,6 +22,7 @@ from pathlib import Path
 from memgraph.annotations import item_ident, version_identity
 from memgraph.model import AMBIGUOUS_RUN_WARNING, Edge, MemoryOp, MemoryUnit, Trajectory
 from memgraph.parse_trajectory import parse_trajectory
+from memgraph.segments import recording_inputs
 
 _TS_PREFIX = re.compile(r"^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})")
 
@@ -393,9 +394,12 @@ def load_trajectories(
     trajectory id) so callers needing the raw stream (injudge's step
     stream) do not re-read the files.
     """
-    traj_dirs = discover_trajectories(paths)
+    # A continuation manifest selects checkpoint prefixes while retaining
+    # the full recordings for call proofs and all-attempt usage.
     warnings: list[str] = []
-    parsed = [(d, *parse_trajectory(d, warnings)) for d in traj_dirs]
+    inputs = recording_inputs(paths, discover_trajectories, warnings)
+    parsed = [(directory, *parse_trajectory(directory, warnings, after_seq=after, through_seq=limit))
+              for directory, after, limit in inputs]
     # Order lanes by started_at (run.json); without run.json, derive a
     # comparable timestamp from the YYYYMMDD-HHMMSS directory-name prefix.
     parsed.sort(key=lambda item: (_traj_sort_key(item[0], item[1].started_at), str(item[0])))

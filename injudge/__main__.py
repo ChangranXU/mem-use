@@ -744,11 +744,13 @@ def main(argv: list[str] | None = None) -> int:
                 {"level": "info", "msg": f"{run_id}: zero recall injections (valid input, empty verdict set)"}
             )
 
-        # delivery-policy metrics: density, restated ratio, and the injected
-        # share of the REAL prompt budget — every lane's billed usage,
-        # including embedding calls that produce no conversation events.
+        # Delivery metrics use the selected activity's budget. Whole-run
+        # snapshots also cover calls without messages, but cannot separate
+        # a checkpoint prefix from discarded attempts.
         budget_warnings: list[str] = []
-        prompt_total = prompt_tokens_total(events, budget_warnings, t.run_usage, bindings=t._annotation_index.binds)
+        prompt_total = prompt_tokens_total(events, budget_warnings, t.run_usage,
+                                           bindings=t._annotation_index.binds,
+                                           include_snapshots=not t._billing_is_bounded)
         for w in budget_warnings:
             validation.append({"level": "warn", "msg": f"{run_id}: {w}"})
         extracts = [op for op in ops if op.kind == "extract"]

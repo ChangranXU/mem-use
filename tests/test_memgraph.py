@@ -1427,7 +1427,8 @@ def test_unparseable_run_json_degrades_never_crashes(tmp_path):
     assert any("cannot parse run.json" in v["msg"] for v in graph["validation"])
 
 
-def test_pathologically_nested_json_degrades_never_raises(tmp_path):
+@pytest.mark.parametrize("recursive", [False, True])
+def test_pathologically_nested_json_degrades_never_raises(tmp_path, recursive):
     """json.loads raises RecursionError on pathologically nested input (and a
     plain ValueError on the int digit limit) — neither may escape the
     never-raise paths: a nested run.json degrades to the directory name, a
@@ -1442,8 +1443,9 @@ def test_pathologically_nested_json_degrades_never_raises(tmp_path):
         + deep.encode() + b"\n"
         + ('{"seq": ' + "1" * 5000 + "}").encode() + b"\n"
     )
-    graph = load_and_build([d])
+    graph = load_and_build([tmp_path if recursive else d])
     assert graph["trajectories"][0]["run_id"] == "t1"
+    assert len([op for op in graph["ops"] if op["kind"] == "recall"]) == 1
     assert any("cannot parse run.json" in v["msg"] for v in graph["validation"])
     assert sum("skipped malformed JSONL line" in v["msg"]
                for v in graph["validation"]) == 2

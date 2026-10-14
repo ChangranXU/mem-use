@@ -195,8 +195,10 @@ def _request_for_delivery(event: dict[str, Any], directory: Path) -> object:
     if not isinstance(call_id, str) or not call_id or Path(call_id).name != call_id or call_id in (".", ".."):
         return None
     try:
-        root = directory.resolve()
-        path = (root / "calls" / call_id / "request.json").resolve()
+        # Recovery copies share the original calls tree; individual requests
+        # must still stay inside that tree after resolving any nested symlinks.
+        root = (directory / "calls").resolve()
+        path = (root / call_id / "request.json").resolve()
         if not path.is_relative_to(root):
             return None
         return json.loads(path.read_text(encoding="utf-8"))

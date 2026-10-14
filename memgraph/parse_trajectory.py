@@ -213,7 +213,7 @@ def classifying_messages(events: list[dict]) -> dict[int, dict]:
     """
     classified: dict[int, dict] = {}
     for e in events:
-        if e.get("type") != "message_end" or e.get("role") != "assistant":
+        if e.get("_context_only") or e.get("type") != "message_end" or e.get("role") != "assistant":
             continue
         t = e.get("turn")
         src = e.get("proxy_source")
@@ -878,6 +878,9 @@ def parse_trajectory(
     traj_dir: Path,
     warnings: list[str],
     traj_id: str = "T?",
+    *,
+    after_seq: int | None = None,
+    through_seq: int | None = None,
 ) -> tuple[Trajectory, list[MemoryOp], list[dict]]:
     """Parse one trajectory directory into (Trajectory, [MemoryOp], events).
 
@@ -888,6 +891,22 @@ def parse_trajectory(
     if not jsonl.is_file():
         raise FileNotFoundError(f"no trajectory.jsonl in {traj_dir}")
     events = load_events(jsonl, warnings)
+    selected = []
+    billing_is_bounded = False
+    for event in events:
+        event.pop("_context_only", None)
+        if through_seq is not None and event["seq"] > through_seq:
+            billing_is_bounded = True
+            continue
+        if after_seq is not None and event["seq"] <= after_seq:
+            billing_is_bounded = True
+            # Retained slots can predate the selected episodes. Replay their
+            # messages and removals without counting earlier activity again.
+            if event.get("type") not in ("message_end", "tool_execution_end", "message_retracted", "history_rewritten"):
+                continue
+            event["_context_only"] = True
+        selected.append(event)
+    events = selected
     # Parsed-stream position is the stable provenance key for preparation.
     # It is intentionally separate from seq, which corrupt recordings may
     # duplicate or regress, and remains internal to the graph parser.
@@ -945,7 +964,8 @@ def parse_trajectory(
                 warnings.append(f"{run_json}: usage is not an object; ignoring run billing snapshot")
 
     traj = Trajectory(id=traj_id, run_id=run_id, path=str(traj_dir),
-                      model=model, started_at=started_at, status=status, run_usage=run_usage)
+                      model=model, started_at=started_at, status=status, run_usage=run_usage,
+                      _billing_is_bounded=billing_is_bounded)
 
     index = build_annotation_index(events)
     traj._annotation_index = index
@@ -1066,7 +1086,7 @@ def parse_trajectory(
 
     table = _TurnTable(events, memory_lanes, side_lanes)
     for e in events:
-        if e.get("type") == "history_rewritten":
+        if e.get("type") == "history_rewritten" and not e.get("_context_only"):
             src = e.get("proxy_source")
             traj.rewrites.append(
                 {

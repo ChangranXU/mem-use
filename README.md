@@ -97,3 +97,31 @@ The suite is offline: Python tests stub paid judge calls.
 `tests/test_agent_tools.py` drives the TypeScript runner and evidence tools
 through `node --test`, and is skipped when node or the agent packages are
 missing.
+
+### Resumed memory-bridge runs
+
+Pass a run directory containing `evaluation.json`, or that manifest itself,
+to either `memgraph` or `injudge`. The manifest follows all recorder segments
+and selects only the checkpoint-credited prefix of each, omitting segments
+with no completed tasks. This prevents a
+discarded attempt's memory updates from changing the resumed store's history.
+The original calls remain available for placement proofs and cost bindings.
+
+Use `evaluation-attempts.json` to inspect every attempt, including discarded
+ones and recovered observations. Use `evaluation-discarded.json` for only
+interrupted or uncheckpointed attempts, separate from completed history. A
+completed task with a failing benchmark score stays in the credited view.
+These are audits of attempts, not the
+continued store's lifecycle. `recorded_usage` on each graph trajectory is the
+recorder's original `run.json` usage snapshot for audit. Billing and operation
+costs follow the selected view. For `evaluation.json`, that means credited
+parent prefixes plus completed resumed work, excluding discarded attempts.
+Views that exclude events use selected message usage for prompt-token billing;
+whole-run snapshots
+and earlier messages retained only for context replay do not add charges.
+Unknown tool-service charges remain unknown. Recovery copies contain explicit
+schema-10 memory annotations validated by traj-recorder; mem-eval does not
+infer memory actions from Bash commands or prompt text. Failed recovery is shown
+as an incomplete-audit warning in graph and judge diagnostics. Recursive scans
+that find both an original and its recovery copy count the original once;
+select the attempts manifest to include recovered observations.

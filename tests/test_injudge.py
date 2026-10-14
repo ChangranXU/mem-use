@@ -1996,6 +1996,110 @@ def test_cli_counts_embedding_billing_without_golden_answers(monkeypatch, tmp_pa
     assert policy["delivery_token_ratio"] == round(policy["est_injected_tokens"] / expected, 4)
 
 
+@pytest.mark.parametrize("billing_source", ["agent_end", "messages"])
+@pytest.mark.parametrize("snapshot", [None, 500, True, 1500])
+def test_checkpoint_prefix_bills_only_selected_activity(monkeypatch, tmp_path, billing_source, snapshot):
+    b = TrajBuilder().episode_open("credited").agent_turn(with_task=True)
+    b.recall([REF_A, REF_B]).agent_turn().episode_close("credited")
+    cutoff = b.seq
+    b.episode_open("discarded").history_rewrite(kept=1, dropped=4).agent_turn(with_task=True)
+    b.generate(produced=[cure_ref("unselected", "later memory")])
+    b.episode_close("discarded")
+    for event in b.events:
+        if event["type"] == "message_end" and event.get("role") == "assistant":
+            event["usage"] = {"prompt_tokens": 700 if event["seq"] > cutoff and billing_source == "messages" else 100}
+    if billing_source == "agent_end":
+        b._emit("agent_end", usage={"prompt_tokens": 1000})
+    else:
+        # An unselected embedding binding must not affect the prefix bill.
+        b.annotation("memory_role_bind", {
+            "trace_session_id": b.events[1]["payload"]["trace_session_id"],
+            "logical_role": "embedding", "adapter": b.adapter,
+        }, lane="EMBED")
+    source = b.write(tmp_path / "trajectory")
+    meta_path = source / "run.json"
+    meta = json.loads(meta_path.read_text())
+    if snapshot is not None:
+        meta["usage"] = {"prompt_tokens": snapshot}
+    meta_path.write_text(json.dumps(meta))
+    originals = {path: path.read_bytes() for path in (meta_path, source / "trajectory.jsonl")}
+    selected = tmp_path / "evaluation.json"
+    selected.write_text(json.dumps({"schema_version": "memory-bridge.evaluation/v1", "segments": [
+        {"recording": str(source), "through_seq": cutoff}]}))
+    bounded_full = tmp_path / "evaluation-attempts.json"
+    bounded_full.write_text(json.dumps({"schema_version": "memory-bridge.evaluation/v1", "segments": [
+        {"recording": str(source), "after_seq": 0, "through_seq": b.seq}]}))
+    env = tmp_path / ".env"
+    env.write_text("BASE_URL=https://judge.invalid\nAPI_KEY=test-key-only\nMODEL=test-judge\n")
+    monkeypatch.setattr("injudge.agent._check_runner", lambda: 4096)
+    summaries = []
+    for label, path in (("full", source), ("prefix", selected), ("bounded_full", bounded_full)):
+        calls = stub_runner(monkeypatch, [_result(GOOD)])
+        output = tmp_path / label
+        assert injudge_main.main([str(path), "--env", str(env), "-o", str(output)]) == 0
+        assert len(calls) == 1
+        (run_dir,) = output.iterdir()
+        summary = json.loads((run_dir / "summary.json").read_text())
+        report = json.loads((run_dir / "injudge-report.json").read_text())
+        notes = [entry["msg"] for entry in report["validation"]]
+        if snapshot == 500 and label != "prefix":
+            assert any("run.json: prompt-token total is below" in note for note in notes)
+        if snapshot is True and label != "prefix":
+            assert any("run.json: invalid usage.prompt_tokens" in note for note in notes)
+        assert any("message usage excludes embedding calls" in note for note in notes) == (
+            label != "prefix" and billing_source == "messages" and snapshot != 1500)
+        assert report["trajectories"][0]["policy"]["n_extractions"] == (0 if label == "prefix" else 1)
+        assert len(report["trajectories"][0]["episodes"]) == (1 if label == "prefix" else 2)
+        summaries.append(summary["recording_policy"])
+    full, prefix, bounded_full = summaries
+    assert bounded_full == full
+    assert full["prompt_tokens_total"] == (1500 if snapshot == 1500 else 1000)
+    assert prefix["prompt_tokens_total"] == 300
+    assert prefix["delivery_token_ratio"] == round(prefix["est_injected_tokens"] / 300, 4)
+    assert prefix["n_steps"] == 3 and full["n_steps"] == 4
+    assert all(path.read_bytes() == content for path, content in originals.items())
+
+
+def test_resumed_billing_counts_the_checkpoint_prefix_and_resumed_work_only(monkeypatch, tmp_path):
+    parent = TrajBuilder().episode_open("credited").agent_turn(with_task=True)
+    parent.recall([REF_A, REF_B]).agent_turn().episode_close("credited")
+    cutoff = parent.seq
+    parent.episode_open("discarded").history_rewrite(kept=1, dropped=4).agent_turn(with_task=True)
+    child = TrajBuilder().episode_open("resumed").agent_turn(with_task=True).episode_close("resumed")
+    recordings = []
+    originals = {}
+    for name, builder, total in (("parent", parent, 9300), ("resumed", child, 700)):
+        for event in builder.events:
+            if event["type"] == "message_end" and event.get("role") == "assistant":
+                event["usage"] = {"prompt_tokens": (100 if event["seq"] <= cutoff else 9000) if name == "parent" else 700}
+        builder._emit("agent_end", usage={"prompt_tokens": total})
+        source = builder.write(tmp_path / name, run_id=name)
+        metadata = json.loads((source / "run.json").read_text())
+        (source / "run.json").write_text(json.dumps({**metadata, "usage": {"prompt_tokens": total}}))
+        originals.update({path: path.read_bytes() for path in (source / "run.json", source / "trajectory.jsonl")})
+        recordings.append({"recording": str(source), "through_seq": cutoff if name == "parent" else None})
+    run = tmp_path / "continued"
+    run.mkdir()
+    (run / "evaluation.json").write_text(json.dumps({"schema_version": "memory-bridge.evaluation/v1", "segments": recordings}))
+    env = tmp_path / ".env"
+    env.write_text("BASE_URL=https://judge.invalid\nAPI_KEY=test-key-only\nMODEL=test-judge\n")
+    monkeypatch.setattr("injudge.agent._check_runner", lambda: 4096)
+    calls = stub_runner(monkeypatch, [_result(GOOD)])
+    output = tmp_path / "output"
+    assert injudge_main.main([str(run), "--env", str(env), "-o", str(output)]) == 0
+    assert len(calls) == 1
+    (run_dir,) = output.iterdir()
+    summary = json.loads((run_dir / "summary.json").read_text())
+    report = json.loads((run_dir / "injudge-report.json").read_text())
+    assert [row["policy"]["prompt_tokens_total"] for row in report["trajectories"]] == [300, 700]
+    policy = summary["recording_policy"]
+    assert policy["prompt_tokens_total"] == 1000  # excludes the abandoned 9,000-token attempt
+    assert policy["delivery_token_ratio"] == round(policy["est_injected_tokens"] / 1000, 4)
+    assert [episode["recorded_episode_identity"]["episode_id"]
+            for row in report["trajectories"] for episode in row["episodes"]] == ["credited", "resumed"]
+    assert all(path.read_bytes() == content for path, content in originals.items())
+
+
 @pytest.mark.parametrize("usage", [[], {"prompt_tokens": True}, {"prompt_tokens": "99"},
                                   {"prompt_tokens": float("inf")}, {"prompt_tokens": -1}])
 def test_corrupt_run_usage_falls_back_to_live_message_billing(usage):

@@ -152,8 +152,12 @@ The optional `embedding` role binds a distinct proxy lane. An operation-end
 `embedding_call_refs` (including an explicit empty list for `no_call`). These
 refs never replace memory-call attribution or create agent steps. Billing
 uses the largest valid prompt-token total from run.json, agent_end, and recorded
-message usage; inconsistent smaller snapshots warn. Without snapshots,
-message usage misses embedding calls and warns when that role is bound.
+message usage for complete recordings; inconsistent smaller snapshots warn.
+When a view excludes events, billing uses message usage only from its selected
+interval and ignores whole-run snapshots, which cannot separate credited and
+discarded attempts. Earlier context retained for replay contributes no charge.
+Without applicable snapshots, message usage misses embedding calls and warns
+when that role is bound in the selected view.
 Duplicate search links remain visible but contribute query/matched once per
 operation.
 
@@ -516,6 +520,27 @@ run → sequence → episode by them and adds no validation notes of its own
 The HTML colors rewrite markers by each marker's own `on_memory_lane` flag,
 computed at parse time against the final lane set. Do not prune a field
 from one consumer only.
+
+Continuation inputs (`evaluation.json`) select the checkpoint-credited prefix
+of each recorder segment; segments with no completed tasks are omitted.
+`evaluation-attempts.json` retains all attempts. `evaluation-discarded.json`
+selects only attempts after the checkpoint, using an exclusive `after_seq`
+lower bound; `through_seq` is the inclusive upper bound. Omitted/null bounds
+are unbounded. Event sequence numbers and source captures stay unchanged.
+Discarded views retain earlier messages and history edits to replay retained
+input slots. Their steps, episodes, and memory operations come only from the
+selected interval.
+Graph trajectories expose `recorded_usage`, the recorder's `run.json` usage
+snapshot for audit. Operation costs and prompt-token billing follow the
+selected view; discarded attempts do not enter the credited continuation's
+totals. Neither view rewrites source captures or infers memory actions from
+agent commands.
+Manifest `recovery_error` entries become graph/judge validation warnings.
+Recursive discovery skips a derived annotation copy when its original is also
+selected; an explicitly selected copy or manifest keeps its requested view.
+Recovery copies may share the original `calls/` directory through a symlink.
+Request-pointer placement proofs resolve within that capture directory;
+per-call or request-file symlinks cannot escape it.
 
 **injudge** writes `injudge.report/v22` (`{tool, generated_at, trajectories,
 operations, injections, aggregates, validation}`). Before paid work, the initial

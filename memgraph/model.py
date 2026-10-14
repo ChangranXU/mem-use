@@ -33,6 +33,8 @@ class Trajectory:
     status: str | None = None
     # Internal billing snapshot: includes embedding calls with no chat events.
     run_usage: dict[str, object] = field(default_factory=dict)
+    # Whole-run snapshots cannot price an interval that excludes attempts.
+    _billing_is_bounded: bool = field(default=False, repr=False)
     # Reuse the parser's accepted annotations during episode preparation.
     _annotation_index: AnnotationIndex = field(default_factory=AnnotationIndex, repr=False)
     n_steps: int = 0  # agent steps (non-memory-lane turns)
@@ -79,6 +81,8 @@ class Trajectory:
             "searches": self.searches,
             "rewrites": self.rewrites,
             "memory_cost": self.memory_cost,
+            # Raw audit snapshot; selected-view billing excludes discarded attempts.
+            "recorded_usage": self.run_usage,
             "episodes": self.episodes,
         }
 
