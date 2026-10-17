@@ -62,12 +62,13 @@ Validation notes retain source span order.
 
 ## Injection Spans
 
-The same content is often re-injected, so the judged unit is the **injection span**: a maximal run of recall ops using the same treatment — identical entries in the same order, the same placement presentation, and the same per-entry exposure.
+The same content is often re-injected, so the judged unit is the **injection span**: recall ops using the same treatment — identical entries in the same order, the same placement presentation, and the same per-entry exposure.
 
 Episodes are partitioned before span grouping. Identical treatments across episodes never merge; each episode retains global step numbers, its own task/context, and its own gold/outcome joins. Empty deliveries and unattributable spans are mechanically counted without paid calls.
 
 - Step gaps do not break a span; they are recorded in `step_gaps` and shown to the judge.
-- A content or treatment change does break a span — a re-ranked bundle, a re-framed block, or a changed per-entry exposure starts a new span even when the delivered content is identical. Every delivered entry is judged against its own footprint window; the window bounds and per-entry exposure are specified in [Judge evidence](scoring-input.md).
+- Unrelated deliveries do not break an observed, nonempty span: alternating unchanged profile and skill blocks form two spans. Empty and unattributable deliveries merge only consecutively.
+- A content or treatment change involving any of the span's items does break it — a re-ranked bundle, a re-framed block, or a changed per-entry exposure starts a new span even when the delivered content is identical. Returning to the original treatment starts another span. Every delivered entry is judged against its own footprint window; the window bounds and per-entry exposure are specified in [Judge evidence](scoring-input.md).
 - Re-deliveries roll up as `restated`: they count toward delivery cost and `n_injections`, but never appear in verdict rates.
 - A span with no attributed agent step (`step_first` is `None`) has no downstream footprint. It is rule-judged **neutral** with `auto: no_subsequent_turn`, and no judge call is made. Aggregates tally it as `unassessable`, out of every directional rate.
 

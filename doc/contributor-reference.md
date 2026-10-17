@@ -206,6 +206,9 @@ adapter vocabulary.
     placement presentation, and the same per-entry exposure. A changed
     exposure, a re-ranked bundle, or a re-framed block starts a new span — a
     wider later exposure never merges backward onto anchors that predate it.
+    Unrelated deliveries do not split an observed, nonempty span. A different
+    treatment of any shared item closes it, even if its original treatment
+    returns later. Empty and unattributed deliveries merge only consecutively.
   - Footprint windows are per item, but only a RE-EXPOSURE (a later delivery
     whose verified text contains everything this entry showed) supersedes
     one. A different or narrower verified text of the same item (a search

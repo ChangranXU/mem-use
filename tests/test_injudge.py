@@ -525,27 +525,88 @@ def test_spans_step_gap_recorded_not_broken(tmp_path):
     assert span.n_injections == 4
 
 
-def test_spans_window_bounded_at_the_memorys_next_redelivery(tmp_path):
-    """Each memory's judged footprint window ends where THAT memory is next
-    re-delivered (a re-delivery supersedes — the later influence is the newer
-    span's to claim, so one memory is never credited in two spans); an
-    unrelated span in between bounds nothing."""
+def test_spans_merge_across_unrelated_deliveries_and_keep_step_gaps(tmp_path):
+    """An unrelated delivery neither splits nor bounds an unchanged treatment."""
     b = TrajBuilder().agent_turn(with_task=True)
     b.recall(REF_A)  # step 2
     b.agent_turn().agent_turn()  # steps 3,4
-    b.recall(REF_B)  # step 5: unrelated content breaks the span
+    b.recall(REF_B)  # step 5: independent memory
     b.agent_turn()  # step 6
     b.recall(REF_A)  # step 7: A re-delivered
     spans = group_spans(_recall_ops(b, tmp_path), "T1")
-    assert len(spans) == 3
-    assert (spans[0].step_first, spans[0].step_last) == (2, 2)
-    # key_a's window ends at its re-delivery (step 7) minus one — NOT at the
-    # unrelated span's step 5
-    assert spans[0].memory_windows == {"m1": 6}
-    assert spans[1].memory_windows == {"m1": None}  # never re-delivered
-    assert spans[2].memory_windows == {"m1": None}  # the last span
-    assert [s.position for s in spans] == [1, 2, 3]
-    assert all(s.total == 3 for s in spans)
+    assert len(spans) == 2
+    assert (spans[0].step_first, spans[0].step_last) == (2, 7)
+    assert spans[0].n_injections == 2
+    assert spans[0].step_gaps == [3, 4, 5, 6]
+    assert all(s.memory_windows == {"m1": None} for s in spans)
+    assert [s.position for s in spans] == [1, 2]
+    assert all(s.total == 2 for s in spans)
+
+
+def test_interleaved_blocks_keep_the_episode_action_window(tmp_path):
+    b = TrajBuilder().agent_turn(with_task=True)
+    for _ in range(4):
+        b.agent_turn()
+    for step in (2, 3, 4):
+        for ref in (REF_A, REF_B):
+            search = b.search(returned=[ref])
+            b.delivery(search, memories=[ref], main_step=step, content=ref["content"]["text"])
+    ops = _recall_ops(b, tmp_path)
+    warnings = []
+    spans = group_spans(ops, "T1", warnings, last_step=5)
+    assert [s.op_ids for s in spans] == [[o.id for o in ops[::2]], [o.id for o in ops[1::2]]]
+    for span in spans:
+        assert span.n_injections == 3 and (span.step_first, span.step_last) == (2, 4)
+        assert span.step_gaps == []
+        assert span.memory_windows == {"m1": 5}
+        assert span.memory_window_starts == {} and not span.same_step_bounds
+        assert _acted_claim(span, "m1", [2, 3, 4, 5], 5) is None
+        assert _acted_claim(span, "m1", [1], 5) is not None
+    assert warnings == []
+
+
+@pytest.mark.parametrize("change", ["version", "order", "framing", "exposure", "bundle"])
+def test_interleaving_never_reopens_a_superseded_treatment(tmp_path, change):
+    original = [REF_A, REF_B]
+    changed = list(original)
+    text = "\n".join(ref["content"]["text"] for ref in original)
+    changed_text = text
+    if change == "version":
+        changed[0] = cure_ref("key_a", "A revised instruction for the same item")
+        changed_text = "\n".join(ref["content"]["text"] for ref in changed)
+    elif change == "order":
+        changed.reverse()
+    elif change == "framing":
+        changed_text = "Tentative advice:\n" + text
+    elif change == "exposure":
+        changed_text = REF_A["content"]["text"][:20]
+    elif change == "bundle":
+        changed = [REF_A]
+        changed_text = REF_A["content"]["text"]
+    unrelated = cure_ref("key_c", "Independent memory")
+    b = TrajBuilder().agent_turn(with_task=True)
+    for refs, content in ((original, text), (changed, changed_text), (original, text)):
+        b.recall(refs, content=content)
+        b.recall(unrelated)
+    ops = _recall_ops(b, tmp_path)
+    spans = group_spans(ops, "T1")
+    assert len(spans) == 4
+    assert spans[1].op_ids == [o.id for o in ops[1::2]]
+    assert [s.op_ids for s in (spans[0], spans[2], spans[3])] == [[o.id] for o in ops[::2]]
+    assert spans[0].memory_exposure == ops[0].exposure
+    assert spans[2].memory_exposure == ops[2].exposure
+    assert _acted_claim(spans[3], "m1", [ops[0].step], ops[-1].step) is not None
+
+
+def test_empty_deliveries_merge_only_consecutively(tmp_path):
+    """A memory stream merging backward never joins two separated empty deliveries."""
+    b = TrajBuilder().agent_turn(with_task=True)
+    for _ in range(2):
+        b.recall(REF_A)
+        b.recall([])
+    b.recall([])
+    spans = group_spans(_recall_ops(b, tmp_path), "T1")
+    assert [(bool(s.memories), s.n_injections) for s in spans] == [(True, 2), (False, 1), (False, 2)]
 
 
 def test_spans_windows_are_per_memory_within_one_span(tmp_path):
@@ -650,7 +711,8 @@ def test_spans_window_same_step_collision_closes_only_carried_entries(tmp_path):
     sid_b = b.search(returned=[REF_B])
     b.delivery(sid_b, memories=[REF_B], main_step=3)  # B declared at step 3
     sid_a = b.search(returned=[REF_A])
-    b.delivery(sid_a, memories=[REF_A], main_step=3)  # A re-delivered at step 3
+    b.delivery(sid_a, memories=[REF_A], main_step=3,
+               content="Reframed: " + REF_A["content"]["text"])  # a new treatment at step 3
     warnings: list[str] = []
     spans = group_spans(_recall_ops(b, tmp_path), "T1", warnings)
     assert len(spans) == 3

@@ -151,14 +151,15 @@ def test_episode_selector_judges_only_the_named_episode(tmp_path, monkeypatch, c
     assert len(calls) == 1
 
 
-def test_identical_delivery_is_partitioned_then_merged_within_each_episode(tmp_path):
+def test_interleaved_deliveries_merge_only_within_each_episode(tmp_path):
     builder = AnnotatedBuilder()
-    ref = cure_ref("same", "same fact")
+    refs = [cure_ref("one", "one fact"), cure_ref("two", "two fact")]
     for episode_id, repeats in (("episode-1", 2), ("episode-2", 1)):
         builder.episode_open(episode_id).agent_turn(with_task=True)
         for _ in range(repeats):
-            builder.recall(ref)
-            builder.agent_turn()
+            for ref in refs:
+                builder.recall(ref)
+                builder.agent_turn()
         builder.episode_close(episode_id)
     source = builder.write(tmp_path / "trajectory")
     trajectories, ops_by_traj, events_by_traj, _warnings = load_trajectories([source])
@@ -170,11 +171,33 @@ def test_identical_delivery_is_partitioned_then_merged_within_each_episode(tmp_p
         spans.extend(group_spans([recalls[item["op_id"]] for item in episode.deliveries], trajectory.id,
                                  episode_execution_id=episode.execution_id, id_offset=len(spans),
                                  last_step=episode.steps[-1].step))
-    assert len(spans) == 2 and [span.n_injections for span in spans] == [2, 1]
-    assert spans[0].id != spans[1].id
-    assert spans[1].step_first > 1
-    assert spans[0].memory_windows["m1"] == prepared.episodes[0].steps[-1].step
-    assert spans[1].memory_windows["m1"] == prepared.episodes[1].steps[-1].step
+    assert len(spans) == 4 and [span.n_injections for span in spans] == [2, 2, 1, 1]
+    assert len({span.id for span in spans}) == 4
+    for i, episode in enumerate(prepared.episodes):
+        assert all(span.memory_windows["m1"] == episode.steps[-1].step
+                   for span in spans[2 * i:2 * i + 2])
+
+
+def test_interleaved_spans_judge_once_and_preserve_every_graph_delivery(tmp_path, monkeypatch):
+    builder = AnnotatedBuilder().episode_open().agent_turn(with_task=True)
+    for _ in range(3):
+        for key in ("profile", "skills"):
+            builder.recall(cure_ref(key, f"{key} fact"))
+    builder.agent_turn().episode_close()
+    status, report, _run_dir, calls, source = _run(
+        tmp_path, monkeypatch, builder, [_result(_answer()), _result(_answer())],
+    )
+    assert status == 0 and len(calls) == 2
+    assert [op["n_injections"] for op in report["operations"]] == [3, 3]
+    overall = report["aggregates"]["overall"]
+    assert (overall["n_injections"], overall["n_spans"], overall["restated_injections"]) == (6, 2, 4)
+    graph_trajs, graph_ops, _events, warnings = load_trajectories([source])
+    graph = build_graph(graph_trajs, graph_ops, warnings)
+    apply_verdicts(graph, report)
+    recalls = [op for op in graph["ops"] if op["kind"] == "recall"]
+    assert len(recalls) == 6
+    assert len({op["verdict_span"] for op in recalls}) == 2
+    assert sum(op["verdict"] == "restated" for op in recalls) == 4
 
 
 def test_step_evidence_marks_exposure_timing_by_global_step(tmp_path):

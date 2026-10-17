@@ -1,6 +1,6 @@
 """Group recall operations into injection spans — the judged unit.
 
-A span is a maximal run of recall ops (in agent-step order) delivering
+A span groups recall ops (in agent-step order) delivering
 identical content under the SAME treatment: the same memory set in the same
 order under the recorder's portable identity (namespace, item, identity_scheme,
 version_id, content digest, so two DISTINCT recorded items that merely share
@@ -27,9 +27,11 @@ step whose anchors predate the delivery that first exposed it, and content-
 identical deliveries under different framing are not necessarily identical
 treatments.
 
-A gap in delivery steps does not break a span (the missing steps are
-recorded in `step_gaps` and surfaced to the judge); a content or treatment
-change does.
+A gap in delivery steps or an unrelated delivery does not break an observed,
+nonempty span (missing steps are recorded in `step_gaps`). A different
+treatment of any of its items does, even if the original treatment returns.
+Empty and unattributed deliveries merge only when consecutive: they cannot
+establish independent streams of observed memory items.
 Each delivered memory's judged footprint window is bounded individually at
 THAT memory's first RE-EXPOSURE starting strictly after this span's
 deliveries end (`memory_windows`): a later delivery of the same item that
@@ -148,7 +150,7 @@ def group_spans(
 def _merge_spans(
     recall_ops: list[MemoryOp], traj_id: str, id_offset: int
 ) -> tuple[list[InjectionSpan], list[list[int]]]:
-    """Collapse consecutive same-treatment deliveries; return the spans and
+    """Collapse same-treatment deliveries across unrelated items; return spans and
     the attributed steps of each (parallel lists).
 
     Observed and unobserved consumers are separate populations. A missing
@@ -157,13 +159,18 @@ def _merge_spans(
     ops = sorted(recall_ops, key=lambda o: (o.step is None, o.step or 0, o.source_event_index or 0))
     spans: list[InjectionSpan] = []
     steps_seen: list[list[int]] = []
+    latest: dict[str, int] = {}  # item identity -> newest span carrying it
+    previous: int | None = None  # the span the previous delivery joined
     for op in ops:
         fp = content_fingerprint(op)
-        target = None
-        if (spans and fp == spans[-1].fingerprint
-                and bool(steps_seen[-1]) == (op.step is not None)
-                and _same_treatment(spans[-1], op)):
-            target = len(spans) - 1
+        idents = {entry_ident(m) for m in op.memories}
+        target = latest.get(next(iter(idents))) if op.step is not None and idents else previous
+        if (target is None or fp != spans[target].fingerprint
+                or bool(steps_seen[target]) != (op.step is not None)
+                or any(latest.get(ident) != target for ident in idents)
+                or not _same_treatment(spans[target], op)):
+            target = None
+        previous = len(spans) if target is None else target
         if target is not None:
             span = spans[target]
             span.op_ids.append(op.id)
@@ -180,6 +187,9 @@ def _merge_spans(
                 if query and query not in span.queries:
                     span.queries.append(query)
             continue
+        # A changed bundle, order, framing or exposure closes every item it
+        # carries: a returning old treatment must never reopen that span.
+        latest.update(dict.fromkeys(idents, len(spans)))
         spans.append(
             InjectionSpan(
                 id=f"{traj_id}:S{id_offset + len(spans) + 1}",
