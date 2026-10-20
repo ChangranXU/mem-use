@@ -17,7 +17,7 @@ usage and span verdicts. Task success never decides a memory verdict.
 | `accuracy` | `corroborated` / `uncontradicted` / `contradicted`, within the claim's own repository/version/situation. Uncontradicted means neither confirmed nor refuted. |
 | `novelty` | `novel` / `confirming` / `redundant` / `null`, relative to the recorded pre-exposure input. Confirming settles a voiced doubt; redundant requires already-established substance. Expected task outputs do not automatically supply the solution mechanism. Mixed entries are redundant only when every material claim was established. An earlier delivery counts as baseline only while still in the consuming input, as `span.md` states; a copy arriving in the same input is not earlier. |
 | `influence` | `none` / `referenced` / `selected` / `acted_on` / `null`, defined below. |
-| `positive_effect` | `improved` / `no_effect` / `harmed` / `null`. Non-null only for `acted_on`; judge observed consequences of the anchored action. Keeping or submitting a change is not itself a benefit. `harmed` requires misdirection from the memory’s exposed guidance, including abandoned or corrected detours without a used finding. Agent typos, unavailable tools, or unrelated environment failures alone do not establish memory harm; follow corrected attempts to their result. A blocked attempt without a finding has unknown effect. Reading memory content is delivery cost, not added work. `no_effect` requires an acted-on action that made no difference and added no work. Any harm among the entry's actions makes it `harmed`, even after an earlier benefit. Unknown direction remains null. |
+| `positive_effect` | `improved` / `no_effect` / `harmed` / `null`. Non-null only for `acted_on`; judge observed consequences of the anchored action. Whether the task or the agent could have reached the same action is settled under influence; it never makes an acted-on action `no_effect`. Keeping or submitting a change is not itself a benefit. `harmed` requires misdirection from the memory’s exposed guidance, including abandoned or corrected detours without a used finding. Agent typos, unavailable tools, or unrelated environment failures alone do not establish memory harm; follow corrected attempts to their result. A blocked attempt without a finding has unknown effect. Reading memory content is delivery cost, not added work. `no_effect` requires an acted-on action that made no difference and added no work. Any harm among the entry's actions makes it `harmed`, even after an earlier benefit. Unknown direction remains null. |
 
 A historical result retrieved for the task is not automatically a diagnosis of
 that task. Its exposed text must supply the connecting mechanism or applicable
@@ -56,19 +56,21 @@ Outcome attachments corroborate but do not determine a signal.
   memory content that was recorded as its own memory delivery, without other
   demonstrated content use. Anchor the selection action, not the
   result-delivery step. Its effect is null: the returned content is assessed
-  on that delivery. A retrieval whose result is not a recorded delivery, or
-  reading repository code at a distinctive path supplied by memory, is
+  on that delivery. A retrieval whose result is not a recorded delivery is
   acted_on: no other span judges what it returned, so its consequence is this
   entry's effect.
 - `acted_on`: an action uses memory-specific content, the agent explicitly
   credits the entry, or the agent turns from a recorded prior direction to the
-  one the entry names right after its delivery. A decision needs subsequent
-  execution.
-- `null`: an action uses content that, before the delivery, was stated only as
-  an open possibility (the agent's unverified hypothesis, question, or search
-  query) or only in a prior source the agent had not acted on, and nothing in
-  the record separates the two; or the window was not read completely. Name
-  the action and the quoted prior source, or the unread steps. Effect is null.
+  one the entry names right after its delivery. Reading, searching, or editing
+  a file, function, or other location only the entry named is acted_on even
+  when its remedy goes unused; what the agent finds there is that action's
+  result. A decision needs subsequent execution.
+- `null`: an action uses content that, before the first consuming step, was
+  stated only as an open possibility (the agent's unverified hypothesis,
+  question, or search query) or only in a prior source the agent had not
+  acted on, and nothing in the record separates the two; or the window was
+  not read completely. Name the action and the quoted prior source, or the
+  unread steps. Effect is null.
 - `none`: after inspecting the complete window, no reference, selection, or
   attributable action was established, and no action remains ambiguous under
   the `null` rule. An action that only carries out the task's instruction or

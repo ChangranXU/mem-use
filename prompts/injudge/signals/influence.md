@@ -24,27 +24,29 @@
    - acted_on: an action uses memory-specific content, or the agent
      explicitly credits this entry for an action, or the agent turns from a
      recorded prior direction to the one this entry names right after its
-     delivery. Anchor those actions. For an action that mixes sources,
-     credit only its memory-specific part;
+     delivery. Reading, searching, or editing a file, function, or other
+     location that only this entry named is acted_on even when its proposed
+     remedy goes unused; what the agent finds there is that action's result.
+     Anchor those actions. For an action that mixes sources, credit only its
+     memory-specific part;
    - selected: its shown identifier or preview caused retrieval of fuller
      memory content that the record shows as its own memory delivery (the
      step's result reads [memory delivery …]; span.md lists proven
      follow-ups), with no other use of this entry's content. Anchor the
      retrieval action. Selection proves retrieval, not benefit:
      positive_effect is null, and the fuller delivery's effect is judged on
-     that delivery. A retrieval whose result is not a recorded delivery, or
-     opening repository code or task data at a path the memory supplied, is
+     that delivery. A retrieval whose result is not a recorded delivery is
      acted_on;
    - referenced: the agent mentions or quotes this entry (its shown
      identifier, distinctive content, or list position; a remark about the
      whole result list references no single entry unless this entry was the
      only one shown) with no action established;
-   - null: an action uses content that, before the delivery, was stated only
-     as an open possibility (the agent's unverified hypothesis, question, or
-     search query) or only in a prior source the agent had not acted on,
-     and the record shows nothing that separates the two; or the window was
-     not inspected completely. Name the action and the quoted prior source,
-     or the unread steps;
+   - null: an action uses content that, before the first consuming step,
+     was stated only as an open possibility (the agent's unverified
+     hypothesis, question, or search query) or only in a prior source the
+     agent had not acted on, and the record shows nothing that separates the
+     two; or the window was not inspected completely. Name the action and
+     the quoted prior source, or the unread steps;
    - none: after reading the complete window, no reference, selection, or
      attributable action was established, and no action remains ambiguous
      under the null rule above. An action that only carries out what the

@@ -1,6 +1,8 @@
 5. positive_effect (@positive_effect@) — only when influence is acted_on;
    otherwise null. Judge observable contributions of the anchored actions
    to the outcome or process, never what might otherwise have happened.
+   Whether the task or the agent could have reached the same action is
+   settled under influence; it never makes an acted_on action no_effect.
    - improved: later work demonstrates a benefit from the action, including
      using its finding to select or reject a course of action. The finding
      can contribute even when it disproves the memory's proposed remedy.
