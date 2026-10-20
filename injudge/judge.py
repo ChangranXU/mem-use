@@ -252,7 +252,11 @@ def _render_span_header(span: InjectionSpan, memories_note: str, earlier: str | 
             key = exposed_key(m, span.placements)
             label = f"{mid} ({key})" if key else mid
             bump = ""
-            if start != span.step_first:
+            owner = span.memory_window_owners.get(mid)
+            if owner:
+                where = f"{owner['span_id']} {owner['memory_id']}"
+                bump = f" (identical resident text is credited to {where})"
+            elif start != span.step_first:
                 # an earlier span delivered this memory to the same consuming
                 # step and this copy adds no verified text: indistinguishable
                 # credit is counted once, under the earlier carrier

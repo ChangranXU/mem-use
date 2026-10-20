@@ -61,7 +61,7 @@ A forced answer can be a valid verdict after retained investigation. Without a s
 
 ## Follow-ups
 
-Python checks strict JSON shape and span-relative semantics (exact id coverage, action-anchor windows, anchors empty for `none`). It also checks that every cited anchor and structured `evidence[].steps` citation names a step whose complete text was read in the retained conversation (`read_steps` in the operation's `input`). An answer that passes all checks needs no additional model call.
+Python checks strict JSON shape and span-relative semantics (exact id coverage, action-anchor windows, anchors empty for `none`). It also checks that every cited anchor and structured `evidence[].steps` citation names a step whose complete text and manifest `result_sources` were read in the retained conversation (`read_steps` in the operation's `input`; the target delivery is already in the opening). An answer that passes all checks needs no additional model call.
 
 Every rejected answer — malformed JSON, an out-of-contract value, an empty final message, or missing required reads — takes the same **follow-up**: the next runner restores the complete `job.history`, keeps the evidence tools, and appends one message naming every rejection reason (`prompts/injudge/agent/followup.md`). The follow-up fixes only what was named, reading the named files when needed, within `min(MAX_STEPS, 4)` calls. Python validates the new answer again.
 
@@ -104,7 +104,7 @@ transcript ends at a newline so the next attempt can append safely. If the
 masked transcript cannot be saved, the file is removed and the span records
 an error with its input diagnostics.
 
-Each read returns one text block per file, headed `==> path <==`, and `details.files` holds per-file metadata (`path`, `lines_read`, `line_start`, `line_end`, `truncated`, or `error` for a path that could not be read) counting only text actually returned after the call's 200,000-character cap; files past the cap are marked unread. A read whose `limit` stops before the file's last non-blank line ends with a note giving the remaining line count and the next offset. Paged reads combine. `read_steps` certifies complete step text, not just file access: header-only reads, truncated lines, search hits and rolled-back reads do not qualify. Every answer requires the manifest's `required_reads.always` files completely: task and baseline files, `messages.md` and `gold.md` when present, the first consuming step, and its preceding episode step if present. The baseline index does not certify its referenced files: non-null novelty and acted-on influence also require every `required_reads.prior_sources` entry, or use null. None/referenced/selected require the full entry window; a non-null acted-on effect requires the episode remainder as well, because consequences can outlive an action window. Incomplete attribution or effect uses influence or positive_effect null. Complete coverage does not prove the judgment itself is correct.
+Each read returns one text block per file, headed `==> path <==`, and `details.files` holds per-file metadata (`path`, `lines_read`, `line_start`, `line_end`, `truncated`, or `error` for a path that could not be read) counting only text actually returned after the call's 200,000-character cap; files past the cap are marked unread. A read whose `limit` stops before the file's last non-blank line ends with a note giving the remaining line count and the next offset. Paged reads combine. `read_steps` certifies complete step text plus the delivery sections listed in its manifest `result_sources`; the target delivery already in the opening needs no duplicate read. File access alone is insufficient: header-only reads, truncated lines, search hits and rolled-back reads do not qualify. Every answer requires the manifest's `required_reads.always` files completely: task and baseline files, `messages.md` and `gold.md` when present, the first consuming step, and its preceding episode step if present. The baseline index does not certify its referenced files: non-null novelty and acted-on influence also require every `required_reads.prior_sources` entry, or use null. None/referenced/selected require the full entry window; a non-null acted-on effect requires the episode remainder as well, because consequences can outlive an action window. Incomplete attribution or effect uses influence or positive_effect null. Complete coverage does not prove the judgment itself is correct.
 
 Prior sources include the complete sections of other deliveries visible in
 the baseline. The manifest supplies their line ranges in `deliveries.md`, and
@@ -117,3 +117,8 @@ A character-capped read gives an exact continuation `offset` and `column`.
 at 1; a continued fragment is displayed as `line@column: text`. This lets even
 one oversized line be read completely. Coverage combines only matching
 retained character ranges; gaps or rolled-back fragments do not count.
+
+Referenced results can require extra reads even for a neutral answer that cites
+what a lookup returned. The cost depends on result packaging: a delivery may
+contain repository output as well as memory text. Track actual model usage and
+follow-ups; unread character counts are not measured token or monetary overhead.

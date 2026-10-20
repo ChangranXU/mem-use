@@ -12,14 +12,20 @@
      no work. This is not harm;
    - harmed: the memory's guidance led the agent astray (wrong location,
      false lead, lost work or state), including a memory-directed detour or
-     change abandoned or corrected without a used finding. Identify which
-     exposed instruction or claim caused the wasted work. An agent's own
-     typo, unavailable tool, or unrelated environment failure does not by
-     itself make the memory harmful. Follow a corrected attempt to its
-     result: a useful memory-directed action remains useful despite an
-     incidental execution slip. If only an environment-blocked attempt is
-     observed, its effect is unknown. Reading or retrieving memory content
-     is delivery cost, not added work.
+     change abandoned or corrected without a used finding. Quote the exposed
+     instruction or claim, identify the action following it, and cite its
+     harmful consequence. First compare the guidance with what was executed:
+     a tool, argument, or resource identifier invented by the agent is not
+     an instruction supplied by memory. A title prompting a failed lookup
+     establishes influence, but does not by itself establish harmful guidance.
+     A false location or remedy actually supplied by the entry can cause harm.
+   An agent's own typo, unavailable tool, or unrelated environment failure
+   does not by itself make memory harmful. Follow corrected attempts to their
+   results; useful guidance remains useful despite an incidental execution
+   slip. Reading or retrieving memory content is delivery cost, not evidence
+   of harm. If only a failed retrieval or blocked attempt is established,
+   with no demonstrated benefit or memory-caused harm, leave effect null;
+   failure alone does not establish no_effect either.
    An action's success or failure, or whether its output was retained, does
    not decide whether its work contributed. Assess the actions shaped inside
    the window, including consequences observed later in the episode.
@@ -30,8 +36,8 @@
    explicit credit. Accuracy does not decide this signal. When the direction
    cannot be established, use null.
    A check must test or use the actual memory-shaped output or property.
-   An assertion about other data cannot verify it, and passing checks do
-   not cover untested cases: a passing test run counts only when the record
-   shows that it tests that property, for example it failed before the
-   change or its output shows the property. Local improvement can coexist
-   with task failure. Mere selection gets no effect score.
+   An assertion about other data cannot verify it. A test's name or a generic
+   pass count does not show which property it checked: require a recorded
+   assertion, before/after reproduction, or downstream result demonstrating
+   that property. Local improvement can coexist with task failure. Mere
+   selection gets no effect score.

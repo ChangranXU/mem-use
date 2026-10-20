@@ -246,7 +246,10 @@ class InjectionSpan:
     consumer stay separate; their step bounds are None.
 
     Each memory window uses the entry's local id. A later delivery ends the
-    window only if it shows all the earlier text. Different or narrower text
+    window when it re-exposes the earlier text, except when proven resident
+    identical copies keep their first owner. `memory_window_owners` names that
+    owner for a suppressed window. Independent re-entry after residency loss
+    starts a separate span with its own input baseline. Different or narrower text
     leaves the window open and is listed in `memory_variant_steps`. The
     episode end caps every prepared window. Copies at the same step share
     credit once through `memory_window_starts` and per-entry `same_step_bounds`.
@@ -274,6 +277,7 @@ class InjectionSpan:
     total: int = 0
     memory_windows: dict[str, int | None] = field(default_factory=dict)
     memory_window_starts: dict[str, int] = field(default_factory=dict)
+    memory_window_owners: dict[str, dict[str, str]] = field(default_factory=dict)
     memory_variant_steps: dict[str, list[int]] = field(default_factory=dict)
     memory_followups: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     same_step_bounds: set[str] = field(default_factory=set)

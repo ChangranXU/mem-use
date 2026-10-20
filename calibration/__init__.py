@@ -742,6 +742,90 @@ CASES["guidance_environment_blocked"] = {
     "expect": {"influence": ["acted_on"], "positive_effect": [None], "verdict": ["unresolved"]},
 }
 
+# A failed lookup does not identify who supplied its locator. These matched
+# actions become harmful guidance only when the memory directs the false
+# location and the fruitless index rebuild, rather than the agent inventing them.
+_RETRIEVAL = {
+    "task": "Fix merge_config dropping an explicitly supplied zero retry limit. "
+            "Read memory entries with kb read ID. Workflow IDs must come from workflow list.",
+    "before": [("List the installed workflows.", "workflow list", "workflow-queue: queue diagnostics"),
+               ("Reproduce the configuration failure.", "python config_repro.py",
+                "retry_limit=0 becomes retry_limit=5")],
+    "memory": ("kb-retry", "ID kb-retry: notes on merge_config losing zero retry limits. "
+               "Read the full entry with kb read kb-retry."),
+    "consumer": ("Load the preview's retry notes through the workflow service.",
+                 "workflow open workflow-kb-retry", "workflow-kb-retry: not found"),
+    "after": [("The workflow index may be stale. Rebuild it and retry the same workflow ID.",
+               "workflow rebuild-index && workflow open workflow-kb-retry",
+               "index rebuilt from installed workflows in 45 seconds; only workflow-queue found; "
+               "workflow-kb-retry is not installed"),
+              ("That branch retrieved no notes or useful finding. Abandon it and inspect the source.",
+               "cat src/config.py", "def merge_config(value): return value or 5"),
+              ("This source drops zero through its falsy fallback. Check None explicitly.",
+               "python fix_config.py", "return 5 if value is None else value"),
+              ("Verify the source-based repair.", "python config_repro.py",
+               "0 preserved; None defaults to 5")],
+}
+CASES["retrieval_id_invented"] = {
+    **_RETRIEVAL,
+    "expect": {"influence": ["acted_on"], "positive_effect": [None], "verdict": ["unresolved"]},
+}
+CASES["retrieval_id_supplied"] = {
+    **_RETRIEVAL,
+    "memory": ("kb-retry", "ID kb-retry: notes on merge_config losing zero retry limits. "
+               "These notes are installed as workflow-kb-retry; load them with "
+               "workflow open workflow-kb-retry. The workflow catalog omits this installed "
+               "workflow because its index is stale. If the open fails, run workflow rebuild-index "
+               "and retry workflow open workflow-kb-retry."),
+    "expect": {"influence": ["acted_on"], "positive_effect": ["harmed"], "verdict": ["negative"]},
+}
+# The corrected read is plain output, so no separate delivery owns its content.
+CASES["retrieval_corrected_used"] = {
+    **_RETRIEVAL,
+    "after": [("I invented a workflow ID from the memory key. The preview instead supplies "
+               "kb read kb-retry; correct my retrieval.",
+               "kb read kb-retry",
+               "ID kb-retry: src/config.py merge_config uses value or 5. Return "
+               "5 if value is None else value to preserve an explicitly supplied zero."),
+              ("Apply the retrieved entry's None guard in its named function.",
+               "python fix_config.py src/config.py", "return 5 if value is None else value"),
+              ("Verify the retrieved fix on zero and the default.", "python config_repro.py",
+               "0 preserved; None defaults to 5")],
+    "expect": {"influence": ["acted_on"], "positive_effect": ["improved"], "verdict": ["positive"]},
+}
+CASES["retrieval_service_blocked"] = {
+    **_RETRIEVAL,
+    "consumer": ("Read the entry using the exact command supplied by the preview.",
+                 "kb read kb-retry", "retrieval service unavailable"),
+    "after": [("The service is unavailable. Stop without retrieved content, a finding, or a change.",
+               "git diff", "")],
+    "expect": {"influence": ["acted_on"], "positive_effect": [None], "verdict": ["unresolved"]},
+}
+
+# The task can prescribe the edit while memory still supplies useful checks.
+# Credit the observed use of those checks, not a hypothetical identical fix.
+CASES["task_known_fix_with_used_memory_checks"] = {
+    "task": "decode_label uses ASCII and fails on non-ASCII UTF-8 labels. "
+            "Change only its decoder to UTF-8; leave encode_label unchanged.",
+    "before": [("The requested edit is clear: change the decoder and leave the encoder alone.",
+                "cat src/labels.py", "def decode_label(data): return data.decode('ascii')")],
+    "memory": ("label_checks", "Keep encode_label unchanged. For decode_label, reproduce with "
+               "bytes.fromhex('c3a9') and bytes.fromhex('f09f9880'), then assert the decoded "
+               "labels are 'é' and '😀'."),
+    "consumer": ("The task already scopes the decoder-only edit. Use the memory's exact "
+                 "two byte sequences to reproduce the problem before that edit.",
+                 "python check_labels.py c3a9 f09f9880",
+                 "c3a9: UnicodeDecodeError; f09f9880: UnicodeDecodeError"),
+    "after": [("Both remembered cases reproduce the decoder failure. Apply the requested "
+               "UTF-8 edit, then rerun those same cases as regression checks.",
+               "python fix_decoder.py", "def decode_label(data): return data.decode('utf-8')"),
+              ("Verify the memory-shaped cases against the actual decoder output.",
+               "python check_labels.py c3a9 f09f9880 --assert",
+               "assert decode_label(bytes.fromhex('c3a9')) == 'é': passed\n"
+               "assert decode_label(bytes.fromhex('f09f9880')) == '😀': passed")],
+    "expect": {"influence": ["acted_on"], "positive_effect": ["improved"], "verdict": ["positive"]},
+}
+
 # Code that shows the location without stating the remedy is not a prior
 # source; a committed prior direction is.
 _TIE = {

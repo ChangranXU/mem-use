@@ -28,6 +28,8 @@ npm --prefix agent install    # TS side once (node >= 22.19 required on PATH)
 | `TEMPERATURE` | `0.0` | Sampling temperature |
 | `THINKING_LEVEL` | `off` | Agent thinking level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` |
 
+Thinking levels are requests, not provider-independent effort guarantees. The installed pi mapping clamps `xhigh` and `max` to `high` for custom models. [DeepSeek](https://api-docs.deepseek.com/guides/thinking_mode/) also maps `medium` and `high` to the same effort, so comparing those settings here does not test different reasoning budgets. `off` is passed as a disable request through the provider compatibility layer.
+
 ## The Two Budgets
 
 During a conversation, either budget can trigger a **forced final answer** from the evidence already read.
@@ -72,7 +74,7 @@ A verdict cut mid-answer is not a failure class: the answer simply fails the con
 ### Offline preparation
 
 Use `--prepare-only` to partition recordings into bridge-delimited episodes and
-write inspectable `injudge.episode-inputs/v4` evidence without loading `.env`,
+write inspectable `injudge.episode-inputs/v5` evidence without loading `.env`,
 Node, or contacting a judge:
 
 ```bash

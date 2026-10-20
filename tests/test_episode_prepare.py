@@ -146,7 +146,9 @@ def test_repeated_session_keeps_one_episode_and_original_task(tmp_path, conflict
     episode = result.episodes[0]
     assert [step.step for step in episode.steps] == [1, 2, 3]
     assert len(episode.deliveries) == 2
-    assert len(group_spans(operations, trajectory.id, episode=episode)) == 1
+    # Each recall re-recorded its host; session deduplication does not prove
+    # continuity of those distinct memory occurrences.
+    assert len(group_spans(operations, trajectory.id, episode=episode)) == 2
     assert all(item["content"] != "INVALID TASK" for item in episode.task)
     assert any("duplicate recorded annotation_id" in note or "second memory_session" in note
                for note in warnings)
@@ -643,6 +645,27 @@ def test_late_turnless_tool_result_is_not_episode_evidence(tmp_path):
                   msg=3, status="completed", result="LATER EPISODE SECRET")
     episode = prepare_trajectory(*_prepare_args(tmp_path, builder)).episodes[0]
     assert "LATER EPISODE SECRET" not in build_episode_evidence(episode)["steps/step_000001.md"]
+
+
+def test_replayed_result_does_not_become_a_future_commands_evidence(tmp_path):
+    builder = (AnnotatedBuilder().episode_open()
+               .agent_turn(with_task=True, command="old command", result="OLD RESULT")
+               .rewrite(kept=4).agent_turn(command="new command", result=None).episode_close())
+    for event in builder.events:
+        if event.get("turn") == 2:
+            if event.get("tool_call_id") == "000002-x":
+                event["tool_call_id"] = "000001-x"
+            for call in event.get("tool_calls", []):
+                call["id"] = "000001-x"
+        if event.get("type") == "tool_execution_end" and "turn" not in event:
+            event["result"] = "OLD RESULT"
+    episode, = prepare_trajectory(*_prepare_args(tmp_path, builder)).episodes
+    assert episode.preparation_status == "prepared"
+    files = build_episode_evidence(episode)
+    assert "OLD RESULT" in files["steps/step_000001.md"]
+    assert "command: bash — new command" in files["steps/step_000002.md"]
+    assert "OLD RESULT" not in files["steps/step_000002.md"]
+    assert "result: (never observed)" in files["steps/step_000002.md"]
 
 
 @pytest.mark.parametrize("late,result_seq", [(False, 1000), (True, 1), (True, None)])

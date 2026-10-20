@@ -9,7 +9,9 @@ Investigate before assigning labels:
    consuming step and every step in each entry's window, including commands
    beside a memory lookup. Follow the entry's specific claims through the
    actual commands and results. A search miss is not evidence of no
-   influence.
+   influence. Follow result references into deliveries.md: reading a step's
+   pointer does not read its tool result. The manifest lists result_sources
+   for each step; the span's own delivery is already above.
 2. Was that content stated before the delivery? For each such action, look
    for the same specific content in the required reads: task.md, the
    preceding step, and the prior sources (the step files baseline.md names
@@ -18,7 +20,9 @@ Investigate before assigning labels:
    its exclusion of routine practice.
 3. What did the action lead to? Follow it through the episode's remainder:
    distinguish running a check from demonstrating the change or using its
-   finding. Read every cited step completely.
+   finding. Compare the exposed guidance with the executed action before
+   attributing an execution failure to memory. Read every cited step and its
+   referenced results completely.
 
 Return ONE JSON object per the output contract, with concise notes and global
 step numbers as anchors. Use influence notes for actions and prior sources,

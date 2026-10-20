@@ -31,6 +31,14 @@ passing local check proves only the behavior it checks. Local improvement can
 coexist with task failure, and an execution without a recorded result proves
 only an attempt.
 
+A memory title can shape a retrieval without supplying the tool or identifier
+the agent invents to perform it. A failed lookup alone therefore establishes
+neither harmful guidance nor no effect. Harm notes quote the exposed claim and
+connect an action following it to an observed consequence; execution mistakes
+are distinguished from a false location or remedy actually supplied by memory.
+Follow corrected attempts and preserve unknown effect when the record shows
+only retrieval failure.
+
 Gold is one reference solution, not the only valid approach. The same signal
 definitions apply with or without gold. Gold can inform relevance and accuracy;
 influence and benefit still require recorded actions and checks. Verification,
@@ -101,8 +109,7 @@ steps or pre-exposure input can establish a prior plan. Per-entry windows bound
 action anchors; later results within the parent episode can establish an
 anchored action's consequence without becoming out-of-window action anchors.
 Different or narrower later exposures of the same item can have overlapping
-windows. Judge each entry by its own window and exposed text. Identical re-exposure
-bounds the earlier window by convention, not proof that its influence vanished.
+windows. Judge each entry by its own window and exposed text. Identical copies keep the first owner while recorded input proves continuous visibility; other re-exposures follow the handoff rules in [Judge evidence](scoring-input.md). Ownership is accounting, not proof that influence appeared or vanished.
 
 Selection and content use are separate stages. Their counts are diagnostics,
 not additive independent gains. `memory_followups` retains the deterministic
@@ -183,8 +190,9 @@ denominators. Unselected episodes/limited spans are `unjudged`; judge failures a
 influence-rate denominator, as novelty null is for novelty.
 
 Report v16 and summary v14 distinguish memory-caused work without a contribution
-from no-effect use. Complete `read_steps` now certifies the step files themselves;
-baseline references do not count as reading those files. Older reports are not silently reinterpreted. See
+from no-effect use. In report v23, `read_steps` certifies complete step files and
+their referenced tool-result sections; baseline references do not count as reads.
+Older reports are not silently reinterpreted. See
 [Artifacts](artifacts.md) and [Judge evidence](scoring-input.md).
 
 A prior code read that shows a location without stating the remedy does not

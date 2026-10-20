@@ -11,8 +11,9 @@ from annotated_fixtures import TASK, AnnotatedBuilder, cure_ref
 from injudge.__main__ import main
 from injudge.agent import _opening_message
 from injudge.episodes import prepare_trajectory, project_occurrence
-from injudge.evidence import build_episode_evidence, build_span_evidence, span_dir_name
+from injudge.evidence import _episode_step_text, build_episode_evidence, build_span_evidence, span_dir_name
 from injudge.judge import _verdict_semantics
+from injudge.model import AgentStep, EpisodeInput, ToolExec
 from injudge.spans import group_spans
 from memgraph.graph import build_graph, load_trajectories
 from memgraph.verdicts import apply_verdicts
@@ -180,9 +181,17 @@ def test_interleaved_deliveries_merge_only_within_each_episode(tmp_path):
 
 def test_interleaved_spans_judge_once_and_preserve_every_graph_delivery(tmp_path, monkeypatch):
     builder = AnnotatedBuilder().episode_open().agent_turn(with_task=True)
+    hosts = {}
     for _ in range(3):
-        for key in ("profile", "skills"):
-            builder.recall(cure_ref(key, f"{key} fact"))
+        for msg, key in enumerate(("profile", "skills"), 4):
+            ref = cure_ref(key, f"{key} fact")
+            if key not in hosts:
+                search, text = _deliver(builder, [ref], msg)
+                hosts[key] = text
+            else:
+                search = builder.search(returned=[ref])
+                builder.agent_turn()
+            _bind(builder, search, [ref], hosts[key], msg)
     builder.agent_turn().episode_close()
     status, report, _run_dir, calls, source = _run(
         tmp_path, monkeypatch, builder, [_result(_answer()), _result(_answer())],
@@ -269,12 +278,11 @@ def test_late_annotation_does_not_move_the_exposure_baseline(tmp_path, same_trea
                   if item.get("content") == "Post-exposure user update")
     assert update["occurrence_id"] not in context["visible_occurrence_ids"]
     assert "consumed from step 3" not in files["span.md"]
-    if same_treatment:
-        assert len(spans) == 1 and spans[0].n_injections == 2
-    else:
-        assert len(spans) == 2
-        later = build_span_evidence(spans[1], episode)
-        assert "D2.E1 consumed from step 2" in later["span.md"]
+    # recall() replaced the earlier host even when its rendered text matches;
+    # only the recorded consumer view can prove continued residency.
+    assert len(spans) == 2 and spans[0].n_injections == 1
+    later = build_span_evidence(spans[1], episode)
+    assert "D2.E1 consumed from step 2" in later["span.md"]
 
 
 def test_span_folder_stores_each_text_once_and_one_record_per_line(tmp_path):
@@ -576,6 +584,37 @@ def test_tool_result_delivery_is_not_its_own_baseline(tmp_path, reasoning):
     assert memory not in files["baseline.md"]
     assert memory not in files[f"steps/step_{episode.steps[0].step:06d}.md"]
     assert memory in files["span.md"] and memory not in files["deliveries.md"]
+
+
+@pytest.mark.parametrize("close_index", [9, 11])
+def test_mixed_tool_result_dependencies_respect_episode_close(close_index):
+    target, other = "Target guidance.", "Other guidance."
+    host = f"repository prefix\n{target}\n{other}\nrepository suffix"
+    episode = EpisodeInput({}, {"close_event_index": close_index}, deliveries=[
+        {"entry_prefix": ref, "step": 3, "placements": [{"text": text,
+            "source_resolution": {"status": "resolved", "occurrence_id": "event:10"}}]}
+        for ref, text in (("D1", target), ("D2", other))
+    ])
+    step = AgentStep(2, 2, 50, seq_end=80, _end_event_index=8, tools=[
+        ToolExec("call", name="bash", args={"command": "lookup && grep"}, result=host,
+                 status="completed", seq_end=100, source_event_index=10)
+    ])
+    occurrences = {10: {"occurrence_id": "event:10", "kind": "tool_result", "content": host,
+                        "source": {"event_index": 10}}}
+    text, sources = _episode_step_text(episode, step, {"D1"}, occurrences)
+
+    assert "command: bash — lookup && grep" in text
+    assert target not in text and other not in text
+    if close_index == 9:
+        assert sources == []
+        assert "recorded after episode close; unavailable in this episode input" in text
+        assert "repository prefix" not in text and "repository suffix" not in text
+    else:
+        # The opening supplies D1; independent command output stays in the step.
+        assert sources == ["deliveries.md#D2"]
+        assert "D1 (consumed at global step 3), D2 (consumed at global step 3)" in text
+        assert "available from seq 100 — after this turn's end" in text
+        assert "repository prefix" in text and "repository suffix" in text
 
 
 def test_repeated_resident_placement_preserves_task_and_system_context(tmp_path):

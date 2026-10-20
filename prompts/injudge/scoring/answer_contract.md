@@ -13,7 +13,7 @@ Use exactly this shape:
       "influence":       {"value": @influence@,
                           "note": "<action step; memory-specific content it uses, or the quoted prior source>"},
       "positive_effect": {"value": @positive_effect@,
-                          "note": "<result step and demonstrated consequence, or what remains unknown>"},
+                          "note": "<result step and demonstrated consequence, or what remains unknown; for harmed, also quote the exposed guidance>"},
       "anchors":         [<int>...]
     }
   ],
@@ -35,4 +35,5 @@ mention alone is not an action anchor. Anchors are required for acted_on or
 selected, optional for referenced or null, empty for none; out-of-window
 anchors are rejected. positive_effect must be null unless influence is
 acted_on. Read the complete text of every step cited in anchors or evidence;
-paged reads of a step file combine.
+paged reads combine. A step's result_sources in the manifest must also be
+read completely; a pointer to a delivery does not certify its result text.

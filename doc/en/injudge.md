@@ -28,7 +28,7 @@ Each run writes its own `<run-stamp>/` folder (`YYYYMMDD-HHMMSS-<hex>`) under `-
 
 | File | Contents |
 |---|---|
-| `injudge-report.json` | The judging record (`injudge.report/v22`): an initial snapshot before paid work, then a full snapshot when the run ends |
+| `injudge-report.json` | The judging record (`injudge.report/v24`): an initial snapshot before paid work, then a full snapshot when the run ends |
 | `injudge-checkpoints.jsonl` | Each completed span, including parallel completions; the report points to this journal until the full snapshot is written |
 | `summary.json` | The final statistics (`injudge.summary/v18`): counts, rates, delivery estimates, judge execution totals |
 | `summary.md` | A readable view of the final statistics, with spans to inspect, diagnostics, and links to the JSON files |
@@ -58,7 +58,7 @@ Validation notes retain source span order.
 
 ## Offline Preparation
 
-`--prepare-only` writes the offline episode package instead of a judged run: `<run-stamp>/episode-inputs.json` (the `injudge.episode-inputs/v4` index) plus one `<run-stamp>/episodes/<episode-dir>/` folder per materialized episode. It loads no `.env`, needs no Node, and makes no judge calls; the package is written before a nonzero exit when a boundary or assignment needs review. See [Configuration](configuration.md#offline-preparation).
+`--prepare-only` writes the offline episode package instead of a judged run: `<run-stamp>/episode-inputs.json` (the `injudge.episode-inputs/v5` index) plus one `<run-stamp>/episodes/<episode-dir>/` folder per materialized episode. It loads no `.env`, needs no Node, and makes no judge calls; the package is written before a nonzero exit when a boundary or assignment needs review. See [Configuration](configuration.md#offline-preparation).
 
 ## Injection Spans
 
@@ -68,6 +68,7 @@ Episodes are partitioned before span grouping. Identical treatments across episo
 
 - Step gaps do not break a span; they are recorded in `step_gaps` and shown to the judge.
 - Unrelated deliveries do not break an observed, nonempty span: alternating unchanged profile and skill blocks form two spans. Empty and unattributable deliveries merge only consecutively.
+- A break in proven visibility starts a new span, even for the same treatment, so independent re-entry uses its own recorded input baseline.
 - A content or treatment change involving any of the span's items does break it — a re-ranked bundle, a re-framed block, or a changed per-entry exposure starts a new span even when the delivered content is identical. Returning to the original treatment starts another span. Every delivered entry is judged against its own footprint window; the window bounds and per-entry exposure are specified in [Judge evidence](scoring-input.md).
 - Re-deliveries roll up as `restated`: they count toward delivery cost and `n_injections`, but never appear in verdict rates.
 - A span with no attributed agent step (`step_first` is `None`) has no downstream footprint. It is rule-judged **neutral** with `auto: no_subsequent_turn`, and no judge call is made. Aggregates tally it as `unassessable`, out of every directional rate.
@@ -77,7 +78,7 @@ Span construction, including the fingerprint fallback for undigested content, is
 Unobserved consumers stay in separate unassessable spans, even when their
 content matches an observed delivery. Their tokens cannot inherit an earlier
 verdict. Grouping repeated treatments is an accounting convention; it does
-not prove continuous residency or independent causal effects. Recorded input
+not prove independent causal effects. Recorded input
 views establish visibility, not the frequency of history rewrites.
 
 ## How a Span Is Judged

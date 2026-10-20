@@ -109,6 +109,65 @@ def test_read_coverage_combines_pages_but_not_truncated_lines_or_search_hits():
                          "details": {"files": [{"path": [], "lines_read": True}]}}], files) == []
 
 
+@pytest.mark.parametrize("influence,effect", [
+    ("acted_on", "harmed"), ("acted_on", "improved"), ("acted_on", None), ("none", None),
+])
+def test_referenced_tool_result_must_be_read_before_accepting_citation(monkeypatch, tmp_path, influence, effect):
+    paths = build(tmp_path / "cases", ["recorded_followup_used"])
+    trajectories, ops, events, _ = load_trajectories(paths)
+    trajectory, = trajectories
+    episode, = prepare_trajectory(trajectory, events[trajectory.id], ops[trajectory.id]).episodes
+    spans = group_spans([op for op in ops[trajectory.id] if op.kind == "recall"],
+                       trajectory.id, episode=episode, last_step=episode.steps[-1].step)
+    span = spans[0]
+    files = build_span_evidence(span, episode)
+    manifest = json.loads(files["manifest.json"])
+    lookup = next(entry for entry in manifest["files"]
+                  if entry.get("kind") == "step" and entry["result_sources"])
+    source, = lookup["result_sources"]
+    ref = source.split("#")[1]
+    section = next(section for entry in manifest["files"] for section in entry.get("sections", [])
+                   if section["ref"] == ref)
+    partial = [_read(files, path) for path in files if path != "deliveries.md"]
+    partial.append(_read(files, "deliveries.md", section["line_start"], section["line_start"]))
+    assert lookup["step"] not in _read_steps(partial, files)
+    complete = [*partial, _read(files, "deliveries.md", section["line_start"] + 1, section["line_end"])]
+    assert lookup["step"] in _read_steps(complete, files)
+
+    answer = json.loads(GOOD)
+    answer["memories"] = answer["memories"][:1]
+    answer["memories"][0]["influence"]["value"] = influence
+    answer["memories"][0]["anchors"] = [] if influence == "none" else [lookup["step"]]
+    answer["memories"][0]["positive_effect"]["value"] = effect
+    answer["evidence"] = [{"claim": "lookup returned content", "steps": [lookup["step"]], "seqs": []}]
+    # Required first-step results also matter without an action/citation claim.
+    baseline_only = copy.deepcopy(answer)
+    baseline_only["evidence"] = []
+    baseline_only["memories"][0].update(anchors=[], influence={"value": None},
+                                        novelty={"value": None}, positive_effect={"value": None})
+    assert lookup["path"] in _baseline_error(baseline_only, files, _read_files(partial, files))
+    assert _baseline_error(baseline_only, files, _read_files(complete, files)) is None
+    calls = stub_runner(monkeypatch, [
+        _result(json.dumps(answer), messages=partial),
+        _result(json.dumps(answer), messages=complete),
+    ])
+    verdict = judge_episode_span(span, episode, _agent_cfg(), [],
+                                evidence_root=tmp_path / "evidence", transcripts_root=tmp_path / "runs")
+    assert [call["followup"] for call in calls] == [False, True]
+    assert "tool results not read completely" in calls[1]["message"]
+    assert "deliveries.md lines" in calls[1]["message"] and ref in calls[1]["message"]
+    expected = "neutral" if influence == "none" else {"harmed": "negative", "improved": "positive", None: "unresolved"}[effect]
+    assert verdict["verdict"] == expected
+    if influence == "none":
+        assert "evidence step(s)" in calls[1]["message"]
+
+    # A target delivery already supplied in span.md needs no duplicate read.
+    full_files = build_span_evidence(spans[1], episode)
+    full_lookup = next(entry for entry in json.loads(full_files["manifest.json"])["files"]
+                       if entry.get("step") == lookup["step"])
+    assert full_lookup["result_sources"] == []
+
+
 def test_baseline_does_not_restore_evicted_history_or_certify_steps(tmp_path):
     builder = AnnotatedBuilder().episode_open().agent_turn(
         with_task=True, reasoning="Historical plan", result="Evicted diagnostic")

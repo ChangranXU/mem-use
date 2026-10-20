@@ -149,11 +149,12 @@ def _episode_memory_line(entry: dict, placements: list[dict]) -> str:
 
 
 def _episode_step_text(episode: EpisodeInput, step: AgentStep, targets: set[str],
-                       occurrences: dict[int, dict]) -> str:
+                       occurrences: dict[int, dict]) -> tuple[str, list[str]]:
     """Keep tool-result ownership and availability tied to the shared parser.
     `targets` names the span's own deliveries, whose text span.md holds."""
     seq_end = step.seq_end if step.seq_end is not None else "?"
     lines = [f"[step {step.step}, turn {step.turn}, seqs {step.seq_start}–{seq_end}]"]
+    result_sources: list[str] = []
     if step.reasoning:
         lines.append(f"reasoning: {step.reasoning}")
     if step.content or not step.reasoning:
@@ -180,6 +181,7 @@ def _episode_step_text(episode: EpisodeInput, step: AgentStep, targets: set[str]
         projected = project_occurrence(occurrence, episode.deliveries) if occurrence else {}
         refs = projected.get("memory_delivery_refs", [])
         if refs:
+            result_sources.extend(f"deliveries.md#{ref}" for ref in refs if ref not in targets)
             where = "span.md" if set(refs) <= targets else "deliveries.md"
             # A step file keeps a tool call with its result. The result can
             # reach its consumer after the action step. Name both times.
@@ -196,7 +198,7 @@ def _episode_step_text(episode: EpisodeInput, step: AgentStep, targets: set[str]
             lines.append("result: (never observed)")
     source = episode._step_sources.get(step.turn)
     prefix = f"source event: {source.event_index}, seq {source.seq}\n" if source is not None else ""
-    return prefix + "\n".join(lines)
+    return prefix + "\n".join(lines), list(dict.fromkeys(result_sources))
 
 
 def _baseline_deliveries(episode: EpisodeInput) -> list[dict]:
@@ -481,9 +483,11 @@ def build_episode_evidence(episode: EpisodeInput, target_ops: set[str] | None = 
     targets = {item["entry_prefix"] for item in episode.deliveries if item["op_id"] in (target_ops or ())}
     occurrences = {item["source"]["event_index"]: item for item in episode.message_occurrences}
     step_files = {}
+    step_results = {}
     for step in episode.steps:
         step_files[step.turn] = f"steps/step_{step.step:06d}.md"
-        files[step_files[step.turn]] = _episode_step_text(episode, step, targets, occurrences)
+        files[step_files[step.turn]], step_results[step.turn] = _episode_step_text(
+            episode, step, targets, occurrences)
 
     if messages := _remaining_messages(episode, files, step_files):
         files["messages.md"] = messages
@@ -551,7 +555,8 @@ def build_episode_evidence(episode: EpisodeInput, target_ops: set[str] | None = 
     for step in episode.steps:
         name = step_files[step.turn]
         entries.append({"path": name, "kind": "step", "step": step.step, "turn": step.turn,
-                        "seqs": [step.seq_start, step.seq_end], "chars": len(files[name])})
+                        "seqs": [step.seq_start, step.seq_end], "chars": len(files[name]),
+                        "result_sources": step_results[step.turn]})
     if episode.attachments.get("golden"):
         files["gold.md"] = "# Golden attachment\n\n" + str(episode.attachments["golden"])
         if not files["gold.md"].endswith("\n"):

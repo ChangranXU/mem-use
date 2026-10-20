@@ -91,6 +91,14 @@ The diagnostic controls distinguish code being exercised from its relevant
 output being verified. The preview controls include repository work before
 a recorded full read, with either a used finding or an abandoned failed search.
 These are controlled regressions, not labels imposed on ambiguous real traces.
+The retrieval controls hold actions fixed while varying who supplied a false
+locator and repair instruction. They also cover a corrected read with a verified
+benefit and a blocked read with unknown effect. Preserve genuine harmful-guidance
+controls when reducing false harm from agent execution mistakes.
+The task-known-fix control distinguishes a task-prescribed edit from useful
+memory-supplied reproduction cases. Compare it with `selected_then_rejected`,
+where a read is set aside without a used finding or extra work: a hypothetical
+same final outcome cannot establish `no_effect`.
 Use repeatable `--case NAME` with both `build` and `score` to limit a calibration
 experiment explicitly; follow-up deliveries remain included and missing targets
 inside the selected cases stay unavailable. For example:

@@ -49,7 +49,7 @@ Policy totals explicitly cover whole input recordings.
 
 `--prepare-only` is a staged offline path. It uses bridge episode lifecycle
 events only for scope/provenance, keeps memory operations annotation-only, and
-writes `injudge.episode-inputs/v4` (`episode-inputs.json` plus one inspectable
+writes `injudge.episode-inputs/v5` (`episode-inputs.json` plus one inspectable
 folder per episode). It loads no `.env`, Node runtime, network client, or
 judge runner. Scope/assignment ambiguity is preserved in diagnostics; the
 package is written before the command returns status 2 for review.
@@ -86,7 +86,7 @@ memgraph/parse_trajectory.py  # trajectory.jsonl → ops; shared step rule
 memgraph/episodes.py       # shared episode-scope rule (bridge boundaries) + graph episode rows
 memgraph/graph.py          # path discovery, cross-trajectory linking, validation
 memgraph/html.py           # self-contained HTML (template + embedded graph JSON)
-memgraph/verdicts.py       # merge injudge.report/v22 onto recall ops
+memgraph/verdicts.py       # merge injudge.report/v24 onto recall ops
 memgraph/__main__.py       # python3 -m memgraph
 injudge/__init__.py        # REPORT_SCHEMA / SUMMARY_SCHEMA / EPISODE_INPUT_SCHEMA / CHECKPOINT_SCHEMA
 injudge/model.py           # AgentStep / ToolExec / InjectionSpan
@@ -100,7 +100,7 @@ injudge/agent.py           # .env → AgentConfig, runner subprocess, corrective
 injudge/gold.py            # golden-answer / correctness sidecars and CLI joins
 injudge/prompts.py         # loads prompts/ (never inline prompts in code)
 injudge/aggregate.py       # verdict counts/rates, per-memory usage roll-ups
-injudge/report.py          # injudge.report/v22 + injudge.summary/v18 + summary.md + stdout
+injudge/report.py          # injudge.report/v24 + injudge.summary/v18 + summary.md + stdout
 injudge/checkpoints.py     # completed-span journal writes and report recovery
 injudge/__main__.py        # python3 -m injudge
 agent/                     # TS judge agent: runner.ts (pi Agent + budgets),
@@ -209,7 +209,14 @@ adapter vocabulary.
     Unrelated deliveries do not split an observed, nonempty span. A different
     treatment of any shared item closes it, even if its original treatment
     returns later. Empty and unattributed deliveries merge only consecutively.
-  - Footprint windows are per item, but only a RE-EXPOSURE (a later delivery
+  - Equal verified exposed text retains its first owner while a proven copy
+    remains in the bound consumer input. Later copies receive no eligible
+    actions; a break in proven continuity starts a new span and input baseline.
+    `memory_window_owners` names the earlier span and entry. This is
+    content-credit accounting, not causal proof. Unknown visibility,
+    different text, newly exposed selectors, and proven selected full reads retain ordinary handoffs.
+    Check continuity when merging individual deliveries; reset per episode.
+  - Otherwise footprint windows are per item, but only a RE-EXPOSURE (a later delivery
     whose verified text contains everything this entry showed) supersedes
     one. A different or narrower verified text of the same item (a search
     preview vs a full read) leaves the earlier window open and is listed in
@@ -427,7 +434,9 @@ Easy to get wrong:
   (`anchors` stay empty when influence is `none`); injudge/agent.py adds
   that every cited anchor and structured `evidence[].steps` citation names a
   step whose complete text the retained conversation read (paged reads of a
-  step file combine). Header-only reads do not count. Every answer also requires
+  step file combine). A step's manifest `result_sources` must also be read:
+  a pointer to a delivery is not its tool-result text. The span's own delivery
+  is already in the opening and needs no duplicate read. Header-only reads do not count. Every answer also requires
   the manifest's `required_reads.always` files completely; baseline references
   do not certify their source files, so non-null novelty and acted_on influence
   also require every `prior_sources` entry (a delivery section by its manifest
@@ -545,7 +554,7 @@ Recovery copies may share the original `calls/` directory through a symlink.
 Request-pointer placement proofs resolve within that capture directory;
 per-call or request-file symlinks cannot escape it.
 
-**injudge** writes `injudge.report/v22` (`{tool, generated_at, trajectories,
+**injudge** writes `injudge.report/v24` (`{tool, generated_at, trajectories,
 operations, injections, aggregates, validation}`). Before paid work, the initial
 snapshot marks pending spans `unjudged` and sets `checkpoint_journal` to
 `injudge-checkpoints.jsonl`. Each completion appends one `injudge.checkpoint/v1`
@@ -594,8 +603,9 @@ to its run.
   conversation's final answer came from a budget-exhausted forced round).
   Only mechanically counted empty/unattributable spans and unjudged spans
   omit it.
-  `read_steps` lists global steps whose complete text remains in
-  the retained conversation; reading headers or navigation cannot validate a judgment,
+  `read_steps` lists global steps whose complete text and referenced
+  `result_sources` remain in the retained conversation (the target delivery
+  is already in the opening); reading headers or navigation cannot validate a judgment,
   and every cited anchor or structured evidence step must be in `read_steps`.
   Tool-result metadata records the actual returned line range and
   truncation; a partial read is not proof that the whole step was inspected.
@@ -648,7 +658,12 @@ source_report_schema, and judge_model. `notes` states that delivery/residency
 estimates use chars divided by four and are not billing or overhead relative
 to a no-memory run. Span verdicts measure
 memory influence, not benchmark task success.
-Report v22 adds journal checkpoints and removes the duplicate
+Report v24 adds `memory_window_owners` and retains the first owner of identical
+text while proven copies remain visible. Its influence/effect/verdict counts
+are not directly comparable with v23. Report v23 strengthens `input.read_steps` to certify referenced tool-result
+sections as well as step files. The evidence manifest is v5. Summary v18 keeps
+`shared_action_groups` as a count of memory groups, not shared steps.
+Report v22 added journal checkpoints and removed the duplicate
 `retained_llm_calls` / `retained_tool_calls` input fields. Rubric rules are unchanged. Report v21
 dropped the runner's duplicate `retained_evidence` count
 (`read_steps` is the certified list) and replaces the tool-free repair with one
@@ -662,7 +677,7 @@ contain useful and harmful entries, so costs by verdict do not measure
 per-memory token benefit. Summary v18 renames `spans_with_repairs` to
 `spans_with_followups`.
 Summary has no span or episode index, memory lists, confidence
-means/buckets, configuration, or provenance. Those details remain in report v22.
+means/buckets, configuration, or provenance. Those details remain in report v24.
 Empty/unassessable/error/unjudged spans stay outside verdict-rate denominators.
 Rates are omitted when no spans were judged; rubric is omitted without judged
 entries, and judge counters without agent runs. JSON uses two-space indentation.

@@ -134,9 +134,9 @@ def build_step_stream(
     classified = classifying_messages(events)  # turn -> classifying message_end
     starts_by_turn: dict[int, list[dict]] = {}
     ends_by_turn: dict[int, list[dict]] = {}
-    turnless_ends: list[dict] = []  # late closings, resolved by tool_call_id below
+    closes: list[tuple[int, dict]] = []
 
-    for e in events:
+    for position, e in enumerate(events):
         if e.get("_context_only"):
             continue
         etype = e.get("type")
@@ -151,17 +151,15 @@ def build_step_stream(
             if (t := _turn_of(e)) is not None:
                 starts_by_turn.setdefault(t, []).append(e)
         elif etype == "tool_execution_end":
-            if (t := _turn_of(e)) is not None:
-                ends_by_turn.setdefault(t, []).append(e)
-            else:
-                turnless_ends.append(e)
+            closes.append((position, e))
 
     # Each (lane, tool_call_id) maps turns to their reveal positions in the
-    # file. A start marks the response that reveals the call. If the start is
-    # missing, use the classifying message; its lane is already validated.
+    # file. Either the start or the assistant's tool declaration reveals it.
     # File positions preserve reveal order when seq values are corrupt.
     reveals: dict[tuple[str | None, str], dict[int, int]] = {}
     for position, event in enumerate(events):
+        if event.get("_context_only"):
+            continue
         turn = _turn_of(event)
         if event.get("type") == "tool_execution_start" and turn is not None:
             if (key := _lane_key_of(event)) is not None:
@@ -175,21 +173,28 @@ def build_step_stream(
             if isinstance(tc, dict):
                 tid = tc.get("id")
                 if isinstance(tid, str) and tid:
-                    reveals.setdefault((src, tid), {}).setdefault(turn, position)
+                    by_turn = reveals.setdefault((src, tid), {})
+                    by_turn[turn] = min(by_turn.get(turn, position), position)
 
-    # A turn-scoped completed close answers its own turn's execution; an
-    # execution without one is still pending a result (a no_result or
-    # interrupted close is exactly what the late completed close supersedes).
+    # Pair in file order: neither a future reveal nor a future completed close
+    # can change which execution is pending when this result was recorded.
     answered: dict[tuple[str | None, str], set[int]] = {}
-    for turn, ends in ends_by_turn.items():
-        for e in ends:
-            if e.get("status") == "completed" and (k := _lane_key_of(e)) is not None:
-                answered.setdefault(k, set()).add(turn)
     seen_turnless: dict[tuple[str | None, str], list[tuple]] = {}
 
-    for e in turnless_ends:
+    for position, e in closes:
         key = _lane_key_of(e)
-        candidates = reveals.get(key) if key is not None else None
+        if (turn := _turn_of(e)) is not None:
+            reveal = reveals.get(key, {}).get(turn)
+            if reveal is not None and reveal >= position:
+                warnings.append(f"turn {turn}: tool_execution_end before action reveal "
+                                f"({e.get('tool_call_id')!r}, seq {e.get('seq')})")
+                continue
+            ends_by_turn.setdefault(turn, []).append(e)
+            if e.get("status") == "completed" and key is not None:
+                answered.setdefault(key, set()).add(turn)
+            continue
+        candidates = {turn: reveal for turn, reveal in reveals.get(key, {}).items()
+                      if reveal < position}
         if not candidates:
             # the id is missing/empty, its lane is corrupt, or no start or
             # assistant tool_calls recorded it ON THAT LANE — an anomaly,

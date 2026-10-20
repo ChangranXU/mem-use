@@ -27,13 +27,15 @@ step whose anchors predate the delivery that first exposed it, and content-
 identical deliveries under different framing are not necessarily identical
 treatments.
 
-A gap in delivery steps or an unrelated delivery does not break an observed,
-nonempty span (missing steps are recorded in `step_gaps`). A different
+A gap in delivery steps or an unrelated delivery does not itself break an
+observed nonempty span (missing steps are recorded in `step_gaps`). Prepared
+input views must still prove an earlier equal copy resident when merging;
+otherwise independent re-entry starts a new span and baseline. A different
 treatment of any of its items does, even if the original treatment returns.
 Empty and unattributed deliveries merge only when consecutive: they cannot
 establish independent streams of observed memory items.
-Each delivered memory's judged footprint window is bounded individually at
-THAT memory's first RE-EXPOSURE starting strictly after this span's
+Each delivered memory's ordinary footprint bound is its first RE-EXPOSURE
+starting strictly after this span's
 deliveries end (`memory_windows`): a later delivery of the same item that
 shows everything this entry showed supersedes it, so identical content is
 never credited in two spans — while an unrelated span in between bounds
@@ -53,6 +55,13 @@ inclusive (the entry is in `same_step_bounds`), with a warning for the collision
 showing new verified text is eligible at that step too; one adding nothing
 verifiable — indistinguishable, so creditable once — opens after it
 (`memory_window_starts`).
+Prepared input views can retain the first owner of identical exposed text
+across later copies, even under a different presentation. Only proven earlier
+copy hosts count; loss or uncertainty restores the ordinary handover. A proven
+selected full read still takes over. `memory_window_owners` names entries whose
+entire window is credited elsewhere. Loss or uncertainty of residency splits
+an independent re-entry into a new span with a fresh baseline. Different-text
+bounds remain unchanged.
 Unattributed deliveries have no observed consumer and stay separate from
 attributed spans. Consecutive unattributed copies merge only under the same
 treatment; their spans remain unassessable and cannot inherit a verdict or
@@ -67,7 +76,7 @@ import re
 from bisect import bisect_right
 
 from injudge.model import EpisodeInput, InjectionSpan, ToolExec, memory_id
-from memgraph.annotations import canonical_entry, exposure_state, grouping_item_key, namespace_of
+from memgraph.annotations import canonical_entry, exposure_state, grouping_item_key, is_int, namespace_of
 from memgraph.model import MemoryOp
 
 
@@ -131,7 +140,7 @@ def group_spans(
     last delivery step): the earlier span's window for that memory is then
     bounded at that step, and a copy adding no verified text opens only
     after it — the bound is named."""
-    spans, steps_seen = _merge_spans(recall_ops, traj_id, id_offset)
+    spans, steps_seen = _merge_spans(recall_ops, traj_id, id_offset, episode)
     entry_idents = _stamp_steps(spans, steps_seen)
     _stamp_windows(spans, entry_idents, warnings)
     for span in spans:
@@ -144,19 +153,42 @@ def group_spans(
             }
     if episode is not None:
         _stamp_followups(spans, episode)
+        _retain_resident_owners(spans, episode)
+        for span in spans:
+            span.memory_followups.clear()
+        _stamp_followups(spans, episode)
     return spans
 
 
+def _resident_text(text: str, copies: list[dict], visible: set[str], selector: str | None) -> bool:
+    """Body and any shown selector must survive in proven placement slots."""
+    for copy in copies:
+        placements = [p for p in copy["placements"]
+                      if p["source_resolution"].get("status") == "resolved"
+                      and p["source_resolution"].get("occurrence_id") in visible]
+        if selector is not None and exposed_key({"key": selector}, placements) != selector:
+            continue
+        if any(exposure_state(text, p.get("text"), placement_kind=p.get("kind"))["state"]
+               in ("full", "full_normalized") for p in placements):
+            return True
+    return False
+
+
 def _merge_spans(
-    recall_ops: list[MemoryOp], traj_id: str, id_offset: int
+    recall_ops: list[MemoryOp], traj_id: str, id_offset: int, episode: EpisodeInput | None = None,
 ) -> tuple[list[InjectionSpan], list[list[int]]]:
     """Collapse same-treatment deliveries across unrelated items; return spans and
     the attributed steps of each (parallel lists).
 
-    Observed and unobserved consumers are separate populations. A missing
-    consumer supplies no evidence that an earlier span's effect applies.
+    Prepared inputs require proven retained text before merging; otherwise
+    a new first-consuming baseline is needed. Observed and unobserved
+    consumers remain separate populations. A missing consumer supplies no
+    evidence that an earlier span's effect applies.
     """
     ops = sorted(recall_ops, key=lambda o: (o.step is None, o.step or 0, o.source_event_index or 0))
+    deliveries = {d["op_id"]: d for d in episode.deliveries} if episode else {}
+    views = {view.turn: view for view in episode.context} if episode else {}
+    copies: dict[tuple[str, str, str | None], list[dict]] = {}
     spans: list[InjectionSpan] = []
     steps_seen: list[list[int]] = []
     latest: dict[str, int] = {}  # item identity -> newest span carrying it
@@ -170,6 +202,23 @@ def _merge_spans(
                 or any(latest.get(ident) != target for ident in idents)
                 or not _same_treatment(spans[target], op)):
             target = None
+        delivery = deliveries.get(op.id)
+        consumer = (delivery or {}).get("consumer") or {}
+        view = views.get(consumer.get("turn"))
+        visible = ({m["occurrence_id"] for m in view.messages}
+                   if view and not view.gaps and consumer.get("status") == "observed" else set())
+        shown = [(entry_ident(m), _exposed_text(m, op.exposure[a] if a < len(op.exposure) else None),
+                  exposed_key(m, op.placements)) for a, m in enumerate(op.memories)]
+        if target is not None and episode is not None and op.step is not None and op.memories:
+            # An independent re-entry needs its own first-consuming input:
+            # moving only its action start would leave the old baseline in force.
+            if not all(text is not None and _resident_text(text, copies.get((ident, text, key), []), visible, key)
+                       for ident, text, key in shown):
+                target = None
+        if delivery is not None and consumer.get("status") == "observed":
+            for ident, text, key in shown:
+                if text is not None:
+                    copies.setdefault((ident, text, key), []).append(delivery)
         previous = len(spans) if target is None else target
         if target is not None:
             span = spans[target]
@@ -341,6 +390,116 @@ def _stamp_windows(
                 "never counted twice"
             )
         span.memory_windows = windows
+
+
+def _retain_resident_owners(spans: list[InjectionSpan], episode: EpisodeInput) -> None:
+    """Equal exposed text keeps its first owner while a proven copy survives.
+
+    This allocates content credit across distinct presentations; it does not
+    assert that the earliest presentation caused the action. Different text
+    retains the ordinary bounds. A proven selected full read still takes over.
+    Individual deliveries extend the surviving-copy proof. Independent re-entry
+    was split during merging, so every independently owned entry keeps its own
+    first-consuming input as the attribution baseline.
+    """
+    last = episode.steps[-1].step if episode.steps else None
+    if last is None:
+        return
+    views = {view.turn: view for view in episode.context}
+    by_op = {op: i for i, span in enumerate(spans) for op in span.op_ids}
+    ends = {(i, memory_id(a)): span.memory_windows.get(memory_id(a))
+            for i, span in enumerate(spans) for a in range(len(span.memories))}
+    selectors = {(i, memory_id(a)): exposed_key(memory, span.placements)
+                 for i, span in enumerate(spans) for a, memory in enumerate(span.memories)}
+    selected = {(hit["operation_id"], entry_ident(span.memories[a]))
+                for span in spans for a in range(len(span.memories))
+                for hit in span.memory_followups.get(memory_id(a), [])}
+    # A merged destination must keep one baseline/ownership convention across
+    # all members, even when only a later member is a selected full read.
+    selected_destinations = {
+        (by_op[d["op_id"]], ident)
+        for d in episode.deliveries if d["op_id"] in by_op
+        for search in d.get("searches", [])
+        for operation, ident in selected if operation == search["operation_id"]}
+    # (item, exact exposed text) -> (owner span/entry, its proven-copy deliveries).
+    owners: dict[tuple[str, str], tuple[tuple[int, str], list[dict]]] = {}
+    owned: set[tuple[int, str]] = set()
+    suppressed: dict[tuple[int, str], tuple[int, str]] = {}
+    deliveries = sorted(episode.deliveries, key=lambda d: (
+        d["step"] if is_int(d.get("step")) else float("inf"),
+        d["source"]["event_index"]))
+    for delivery in deliveries:
+        i = by_op.get(delivery["op_id"])
+        step = delivery.get("step")
+        consumer = delivery.get("consumer") or {}
+        if i is None or not is_int(step) or consumer.get("status") != "observed":
+            continue
+        span = spans[i]
+        view = views.get(consumer.get("turn"))
+        visible = ({m["occurrence_id"] for m in view.messages} if view and not view.gaps else set())
+        for a, (memory, exposure) in enumerate(span.iter_exposed()):
+            mid, text = memory_id(a), _exposed_text(memory, exposure)
+            ident, ref = entry_ident(memory), (i, mid)
+            # A different/wider exposure keeps its existing supersession rule;
+            # an equal copy later must not revive a window it closed.
+            for other in list(owners):
+                owner, _copies = owners[other]
+                if other[0] != ident or other[1] == text or owner[0] == i:
+                    continue
+                earlier = spans[owner[0]]
+                end = earlier.memory_windows.get(owner[1])
+                if text is None or other[1] in text:
+                    owners.pop(other)
+                    bound = step if earlier.step_last == step else step - 1
+                    earlier.memory_windows[owner[1]] = bound if end is None else min(end, bound)
+                elif end is None or end >= step:
+                    variants = earlier.memory_variant_steps.setdefault(owner[1], [])
+                    if step not in variants:
+                        variants.append(step)
+            if text is None:
+                continue
+            key = ident, text
+            previous = owners.get(key)
+            if previous is not None:
+                owner, copies = previous
+                end = spans[owner[0]].memory_windows.get(owner[1])
+                if end is not None and end < step - 1:
+                    previous = None
+            if previous is not None:
+                owner, copies = previous
+                if owner == ref:
+                    copies.append(delivery)
+                    continue
+                full_read = (i, ident) in selected_destinations
+                resident = _resident_text(text, copies, visible, selectors[owner])
+                if (resident and not full_read and ref not in owned
+                        and selectors[ref] == selectors[owner]):
+                    earlier = spans[owner[0]]
+                    old_end, new_end = earlier.memory_windows.get(owner[1]), ends[ref]
+                    earlier.memory_windows[owner[1]] = (
+                        None if old_end is None or new_end is None else max(old_end, new_end))
+                    if earlier.memory_windows[owner[1]] != old_end:
+                        earlier.same_step_bounds.discard(owner[1])
+                    suppressed.setdefault(ref, owner)
+                    span.memory_window_owners[mid] = {"span_id": earlier.id, "memory_id": owner[1]}
+                    copies.append(delivery)
+                    continue
+                # Independent re-entry has a separate span and baseline.
+                earlier = spans[owner[0]]
+                bound = step if earlier.step_last == step else step - 1
+                old_end = earlier.memory_windows.get(owner[1])
+                earlier.memory_windows[owner[1]] = bound if old_end is None else min(old_end, bound)
+                if earlier.step_last == step:
+                    earlier.same_step_bounds.add(owner[1])
+            owned.add(ref)
+            owners[key] = ref, [delivery]
+    for ref in sorted(suppressed.keys() - owned):
+        i, mid = ref
+        end = spans[i].memory_windows.get(mid)
+        if end is None:
+            end = last
+            spans[i].memory_windows[mid] = end
+        spans[i].memory_window_starts[mid] = end + 1
 
 
 def _stamp_followups(spans: list[InjectionSpan], episode: EpisodeInput) -> None:

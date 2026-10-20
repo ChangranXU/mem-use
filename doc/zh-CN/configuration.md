@@ -28,6 +28,8 @@ npm --prefix agent install    # TS 侧执行一次（需要 PATH 上有 node >= 
 | `TEMPERATURE` | `0.0` | 采样温度 |
 | `THINKING_LEVEL` | `off` | 智能体思考层级：`off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max` |
 
+思考层级是请求，并不保证各提供方具有不同的推理预算。当前 pi 对自定义模型将 `xhigh` 和 `max` 限定为 `high`；[DeepSeek](https://api-docs.deepseek.com/guides/thinking_mode/) 也将 `medium` 和 `high` 映射为同一强度，因此比较这两种设置不能检验不同推理预算。`off` 经提供方兼容层明确请求禁用思考。
+
 ## 两个预算
 
 对话开始后，任一预算都可以触发基于已读证据的**强制作答**。首次付费调用前，若开场消息或必读证据超过估算的输入预算，运行器就会拒绝该区间；见[评审智能体](judge-client.md#预算与强制作答)。
@@ -70,7 +72,7 @@ npm --prefix agent install    # TS 侧执行一次（需要 PATH 上有 node >= 
 ### 离线准备
 
 使用 `--prepare-only` 可在不加载 `.env`、Node 或网络的情况下按 bridge
-episode 分区并写出 `injudge.episode-inputs/v4`：
+episode 分区并写出 `injudge.episode-inputs/v5`：
 
 ```bash
 uv run -m injudge <paths> --prepare-only -o output/

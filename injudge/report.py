@@ -91,9 +91,9 @@ def operation_record(span: InjectionSpan, verdict: dict, delivery_cost: dict) ->
         # superseded by an in-episode re-delivery) — recorded so the bounds stay
         # auditable from the artifact; omitted like `steps` when no delivery
         # has an attributed agent step (no window bounds anything there).
-        # `memory_window_starts` carries the same-step collision exception:
-        # the entries whose same-step copy adds no verified text and so opens
-        # only AFTER the shared step the earlier carrier owns (empty unless a collision bumped one);
+        # `memory_window_starts` also suppresses resident duplicate entries:
+        # start > end means no eligible actions. `memory_window_owners` names
+        # the earlier owner; independent re-entry starts its own span.
         # `memory_variant_steps` names in-window deliveries of the same item
         # with different text (they left the window open), and
         # `memory_followups` the proven selection actions, with their tool and
@@ -102,6 +102,8 @@ def operation_record(span: InjectionSpan, verdict: dict, delivery_cost: dict) ->
            if span.step_first is not None and span.memory_windows else {}),
         **({"memory_window_starts": span.memory_window_starts}
            if span.step_first is not None and span.memory_window_starts else {}),
+        **({"memory_window_owners": span.memory_window_owners}
+           if span.step_first is not None and span.memory_window_owners else {}),
         **({"memory_variant_steps": span.memory_variant_steps}
            if span.step_first is not None and span.memory_variant_steps else {}),
         **({"memory_followups": span.memory_followups}

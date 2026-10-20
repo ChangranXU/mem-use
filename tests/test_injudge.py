@@ -367,6 +367,78 @@ def test_turnless_same_id_duplicate_close_deduped_before_pairing():
     assert warnings == []
 
 
+@pytest.mark.parametrize("with_starts", [False, True])
+@pytest.mark.parametrize("prior_execution", [False, True])
+def test_turnless_result_cannot_answer_a_future_reuse(with_starts, prior_execution):
+    b = TrajBuilder()
+    if prior_execution:
+        b.agent_turn(with_task=True, result="old result")
+    b._emit("tool_execution_end", proxy_source="MAIN", tool_call_id="000001-x",
+            name="bash", status="completed", result="old result")
+    b.agent_turn(with_task=not prior_execution, command="new command", result=None)
+    for event in b.events:
+        if event.get("turn") == b.turn:
+            if event.get("tool_call_id"):
+                event["tool_call_id"] = "000001-x"
+            for call in event.get("tool_calls", []):
+                call["id"] = "000001-x"
+    if not with_starts:
+        b.events = [event for event in b.events if event["type"] != "tool_execution_start"]
+    steps, warnings = make_steps(b)
+    assert steps[-1].tools[0].result is None
+    assert steps[-1].tools[0].status is None
+    if prior_execution:
+        assert steps[0].tools[0].result == "old result"
+        assert warnings == []
+    else:
+        assert any("unknown tool_call_id" in warning for warning in warnings)
+
+
+def test_later_scoped_reclose_does_not_change_earlier_pending_pairing():
+    b = TrajBuilder()
+    _pipelined_same_id_turns(b)
+    b._emit("tool_execution_end", proxy_source="MAIN", tool_call_id="call_1",
+            name="bash", status="completed", result="result-for-turn-2")
+    b._emit("tool_execution_end", proxy_source="MAIN", turn=2, tool_call_id="call_1",
+            name="bash", status="completed", result="result-for-turn-2")
+    b._emit("tool_execution_end", proxy_source="MAIN", tool_call_id="call_1",
+            name="bash", status="completed", result="result-for-turn-1")
+    steps, warnings = make_steps(b)
+    by_turn = {step.turn: step for step in steps}
+    assert by_turn[2].tools[0].result == "result-for-turn-2"
+    assert by_turn[1].tools[0].result == "result-for-turn-1"
+    assert warnings == []
+
+
+def test_scoped_result_before_its_action_reveal_is_not_evidence():
+    b = TrajBuilder()
+    b._emit("tool_execution_end", proxy_source="MAIN", turn=1,
+            tool_call_id="000001-x", status="completed", result="premature result")
+    b.agent_turn(with_task=True, result=None)
+    steps, warnings = make_steps(b)
+    assert steps[0].tools[0].result is None
+    assert any("before action reveal" in warning for warning in warnings)
+
+
+def test_context_only_execution_cannot_claim_selected_turnless_result():
+    b = TrajBuilder().agent_turn(with_task=True, result=None)
+    for event in b.events:
+        event["_context_only"] = True
+    b.agent_turn(result=None)
+    for event in b.events:
+        if event.get("turn") == 2:
+            if event.get("tool_call_id"):
+                event["tool_call_id"] = "000001-x"
+            for call in event.get("tool_calls", []):
+                call["id"] = "000001-x"
+    b._emit("tool_execution_end", proxy_source="MAIN", tool_call_id="000001-x",
+            status="completed", result="selected result")
+    steps, warnings = make_steps(b)
+    assert len(steps) == 1 and steps[0].turn == 2
+    assert steps[0].tools[0].result == "selected result"
+    assert warnings == []
+
+
 def test_step_stream_normalizes_non_openai_message_shapes():
     """Anthropic-family recordings carry content as a parts list and
     reasoning as thinking_blocks, and tool args may be the raw wire string
@@ -1799,7 +1871,7 @@ def test_summary_is_statistics_only():
     before = json.dumps(artifact)
     summary = build_summary(artifact)
     assert summary["tool"] == {"name": "injudge", "schema": "injudge.summary/v18",
-                               "source_report_schema": "injudge.report/v22", "judge_model": "judge"}
+                               "source_report_schema": "injudge.report/v24", "judge_model": "judge"}
     assert summary["report"] == "injudge-report.json"
     assert summary["generated_at"] == artifact["generated_at"]
     assert summary["diagnostics"] == {"error": 0, "warn": 1, "info": 0}
@@ -2246,7 +2318,7 @@ def test_cli_runs_share_the_container_without_clobbering(monkeypatch, tmp_path):
     assert len(run_dirs) == 2  # distinct stamps even for same-second runs
     for run_dir in run_dirs:
         report = json.loads((run_dir / "injudge-report.json").read_text())
-        assert report["tool"]["schema"] == "injudge.report/v22"
+        assert report["tool"]["schema"] == "injudge.report/v24"
         assert (run_dir / "summary.json").is_file()
         (span_evidence,) = (run_dir / "evidence").iterdir()
         assert (span_evidence / "manifest.json").is_file()
@@ -2828,7 +2900,9 @@ def test_render_steps_reports_the_recorded_close_status():
                  seq_start=5),  # truncated: no close at all
     ]
     from injudge.evidence import _episode_step_text
-    text = _episode_step_text(_test_episode(InjectionSpan(id="T1:S1", traj="T1"), [step]), step, set(), {})
+    text, result_sources = _episode_step_text(
+        _test_episode(InjectionSpan(id="T1:S1", traj="T1"), [step]), step, set(), {})
+    assert result_sources == []
     assert "result (interrupted): (none recorded)" in text
     assert "result: (never observed)" in text  # the truly unclosed one
 
@@ -3664,7 +3738,7 @@ def test_agent_unknown_novelty_preserves_independent_signals(
     path = tmp_path / "report.json"
     path.write_text(json.dumps(artifact))
     saved = json.loads(path.read_text())
-    assert saved["tool"]["schema"] == "injudge.report/v22"
+    assert saved["tool"]["schema"] == "injudge.report/v24"
     assert saved["operations"][0]["rubric"]["m1"]["novelty"]["value"] is None
     rub = saved["aggregates"]["overall"]["rubric"]
     assert rub["deliveries"] == 2

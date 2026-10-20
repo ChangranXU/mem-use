@@ -12,11 +12,14 @@ type RequestBody = {
 	tools?: { function: { name: string } }[];
 	max_tokens?: number;
 	max_completion_tokens?: number;
+	thinking?: { type: string };
+	reasoning_effort?: string;
 };
 type Reply = { content?: string; tool_calls?: unknown[]; usage?: object; status?: number;
 	headersDelayMs?: number; streamChunks?: number; streamDelayMs?: number };
 
-async function fixture(t: TestContext, replies: Reply[], onRequest?: (count: number, root: string) => void) {
+async function fixture(t: TestContext, replies: Reply[], onRequest?: (count: number, root: string) => void,
+	basePath = "/test-key-only/v1") {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "judge-runner-"));
 	fs.mkdirSync(path.join(root, "steps"));
 	fs.writeFileSync(path.join(root, "steps/step_000001.md"), "previous step-one evidence");
@@ -43,6 +46,18 @@ async function fixture(t: TestContext, replies: Reply[], onRequest?: (count: num
 			return;
 		}
 		res.writeHead(200, { "Content-Type": "text/event-stream" });
+		if (req.url?.split("?")[0].endsWith("/messages")) {
+			const event = (type: string, data: object) => res.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`);
+			event("message_start", { message: { id: "test", type: "message", role: "assistant", content: [],
+				model: "test-model", stop_reason: null, stop_sequence: null, usage: { input_tokens: 1, output_tokens: 0 } } });
+			event("content_block_start", { index: 0, content_block: { type: "text", text: "" } });
+			event("content_block_delta", { index: 0, delta: { type: "text_delta", text: reply.content ?? "" } });
+			event("content_block_stop", { index: 0 });
+			event("message_delta", { delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 1 } });
+			event("message_stop", {});
+			res.end();
+			return;
+		}
 		const chunk = (delta: object, finish_reason: string | null) => ({
 			id: "test", object: "chat.completion.chunk", created: 0, model: "test-model",
 			choices: [{ index: 0, delta, finish_reason }],
@@ -81,7 +96,7 @@ async function fixture(t: TestContext, replies: Reply[], onRequest?: (count: num
 		const child = spawn(process.execPath, [path.join(import.meta.dirname, "runner.ts"),
 			"--job", input, "--out", output], {
 			env: { ...process.env, JUDGE_API_KEY: "test-key-only",
-				JUDGE_BASE_URL: `http://127.0.0.1:${port}/test-key-only/v1` },
+				JUDGE_BASE_URL: `http://127.0.0.1:${port}${basePath}` },
 			stdio: ["ignore", "ignore", "pipe"],
 		});
 		let stderr = "";
@@ -107,6 +122,30 @@ test("an endpoint credential stays out of the job file", async (t) => {
 	assert.equal(result.error, null);
 	assert.deepEqual(requestPaths, ["/test-key-only/v1/chat/completions"]);
 	assert.ok(!fs.readFileSync(path.join(root, "job.json"), "utf8").includes("test-key-only"));
+});
+
+test("off explicitly disables DeepSeek thinking while medium keeps its wire settings", async (t) => {
+	const { run, requests, config } = await fixture(t, [{ content: "off" }, { content: "medium" }],
+		undefined, "/deepseek.com/v1");
+	assert.equal((await run()).error, null);
+	assert.deepEqual(requests[0].thinking, { type: "disabled" });
+	assert.equal(requests[0].reasoning_effort, undefined);
+	assert.equal((await run({ config: { ...config, thinking_level: "medium" } })).error, null);
+	assert.deepEqual(requests[1].thinking, { type: "enabled" });
+	assert.equal(requests[1].reasoning_effort, "medium");
+});
+
+test("generic OpenAI-compatible off omits thinking and reasoning effort", async (t) => {
+	const { run, requests } = await fixture(t, [{ content: "done" }]);
+	assert.equal((await run()).error, null);
+	assert.equal(requests[0].thinking, undefined);
+	assert.equal(requests[0].reasoning_effort, undefined);
+});
+
+test("off explicitly disables Anthropic thinking", async (t) => {
+	const { run, requests, config } = await fixture(t, [{ content: "done" }]);
+	assert.equal((await run({ config: { ...config, api: "anthropic" } })).error, null);
+	assert.deepEqual(requests[0].thinking, { type: "disabled" });
 });
 
 test("completed messages are masked on disk while the live conversation retains evidence", async (t) => {

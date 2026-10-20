@@ -83,7 +83,8 @@ function buildModel(job: AgentJob, apiKey: string, baseUrl: string): { model: Mo
 		name: cfg.model,
 		provider: PROVIDER_ID,
 		baseUrl,
-		reasoning: cfg.thinking_level !== "off",
+		// pi needs the capability to serialize an explicit thinking disable.
+		reasoning: true,
 		input: ["text"] as ("text" | "image")[],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: cfg.context_window,

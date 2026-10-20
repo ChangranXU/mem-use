@@ -364,3 +364,36 @@ def test_query_controls_keep_actions_fixed_and_move_exposure(tmp_path):
         assert "docs-search" in files["steps/step_000002.md"]
         assert ("steps/step_000002.md" in files["baseline.md"]) == before
     assert actions[0] == actions[1]
+
+
+def test_retrieval_controls_keep_locator_provenance_and_corrected_output(tmp_path):
+    from injudge.episodes import prepare_trajectory
+    from injudge.evidence import build_span_evidence
+    from injudge.spans import group_spans
+    from memgraph.graph import load_trajectories
+
+    names = ["retrieval_id_invented", "retrieval_id_supplied",
+             "retrieval_corrected_used", "retrieval_service_blocked"]
+    trajectories, ops, events, _ = load_trajectories(build(tmp_path, names))
+    files_by_case, actions = {}, {}
+    for trajectory in trajectories:
+        episode, = prepare_trajectory(trajectory, events[trajectory.id], ops[trajectory.id]).episodes
+        span, = group_spans(ops[trajectory.id], trajectory.id, episode=episode,
+                           last_step=episode.steps[-1].step)
+        name = next(n for n in names if case_id(n) == trajectory.run_id)
+        files_by_case[name] = build_span_evidence(span, episode)
+        actions[name] = [(step.reasoning, step.content, [(tool.name, tool.args, tool.result)
+                         for tool in step.tools]) for step in episode.steps]
+    invented, supplied, corrected, blocked = (files_by_case[name] for name in names)
+    assert actions[names[0]] == actions[names[1]]
+    assert invented["task.md"] == supplied["task.md"]
+    assert "kb read kb-retry" in invented["span.md"]
+    for instruction in ("workflow open workflow-kb-retry", "workflow rebuild-index"):
+        assert instruction not in invented["span.md"]
+        assert instruction in supplied["span.md"]
+    assert "workflow-kb-retry is not installed" in supplied["steps/step_000004.md"]
+    read = corrected["steps/step_000004.md"]
+    assert "kb read kb-retry" in read and "5 if value is None else value" in read
+    assert "[memory delivery" not in read
+    assert "0 preserved; None defaults to 5" in corrected["steps/step_000006.md"]
+    assert "retrieval service unavailable" in blocked["steps/step_000003.md"]

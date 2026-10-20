@@ -51,7 +51,7 @@ icon: plug
 
 ## 跟进
 
-Python 检查严格 JSON 形状和区间相对语义（精确 id 覆盖、动作锚点窗口、`none` 下锚点为空），并检查每个被引用的锚点及结构化 `evidence[].steps` 都指向保留对话中完整读取的步骤文本（操作 `input` 中的 `read_steps`）。答案通过全部检查后不增加模型调用。
+Python 检查严格 JSON 形状和区间相对语义（精确 id 覆盖、动作锚点窗口、`none` 下锚点为空），并检查每个被引用的锚点及结构化 `evidence[].steps` 都指向保留对话中完整读取的步骤文本及其 manifest `result_sources` 结果章节（操作 `input` 中的 `read_steps`；目标投递已在开场输入中）。答案通过全部检查后不增加模型调用。
 
 每个被拒的答案——JSON 格式错误、超出契约的取值、空的最终消息或缺少必读证据——都走同一种**跟进**：下一个运行器恢复完整 `job.history`，保留证据工具，并追加一条列出全部拒绝原因的消息（`prompts/injudge/agent/followup.md`）。跟进只修正所列问题，必要时读取所列文件，最多使用 `min(MAX_STEPS, 4)` 次调用；Python 再次校验新答案。
 
@@ -80,7 +80,7 @@ API key 和端点 URL 通过 `JUDGE_API_KEY`、`JUDGE_BASE_URL` 环境变量从 
 
 打码也覆盖密钥本身的 JSON 序列化拼写。Python 在写入作业前对内容打码；运行器在序列化前对轨迹和结果中的字符串打码，因此进程停止也不会留下未打码的完整记录。打码不改变运行器当前对话中的文本。Python 随后再次检查已保存的轨迹，只解析 JSONL 外层并处理字符串字段，不解码字段内看似 JSON 的文本。不完整或格式错误的记录会被移除，保留的轨迹以换行结束，确保下一次尝试可以安全追加；若无法保存打码后的轨迹，则删除该文件，并将区间记录为带有 input 诊断的错误。
 
-每次读取为每个文件返回一个以 `==> path <==` 开头的文本块，`details.files` 给出逐文件元数据（`path`、`lines_read`、`line_start`、`line_end`、`truncated`，无法读取的路径则为 `error`），仅统计单次调用 200,000 字符上限内实际返回的文本；超出上限的文件标为未读。`limit` 在文件最后一个非空行之前截止时，结果末尾会注明剩余行数与下一个 offset。分页读取可以合并；`read_steps` 证明完整步骤文本已返回，标题、截断行、搜索命中和回滚读取不算。每份答案必须完整读取 manifest 中 `required_reads.always` 的文件：任务和基线文件、存在时的 `messages.md` 和 `gold.md`、首次消费步骤及同一 episode 内的前一步（若存在）；基线索引不代表其引用的文件已读；非空 novelty 与 acted_on 影响还须读取 `required_reads.prior_sources` 的全部条目，否则用 null。none/referenced/selected 须检查完整条目窗口，acted_on 的非空效果还须检查至 episode 结束，因为后果可能晚于动作窗口出现。归因或效果未查明时用 influence 或 positive_effect null。完整读取并不证明判定本身正确。
+每次读取为每个文件返回一个以 `==> path <==` 开头的文本块，`details.files` 给出逐文件元数据（`path`、`lines_read`、`line_start`、`line_end`、`truncated`，无法读取的路径则为 `error`），仅统计单次调用 200,000 字符上限内实际返回的文本；超出上限的文件标为未读。`limit` 在文件最后一个非空行之前截止时，结果末尾会注明剩余行数与下一个 offset。分页读取可以合并；`read_steps` 证明完整步骤文本及 manifest `result_sources` 指向的投递结果章节均已返回；开场输入已有的目标投递无需重复读取。标题、截断行、搜索命中和回滚读取不算。每份答案必须完整读取 manifest 中 `required_reads.always` 的文件：任务和基线文件、存在时的 `messages.md` 和 `gold.md`、首次消费步骤及同一 episode 内的前一步（若存在）；基线索引不代表其引用的文件已读；非空 novelty 与 acted_on 影响还须读取 `required_reads.prior_sources` 的全部条目，否则用 null。none/referenced/selected 须检查完整条目窗口，acted_on 的非空效果还须检查至 episode 结束，因为后果可能晚于动作窗口出现。归因或效果未查明时用 influence 或 positive_effect null。完整读取并不证明判定本身正确。
 
 先前来源包括基线中可见的其他投递的完整段落。manifest 提供
 它们在 `deliveries.md` 中的行范围，开场消息也会列出；分页读取按步骤文件相同的规则合并覆盖。
