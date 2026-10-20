@@ -199,11 +199,11 @@ const RECALL_FILL=G.tool&&G.tool.verdicts? "#aebfee" : "var(--recall)";
 const TALLY_COLOR={...VD_COLOR, unjudged:"#aebfee", unassessable:"#d0d5dd", empty:"#eceff3"};
 const VD_TIP={positive:"a memory was used and improved later work (judge assessment)",
   negative:"a memory-shaped action caused harm (judge assessment)",
-  unresolved:"memory attribution or its effect could not be determined",
-  neutral:"no established benefit or harm: selection, reference, unproductive use, or no influence",
+  unresolved:"a memory's effect, or its attribution over the whole window, could not be determined",
+  neutral:"no established benefit or harm: selection, reference, unproductive use, ambiguous attribution, or no influence",
   error:"the judge failed (excluded from rates)", unjudged:"not judged in the merged report",
   unassessable:"no observed later turn (outside every rate)", empty:"nothing delivered (outside every rate)"};
-const USAGE_COLOR=table({used:"#2e9e5b",unproductive:"#b8860b",misused:"#d64545",selected:"#3567d6",noted:"#3567d6",ignored:"#98a2b3",unclear:"#7a5af8"});
+const USAGE_COLOR=table({used:"#2e9e5b",unproductive:"#b8860b",misused:"#d64545",selected:"#3567d6",noted:"#3567d6",ignored:"#98a2b3",ambiguous:"#8a94a6",unclear:"#7a5af8"});
 const STATUS_COLOR=table({approved:"var(--write)",pending:"var(--pending)",pending_review:"var(--pending)"});
 const ACTION={created:["▲ created","var(--write)"],updated:["↻ updated","var(--pending)"],deleted:["✕ deleted","var(--flag)"],recalled:["▼ recalled","var(--recall)"]};
 // "20260727-065319.391Z-cure-v2-9eb25cc9" → {main:"cure-v2 · #9eb25cc9", sub:"2026-07-27 06:53Z"}

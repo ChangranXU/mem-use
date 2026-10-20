@@ -15,10 +15,10 @@ The verdict rests on subsequent influence, never on the final task result:
   ⇒ span **negative**; unproductive use is not harm;
 - else any memory `used` (acted-on influence that improved the work) ⇒
   span **positive**;
-- else any memory `unclear` (attribution or effect undetermined)
-  ⇒ span **unresolved**;
+- else any memory `unclear` (effect undetermined, or attribution left
+  unassessed over the entry's window) ⇒ span **unresolved**;
 - else ⇒ **neutral** (no established benefit or harm; selection, reference,
-  unproductive use, or no established influence).
+  unproductive use, ambiguous attribution, or no established influence).
 
 Parsing is strict, and the contract keys each rubric entry by the
 SPAN-LOCAL memory id (m1, m2, … per delivered entry — display keys are
@@ -497,8 +497,12 @@ def _verdict_semantics(
     return None
 
 
-def _derive_usage(signals: dict) -> str:
-    """Separate useful, unproductive, harmful, and selection-only actions."""
+def _derive_usage(signals: dict, window_read: bool) -> str:
+    """Separate useful, unproductive, harmful, and selection-only actions.
+
+    Unknown influence over a completely read window means the memory and an
+    earlier source explain the action equally: attribution is ambiguous and
+    no help or harm is established. Without that reading it is unassessed."""
     inf = signals["influence"]["value"]
     pe = signals["positive_effect"]["value"]
     if inf in _ACTED:
@@ -515,7 +519,7 @@ def _derive_usage(signals: dict) -> str:
         return "selected"
     if inf == "none":
         return "ignored"
-    return "unclear"  # influence itself unknown
+    return "ambiguous" if window_read else "unclear"
 
 
 def _footprint_reason(signals: dict) -> str:
@@ -536,8 +540,9 @@ def _footprint_reason(signals: dict) -> str:
 
 def derive_verdict(memory_usage: dict) -> str:
     """Span verdict from derived per-memory usage: misuse dominates, then
-    use; unknown attribution or effect keeps the span unresolved. Selection,
-    reference and unproductive use are neutral, with their usage preserved."""
+    use; an unknown effect or unassessed attribution keeps the span
+    unresolved. Selection, reference, ambiguous attribution and unproductive
+    use are neutral, with their usage preserved."""
     usages = [e.get("usage") for e in memory_usage.values()]
     if "misused" in usages:
         return "negative"
@@ -650,12 +655,13 @@ def _error_verdict(
 
 
 def _assemble_verdict(
-    obj: dict, span: InjectionSpan, warnings: list[str], api_key: str
+    obj: dict, span: InjectionSpan, warnings: list[str], api_key: str, windows_read: set[str]
 ) -> dict:
     """Derive usage and verdict after strict shape and span validation.
 
     Coverage and anchor checks have one owner: _verdict_semantics. Assembly
-    never invents partial rubric entries for an invalid answer.
+    never invents partial rubric entries for an invalid answer. `windows_read`
+    names the entries whose complete window the judge read.
     """
     verdict = blank_verdict()
     entries = {e["id"]: e for e in obj["memories"]}
@@ -679,7 +685,7 @@ def _assemble_verdict(
             pe["value"] = None
             verdict["pe_pairing_corrections"] += 1
         verdict["rubric"][mid] = {**signals, "anchors": anchors}
-        usage = _derive_usage(signals)
+        usage = _derive_usage(signals, mid in windows_read)
         usage_entry = {"usage": usage, "evidence": _usage_evidence(signals)}
         if usage == "ignored":
             usage_entry["reason"] = _footprint_reason(signals)

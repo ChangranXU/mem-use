@@ -28,7 +28,7 @@ uv run -m injudge <paths> --dry-run --limit 3
 
 | 文件 | 内容 |
 |---|---|
-| `injudge-report.json` | 评审记录（`injudge.report/v24`）：付费调用前写出初始快照，运行结束时写出完整快照 |
+| `injudge-report.json` | 评审记录（`injudge.report/v25`）：付费调用前写出初始快照，运行结束时写出完整快照 |
 | `injudge-checkpoints.jsonl` | 每个已完成区间的记录，包括并行完成的结果；完整快照写出前，报告指向此日志 |
 | `summary.json` | 最终统计（`injudge.summary/v18`）：计数、比率、投递估算、评审运行总量 |
 | `summary.md` | 最终统计的可读摘要，列出待查看区间、诊断，并链接到 JSON 文件 |

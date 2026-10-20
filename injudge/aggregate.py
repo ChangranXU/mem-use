@@ -69,7 +69,7 @@ from injudge.cost import TOKEN_COST_CAVEAT
 from memgraph.annotations import canonical_entry, is_int, item_ident, version_identity
 
 _VERDICTS = ("positive", "negative", "neutral", "unresolved")
-_USAGES = ("used", "unproductive", "misused", "selected", "noted", "ignored", "unclear")
+_USAGES = ("used", "unproductive", "misused", "selected", "noted", "ignored", "ambiguous", "unclear")
 _BUCKETS = ("[0,0.5)", "[0.5,0.8)", "[0.8,1.0]")
 # the verdict classes every count/cost rollup tallies (error, unjudged, and
 # unassessable — the rule-judged no-subsequent-turn spans — are counts,

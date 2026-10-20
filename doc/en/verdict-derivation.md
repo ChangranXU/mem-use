@@ -162,7 +162,8 @@ neutral.
 | `selected` | `null` | `selected` |
 | `referenced` | `null` | `noted` |
 | `none` | `null` | `ignored` |
-| `null` | `null` | `unclear` |
+| `null`, whole window read | `null` | `ambiguous` |
+| `null`, window not read completely | `null` | `unclear` |
 
 Unproductive use requires evidence that an acted-on action made no difference
 and added no work; it is not harm. Memory-misdirected
@@ -175,8 +176,14 @@ Costs are recorded separately. `misused` is reserved for harmful acted-on influe
 
 The conservative span triage rule is: any `misused` → negative; otherwise any
 `used` → positive; otherwise any `unclear` → unresolved; otherwise neutral.
-Neutral therefore includes selection, reference, unproductive use, and no
-established influence. A mixed beneficial/harmful bundle is negative for triage;
+Neutral therefore includes selection, reference, ambiguous attribution,
+unproductive use, and no established influence. Unknown influence over a
+completely read window means the memory and an earlier source explain the
+action equally; independent reviewers split on such cases as often as judges
+do, and either way no help or harm is established, so it is `ambiguous` and
+neutral. Python decides this from the judge's recorded reads, never from the
+answer: unknown influence over a window the judge did not read completely stays
+`unclear`, so a budget-limited investigation never becomes a silent neutral. A mixed beneficial/harmful bundle is negative for triage;
 its individual labels remain visible. These signs do not estimate net utility.
 
 Ignored-entry reasons remain `irrelevant`, `redundant`, `confirming_ignored`,

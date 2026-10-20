@@ -114,15 +114,19 @@ positive_effect null；归因尚未评估时用 influence null。不能为了结
 | selected | null | selected |
 | referenced | null | noted |
 | none | null | ignored |
-| null | null | unclear |
+| null，已完整读取窗口 | null | ambiguous |
+| null，窗口未完整读取 | null | unclear |
 
 unproductive 需要 acted_on 行动没有带来差异、也没有增加工作的肯定证据；它不等于
 伤害。由记忆引起但毫无贡献的额外工作属于 `harmed`。被否定的调查可能通过
 消除疑问改善工作，开销单独记录。misused 只表示造成伤害的使用。
 
 保守的区间复核规则：任一 misused → negative；否则任一 used → positive；否则
-任一 unclear → unresolved；其余 neutral。neutral 包括选择、提及、无收益使用和
-没有建立影响。有益与有害混合的包为 negative，但保留每条标签；这个符号不是净效用。
+任一 unclear → unresolved；其余 neutral。neutral 包括选择、提及、归因不明、
+无收益使用和没有建立影响。完整读取窗口后的未知影响表示记忆与先前来源同样能解释该行动；
+独立复核者在这类案例上的分歧与评审一样多，而且无论哪种解读都未确立收益或伤害，
+因此记为 `ambiguous` 并判为中性。是否完整读取由 Python 根据评审的实际读取记录判断，
+而不是根据答案：窗口未完整读取的未知影响仍为 `unclear`，预算受限的调查不会悄悄变成中性。有益与有害混合的包为 negative，但保留每条标签；这个符号不是净效用。
 
 ignored 的原因仍为 irrelevant、redundant、confirming_ignored、ignored_novel 或
 ignored_unknown_novelty，不决定区间符号。

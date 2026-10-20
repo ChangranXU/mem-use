@@ -28,7 +28,7 @@ Each run writes its own `<run-stamp>/` folder (`YYYYMMDD-HHMMSS-<hex>`) under `-
 
 | File | Contents |
 |---|---|
-| `injudge-report.json` | The judging record (`injudge.report/v24`): an initial snapshot before paid work, then a full snapshot when the run ends |
+| `injudge-report.json` | The judging record (`injudge.report/v25`): an initial snapshot before paid work, then a full snapshot when the run ends |
 | `injudge-checkpoints.jsonl` | Each completed span, including parallel completions; the report points to this journal until the full snapshot is written |
 | `summary.json` | The final statistics (`injudge.summary/v18`): counts, rates, delivery estimates, judge execution totals |
 | `summary.md` | A readable view of the final statistics, with spans to inspect, diagnostics, and links to the JSON files |

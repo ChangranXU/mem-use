@@ -22,7 +22,7 @@ from injudge.aggregate import aggregate
 from injudge.report import operation_record
 from injudge.spans import group_spans
 from memgraph.graph import load_trajectories
-from test_injudge import (GOOD, _agent_cfg, _judge_input_fixture, _result,
+from test_injudge import (GOOD, _agent_cfg, _judge_input_fixture, _reads, _result,
                           _test_episode, judge_span, stub_runner)
 
 
@@ -733,7 +733,7 @@ def test_selection_cannot_inherit_the_followup_effect():
     assert _verdict_semantics(obj, span, 4) is None
     # A claimed benefit of the selection itself is coerced away and counted
     # as a pairing correction (judge compliance), never inherited.
-    result = _assemble_verdict(obj, span, [], "")
+    result = _assemble_verdict(obj, span, [], "", set())
     assert result["rubric"]["m1"]["positive_effect"]["value"] is None
     assert result["pe_pairing_corrections"] == 1
     assert result["memory_usage"]["m1"]["usage"] == "selected"
@@ -746,13 +746,15 @@ def test_removed_decisive_tier_is_not_silently_accepted():
     assert "outside the contract" in _strict_parse(json.dumps(obj))[1]
 
 
-@pytest.mark.parametrize("influence,effect,usage,verdict", [
-    ("selected", None, "selected", "neutral"),
-    ("acted_on", "no_effect", "unproductive", "neutral"),
-    ("acted_on", "harmed", "misused", "negative"),
-    (None, None, "unclear", "unresolved"),
+@pytest.mark.parametrize("influence,effect,window_read,usage,verdict", [
+    ("selected", None, True, "selected", "neutral"),
+    ("acted_on", "no_effect", True, "unproductive", "neutral"),
+    ("acted_on", "harmed", True, "misused", "negative"),
+    ("acted_on", None, True, "unclear", "unresolved"),
+    (None, None, True, "ambiguous", "neutral"),
+    (None, None, False, "unclear", "unresolved"),
 ])
-def test_selection_unproductive_harm_and_uncertainty_stay_distinct(influence, effect, usage, verdict):
+def test_selection_unproductive_harm_and_uncertainty_stay_distinct(influence, effect, window_read, usage, verdict):
     span, _ = _judge_input_fixture()
     obj = json.loads(GOOD)
     entry = obj["memories"][0]
@@ -760,7 +762,7 @@ def test_selection_unproductive_harm_and_uncertainty_stay_distinct(influence, ef
     entry["positive_effect"]["value"] = effect
     assert _strict_parse(json.dumps(obj))[1] is None
     assert _verdict_semantics(obj, span, 2) is None
-    result = _assemble_verdict(obj, span, [], "")
+    result = _assemble_verdict(obj, span, [], "", {"m1", "m2"} if window_read else {"m2"})
     assert result["verdict"] == verdict
     assert result["memory_usage"]["m1"]["usage"] == usage
     rollup = aggregate([operation_record(span, result, {})], 1)
@@ -768,6 +770,27 @@ def test_selection_unproductive_harm_and_uncertainty_stay_distinct(influence, ef
     assert rollup["rubric"]["counts"]["influence"].get("null", 0) == int(influence is None)
     if influence is None:
         assert rollup["rubric"]["rates"]["influence"] == 0.0  # m2 only; m1 is unknown
+
+
+@pytest.mark.parametrize("read_window", [True, False])
+def test_unknown_influence_is_neutral_only_over_a_fully_read_window(monkeypatch, tmp_path, read_window):
+    # After reading the whole window, unknown influence means the memory and an
+    # earlier source explain the action equally: no help or harm is established.
+    # An unread window leaves attribution unassessed, never a silent neutral.
+    span, steps = _judge_input_fixture()
+    span.step_first = span.step_last = 1
+    answer = json.loads(GOOD)
+    answer["evidence"] = []
+    for entry in answer["memories"]:
+        entry["influence"]["value"] = entry["positive_effect"]["value"] = None
+        entry["anchors"] = []
+    reads = _reads(1, 2) if read_window else _reads(1)
+    stub_runner(monkeypatch, [_result(json.dumps(answer), messages=[{"role": "user"}, *reads, {"role": "assistant"}])])
+    verdict = judge_span(span, steps, _agent_cfg(), [], evidence_root=tmp_path / "evidence",
+                         transcripts_root=tmp_path / "runs")
+    usage = "ambiguous" if read_window else "unclear"
+    assert verdict["verdict"] == ("neutral" if read_window else "unresolved")
+    assert {e["usage"] for e in verdict["memory_usage"].values()} == {usage}
 
 
 def test_evidence_and_prompt_hashes_identify_exact_judge_inputs(monkeypatch, tmp_path):

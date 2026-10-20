@@ -886,7 +886,7 @@ CASES["query_before_delivery"] = {
     "consumer": _QUERY_EDIT,
     "after": [_QUERY_CHECK],
     "expect": {"novelty": ["confirming"], "influence": [None],
-               "positive_effect": [None], "verdict": ["unresolved"]},
+               "positive_effect": [None], "verdict": ["neutral"]},
 }
 CASES["query_after_delivery"] = {
     **_QUERY_TIMING,

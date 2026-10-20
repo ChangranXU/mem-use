@@ -597,6 +597,14 @@ def _baseline_error(obj: dict, files: dict[str, str], read_files: set[str]) -> s
     return "; ".join(gaps) or None
 
 
+def _unread_window(span: InjectionSpan, mid: str, eligible: set[int], read: set[int],
+                   through_episode_end: bool = False) -> list[int]:
+    """Eligible steps of an entry's window (or through the episode end) the judge did not read."""
+    start = span.memory_window_starts.get(mid, span.step_first)
+    end = None if through_episode_end else span.memory_windows.get(mid)
+    return sorted(s for s in eligible if s >= start and (end is None or s <= end) and s not in read)
+
+
 def _coverage_error(obj: dict, span: InjectionSpan, eligible: set[int], read: set[int]) -> str | None:
     """Absence of influence needs the whole window, not a search miss.
 
@@ -616,11 +624,10 @@ def _coverage_error(obj: dict, span: InjectionSpan, eligible: set[int], read: se
         else:
             continue
         mid = entry["id"]
-        start = span.memory_window_starts.get(mid, span.step_first)
-        end = None if influence == "acted_on" and effect is not None else span.memory_windows.get(mid)
-        missing = sorted(s for s in eligible if s >= start and (end is None or s <= end) and s not in read)
+        through_end = influence == "acted_on"
+        missing = _unread_window(span, mid, eligible, read, through_end)
         if missing:
-            scope = "window coverage through the episode's end" if end is None else "window coverage"
+            scope = "window coverage through the episode's end" if through_end else "window coverage"
             gaps.append(f"{mid} claims {claim} without complete {scope}; "
                         f"read step(s) {missing}, or use {fallback} remains unassessed")
     return "; ".join(gaps) or None
@@ -870,7 +877,10 @@ def judge_span(
         last_text = result["answer"]
         obj, last_error = _answer_error(last_text, result, span, episode, files, read_files)
         if obj is not None:
-            verdict = _assemble_verdict(obj, span, warnings, cfg.api_key)
+            # unknown influence is ambiguous attribution only over a fully read window
+            eligible, read = {step.step for step in episode.steps}, set(health["read_steps"])
+            windows_read = {e["id"] for e in obj["memories"] if not _unread_window(span, e["id"], eligible, read)}
+            verdict = _assemble_verdict(obj, span, warnings, cfg.api_key, windows_read)
             verdict["input"] = _input_record(gold, attempt, result, transcript, health)
             return verdict
         history = result["messages"]

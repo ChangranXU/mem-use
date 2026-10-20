@@ -129,7 +129,7 @@ def test_terminal_interrupt_retains_running_spans_and_cancels_queue(tmp_path, en
         stdout, stderr = proc.communicate(timeout=12)
         assert proc.returncode != 0, (stdout, stderr)
         verdicts = [row['verdict'] for row in _report(tmp_path)['operations']]
-        assert verdicts.count('unresolved') == parallel, (verdicts, stderr.decode())
+        assert verdicts.count('neutral') == parallel, (verdicts, stderr.decode())  # unknown influence, window read
         assert verdicts.count('unjudged') == 4 - parallel
         assert len(requests) == 2 * parallel
         assert not list((tmp_path / 'output').rglob('.runner-*'))

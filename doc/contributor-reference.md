@@ -86,7 +86,7 @@ memgraph/parse_trajectory.py  # trajectory.jsonl → ops; shared step rule
 memgraph/episodes.py       # shared episode-scope rule (bridge boundaries) + graph episode rows
 memgraph/graph.py          # path discovery, cross-trajectory linking, validation
 memgraph/html.py           # self-contained HTML (template + embedded graph JSON)
-memgraph/verdicts.py       # merge injudge.report/v24 onto recall ops
+memgraph/verdicts.py       # merge injudge.report/v25 onto recall ops
 memgraph/__main__.py       # python3 -m memgraph
 injudge/__init__.py        # REPORT_SCHEMA / SUMMARY_SCHEMA / EPISODE_INPUT_SCHEMA / CHECKPOINT_SCHEMA
 injudge/model.py           # AgentStep / ToolExec / InjectionSpan
@@ -100,7 +100,7 @@ injudge/agent.py           # .env → AgentConfig, runner subprocess, corrective
 injudge/gold.py            # golden-answer / correctness sidecars and CLI joins
 injudge/prompts.py         # loads prompts/ (never inline prompts in code)
 injudge/aggregate.py       # verdict counts/rates, per-memory usage roll-ups
-injudge/report.py          # injudge.report/v24 + injudge.summary/v18 + summary.md + stdout
+injudge/report.py          # injudge.report/v25 + injudge.summary/v18 + summary.md + stdout
 injudge/checkpoints.py     # completed-span journal writes and report recovery
 injudge/__main__.py        # python3 -m injudge
 agent/                     # TS judge agent: runner.ts (pi Agent + budgets),
@@ -554,7 +554,7 @@ Recovery copies may share the original `calls/` directory through a symlink.
 Request-pointer placement proofs resolve within that capture directory;
 per-call or request-file symlinks cannot escape it.
 
-**injudge** writes `injudge.report/v24` (`{tool, generated_at, trajectories,
+**injudge** writes `injudge.report/v25` (`{tool, generated_at, trajectories,
 operations, injections, aggregates, validation}`). Before paid work, the initial
 snapshot marks pending spans `unjudged` and sets `checkpoint_journal` to
 `injudge-checkpoints.jsonl`. Each completion appends one `injudge.checkpoint/v1`
@@ -677,7 +677,7 @@ contain useful and harmful entries, so costs by verdict do not measure
 per-memory token benefit. Summary v18 renames `spans_with_repairs` to
 `spans_with_followups`.
 Summary has no span or episode index, memory lists, confidence
-means/buckets, configuration, or provenance. Those details remain in report v24.
+means/buckets, configuration, or provenance. Those details remain in report v25.
 Empty/unassessable/error/unjudged spans stay outside verdict-rate denominators.
 Rates are omitted when no spans were judged; rubric is omitted without judged
 entries, and judge counters without agent runs. JSON uses two-space indentation.
