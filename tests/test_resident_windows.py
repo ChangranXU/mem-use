@@ -1,4 +1,4 @@
-"""Credit identical text once while recorded input proves an earlier copy."""
+"""Credit equal or shorter text once while recorded input proves an earlier copy."""
 
 import hashlib
 import json
@@ -153,20 +153,49 @@ def test_residency_is_proven_in_the_surviving_entry_slot(tmp_path):
     assert later.memory_window_owners == {}
 
 
+@pytest.mark.parametrize("same_step", [False, True])
 @pytest.mark.parametrize("first_full", [False, True])
-def test_changed_exposure_keeps_existing_windows(tmp_path, first_full):
+def test_shorter_copy_of_resident_text_keeps_the_first_owner(tmp_path, first_full, same_step):
     b = AnnotatedBuilder().episode_open().agent_turn(with_task=True)
     clipped = "Cached index maps go stale"
-    search, text = _deliver(b, [A], 4, text=None if first_full else clipped)
+    search, text = _deliver(b, [A], 4, text=None if first_full else clipped, consume=not same_step)
+    if not same_step:
+        _bind(b, search, [A], text, 4)
+    second, block = _deliver(b, [B, A], 5,
+                             text=(B["content"]["text"] + "\n" + clipped) if first_full else None)
+    if same_step:
+        _bind(b, search, [A], text, 4)
+    _bind(b, second, [B, A], block, 5)
+    b.agent_turn().episode_close()
+    trajectory, ops, episode = _prepare(tmp_path, b)
+    first, later = _group(trajectory, ops, episode)
+    last = episode.steps[-1].step
+    if first_full:
+        # The preview adds nothing to the visible full copy: one owner, no overlap.
+        assert first.memory_windows["m1"] == last
+        assert later.memory_window_owners == {"m2": {"span_id": first.id, "memory_id": "m1"}}
+        assert later.memory_window_starts["m2"] > later.memory_windows["m2"]
+    else:
+        # The full copy shows new text: the preview hands over at its arrival.
+        assert first.memory_windows["m1"] == later.step_first - (not same_step)
+        assert later.memory_window_owners == {}
+        assert later.memory_window_starts.get("m2", later.step_first) == later.step_first
+        assert later.memory_windows["m2"] == last
+
+
+def test_shorter_copy_after_its_host_left_keeps_its_own_window(tmp_path):
+    b = AnnotatedBuilder().episode_open().agent_turn(with_task=True)
+    search, text = _deliver(b, [A], 4)
     _bind(b, search, [A], text, 4)
-    search, text = _deliver(b, [B, A], 5,
-                            text=(B["content"]["text"] + "\n" + clipped) if first_full else None)
+    b._emit("message_retracted", proxy_source=b.main, msg=4)
+    b.user_message("Replacement without memory.", msg=4)
+    search, text = _deliver(b, [B, A], 5, text=B["content"]["text"] + "\nCached index maps go stale")
     _bind(b, search, [B, A], text, 5)
     b.agent_turn().episode_close()
     trajectory, ops, episode = _prepare(tmp_path, b)
     first, later = _group(trajectory, ops, episode)
-    assert first.memory_windows["m1"] == (4 if first_full else 2)
-    assert later.memory_window_owners == {}
+    assert later.memory_window_owners == later.memory_window_starts == {}
+    assert later.memory_windows["m2"] == episode.steps[-1].step
 
 
 def test_selected_equal_text_full_read_keeps_its_handover(tmp_path):
@@ -206,7 +235,8 @@ def test_retained_owner_records_later_narrower_exposure_and_still_closes_on_wide
     assert first.memory_windows["m1"] == 4
     assert first.memory_variant_steps["m1"] == [4]
     assert repeated.memory_window_starts["m2"] > repeated.memory_windows["m2"]
-    assert narrow.memory_windows["m2"] == 4
+    assert narrow.memory_window_owners["m2"] == {"span_id": first.id, "memory_id": "m1"}
+    assert narrow.memory_window_starts["m2"] > narrow.memory_windows["m2"] == 4
     assert full.memory_window_starts.get("m1", full.step_first) == 5
     assert "different content at step(s) [4]" in build_span_evidence(first, episode)["span.md"]
 
@@ -283,6 +313,22 @@ def test_newly_exposed_selector_is_not_suppressed_as_identical_text(tmp_path):
     assert first.memory_windows["m1"] == 2
     assert later.memory_window_owners == {}
     assert later.memory_window_starts.get("m2", later.step_first) == 3
+
+
+@pytest.mark.parametrize("clipped", [False, True])
+def test_same_step_new_selector_keeps_its_action_step(tmp_path, clipped):
+    b = AnnotatedBuilder().episode_open().agent_turn(with_task=True)
+    search, text = _deliver(b, [A], 4, text=A["content"]["text"], consume=False)
+    shown = "Cached index maps go stale" if clipped else A["content"]["text"]
+    second, block = _deliver(b, [A], 5, text="kb-a: " + shown)
+    _bind(b, search, [A], text, 4)
+    _bind(b, second, [A], block, 5)
+    b.episode_close()
+    trajectory, ops, episode = _prepare(tmp_path, b)
+    first, later = _group(trajectory, ops, episode)
+    assert later.step_first == first.step_first == episode.steps[-1].step
+    assert later.memory_window_owners == {}
+    assert _acted_claim(later, "m1", [later.step_first], episode.steps[-1].step) is None
 
 
 @pytest.mark.parametrize("same_step", [False, True])
@@ -390,3 +436,21 @@ def test_later_selected_member_protects_its_whole_destination_from_overlapping_c
     assert destination.memory_followups["m2"][0]["step"] == 4
     assert _acted_claim(first, "m1", [4], 6) is not None
     assert _acted_claim(destination, "m2", [4], 6) is None
+
+
+def test_span_with_no_eligible_step_is_rule_judged_without_a_call(tmp_path, monkeypatch):
+    from test_episode_judging import _answer, _result, _run
+    b = AnnotatedBuilder().episode_open().agent_turn(with_task=True)
+    search, text = _deliver(b, [A], 4)
+    _bind(b, search, [A], text, 4)
+    search, text = _deliver(b, [A], 5, text="kb-a: Cached index maps go stale")
+    _bind(b, search, [A], text, 5)
+    b.agent_turn().episode_close()
+    status, report, _run_dir, calls, _source = _run(tmp_path, monkeypatch, b, [_result(_answer())])
+    assert status == 0 and len(calls) == 1
+    first, preview = report["operations"]
+    assert preview["memory_window_owners"]["m1"]["span_id"] == first["operation_id"]
+    assert (preview["verdict"], preview["auto"], preview["confidence"]) == ("neutral", "no_eligible_step", None)
+    overall = report["aggregates"]["overall"]
+    assert overall["neutral"] == 2 and overall["unassessable"] == 0
+    assert overall["rubric"]["deliveries"] == 1  # only the judged owner is scored

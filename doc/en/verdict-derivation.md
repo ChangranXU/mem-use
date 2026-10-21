@@ -93,14 +93,15 @@ instead of a weighing of how "equally" two sources explain an action.
 The redundant `decisive` tier was removed in v15. Describe a course change in
 an `acted_on` note. A preview can directly shape an edit without being opened;
 selection does not suppress that credit, but the separate action needs its own
-anchor. Content a preview shares with the recorded fuller delivery it selected
-is credited to that fuller delivery: the preview stays `selected` unless it
-shaped an action before that delivery arrived or with content the fuller
-delivery lacks, and the fuller delivery's judge does not treat the selecting
-preview as a competing source. Otherwise each span would defer to the other
-and the memory would receive no credit at all. This allocates influence that
-is first established against the task, code, and prior reasoning; it neither
-creates influence nor moves an action shaped before the full read arrived. A single step can contain selection and another action, so follow-up step
+anchor. When a later delivery of the same item takes over an earlier delivery's
+window, shared content is credited to the later delivery, whether or not a
+preview selected it. The earlier copy itself is not a competing source;
+independent task instructions, prior decisions, and other sources still are.
+Otherwise each span could defer to the other and the memory would receive
+no credit. This allocates established influence; it neither creates influence
+nor moves actions shaped before the handoff. A selecting preview stays
+`selected` unless it shaped an action before the handoff or with content
+only it showed. A single step can contain selection and another action, so follow-up step
 numbers alone do not decide the label. Assembly coerces a non-null effect to
 null for any influence other than acted_on and counts it as a pairing
 correction (judge compliance); a separately claimed content use must be
@@ -110,8 +111,8 @@ The first consuming step already had the memory in its input. Only earlier
 steps or pre-exposure input can establish a prior plan. Per-entry windows bound
 action anchors; later results within the parent episode can establish an
 anchored action's consequence without becoming out-of-window action anchors.
-Different or narrower later exposures of the same item can have overlapping
-windows. Judge each entry by its own window and exposed text. Identical copies keep the first owner while recorded input proves continuous visibility; other re-exposures follow the handoff rules in [Judge evidence](scoring-input.md). Ownership is accounting, not proof that influence appeared or vanished.
+Different later exposures of the same item, or narrower ones without proven
+visibility of an earlier copy, can have overlapping windows. Judge each entry by its own window and exposed text. Equal or shorter copies keep the first owner while recorded input proves continuous visibility; other re-exposures follow the handoff rules in [Judge evidence](scoring-input.md). Ownership is accounting, not proof that influence appeared or vanished.
 
 Selection and content use are separate stages. Their counts are diagnostics,
 not additive independent gains. `memory_followups` retains the deterministic
@@ -195,7 +196,9 @@ and do not determine the span sign.
 Empty deliveries and unattributed consumers are mechanically counted without
 paid calls. They are `empty` and `unassessable` in aggregates, outside directional
 denominators. Unselected episodes/limited spans are `unjudged`; judge failures are
-`error`. Influence null is counted explicitly and excluded from the assessed
+`error`. A span with no eligible action step for any entry is rule-judged
+neutral (`auto: no_eligible_step`) and counted as neutral, since no valid
+answer can anchor influence there. Influence null is counted explicitly and excluded from the assessed
 influence-rate denominator, as novelty null is for novelty.
 
 Report v16 and summary v14 distinguish memory-caused work without a contribution

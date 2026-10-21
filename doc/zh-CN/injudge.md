@@ -28,7 +28,7 @@ uv run -m injudge <paths> --dry-run --limit 3
 
 | 文件 | 内容 |
 |---|---|
-| `injudge-report.json` | 评审记录（`injudge.report/v25`）：付费调用前写出初始快照，运行结束时写出完整快照 |
+| `injudge-report.json` | 评审记录（`injudge.report/v26`）：付费调用前写出初始快照，运行结束时写出完整快照 |
 | `injudge-checkpoints.jsonl` | 每个已完成区间的记录，包括并行完成的结果；完整快照写出前，报告指向此日志 |
 | `summary.json` | 最终统计（`injudge.summary/v18`）：计数、比率、投递估算、评审运行总量 |
 | `summary.md` | 最终统计的可读摘要，列出待查看区间、诊断，并链接到 JSON 文件 |
@@ -67,6 +67,7 @@ uv run -m injudge <paths> --dry-run --limit 3
 - 涉及区间内任一条目的内容或处理方式变化都会切段——重新排序的包、重新框定的块、或单条目曝光的变化都会开启新区间，即使投递内容完全相同；之后恢复原处理方式也会再开启一个新区间。每个投递条目按各自的足迹窗口评判；窗口边界与逐条目曝光的规格见[评审证据](scoring-input.md)。
 - 重复投递归并为 `restated`：计入投递成本与 `n_injections`，但绝不进入判定率。
 - 没有可归属 agent 步骤的区间（`step_first` 为 `None`）没有下游足迹。按规则判 **neutral** 并标记 `auto: no_subsequent_turn`，不发起评审调用。汇总将其计为 `unassessable`，不进入任何方向性比率。
+- 所有条目都没有合格动作步骤的区间（每条文本仍在更早归属中可见，见 `memory_window_owners`）按规则判 **neutral** 并标记 `auto: no_eligible_step`，不发起评审调用：任何有效回答都只能推导出中性。它计入中性，但不进入评分规则、用法和置信度汇总。
 
 区间如何构造（含未摘要内容的指纹回退）见[记忆身份](input-contract.md#记忆身份)。
 

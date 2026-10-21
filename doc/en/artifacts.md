@@ -1,11 +1,21 @@
 ---
-description: "injudge.report/v25, injudge.summary/v18, every field, and how every rate is counted."
+description: "injudge.report/v26, injudge.summary/v18, every field, and how every rate is counted."
 icon: box-archive
 ---
 
 # Artifacts
 
-The current schemas are report v25 and summary v18. Report v25 splits unknown
+The current schemas are report v26 and summary v18. Report v26 also keeps the
+first owner when a later copy shows equal or shorter text (a preview of a
+still-visible full read), and rule-judges a span whose entries have no eligible
+action step as neutral (`auto: no_eligible_step`) without a judge call. Its
+verdict counts match what the judge would derive, but rubric, usage, and
+confidence rollups now cover only judge-scored spans, so they are not directly
+comparable with v25. Same-turn copies that add a shown selector keep that
+turn eligible. The influence rule also assigns shared content to the later
+window after a same-item handoff without requiring selection; affected
+judgments can change and should not be pooled with older prompt results.
+Report v25 splits unknown
 influence by what the judge read: over a completely read window it is
 `ambiguous` attribution and derives neutral; otherwise it stays `unclear` and
 unresolved. Verdict counts are not directly comparable with v24 (unresolved
@@ -46,7 +56,7 @@ failure alone does not prove memory harm; follow corrected attempts to their
 results. Report v17 introduced this distinction; harm counts from v16 are not
 directly comparable. Do not combine effect labels or rates from different scoring versions.
 Older reports remain historical artifacts; memgraph and calibration accept
-only report v25. Use the matching older code to load historical reports.
+only report v26. Use the matching older code to load historical reports.
 
 {% hint style="info" %}
 injudge writes all artifacts of a run to that run's own `<run-stamp>/` folder under the output container (`-o DIR`, default `output/`) — a run never overwrites another run's artifacts.
@@ -54,7 +64,7 @@ injudge writes all artifacts of a run to that run's own `<run-stamp>/` folder un
 
 | File | Schema | Role |
 |---|---|---|
-| `injudge-report.json` | `injudge.report/v25` | Initial snapshot with pending spans marked `unjudged`, then a complete snapshot when the run ends. During judging, `checkpoint_journal` names the file with completed results. Feed the report to memgraph with `--verdicts`. |
+| `injudge-report.json` | `injudge.report/v26` | Initial snapshot with pending spans marked `unjudged`, then a complete snapshot when the run ends. During judging, `checkpoint_journal` names the file with completed results. Feed the report to memgraph with `--verdicts`. |
 | `injudge-checkpoints.jsonl` | `injudge.checkpoint/v1` | One appended record per completed span. Required while the report has a `checkpoint_journal` field; retained for audit after completion. |
 | `summary.json` | `injudge.summary/v18` | Compact final statistics: counts, rates, delivery estimates, and judge execution totals. |
 | `summary.md` | — | Short readable summary of the same totals, the spans to inspect first, diagnostic counts, and links to the JSON files. |
@@ -130,7 +140,7 @@ Episode counts appear alongside trajectory/span counts. Empty deliveries and
 unobserved consumers use separate classes (`empty`, `unassessable`), outside
 verdict-rate denominators. The report keeps complete diagnostics, memory
 identities, episode rows, and span records. `memgraph --verdicts` accepts only
-`injudge.report/v25`.
+`injudge.report/v26`.
 
 ### The Report's Aggregates
 
@@ -153,7 +163,7 @@ The mapping from rubric signals to usage labels and span verdicts is in [Rubric 
 
 | Population | Members |
 |---|---|
-| Judged spans | `positive` + `negative` + `unresolved` + `neutral`. Denominator for verdict rates. `unresolved` means an acted-on effect could not be determined, or attribution was not assessed over the whole window. Neutral includes selection, reference, ambiguous attribution, unproductive use, and no established influence. |
+| Judged spans | `positive` + `negative` + `unresolved` + `neutral`. Denominator for verdict rates. `unresolved` means an acted-on effect could not be determined, or attribution was not assessed over the whole window. Neutral includes selection, reference, ambiguous attribution, unproductive use, and no established influence, plus spans with no eligible action step (`auto: no_eligible_step`), rule-judged without a call. |
 | `empty` | No entries were delivered (`auto: empty_delivery`). No judge call. Counts and delivery cost stay outside verdict rates. |
 | `unassessable` | No delivery has an attributed agent step (`auto: no_subsequent_turn`). The recording cannot support a downstream influence judgment. Counts and delivery cost have their own class, outside verdict rates. Missing observations do not prove zero effect. |
 | LLM-judged spans | Judged spans with no `auto` marker. Population for rubric rates, usage tallies, and confidence. |

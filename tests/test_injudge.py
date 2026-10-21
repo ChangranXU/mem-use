@@ -1871,7 +1871,7 @@ def test_summary_is_statistics_only():
     before = json.dumps(artifact)
     summary = build_summary(artifact)
     assert summary["tool"] == {"name": "injudge", "schema": "injudge.summary/v18",
-                               "source_report_schema": "injudge.report/v25", "judge_model": "judge"}
+                               "source_report_schema": "injudge.report/v26", "judge_model": "judge"}
     assert summary["report"] == "injudge-report.json"
     assert summary["generated_at"] == artifact["generated_at"]
     assert summary["diagnostics"] == {"error": 0, "warn": 1, "info": 0}
@@ -2318,7 +2318,7 @@ def test_cli_runs_share_the_container_without_clobbering(monkeypatch, tmp_path):
     assert len(run_dirs) == 2  # distinct stamps even for same-second runs
     for run_dir in run_dirs:
         report = json.loads((run_dir / "injudge-report.json").read_text())
-        assert report["tool"]["schema"] == "injudge.report/v25"
+        assert report["tool"]["schema"] == "injudge.report/v26"
         assert (run_dir / "summary.json").is_file()
         (span_evidence,) = (run_dir / "evidence").iterdir()
         assert (span_evidence / "manifest.json").is_file()
@@ -3738,7 +3738,7 @@ def test_agent_unknown_novelty_preserves_independent_signals(
     path = tmp_path / "report.json"
     path.write_text(json.dumps(artifact))
     saved = json.loads(path.read_text())
-    assert saved["tool"]["schema"] == "injudge.report/v25"
+    assert saved["tool"]["schema"] == "injudge.report/v26"
     assert saved["operations"][0]["rubric"]["m1"]["novelty"]["value"] is None
     rub = saved["aggregates"]["overall"]["rubric"]
     assert rub["deliveries"] == 2

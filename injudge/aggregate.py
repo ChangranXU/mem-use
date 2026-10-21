@@ -3,7 +3,10 @@
 The counting rules:
 
 - rates are over judged spans only: denominator = positive + negative +
-  neutral + unresolved (attribution or effect undetermined). Selection and
+  neutral + unresolved (attribution or effect undetermined). A span whose
+  entries have no eligible action step (their text stays credited to an
+  earlier visible owner) is rule-judged neutral without a judge call: every
+  valid answer derives neutral. Selection and
   unproductive use are neutral; only harmful acted-on influence is negative. `error` (judge failures),
   `unjudged` (--limit truncation; spans outside --episode never reach
   these totals), and `unassessable`
@@ -53,9 +56,9 @@ The counting rules:
   include both useful and harmful entries. Its cost by verdict cannot
   measure per-memory token benefit or net gain.
 - footprint windows of one memory can overlap when its deliveries showed
-  different text (a preview and a full read); each judge credits only its
-  own entry's text, and `rubric.shared_anchors` lists any action step two
-  spans both credited for one memory, so a shared action is never silently
+  different text, or narrower text with no proven visible earlier copy;
+  each judge credits only its own entry's text, and `rubric.shared_anchors`
+  lists any action step two spans both credited for one memory, so a shared action is never silently
   counted twice.
 """
 
@@ -78,10 +81,11 @@ _COUNTED = (*_VERDICTS, "error", "unjudged", "unassessable", "empty")
 
 
 def counted_verdict(op: dict) -> str:
-    """Mechanical skips have their own populations, outside judged rates."""
+    """Mechanical skips have their own populations, outside judged rates. A
+    span with no eligible action step keeps its rule-derived neutral."""
     if op.get("auto") == "empty_delivery":
         return "empty"
-    if op.get("auto"):
+    if op.get("auto") == "no_subsequent_turn":
         return "unassessable"
     verdict = op.get("verdict")
     return verdict if verdict in _COUNTED else "error"
@@ -245,10 +249,8 @@ def _rubric_rollup(operations: list[dict]) -> dict:
 
 
 def _cost_rollup(operations: list[dict]) -> dict:
-    """Deterministic delivery-cost totals, charged per span verdict. A
-    rule-judged auto-neutral span's cost charges to `unassessable`, not to
-    the neutral class its placeholder verdict spells: the recording simply
-    holds no downstream to judge, so its spend is neither waste nor help."""
+    """Charge delivery cost by the same verdict population as span counts:
+    missing observations are unassessable; no eligible action is neutral."""
     by_verdict = dict.fromkeys(_COUNTED, 0)
     chars = 0
     for op in operations:
@@ -293,9 +295,6 @@ def aggregate(operations: list[dict], n_injections: int, n_trajectories: int | N
     pe_corrected = 0  # ... of them needing the positive_effect↔influence correction
     for op in operations:
         v = op.get("verdict")
-        # a rule-judged auto-neutral span tallies as UNASSESSABLE, never as
-        # the neutral its placeholder verdict spells: its "no footprint" is
-        # observation missingness, not a measured null effect
         counts[counted_verdict(op)] += 1
         conf = op.get("confidence")
         if v in _VERDICTS and isinstance(conf, (int, float)) and not isinstance(conf, bool):

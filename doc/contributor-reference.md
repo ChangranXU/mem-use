@@ -86,7 +86,7 @@ memgraph/parse_trajectory.py  # trajectory.jsonl → ops; shared step rule
 memgraph/episodes.py       # shared episode-scope rule (bridge boundaries) + graph episode rows
 memgraph/graph.py          # path discovery, cross-trajectory linking, validation
 memgraph/html.py           # self-contained HTML (template + embedded graph JSON)
-memgraph/verdicts.py       # merge injudge.report/v25 onto recall ops
+memgraph/verdicts.py       # merge injudge.report/v26 onto recall ops
 memgraph/__main__.py       # python3 -m memgraph
 injudge/__init__.py        # REPORT_SCHEMA / SUMMARY_SCHEMA / EPISODE_INPUT_SCHEMA / CHECKPOINT_SCHEMA
 injudge/model.py           # AgentStep / ToolExec / InjectionSpan
@@ -100,7 +100,7 @@ injudge/agent.py           # .env → AgentConfig, runner subprocess, corrective
 injudge/gold.py            # golden-answer / correctness sidecars and CLI joins
 injudge/prompts.py         # loads prompts/ (never inline prompts in code)
 injudge/aggregate.py       # verdict counts/rates, per-memory usage roll-ups
-injudge/report.py          # injudge.report/v25 + injudge.summary/v18 + summary.md + stdout
+injudge/report.py          # injudge.report/v26 + injudge.summary/v18 + summary.md + stdout
 injudge/checkpoints.py     # completed-span journal writes and report recovery
 injudge/__main__.py        # python3 -m injudge
 agent/                     # TS judge agent: runner.ts (pi Agent + budgets),
@@ -209,20 +209,22 @@ adapter vocabulary.
     Unrelated deliveries do not split an observed, nonempty span. A different
     treatment of any shared item closes it, even if its original treatment
     returns later. Empty and unattributed deliveries merge only consecutively.
-  - Equal verified exposed text retains its first owner while a proven copy
-    remains in the bound consumer input. Later copies receive no eligible
+  - Equal or shorter verified exposed text with no newly exposed selector
+    retains its first owner while a proven copy showing all of it remains in
+    the bound consumer input. Later copies receive no eligible
     actions; a break in proven continuity starts a new span and input baseline.
     `memory_window_owners` names the earlier span and entry. This is
     content-credit accounting, not causal proof. Unknown visibility,
-    different text, newly exposed selectors, and proven selected full reads retain ordinary handoffs.
+    wider or different text, newly exposed selectors, and proven selected full reads retain ordinary handoffs.
     Check continuity when merging individual deliveries; reset per episode.
   - Otherwise footprint windows are per item, but only a RE-EXPOSURE (a later delivery
     whose verified text contains everything this entry showed) supersedes
-    one. A different or narrower verified text of the same item (a search
-    preview vs a full read) leaves the earlier window open and is listed in
+    one. A different verified text of the same item, or a narrower one with
+    no proven visible earlier copy, leaves the earlier window open and is listed in
     `memory_variant_steps`; unverifiable text keeps the item convention.
     Deliveries reaching one consuming turn are all eligible there; only a
-    same-step copy adding no verified text opens after the shared step.
+    same-step copy adding neither verified text nor a shown selector opens
+    after the shared step.
     Each entry has its own end reason. A same-step collision for one entry
     does not change the reason for another entry's window.
     Overlapping credit is surfaced as `rubric.shared_anchors`, never
@@ -324,10 +326,12 @@ Reading memory content is delivery cost, not such work.
 `unclear` covers unknown attribution (influence
 null) or acted-on influence with unknown effect. `selected` records
 retrieval of fuller memory content recorded as its own delivery, without
-inheriting that delivery's effect; content both carry is credited to the
-fuller delivery for downstream actions, never discounted on either side
-as a competing source. This allocates established influence; it does not
-create influence or transfer actions already shaped before the full read.
+inheriting that delivery's effect. Whenever a later same-item delivery takes
+over an earlier window, their shared content is credited to the later
+delivery for downstream actions, even without selection. The earlier copy
+itself is not a competing source; independent task instructions, prior
+decisions, and other sources still are. This allocates established influence;
+it does not create influence or transfer actions already shaped before the handoff.
 A retrieval returning no recorded delivery,
 or reading repository code at a memory-supplied distinctive path, is
 acted_on. `referenced` records a mention singling out that entry (a remark on
@@ -554,7 +558,7 @@ Recovery copies may share the original `calls/` directory through a symlink.
 Request-pointer placement proofs resolve within that capture directory;
 per-call or request-file symlinks cannot escape it.
 
-**injudge** writes `injudge.report/v25` (`{tool, generated_at, trajectories,
+**injudge** writes `injudge.report/v26` (`{tool, generated_at, trajectories,
 operations, injections, aggregates, validation}`). Before paid work, the initial
 snapshot marks pending spans `unjudged` and sets `checkpoint_journal` to
 `injudge-checkpoints.jsonl`. Each completion appends one `injudge.checkpoint/v1`
@@ -658,6 +662,9 @@ source_report_schema, and judge_model. `notes` states that delivery/residency
 estimates use chars divided by four and are not billing or overhead relative
 to a no-memory run. Span verdicts measure
 memory influence, not benchmark task success.
+Report v26 extends ownership to equal-or-shorter copies and rule-judges spans
+with no eligible action step as neutral (`auto: no_eligible_step`), outside the
+rubric, usage, and confidence rollups.
 Report v24 adds `memory_window_owners` and retains the first owner of identical
 text while proven copies remain visible. Its influence/effect/verdict counts
 are not directly comparable with v23. Report v23 strengthens `input.read_steps` to certify referenced tool-result
@@ -677,7 +684,7 @@ contain useful and harmful entries, so costs by verdict do not measure
 per-memory token benefit. Summary v18 renames `spans_with_repairs` to
 `spans_with_followups`.
 Summary has no span or episode index, memory lists, confidence
-means/buckets, configuration, or provenance. Those details remain in report v25.
+means/buckets, configuration, or provenance. Those details remain in report v26.
 Empty/unassessable/error/unjudged spans stay outside verdict-rate denominators.
 Rates are omitted when no spans were judged; rubric is omitted without judged
 entries, and judge counters without agent runs. JSON uses two-space indentation.

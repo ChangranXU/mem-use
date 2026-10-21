@@ -259,7 +259,7 @@ const rows=outline.filter(e=>e.kind==="row");
 rows.forEach((r,i)=>r.i=i);
 // a recall's verdict class, as the header tally counts it: its judged span's
 // verdict, unjudged, or a mechanical skip (empty delivery, unobserved consumer)
-const vclass=o=>{ const auto=(o.verdict_detail||{}).auto; return auto==="empty_delivery"?"empty":auto?"unassessable":(o.span_verdict||"unjudged"); };
+const vclass=o=>{ const auto=(o.verdict_detail||{}).auto; return auto==="empty_delivery"?"empty":auto==="no_subsequent_turn"?"unassessable":(o.span_verdict||"unjudged"); };
 for(const r of rows) r.verdicts=new Set(r.ops.filter(o=>o.kind==="recall").map(vclass));
 // an op's x is its step within its row; null parks it in the no-step gutter
 const localStep=o=>{ const r=rowOf[o.id]; return !r||r.loose||o.step==null? null : Math.max(0,o.step-r.base); };

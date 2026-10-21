@@ -44,8 +44,8 @@ corrupt steps) is skipped rather than terminal, and a co-delivered memory
 with no cleanly separated re-exposure keeps the rest of the stream.
 Re-delivery is an attribution convention, not proof that earlier content
 left the context: a later delivery of the same item with DIFFERENT or
-narrower verified text (a search preview after a full read, or the reverse)
-leaves this window open, and its step is recorded in
+narrower verified text (a search preview after a full read) leaves this
+window open, and its step is recorded in
 `memory_variant_steps` so the judge credits each delivery only for the text
 it showed. When either text is unverifiable, the item-level convention
 stands. A later span starting at this span's last delivery step (two memory
@@ -55,10 +55,11 @@ inclusive (the entry is in `same_step_bounds`), with a warning for the collision
 showing new verified text is eligible at that step too; one adding nothing
 verifiable — indistinguishable, so creditable once — opens after it
 (`memory_window_starts`).
-Prepared input views can retain the first owner of identical exposed text
-across later copies, even under a different presentation. Only proven earlier
-copy hosts count; loss or uncertainty restores the ordinary handover. A proven
-selected full read still takes over. `memory_window_owners` names entries whose
+Prepared input views can retain the first owner of exposed text across later
+copies showing nothing new (equal or shorter text, no newly exposed selector),
+even under a different presentation. Only proven earlier copy hosts count;
+loss or uncertainty restores the ordinary handover. A proven selected full
+read still takes over. `memory_window_owners` names entries whose
 entire window is credited elsewhere. Loss or uncertainty of residency splits
 an independent re-entry into a new span with a fresh baseline. Different-text
 bounds remain unchanged.
@@ -332,8 +333,8 @@ def _stamp_windows(
     """A re-exposure bounds only the entries it re-exposes. A strictly later
     one ends the earlier window before its first step. A same-step one ends
     it at the shared step, which both consumed. A same-step copy adding no
-    verified text opens after that step, since its credit there is
-    indistinguishable; one showing new text keeps its consuming step. A later
+    verified text or selector opens after that step, since its credit there
+    is indistinguishable; one showing either keeps its consuming step. A later
     delivery with different or narrower text bounds nothing and is listed in
     `memory_variant_steps`. Spans are ordered, so same-step carriers are met
     before strictly later ones and the shared-step cap always wins.
@@ -361,11 +362,14 @@ def _stamp_windows(
                     continue  # overlapping (declared-back/corrupt) steps: never terminal
                 hits = [b for b, other in enumerate(entry_idents[k]) if other == ident]
                 if first == span.step_last:
-                    # one consuming turn saw both: a copy adding no verified
-                    # text has no separate claim on the shared step
+                    # The shared turn can use a newly shown selector even
+                    # when the body adds no text.
                     for b in hits:
                         before, after = _exposed_text(*entry), _exposed_text(*exposed[k][b])
-                        if after is None or (before is not None and after in before):
+                        selector = exposed_key(spans[k].memories[b], spans[k].placements)
+                        new_selector = selector is not None and exposed_key(
+                            {"key": selector}, span.placements) is None
+                        if not new_selector and (after is None or (before is not None and after in before)):
                             spans[k].memory_window_starts[memory_id(b)] = first + 1
                 if not any(_reexposes(exposed[k][b], entry) for b in hits):
                     steps = span.memory_variant_steps.setdefault(mid, [])
@@ -393,12 +397,14 @@ def _stamp_windows(
 
 
 def _retain_resident_owners(spans: list[InjectionSpan], episode: EpisodeInput) -> None:
-    """Equal exposed text keeps its first owner while a proven copy survives.
+    """A copy showing nothing new keeps the first owner while a proven copy survives.
 
+    Equal or shorter text with no newly exposed selector adds no content, so a
+    preview of a resident full copy is suppressed like an identical copy.
     This allocates content credit across distinct presentations; it does not
-    assert that the earliest presentation caused the action. Different text
-    retains the ordinary bounds. A proven selected full read still takes over.
-    Individual deliveries extend the surviving-copy proof. Independent re-entry
+    assert that the earliest presentation caused the action. Wider or
+    different text retains the ordinary bounds. A proven selected full read
+    still takes over. Individual deliveries extend the surviving-copy proof. Independent re-entry
     was split during merging, so every independently owned entry keeps its own
     first-consuming input as the attribution baseline.
     """
@@ -459,32 +465,33 @@ def _retain_resident_owners(spans: list[InjectionSpan], episode: EpisodeInput) -
             if text is None:
                 continue
             key = ident, text
-            previous = owners.get(key)
+            # Owners of this item whose credit has not been handed over.
+            live = {k: v for k, v in owners.items() if k[0] == ident and (
+                (end := spans[v[0][0]].memory_windows.get(v[0][1])) is None or end >= step - 1)}
+            previous = live.get(key)
+            if previous is not None and previous[0] == ref:
+                previous[1].append(delivery)
+                continue
+            # A copy showing nothing that a live owner's resident copy does not
+            # already show (equal or shorter text, no new selector) adds nothing.
+            host = None if (i, ident) in selected_destinations or ref in owned else next(
+                (v for k, v in live.items()
+                 if text in k[1] and _resident_text(text, v[1], visible, selectors[ref])), None)
+            if host is not None:
+                owner, copies = host
+                earlier = spans[owner[0]]
+                old_end, new_end = earlier.memory_windows.get(owner[1]), ends[ref]
+                earlier.memory_windows[owner[1]] = (
+                    None if old_end is None or new_end is None else max(old_end, new_end))
+                if earlier.memory_windows[owner[1]] != old_end:
+                    earlier.same_step_bounds.discard(owner[1])
+                suppressed.setdefault(ref, owner)
+                span.memory_window_owners.setdefault(mid, {"span_id": earlier.id, "memory_id": owner[1]})
+                copies.append(delivery)
+                continue
             if previous is not None:
-                owner, copies = previous
-                end = spans[owner[0]].memory_windows.get(owner[1])
-                if end is not None and end < step - 1:
-                    previous = None
-            if previous is not None:
-                owner, copies = previous
-                if owner == ref:
-                    copies.append(delivery)
-                    continue
-                full_read = (i, ident) in selected_destinations
-                resident = _resident_text(text, copies, visible, selectors[owner])
-                if (resident and not full_read and ref not in owned
-                        and selectors[ref] == selectors[owner]):
-                    earlier = spans[owner[0]]
-                    old_end, new_end = earlier.memory_windows.get(owner[1]), ends[ref]
-                    earlier.memory_windows[owner[1]] = (
-                        None if old_end is None or new_end is None else max(old_end, new_end))
-                    if earlier.memory_windows[owner[1]] != old_end:
-                        earlier.same_step_bounds.discard(owner[1])
-                    suppressed.setdefault(ref, owner)
-                    span.memory_window_owners[mid] = {"span_id": earlier.id, "memory_id": owner[1]}
-                    copies.append(delivery)
-                    continue
                 # Independent re-entry has a separate span and baseline.
+                owner = previous[0]
                 earlier = spans[owner[0]]
                 bound = step if earlier.step_last == step else step - 1
                 old_end = earlier.memory_windows.get(owner[1])

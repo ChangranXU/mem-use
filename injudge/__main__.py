@@ -62,7 +62,15 @@ from injudge.gold import (
     load_sidecar,
     outcome_correctness,
 )
-from injudge.judge import GoldInput, _mask_key, auto_verdict_empty, auto_verdict_no_subsequent_turn, blank_verdict
+from injudge.judge import (
+    GoldInput,
+    _mask_key,
+    auto_verdict_empty,
+    auto_verdict_no_eligible_step,
+    auto_verdict_no_subsequent_turn,
+    blank_verdict,
+    no_eligible_step,
+)
 from injudge.model import EpisodeInput, InjectionSpan
 from injudge.prompts import implementation_digest
 from injudge.report import (
@@ -827,6 +835,8 @@ def main(argv: list[str] | None = None) -> int:
                 verdicts[i] = blank_verdict()
                 verdicts[i]["error"] = f"unsafe episode evidence: {problem}"
                 validation.append({"level": "error", "msg": f"{span.id}: {verdicts[i]['error']}"})
+            elif no_eligible_step(span):
+                verdicts[i] = auto_verdict_no_eligible_step(span)
             elif args.limit is not None and taken >= args.limit:
                 verdicts[i] = _unjudged("beyond --limit")
             elif args.dry_run:

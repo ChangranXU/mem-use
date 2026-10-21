@@ -28,7 +28,7 @@ Each run writes its own `<run-stamp>/` folder (`YYYYMMDD-HHMMSS-<hex>`) under `-
 
 | File | Contents |
 |---|---|
-| `injudge-report.json` | The judging record (`injudge.report/v25`): an initial snapshot before paid work, then a full snapshot when the run ends |
+| `injudge-report.json` | The judging record (`injudge.report/v26`): an initial snapshot before paid work, then a full snapshot when the run ends |
 | `injudge-checkpoints.jsonl` | Each completed span, including parallel completions; the report points to this journal until the full snapshot is written |
 | `summary.json` | The final statistics (`injudge.summary/v18`): counts, rates, delivery estimates, judge execution totals |
 | `summary.md` | A readable view of the final statistics, with spans to inspect, diagnostics, and links to the JSON files |
@@ -72,6 +72,7 @@ Episodes are partitioned before span grouping. Identical treatments across episo
 - A content or treatment change involving any of the span's items does break it — a re-ranked bundle, a re-framed block, or a changed per-entry exposure starts a new span even when the delivered content is identical. Returning to the original treatment starts another span. Every delivered entry is judged against its own footprint window; the window bounds and per-entry exposure are specified in [Judge evidence](scoring-input.md).
 - Re-deliveries roll up as `restated`: they count toward delivery cost and `n_injections`, but never appear in verdict rates.
 - A span with no attributed agent step (`step_first` is `None`) has no downstream footprint. It is rule-judged **neutral** with `auto: no_subsequent_turn`, and no judge call is made. Aggregates tally it as `unassessable`, out of every directional rate.
+- A span whose entries have no eligible action step (each one's text is still visible in an earlier owner, `memory_window_owners`) is rule-judged **neutral** with `auto: no_eligible_step`, and no judge call is made: every valid answer derives neutral. It counts as neutral, outside the rubric, usage, and confidence rollups.
 
 Span construction, including the fingerprint fallback for undigested content, is specified in [Memory identity](input-contract.md#memory-identity).
 

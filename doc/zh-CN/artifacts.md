@@ -1,11 +1,16 @@
 ---
-description: "injudge.report/v25、injudge.summary/v18、全部字段，以及每项比率如何计数。"
+description: "injudge.report/v26、injudge.summary/v18、全部字段，以及每项比率如何计数。"
 icon: box-archive
 ---
 
 # 产物
 
-当前 schema 为 report v25 和 summary v18。Report v25 按评审实际读取范围区分未知影响：
+当前 schema 为 report v26 和 summary v18。Report v26 在后续副本显示相同或更短文本时（如仍可见完整读取的预览）也保留最早归属，
+并将所有条目都没有合格动作步骤的区间按规则判为中性（`auto: no_eligible_step`），不调用评审。
+判定计数与评审本应推导的结果一致，但评分规则、用法与置信度汇总只覆盖评审实际打分的区间，不能与 v25 直接比较。
+同一回合新增可见选择标识符的副本保留该步的动作资格。影响规则也将同条目窗口交接后的共有内容归后续窗口，
+无需先发生选择；受影响的判定可能改变，不应与旧提示词的结果混合比较。
+Report v25 按评审实际读取范围区分未知影响：
 完整读取窗口后的未知影响为 `ambiguous`（归因不明），判为中性；否则仍为 `unclear`，
 判为未决。判定计数不能与 v24 直接比较（未决减少、中性增加；正面与负面不变）。
 Report v24 在消费者输入中仍有已证明副本时，
@@ -30,7 +35,7 @@ Report 和 summary 区分记忆指导造成的危害和执行中的失败。由�
 随后放弃或纠正且没有产生被使用发现的弯路计为危害。智能体自身的笔误、缺失工具
 或无关环境失败本身不能证明记忆危害；应追踪纠正后的结果。Report v17 引入了这一区分，
 因此 v16 的危害计数不能直接比较。不要混合比较不同评分
-版本的效果标签或比率。旧报告保留为历史产物；memgraph 和 calibration 仅接受 report v25。
+版本的效果标签或比率。旧报告保留为历史产物；memgraph 和 calibration 仅接受 report v26。
 读取历史报告需使用与其版本匹配的旧代码。
 
 {% hint style="info" %}
@@ -39,7 +44,7 @@ injudge 把一次运行的全部产物写入输出容器（`-o DIR`，默认 `ou
 
 | 文件 | Schema | 作用 |
 |---|---|---|
-| `injudge-report.json` | `injudge.report/v25` | 初始快照将待评区间标为 `unjudged`，运行结束时写出完整快照。评审期间，`checkpoint_journal` 指定保存已完成结果的文件。用 `--verdicts` 喂给 memgraph。 |
+| `injudge-report.json` | `injudge.report/v26` | 初始快照将待评区间标为 `unjudged`，运行结束时写出完整快照。评审期间，`checkpoint_journal` 指定保存已完成结果的文件。用 `--verdicts` 喂给 memgraph。 |
 | `injudge-checkpoints.jsonl` | `injudge.checkpoint/v1` | 每个已完成区间追加一条记录。报告带有 `checkpoint_journal` 字段时必须保留；运行完成后作为审计记录保留。 |
 | `summary.json` | `injudge.summary/v18` | 精简最终统计：计数、比率、投递估算及评审运行总量。 |
 | `summary.md` | — | 同一批统计的简短可读摘要，列出应优先查看的区间、诊断计数，并链接到 JSON 文件。 |
@@ -99,7 +104,7 @@ memgraph 的 `--json` 产物是 `{tool, trajectories, ops, memories, edges, vali
 
 Episode 数与轨迹/区间数一起呈现。空投递和不可观察消费者分别计为 `empty`、
 `unassessable`，不进入判定比率分母。完整诊断、记忆身份、episode 行和区间记录
-保留在 report。`memgraph --verdicts` 只接受 `injudge.report/v25`。
+保留在 report。`memgraph --verdicts` 只接受 `injudge.report/v26`。
 
 ### Report 的 aggregates
 
@@ -122,7 +127,7 @@ Episode 数与轨迹/区间数一起呈现。空投递和不可观察消费者�
 
 | 总体 | 成员 |
 |---|---|
-| 已评判区间 | `positive` + `negative` + `unresolved` + `neutral`。判定率的分母。`unresolved` 指已采取行动但评审无法判定效果，或未在完整窗口上评估归因。中性包括选取、引用、归因不明、无效使用和未确立影响。 |
+| 已评判区间 | `positive` + `negative` + `unresolved` + `neutral`。判定率的分母。`unresolved` 指已采取行动但评审无法判定效果，或未在完整窗口上评估归因。中性包括选取、引用、归因不明、无效使用和未确立影响，以及按规则判定、不调用评审的无合格动作步骤区间（`auto: no_eligible_step`）。 |
 | `empty` | 未投递任何条目（`auto: empty_delivery`）。不调用评审；单独计数和记录投递成本，不进入判定比率。 |
 | `unassessable` | 所有投递都无法归属到 agent 步骤（`auto: no_subsequent_turn`），录制内容无法支持下游影响判断。计数与投递成本保留在独立类别中，不进入判定比率。缺少观察不代表测得零效应。 |
 | LLM 已评判区间 | 无 `auto` 标记的已评判区间。评分比率、使用汇总与置信度的总体。 |

@@ -194,6 +194,20 @@ def test_recorded_followup_cases_have_real_host_links_and_separate_credit(tmp_pa
         assert full["verdict"] in case["followup"]["expect"]["verdict"]
 
 
+def test_unselected_wider_cases_handover_without_selector_followups(tmp_path, monkeypatch):
+    roots = []
+    _status, report = _judge_cases(tmp_path, monkeypatch, roots)
+    by_span = {json.loads((p / "manifest.json").read_text())["span_id"]: p for p in roots}
+    run_of = {t["id"]: t["run_id"] for t in report["trajectories"]}
+    for name in ("unselected_wider_used", "unselected_wider_harmed", "unselected_wider_planned"):
+        preview, full = [o for o in report["operations"] if run_of[o["traj"]] == case_id(name)]
+        assert not preview.get("memory_followups")
+        assert preview["memory_windows"]["m1"] == full["steps"][0] - 1
+        assert not full.get("memory_window_owners")
+        assert "even without selection" in (by_span[full["operation_id"]] / "span.md").read_text()
+        assert "even without selection" not in (by_span[preview["operation_id"]] / "span.md").read_text()
+
+
 def test_followup_scoring_keeps_missing_or_errored_read_separate(tmp_path, monkeypatch):
     _status, report = _judge_cases(tmp_path, monkeypatch)
     run_of = {t["id"]: t["run_id"] for t in report["trajectories"]}

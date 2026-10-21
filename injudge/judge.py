@@ -757,6 +757,29 @@ def auto_verdict_no_subsequent_turn(span: InjectionSpan) -> dict:
     return verdict
 
 
+def no_eligible_step(span: InjectionSpan) -> bool:
+    """Whether every entry's action window is empty, so no valid answer can
+    anchor influence or derive anything but neutral."""
+    return all((end := span.memory_windows.get(memory_id(i))) is not None
+               and span.memory_window_starts.get(memory_id(i), span.step_first) > end
+               for i in range(len(span.memories)))
+
+
+def auto_verdict_no_eligible_step(span: InjectionSpan) -> dict:
+    """Rule-judged neutral for a span whose entries have no eligible action
+    step: their shown text is still visible in earlier owners that keep the
+    credit. Counted as neutral, as any judge answer would derive; no judge
+    ran, so it adds no confidence, rubric, or usage tally."""
+    verdict = blank_verdict()
+    verdict["verdict"] = "neutral"
+    owners = ", ".join(dict.fromkeys(
+        f"{owner['span_id']} {owner['memory_id']}" for owner in span.memory_window_owners.values()))
+    verdict["analysis"] = "no entry has an eligible action step" + (
+        f"; the shown text stays credited to {owners}" if owners else "")
+    verdict["auto"] = "no_eligible_step"
+    return verdict
+
+
 def auto_verdict_empty(span: InjectionSpan) -> dict:
     verdict = blank_verdict()
     verdict["verdict"] = "neutral"

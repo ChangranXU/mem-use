@@ -36,6 +36,7 @@ from injudge.spans import _exposed_text, entry_ident, exposed_key
 from memgraph.annotations import exposure_state, is_int
 
 _SPAN_CONTEXT = load_prompt("injudge/scoring/span_context")
+_WIDER_COPY = load_prompt("injudge/scoring/wider_copy")
 
 def span_dir_name(span_id: str) -> str:
     """The evidence folder name for one span id: filesystem-safe, collision-
@@ -319,6 +320,7 @@ def _earlier_deliveries(span: InjectionSpan, episode: EpisodeInput, baseline: di
             earlier.append(item)
     visible = set(baseline["visible_occurrence_ids"])
     lines = []
+    wider = []
     for i, (memory, exposure) in enumerate(span.iter_exposed()):
         ident, text = entry_ident(memory), _exposed_text(memory, exposure)
         notes, same_input, still_visible = [], [], False
@@ -361,6 +363,11 @@ def _earlier_deliveries(span: InjectionSpan, episode: EpisodeInput, baseline: di
                     note += ", shows all of this entry's text"
                 else:
                     note += ", shows different or partial text"
+                    mid = memory_id(i)
+                    if (placements and is_int(step) and step < span.step_first
+                            and shown and shown in text and mid not in span.memory_window_owners
+                            and mid not in wider):
+                        wider.append(mid)
                 (same_input if step == span.step_first else notes).append(note)
         # A copy arriving with this delivery cannot make it less new than one
         # the agent already had; naming both invites the wrong comparison.
@@ -372,6 +379,8 @@ def _earlier_deliveries(span: InjectionSpan, episode: EpisodeInput, baseline: di
             lines.append(f"- {label}: " + "; ".join(notes) + ".")
     if not lines:
         return None
+    if wider:
+        lines.append(_WIDER_COPY.replace("@entries@", ", ".join(wider)))
     gaps = baseline["visibility_gaps"]
     caveat = (f" That input's recorded view has gaps ({'; '.join(map(str, gaps))}), so absence "
               "from it is unproven." if gaps else "")

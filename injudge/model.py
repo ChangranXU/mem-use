@@ -246,11 +246,13 @@ class InjectionSpan:
     consumer stay separate; their step bounds are None.
 
     Each memory window uses the entry's local id. A later delivery ends the
-    window when it re-exposes the earlier text, except when proven resident
-    identical copies keep their first owner. `memory_window_owners` names that
+    window when it re-exposes the earlier text, except when a proven resident
+    copy keeps its first owner because the later copy shows nothing new (equal
+    or shorter text, no new selector). `memory_window_owners` names that
     owner for a suppressed window. Independent re-entry after residency loss
-    starts a separate span with its own input baseline. Different or narrower text
-    leaves the window open and is listed in `memory_variant_steps`. The
+    starts a separate span with its own input baseline. Different text, or
+    narrower text with no proven visible earlier copy, leaves the window open
+    and is listed in `memory_variant_steps`. The
     episode end caps every prepared window. Copies at the same step share
     credit once through `memory_window_starts` and per-entry `same_step_bounds`.
 

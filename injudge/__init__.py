@@ -19,7 +19,7 @@ from __future__ import annotations
 
 # Writers and readers share these schema names. Update their tests together.
 # See doc/en/artifacts.md for the current contract and comparison limits.
-REPORT_SCHEMA = "injudge.report/v25"
+REPORT_SCHEMA = "injudge.report/v26"
 SUMMARY_SCHEMA = "injudge.summary/v18"
 EPISODE_INPUT_SCHEMA = "injudge.episode-inputs/v5"
 CHECKPOINT_SCHEMA = "injudge.checkpoint/v1"

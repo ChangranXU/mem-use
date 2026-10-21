@@ -2166,7 +2166,7 @@ def test_render_html_verdict_stats_separate_mechanical_skips():
 
     html = render_html({"trajectories": [], "ops": [], "memories": [],
                         "edges": [], "validation": []})
-    assert 'auto==="empty_delivery"?"empty":auto?"unassessable"' in html
+    assert 'auto==="empty_delivery"?"empty":auto==="no_subsequent_turn"?"unassessable"' in html
     # the tally lists judged verdicts first and the mechanical skips apart
     assert '"error","unjudged","unassessable","empty"]' in html
 

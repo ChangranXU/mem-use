@@ -57,6 +57,9 @@ Recorded follow-up cases contain a preview and a separately bound full read.
 Calibration scores both targets (`case` and `case/read`), preserving each
 verdict and marking missing or errored targets unavailable. The controls
 cover useful reads, unused reads, and preview actions predating the read.
+Broader-search controls also cover an unselected fuller copy: useful and
+harmful actions on shared content belong to the later window, while a plan
+established before either delivery stays uncredited.
 Credit ownership is an accounting convention after influence is established;
 it cannot override earlier actions or manufacture influence from matching text.
 

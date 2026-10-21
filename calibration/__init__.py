@@ -634,6 +634,55 @@ CASES: dict[str, dict] = {
     },
 }
 
+# A broader search can re-expose a preview without selecting its identifier.
+# Shared content still needs one owner, without overriding an independent plan.
+_WIDER = {
+    "task": "The parser rejects hexadecimal identifiers. Make parse_id('0xff') return 255.",
+    "before": [("Reproduce.", "python reproduce.py", "ValueError: invalid literal '0xff'")],
+    "memory": ("kb-hex", "ID kb-hex: parse_id must pass base=0 to int to accept the 0x prefix."),
+    "consumer": ("Search for more parser conversion experiences.", None, None),
+    "followup": {
+        "query": "parser integer conversion",
+        "memories": [("kb-hex", "ID kb-hex: parse_id must pass base=0 to int to accept the 0x prefix. "
+                               "This experience was recorded after a parser maintenance task.")],
+        "expect": {"influence": ["acted_on"], "positive_effect": ["improved"], "verdict": ["positive"]},
+    },
+    "after": [("Update the conversion.", "python change_conversion.py --expression 'int(value, base=0)'",
+               "-return int(value)\n+return int(value, base=0)"),
+              ("Verify both formats.", "python reproduce.py", "0xff -> 255; 123 -> 123")],
+    "expect": {"influence": ["none"], "positive_effect": [None], "verdict": ["neutral"]},
+}
+CASES["unselected_wider_used"] = _WIDER
+CASES["unselected_wider_planned"] = {
+    **_WIDER,
+    "before": [("The conversion needs int(value, base=0). Apply that expression after the search.",
+                "python reproduce.py", "ValueError: invalid literal '0xff'")],
+    "followup": {
+        **_WIDER["followup"],
+        "expect": {"influence": ["none"], "positive_effect": [None], "verdict": ["neutral"]},
+    },
+}
+CASES["unselected_wider_harmed"] = {
+    "task": "choose_limit(None, 10) should return 10; keep every explicitly supplied limit.",
+    "before": [("Inspect the function.", "cat src/limits.py",
+                "def choose_limit(value, default): return value")],
+    "memory": ("kb-limit", "ID kb-limit: implement choose_limit as return value or default."),
+    "consumer": ("Search for more default-limit experiences.", None, None),
+    "followup": {
+        "query": "optional limit default",
+        "memories": [("kb-limit", "ID kb-limit: implement choose_limit as return value or default. "
+                                 "This experience was recorded after a configuration maintenance task.")],
+        "expect": {"influence": ["acted_on"], "positive_effect": ["harmed"], "verdict": ["negative"]},
+    },
+    "after": [("Update the return expression.", "python use_default_expression.py",
+               "-return value\n+return value or default"),
+              ("Check explicit limits.", "python check_limits.py", "None -> 10; 0 -> 10 (expected 0)"),
+              ("The change broke zero. Replace it with an explicit None check.",
+               "python use_none_guard.py", "return default if value is None else value"),
+              ("Verify.", "python check_limits.py", "None -> 10; 0 -> 0; 5 -> 5")],
+    "expect": {"influence": ["none"], "positive_effect": [None], "verdict": ["neutral"]},
+}
+
 # These controls separate execution from verification: printing an ID is
 # evidence the path ran, but only an independent oracle establishes its value.
 _ENCODING = {
