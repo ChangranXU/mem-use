@@ -68,7 +68,8 @@ import hashlib
 import json
 
 from injudge.judge import _ACCURACY, _ACTED, RUBRIC_SIGNALS
-from injudge.cost import TOKEN_COST_CAVEAT
+from injudge.cost import TOKEN_COST_CAVEAT, billing_rollup
+from injudge.profiles import profile_rollup
 from memgraph.annotations import canonical_entry, is_int, item_ident, version_identity
 
 _VERDICTS = ("positive", "negative", "neutral", "unresolved")
@@ -277,6 +278,7 @@ def aggregate(operations: list[dict], n_injections: int, n_trajectories: int | N
         "low_confidence": [],
         "rubric": _rubric_rollup(operations),
         "cost": _cost_rollup(operations),
+        "profiles": profile_rollup(operations),
     }
     if n_trajectories is not None:
         out["n_trajectories"] = n_trajectories
@@ -441,6 +443,8 @@ def policy_rollup(trajectories: list[dict]) -> dict:
            if n_extractions else {}),
     }
     out["cost_caveat"] = TOKEN_COST_CAVEAT
+    if blocks and all("billing" in block for block in blocks):
+        out["billing"] = billing_rollup([block["billing"] for block in blocks])
     residency = [b["residency"] for b in blocks if b.get("residency")]
     if residency:
         out["residency"] = {key: sum(r[key] for r in residency) for key in residency[0]}

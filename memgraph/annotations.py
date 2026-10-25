@@ -737,7 +737,7 @@ def resolved_content_text(
     afterward (a later retraction/rewrite can never rewrite the answer). Only
     without a digest match (a corrupt or digest-less ref) does the slot's
     latest un-annulled record speak — the same annul rule injudge's
-    prompt_tokens_total applies, but tolerant of corruption: a retraction
+    recorded_usage applies, but tolerant of corruption: a retraction
     matching no live record is skipped, never allowed to pop a live record it
     never annulled. "No live record" reads the slot's own record order: the
     stack empty, or the previous record/retraction event itself a retraction

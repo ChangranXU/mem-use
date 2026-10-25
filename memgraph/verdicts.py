@@ -197,6 +197,7 @@ def apply_verdicts(graph: dict, report: dict, source: str = "") -> None:
                 "evidence": span.get("evidence") or [],
                 "memory_usage": span.get("memory_usage") or {},
                 "rubric": span.get("rubric"),
+                "profile": span.get("profile"),
                 # rubric/usage key on span-local entry ids; the popover
                 # renders "m1 (key_a)", never a bare id
                 "memory_labels": {m["id"]: m.get("key") or m["id"] for m in span.get("memories", [])},

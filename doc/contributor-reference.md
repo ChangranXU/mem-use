@@ -86,7 +86,7 @@ memgraph/parse_trajectory.py  # trajectory.jsonl → ops; shared step rule
 memgraph/episodes.py       # shared episode-scope rule (bridge boundaries) + graph episode rows
 memgraph/graph.py          # path discovery, cross-trajectory linking, validation
 memgraph/html.py           # self-contained HTML (template + embedded graph JSON)
-memgraph/verdicts.py       # merge injudge.report/v26 onto recall ops
+memgraph/verdicts.py       # merge injudge.report/v27 onto recall ops
 memgraph/__main__.py       # python3 -m memgraph
 injudge/__init__.py        # REPORT_SCHEMA / SUMMARY_SCHEMA / EPISODE_INPUT_SCHEMA / CHECKPOINT_SCHEMA
 injudge/model.py           # AgentStep / ToolExec / InjectionSpan
@@ -100,7 +100,7 @@ injudge/agent.py           # .env → AgentConfig, runner subprocess, corrective
 injudge/gold.py            # golden-answer / correctness sidecars and CLI joins
 injudge/prompts.py         # loads prompts/ (never inline prompts in code)
 injudge/aggregate.py       # verdict counts/rates, per-memory usage roll-ups
-injudge/report.py          # injudge.report/v26 + injudge.summary/v18 + summary.md + stdout
+injudge/report.py          # injudge.report/v27 + injudge.summary/v19 + summary.md + stdout
 injudge/checkpoints.py     # completed-span journal writes and report recovery
 injudge/__main__.py        # python3 -m injudge
 agent/                     # TS judge agent: runner.ts (pi Agent + budgets),
@@ -558,7 +558,7 @@ Recovery copies may share the original `calls/` directory through a symlink.
 Request-pointer placement proofs resolve within that capture directory;
 per-call or request-file symlinks cannot escape it.
 
-**injudge** writes `injudge.report/v26` (`{tool, generated_at, trajectories,
+**injudge** writes `injudge.report/v27` (`{tool, generated_at, trajectories,
 operations, injections, aggregates, validation}`). Before paid work, the initial
 snapshot marks pending spans `unjudged` and sets `checkpoint_journal` to
 `injudge-checkpoints.jsonl`. Each completion appends one `injudge.checkpoint/v1`
@@ -635,7 +635,7 @@ to its run.
   (non-`[A-Za-z0-9._-]` replaced by `_`, capped at 80 chars) plus an
   8-char digest suffix — `evidence.span_dir_name`.
 
-The companion `summary.json` (`injudge.summary/v18`) contains compact final
+The companion `summary.json` (`injudge.summary/v19`) contains compact final
 statistics. Every completed run also writes `summary.md`, a short readable view
 of those same totals: run date and judge model, the verdict table, entry
 influence and acted-on effect counts, accuracy and novelty counts for relevant
@@ -662,6 +662,11 @@ source_report_schema, and judge_model. `notes` states that delivery/residency
 estimates use chars divided by four and are not billing or overhead relative
 to a no-memory run. Span verdicts measure
 memory influence, not benchmark task success.
+Report v27 adds `operations[].profile`, aggregate/summary `profiles`, and
+recorded billing under policy. These are deterministic projections of the
+existing rubric, with no judge prompt or triage change. See
+[entry-share profiles](en/artifacts.md#entry-share-profiles). Summary v19 carries
+overall profile/billing statistics; trajectory rows add only the profiled-span count.
 Report v26 extends ownership to equal-or-shorter copies and rule-judges spans
 with no eligible action step as neutral (`auto: no_eligible_step`), outside the
 rubric, usage, and confidence rollups.
@@ -684,7 +689,7 @@ contain useful and harmful entries, so costs by verdict do not measure
 per-memory token benefit. Summary v18 renames `spans_with_repairs` to
 `spans_with_followups`.
 Summary has no span or episode index, memory lists, confidence
-means/buckets, configuration, or provenance. Those details remain in report v26.
+means/buckets, configuration, or provenance. Those details remain in report v27.
 Empty/unassessable/error/unjudged spans stay outside verdict-rate denominators.
 Rates are omitted when no spans were judged; rubric is omitted without judged
 entries, and judge counters without agent runs. JSON uses two-space indentation.

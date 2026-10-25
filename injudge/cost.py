@@ -9,6 +9,25 @@ from __future__ import annotations
 
 from injudge.episodes import placement_interval
 from injudge.model import EpisodeInput
+from injudge.steps import BILLING_FIELDS
+from memgraph.parse_trajectory import merge_costs
+
+
+def billing_rollup(blocks: list[dict]) -> dict:
+    """Never turn a missing trajectory's billing into a smaller known total."""
+    usage = {}
+    for key in BILLING_FIELDS:
+        values = [block["usage"][key] for block in blocks]
+        usage[key] = sum(values) if values and all(value is not None for value in values) else None
+    return {
+        "usage": usage,
+        "sources": {source: sum(block["source"] == source for block in blocks)
+                    for source in ("run.json", "agent_end", "message_usage_lower_bound")},
+        "memory_operations": {
+            kind: merge_costs(block["memory_operations"].get(kind) for block in blocks)
+            for kind in ("generation", "search")
+        },
+    }
 
 
 def residency_cost(episodes: list[EpisodeInput]) -> dict:
@@ -55,6 +74,8 @@ def residency_cost(episodes: list[EpisodeInput]) -> dict:
 
 
 TOKEN_COST_CAVEAT = (
+    "Recorded model tokens and provider-reported prices live in billing; missing "
+    "prices stay unknown. They are not the tokens or price of a memory substring. "
     "Delivery volume counts each placement once (chars/4); delivery_token_ratio "
     "compares that estimate with all-lane billed input tokens. Residency counts "
     "proven placement text once per recorded main-lane input view (chars/4), "

@@ -723,6 +723,25 @@ function sigCell(sig,s,abbr){
   }
   return `<span title="${esc(s)}: ${esc(v==null?"null":String(v))}${e.note?" — "+esc(e.note):""}" style="color:${col}">${abbr}${mark}</span>`;
 }
+function profileHtml(profile){
+  if(!profile) return `<div class="sub">No assessed span profile; delivery cost still counts.</div>`;
+  const p=obj(profile), counts=obj(p.counts), n=p.n_entries;
+  const share=key=>{
+    const value=counts[key];
+    return Number.isInteger(n)&&n>0&&Number.isInteger(value)&&value>=0&&value<=n?`${(100*value/n).toFixed(2)}%`:"?";
+  };
+  let h=`<div class="sub">Entry-share profile · ${esc(p.n_entries)} entries · same denominator on every axis</div><div class="row">`;
+  for(const [key,label] of [["relevance","Relevance"],["corroboration","Corroboration"],["info_gain","Information gain"],["influence","Acted on"],["benefit","Benefit"],["harm","Harm"]]){
+    h+=`<span>${label}: <b>${share(key)}</b></span> `;
+  }
+  h+=`</div><div class="sub">Uncertainty: `;
+  h+=[["uncontradicted_accuracy","uncontradicted accuracy"],["unknown_novelty","unknown novelty"],["unknown_influence","unknown influence"],["unknown_effect","unknown acted-on effect"]]
+    .map(([key,label])=>`${label} ${share(key)}`).join(" · ");
+  h+=`</div><div class="sub">Assessed: `;
+  h+=[["contradicted","contradicted"],["redundant","redundant"],["no_effect","no effect"]]
+    .map(([key,label])=>`${label} ${share(key)}`).join(" · ");
+  return h+` · selected / referenced entries: ${esc(counts.selected)} / ${esc(counts.referenced)}</div>`;
+}
 // injudge verdicts for every judged span a drawn recall covers
 function verdictsHtml(vops){
   let h="";
@@ -748,6 +767,7 @@ function verdictsHtml(vops){
       <div class="sub">span ${esc(x.verdict_span)}${d.episode_execution_id?` · episode ${esc(d.episode_execution_id)}`:""}</div>`;
     if(d.error) h+=`<div class="flag">judge error: ${esc(d.error)}</div>`;
     if(d.analysis) h+=`<p>${esc(d.analysis)}</p>`;
+    h+=profileHtml(d.profile);
     // rubric and usage key on span-local entry ids (m1, m2, …): one row per
     // entry, labelled with its memory's display key off memory_labels
     const mLabels=d.memory_labels||{}, rubric=obj(d.rubric), usage=obj(d.memory_usage);

@@ -427,7 +427,8 @@ def _known_sum(values: Any) -> int | None:
 
 def _reported_cost(usage: dict | None) -> int | float | None:
     value = usage.get("cost") if isinstance(usage, dict) else None
-    return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+    return (value if isinstance(value, (int, float)) and not isinstance(value, bool)
+            and value >= 0 and value < float("inf") else None)
 
 
 def merge_costs(costs: Any) -> dict[str, int | None] | None:

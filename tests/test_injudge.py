@@ -41,7 +41,7 @@ from injudge.report import (
     print_summary,
 )
 from injudge.spans import content_fingerprint, group_spans
-from injudge.steps import build_step_stream, prompt_tokens_total
+from injudge.steps import build_step_stream, recorded_usage
 from memgraph.parse_trajectory import parse_trajectory
 from annotated_fixtures import MEM, TASK
 from annotated_fixtures import AnnotatedBuilder as TrajBuilder
@@ -1870,8 +1870,8 @@ def test_summary_is_statistics_only():
         [op], [], [{"level": "warn", "msg": "REPORT ONLY"}])
     before = json.dumps(artifact)
     summary = build_summary(artifact)
-    assert summary["tool"] == {"name": "injudge", "schema": "injudge.summary/v18",
-                               "source_report_schema": "injudge.report/v26", "judge_model": "judge"}
+    assert summary["tool"] == {"name": "injudge", "schema": "injudge.summary/v19",
+                               "source_report_schema": "injudge.report/v27", "judge_model": "judge"}
     assert summary["report"] == "injudge-report.json"
     assert summary["generated_at"] == artifact["generated_at"]
     assert summary["diagnostics"] == {"error": 0, "warn": 1, "info": 0}
@@ -1988,6 +1988,8 @@ def test_cli_writes_results_first_summary(monkeypatch, tmp_path):
     source = b.write(tmp_path / "trajectory")
     metadata = json.loads((source / "run.json").read_text())
     metadata["schema_version"] = 9
+    metadata["usage"] = {"prompt_tokens": 10000, "completion_tokens": 1000,
+                         "total_tokens": 11000, "cached_tokens": 6000, "cost": 1.25}
     (source / "run.json").write_text(json.dumps(metadata))
     env = tmp_path / ".env"
     env.write_text("BASE_URL=https://judge.invalid\nAPI_KEY=test-key-only\nMODEL=test-judge\n")
@@ -2001,11 +2003,16 @@ def test_cli_writes_results_first_summary(monkeypatch, tmp_path):
     summary = json.loads(text)
     report = json.loads((run_dir / "injudge-report.json").read_text())
     assert text.startswith('{\n  "overall": {\n') and text.endswith("\n")
-    assert summary["tool"]["schema"] == "injudge.summary/v18"
+    assert summary["tool"]["schema"] == "injudge.summary/v19"
     assert summary["tool"]["source_report_schema"] == report["tool"]["schema"]
     assert "test-key-only" not in text
     (row,) = summary["trajectories"]
     assert row["verdicts"]["counts"]["positive"] == 1
+    assert report["trajectories"][0]["policy"]["billing"]["usage"]["prompt_tokens"] == 10000
+    assert report["trajectories"][0]["policy"]["billing"]["usage"]["reported_cost"] == 1.25
+    assert summary["recording_policy"]["billing"]["usage"]["total_tokens"] == 11000
+    assert "billing" not in row and "profiles" not in row
+    assert report["operations"][0]["profile"]["n_entries"] == 2
     assert "spans" not in row
     assert summary["overall"]["rubric"]["judged_entries"] == 2
     assert summary["overall"]["judge"]["attempted_spans"] == 1
@@ -2050,7 +2057,7 @@ def test_readable_summary_separates_failed_skipped_and_selected_spans():
     assert "- T1:S6 (no episode): **unresolved**. acted on &lt;b&gt;, effect unknown" in text
     assert text.index("T1:S2 (") < text.index("T1:S6 (")
     assert "Errors 0, warnings 0, notes 0." in text
-    assert "Selected scope: ≈60 tokens." in text
+    assert "Selected scope: ≈60 delivered tokens." in text
     assert "Whole input recordings: 7 deliveries over 30 steps, ≈150 tokens." in text
     assert "MEMORY BODY" not in text
     assert json.dumps(artifact) == before
@@ -2246,14 +2253,14 @@ def test_corrupt_run_usage_falls_back_to_live_message_billing(usage):
         {"type": "agent_end", "usage": usage},
     ]
     warnings = []
-    assert prompt_tokens_total(events, warnings, bindings={}) == 100
+    assert (recorded_usage(events, warnings, bindings={})["usage"]["prompt_tokens"]) == 100
     assert any("agent_end" in w and "invalid" in w for w in warnings)
 
 
 def test_invalid_manifest_billing_uses_terminal_snapshot():
     warnings = []
     events = [{"type": "agent_end", "usage": {"prompt_tokens": 25}}]
-    assert prompt_tokens_total(events, warnings, {"prompt_tokens": True}, bindings={}) == 25
+    assert (recorded_usage(events, warnings, {"prompt_tokens": True}, bindings={})["usage"]["prompt_tokens"]) == 25
     assert any("run.json" in w and "invalid" in w for w in warnings)
 
 
@@ -2263,7 +2270,7 @@ def test_billing_uses_the_largest_snapshot(manifest, ended):
                "usage": {"prompt_tokens": 100}},
               {"type": "agent_end", "usage": {"prompt_tokens": ended}}]
     warnings = []
-    assert prompt_tokens_total(events, warnings, {"prompt_tokens": manifest}, bindings={}) == 300
+    assert (recorded_usage(events, warnings, {"prompt_tokens": manifest}, bindings={})["usage"]["prompt_tokens"]) == 300
     assert any("below another billing snapshot" in w for w in warnings)
 
 
@@ -2272,7 +2279,7 @@ def test_billing_snapshot_cannot_erase_observed_spend():
     events = [{"type": "message_end", "role": "assistant", "msg": 0,
                "usage": {"prompt_tokens": 100}},
               {"type": "agent_end", "usage": {"prompt_tokens": 90}}]
-    assert prompt_tokens_total(events, warnings, {"prompt_tokens": 80}, bindings={}) == 100
+    assert (recorded_usage(events, warnings, {"prompt_tokens": 80}, bindings={})["usage"]["prompt_tokens"]) == 100
     assert len(warnings) == 2 and all("below live message usage" in w for w in warnings)
 
 
@@ -2285,7 +2292,7 @@ def test_embedding_billing_warning_uses_accepted_bindings(tmp_path, recorded_ses
         "trace_session_id": session, "logical_role": "embedding", "adapter": builder.adapter,
     }, lane="EMBED")
     trajectory, _operations, events = parse_trajectory(builder.write(tmp_path / "run"), [])
-    assert prompt_tokens_total(events, warnings, bindings=trajectory._annotation_index.binds) == 0
+    assert (recorded_usage(events, warnings, bindings=trajectory._annotation_index.binds)["usage"]["prompt_tokens"]) is None
     assert any("excludes embedding calls" in w for w in warnings) is recorded_session
 
 
@@ -2293,7 +2300,7 @@ def test_negative_message_usage_cannot_cancel_observed_spend():
     warnings = []
     events = [{"type": "message_end", "role": "assistant", "msg": i,
                "usage": {"prompt_tokens": tokens}} for i, tokens in enumerate((100, -50))]
-    assert prompt_tokens_total(events, warnings, bindings={}) == 100
+    assert (recorded_usage(events, warnings, bindings={})["usage"]["prompt_tokens"]) == 100
     assert any("corrupt slot or prompt_tokens value" in w for w in warnings)
 
 
@@ -2318,7 +2325,7 @@ def test_cli_runs_share_the_container_without_clobbering(monkeypatch, tmp_path):
     assert len(run_dirs) == 2  # distinct stamps even for same-second runs
     for run_dir in run_dirs:
         report = json.loads((run_dir / "injudge-report.json").read_text())
-        assert report["tool"]["schema"] == "injudge.report/v26"
+        assert report["tool"]["schema"] == "injudge.report/v27"
         assert (run_dir / "summary.json").is_file()
         (span_evidence,) = (run_dir / "evidence").iterdir()
         assert (span_evidence / "manifest.json").is_file()
@@ -3738,7 +3745,7 @@ def test_agent_unknown_novelty_preserves_independent_signals(
     path = tmp_path / "report.json"
     path.write_text(json.dumps(artifact))
     saved = json.loads(path.read_text())
-    assert saved["tool"]["schema"] == "injudge.report/v26"
+    assert saved["tool"]["schema"] == "injudge.report/v27"
     assert saved["operations"][0]["rubric"]["m1"]["novelty"]["value"] is None
     rub = saved["aggregates"]["overall"]["rubric"]
     assert rub["deliveries"] == 2
@@ -3747,7 +3754,7 @@ def test_agent_unknown_novelty_preserves_independent_signals(
     assert rub["relevant_counts"]["novelty"] == {"null": 1}
     assert rub["rates"]["novelty"] is None
     summary = build_summary(saved)
-    assert summary["tool"]["schema"] == "injudge.summary/v18"
+    assert summary["tool"]["schema"] == "injudge.summary/v19"
     assert summary["overall"]["rubric"]["counts"]["novelty"] == rub["counts"]["novelty"]
     if usage == "ignored":
         assert rub["no_footprint_reasons"] == {"ignored_unknown_novelty": 1, "irrelevant": 1}

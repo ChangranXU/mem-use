@@ -84,7 +84,7 @@ from injudge.report import (
     render_summary,
 )
 from injudge.spans import group_spans
-from injudge.steps import prompt_tokens_total
+from injudge.steps import recorded_usage
 from injudge.checkpoints import CHECKPOINT_FILE, append_checkpoint
 from memgraph.graph import build_graph, load_trajectories
 from memgraph.html import render_html
@@ -756,9 +756,11 @@ def main(argv: list[str] | None = None) -> int:
         # snapshots also cover calls without messages, but cannot separate
         # a checkpoint prefix from discarded attempts.
         budget_warnings: list[str] = []
-        prompt_total = prompt_tokens_total(events, budget_warnings, t.run_usage,
-                                           bindings=t._annotation_index.binds,
-                                           include_snapshots=not t._billing_is_bounded)
+        billing = recorded_usage(events, budget_warnings, t.run_usage,
+                                 bindings=t._annotation_index.binds,
+                                 include_snapshots=not t._billing_is_bounded)
+        billing["memory_operations"] = t.memory_cost
+        prompt_total = billing["usage"]["prompt_tokens"] or 0
         for w in budget_warnings:
             validation.append({"level": "warn", "msg": f"{run_id}: {w}"})
         extracts = [op for op in ops if op.kind == "extract"]
@@ -768,6 +770,7 @@ def main(argv: list[str] | None = None) -> int:
         est_injected_tokens = sum(span_costs[span.id]["approx_tokens_total"] for span in spans)
         share = round(est_injected_tokens / prompt_total, 4) if prompt_total else None
         policy = {
+            "billing": billing,
             "residency": residency_cost(episodes_by_traj[t.id]),
             "n_steps": t.n_steps,
             "n_injections": len(recall_ops),

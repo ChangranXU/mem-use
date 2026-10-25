@@ -17,6 +17,7 @@ from injudge import REPORT_SCHEMA, SUMMARY_SCHEMA
 from injudge.aggregate import aggregate, policy_rollup
 from injudge.judge import _ACCURACY, _NOVELTY
 from injudge.model import InjectionSpan, memory_id, step_range
+from injudge.profiles import AXES, UNCERTAINTY, episode_profile_rollup, span_profile
 
 # The analysis of a span that --episode excluded. Such a span keeps a compact
 # record for joins and real delivery cost, but it is not part of the run's
@@ -63,8 +64,9 @@ def operation_record(span: InjectionSpan, verdict: dict, delivery_cost: dict) ->
             "episode_execution_id": span.episode_execution_id, "seq": span.seq_first,
             "n_injections": span.n_injections, "verdict": "unjudged",
             "analysis": OUTSIDE_SELECTION, "delivery_cost": delivery_cost,
+            "profile": None,
         }
-    return {
+    record = {
         "operation_id": span.id,
         "kind": "recall_injection_span",
         "traj": span.traj,
@@ -129,6 +131,8 @@ def operation_record(span: InjectionSpan, verdict: dict, delivery_cost: dict) ->
            if verdict.get("pe_pairing_corrections") else {}),
         **({"judge_raw": verdict["judge_raw"]} if verdict.get("judge_raw") else {}),
     }
+    record["profile"] = span_profile(record)
+    return record
 
 
 def injection_rollup(
@@ -178,8 +182,10 @@ def build_artifact(
         ops = [o for o in scoped if o["traj"] == t["id"]]
         per_traj[t["id"]] = aggregate(ops, sum(o.get("n_injections") or 0 for o in ops))
         per_traj[t["id"]]["n_episodes"] = len(t.get("episodes", []))
+        per_traj[t["id"]]["profiles"]["episodes"] = episode_profile_rollup([t], ops)
     overall = aggregate(scoped, sum(o.get("n_injections") or 0 for o in scoped), len(trajectories))
     overall["n_episodes"] = sum(stats["n_episodes"] for stats in per_traj.values())
+    overall["profiles"]["episodes"] = episode_profile_rollup(trajectories, scoped)
     overall["policy"] = policy_rollup(trajectories)
     return {
         "tool": {"name": "injudge", "schema": REPORT_SCHEMA, **tool_cfg},
@@ -286,6 +292,8 @@ SUMMARY_NOTES = (
     "Delivery and residency estimates use chars // 4. They are not billed tokens "
     "or overhead relative to a no-memory run.",
     "Span verdicts measure memory influence, not benchmark task success.",
+    "Recorded model billing is separate from delivery size. Whole-call usage cannot "
+    "measure the tokens or price of memory text alone; unreported prices stay unknown.",
 )
 
 
@@ -299,6 +307,7 @@ def _slim_aggregate(a: dict) -> dict:
             "positive", "negative", "unresolved", "neutral", "error", "unjudged",
             "unassessable", "empty",
         )}},
+        "profiles": a["profiles"],
     }
     judged = sum(a[k] for k in ("positive", "negative", "unresolved", "neutral"))
     out["verdicts"]["judged_spans"] = judged
@@ -365,7 +374,7 @@ def build_summary(artifact: dict) -> dict:
         row = {
             "id": t["id"],
             **{k: t[k] for k in ("run_id", "instance_id", "model", "adapter") if t.get(k)},
-            "counts": stats["counts"],
+            "counts": {**stats["counts"], "n_profiled_spans": stats["profiles"]["profiled_spans"]},
             "verdicts": stats["verdicts"],
         }
         if stats.get("delivery"):
@@ -437,6 +446,37 @@ def render_summary(artifact: dict, inspect_cap: int = 10) -> str:
     ):
         lines.append(f"| {label} | {tally[label]:,} | {meaning} |")
     lines += ["", SUMMARY_NOTES[1]]
+    profiles = overall["profiles"]
+    n = profiles["profiled_spans"]
+    lines += ["", "## Span profiles", "",
+              f"Profiled: {n:,} spans, {profiles['n_entries']:,} entries. "
+              "Means weight each profiled span equally; each share divides by all entries in that span."]
+    if n:
+        lines += ["", "| Axis | Mean entry share | Entry count |", "|---|---:|---:|"]
+        for key in AXES:
+            lines.append(f"| {key} | {profiles['mean']['axes'][key]:.2%} | {profiles['counts'][key]:,} |")
+        lines += ["", "Uncertainty (separate shares of all entries): " + ", ".join(
+            f"{key} {profiles['mean']['uncertainty'][key]:.2%}" for key in UNCERTAINTY) + ".",
+            f"Positive triage rate: {verdicts['rates']['positive']:.2%} of judged spans, "
+            f"{profiles['triage']['positive'] / n:.2%} of profiled spans. "
+            f"Benefit / harm yield per 100 profiled spans: {profiles['benefit_per_100_spans']:.2f} / "
+            f"{profiles['harm_per_100_spans']:.2f} entries."]
+    for reason, population in profiles["unprofiled"].items():
+        lines.append(f"No profile ({reason}): {population['n_spans']:,} spans, "
+                     f"{population['n_injections']:,} injections, ≈{population['approx_tokens']:,} delivered tokens.")
+    efficiency = profiles["benefit_per_million_delivered_tokens"]
+    if efficiency is not None:
+        lines.append(f"Beneficial entries per million delivered tokens (all selected spans): {efficiency:.2f}.")
+    episodes = profiles["episodes"]
+    if episodes["n_episodes"]:
+        lines.append(f"Episode coverage ({episodes['n_episodes']:,} recorded episodes, including zero-delivery episodes): "
+                     + ", ".join(f"{key} {episodes['rates'][key]:.2%}"
+                                 for key in ("profiled", "relevant", "beneficial", "harmful")) + ".")
+        frequency = episodes["frequency"]
+        lines.append(f"Coverage excluding items delivered in ≥{frequency['episode_share_threshold']:.0%} "
+                     f"of these episodes and at least {frequency['minimum_episodes']:d} episodes "
+                     "(diagnostic only): "
+                     f"{episodes['rates']['relevant_below_high_frequency']:.2%}.")
     if rubric := overall.get("rubric"):
         signals = rubric["counts"]
         influence = signals.get("influence") or {}
@@ -509,8 +549,8 @@ def render_summary(artifact: dict, inspect_cap: int = 10) -> str:
         lines += ["", f"Errors and warnings ({min(len(messages), 3)} of {len(messages)} unique):", ""]
         lines += [f"- {message}" for message in messages[:3]]
     lines += [
-        "", "## Delivery cost", "",
-        f"Selected scope: ≈{(overall.get('delivery') or {}).get('approx_tokens_total', 0):,} tokens.",
+        "", "## Delivery size estimates", "",
+        f"Selected scope: ≈{(overall.get('delivery') or {}).get('approx_tokens_total', 0):,} delivered tokens.",
     ]
     policy = summary.get("recording_policy") or {}
     if policy.get("n_injections") and policy["n_injections"] != counts["n_injections"]:
@@ -519,7 +559,17 @@ def render_summary(artifact: dict, inspect_cap: int = 10) -> str:
             f"{policy.get('n_steps', 0):,} steps, ≈{policy.get('est_injected_tokens', 0):,} tokens."
         )
     lines += [
-        SUMMARY_NOTES[0], "",
+        SUMMARY_NOTES[0], "", "## Recorded model billing", "",
+    ]
+    billing = policy.get("billing") or {}
+    usage = billing.get("usage") or {}
+    lines.append("Input recordings (all lanes; independent of judge selection): " + ", ".join(
+        f"{label} {usage[key]:,}" if usage.get(key) is not None else f"{label} unknown"
+        for key, label in (("prompt_tokens", "input tokens"), ("completion_tokens", "output tokens"),
+                           ("cached_tokens", "cached input tokens"), ("reported_cost", "provider-reported cost"))) + ".")
+    if (billing.get("sources") or {}).get("message_usage_lower_bound"):
+        lines.append("Some recordings have only a message-usage lower bound; missing billing fields stay unknown.")
+    lines += [SUMMARY_NOTES[2], "",
         "Details: [summary.json](summary.json) · [injudge-report.json](injudge-report.json).", "",
     ]
     return "\n".join(lines)
@@ -568,7 +618,23 @@ def print_summary(artifact: dict) -> int:
         # the policy block covers whole recordings, also under --episode
         scope = " [whole recordings]" if (artifact.get("tool") or {}).get("selection") else ""
         print_safe(f"  {txt}{scope}")
+    billing = (agg.get("policy") or {}).get("billing") or {}
+    usage = billing.get("usage") or {}
+    if any(value is not None for value in usage.values()):
+        print_safe("  recorded model billing [input recordings, all lanes]: " + ", ".join(
+            f"{label} {usage[key]:,}" if usage.get(key) is not None else f"{label} unknown"
+            for key, label in (("prompt_tokens", "input tokens"), ("completion_tokens", "output tokens"),
+                               ("reported_cost", "provider-reported cost")))
+            + ("; includes message-usage lower bounds"
+               if (billing.get("sources") or {}).get("message_usage_lower_bound") else ""))
     rub = agg.get("rubric") or {}
+    profiles = agg["profiles"]
+    if profiles["profiled_spans"]:
+        print_safe(f"  profiles: {profiles['profiled_spans']} spans, equal-span mean entry shares — "
+                   + ", ".join(f"{key} {profiles['mean']['axes'][key]:.2%}" for key in AXES))
+        print_safe("  profile uncertainty: " + ", ".join(
+            f"{key} {profiles['mean']['uncertainty'][key]:.2%}" for key in UNCERTAINTY)
+            + f"; selected {profiles['counts']['selected']}, referenced {profiles['counts']['referenced']}")
     if (txt := _rubric_line(rub)) is not None:
         print_safe(f"  rubric: {rub['deliveries']} memory-deliveries — {txt}")
     for t in artifact["trajectories"]:

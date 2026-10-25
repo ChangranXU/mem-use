@@ -2119,7 +2119,7 @@ def test_task_locator_resolves_the_live_record_after_a_retraction(tmp_path):
     """The log is append-only: a retraction annuls the record it replaces and
     the replacement re-records at the same rewound msg slot. Without a
     digest match (this fixture's sha256 names nothing), the resolver falls
-    back to the slot's LIVE text (the annul rule prompt_tokens_total
+    back to the slot's LIVE text (the annul rule recorded_usage
     applies), never the annulled first record."""
     locator_task = {
         "availability": "trajectory_message",
@@ -2710,7 +2710,7 @@ def test_slot_index_matches_per_locator_scans_and_tolerates_extra_retractions():
     """The shared (lane, msg) slot index must resolve identically to a
     per-locator scan of the raw stream (it replaces one), and a retraction
     matching no live record (a duplicated hand-edit) is skipped — popping a
-    live record it never annulled would blank the slot (prompt_tokens_total
+    live record it never annulled would blank the slot (recorded_usage
     warns about the same corruption instead)."""
     ref = {"availability": "trajectory_message", "sha256": None,
            "locator": {"logical_role": "main", "msg_index": 1}}

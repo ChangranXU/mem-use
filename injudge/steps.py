@@ -38,7 +38,7 @@ Anomalies (end without start, unknown tool_call_id, start without end while
 the run continued) are reported via `warnings`, never dropped silently.
 
 The module also owns the run's billed prompt-token accounting
-(`prompt_tokens_total`) — run.json totals include every lane's spend,
+(`recorded_usage`) — run.json totals include every lane's spend,
 including embeddings with no chat events. agent_end is the snapshot at seal
 time; live message usage is the lower bound when neither total is available.
 """
@@ -49,7 +49,10 @@ import json
 
 from injudge.model import AgentStep, ToolExec
 from memgraph.annotations import is_int, message_text
-from memgraph.parse_trajectory import agent_turns, classifying_messages, list_field
+from memgraph.parse_trajectory import _reported_cost, _token_count, agent_turns, classifying_messages, list_field
+
+BILLING_FIELDS = ("prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens",
+                  "cache_write_tokens", "cache_write_1h_tokens", "reasoning_tokens", "reported_cost")
 
 
 def _turn_of(e: dict) -> int | None:
@@ -348,11 +351,11 @@ def _valid_tokens(value: object) -> bool:
     return is_int(value) and value >= 0
 
 
-def prompt_tokens_total(
+def recorded_usage(
     events: list[dict], warnings: list[str], run_usage: dict[str, object] | None = None,
     *, bindings: dict[str, dict[str, str | None]], include_snapshots: bool = True,
-) -> int:
-    """Count selected message usage, using whole-run snapshots when applicable.
+) -> dict:
+    """Return recorded usage with its selected source and recording scope.
 
     Run snapshots include calls without messages, such as embeddings. They
     replace the message sum. Invalid or smaller snapshots produce warnings.
@@ -413,7 +416,7 @@ def prompt_tokens_total(
             "(out-of-order or duplicate); the prompt-token total may overcount"
         )
     ended = next((e.get("usage") for e in reversed(events) if e.get("type") == "agent_end"), None)
-    snapshots: dict[str, int] = {}
+    snapshots: dict[str, dict] = {}
     sources = (("run.json", run_usage), ("agent_end", ended)) if include_snapshots else ()
     for source, usage in sources:
         if usage is None or (isinstance(usage, dict) and "prompt_tokens" not in usage):
@@ -424,20 +427,35 @@ def prompt_tokens_total(
         elif tokens < total:
             warnings.append(f"{source}: prompt-token total is below live message usage; ignoring billing snapshot")
         else:
-            snapshots[source] = tokens
+            snapshots[source] = usage
     if snapshots:
-        largest = max(snapshots.values())
-        for source, tokens in snapshots.items():
-            if tokens < largest:
+        source = max(snapshots, key=lambda key: snapshots[key]["prompt_tokens"])
+        total = snapshots[source]["prompt_tokens"]
+        for name, usage in snapshots.items():
+            if usage["prompt_tokens"] < total:
                 warnings.append(
-                    f"{source}: prompt-token total is below another billing snapshot; "
+                    f"{name}: prompt-token total is below another billing snapshot; "
                     "using the larger total to avoid undercounting"
                 )
-        return largest
-    if any("embedding" in roles for roles in bindings.values()):
-        basis = ("no valid run-level prompt-token total" if include_snapshots
-                 else "whole-run snapshots excluded by interval selection")
-        warnings.append(
-            f"{basis}; message usage excludes embedding calls and may undercount the billed budget"
-        )
-    return total
+        usages = [snapshots[source]]
+    else:
+        source = "message_usage_lower_bound"
+        usages = [event.get("usage") for event in charged.values()]
+        if any("embedding" in roles for roles in bindings.values()):
+            basis = ("no valid run-level prompt-token total" if include_snapshots
+                     else "whole-run snapshots excluded by interval selection")
+            warnings.append(
+                f"{basis}; message usage excludes embedding calls and may undercount the billed budget"
+            )
+    values = {}
+    for key in BILLING_FIELDS:
+        parts = [(_reported_cost(usage) if key == "reported_cost" else _token_count(usage, key))
+                 for usage in usages]
+        values[key] = sum(parts) if parts and all(part is not None for part in parts) else None
+    # Retain a partial prompt lower bound only when a valid count was recorded.
+    # No recorded counts means unknown, while an explicit zero remains zero.
+    values["prompt_tokens"] = total if any(
+        _token_count(usage, "prompt_tokens") is not None for usage in usages
+    ) else None
+    return {"scope": "whole_recording" if include_snapshots else "selected_interval",
+            "source": source, "usage": values}

@@ -88,3 +88,130 @@ def test_residency_keeps_proven_text_when_another_placement_is_ambiguous(tmp_pat
     assert cost["proven_resident_chars"] == len(memory)
     assert cost["views_with_memory"] == 1
     assert cost["unresolved_placements"] == 1
+
+
+def test_billing_preserves_recorded_tokens_and_cost_without_cache_double_counting():
+    from injudge.steps import recorded_usage
+    from injudge.cost import billing_rollup
+    usage = {'prompt_tokens': 100, 'completion_tokens': 20, 'total_tokens': 120,
+             'cached_tokens': 70, 'cache_write_tokens': 10, 'cache_write_1h_tokens': 4,
+             'reasoning_tokens': 5, 'cost': 0.125}
+    billing = recorded_usage([], [], usage, bindings={})
+    assert billing['source'] == 'run.json'
+    assert billing['usage'] == {**{k: v for k, v in usage.items() if k != 'cost'}, 'reported_cost': 0.125}
+    billing['memory_operations'] = {'generation': {'prompt_tokens': 30, 'reported_cost': 0.025}}
+    result = billing_rollup([billing, billing])
+    assert result['usage']['prompt_tokens'] == 200
+    assert result['usage']['total_tokens'] == 240
+    assert result['usage']['reported_cost'] == 0.25
+    assert result['memory_operations']['generation']['reported_cost'] == 0.05
+
+
+@pytest.mark.parametrize('manifest,ended,source,cost', [
+    (80, 100, 'agent_end', 2), (100, 80, 'run.json', 1),
+    (100, 100, 'run.json', 1), (True, 100, 'agent_end', 2),
+])
+def test_billing_source_and_usage_are_selected_together(manifest, ended, source, cost):
+    from injudge.steps import recorded_usage
+    result = recorded_usage([{'type': 'agent_end', 'usage': {'prompt_tokens': ended, 'cost': 2}}], [],
+                            {'prompt_tokens': manifest, 'cost': 1}, bindings={})
+    assert result['source'] == source
+    assert result['usage']['prompt_tokens'] == 100
+    assert result['usage']['reported_cost'] == cost
+
+
+def test_billing_partial_prices_stay_unknown_instead_of_shrinking_totals():
+    from injudge.steps import recorded_usage
+    from injudge.cost import billing_rollup
+    from injudge.aggregate import policy_rollup
+    known = {**recorded_usage([], [], {'prompt_tokens': 10, 'cost': 0}, bindings={}), 'memory_operations': {}}
+    missing = {**recorded_usage([], [], {'prompt_tokens': 20}, bindings={}), 'memory_operations': {}}
+    assert known['usage']['reported_cost'] == 0
+    result = billing_rollup([known, missing])
+    assert result['usage']['prompt_tokens'] == 30
+    assert result['usage']['reported_cost'] is None
+    # Partial artifact inputs cannot turn a known subset into a complete total.
+    assert 'billing' not in policy_rollup([{'policy': {'billing': known}}, {}])
+    assert all(value is None for value in billing_rollup([])['usage'].values())
+
+
+@pytest.mark.parametrize('price', [True, -1, float('inf'), float('-inf'), float('nan'), '0.1'])
+def test_invalid_recorded_prices_do_not_enter_billing_totals(price):
+    from memgraph.parse_trajectory import _reported_cost
+    assert _reported_cost({'cost': price}) is None
+
+
+def test_bounded_billing_uses_recorded_output_and_prices_with_slot_rules():
+    from injudge.steps import recorded_usage
+    def message(prompt, output, cost, **extra):
+        return {'type': 'message_end', 'role': 'assistant', 'msg': 1,
+                'usage': {'prompt_tokens': prompt, 'completion_tokens': output,
+                          'total_tokens': prompt + output, 'cost': cost}, **extra}
+    events = [message(100, 10, 1, _context_only=True),
+              {'type': 'history_rewritten', 'kept': 0}, message(20, 2, 0.2),
+              {'type': 'history_rewritten', 'kept': 0}, message(30, 3, 0.3),
+              {'type': 'message_retracted', 'msg': 1}, message(40, 4, 0.4),
+              {'type': 'agent_end', 'usage': {'prompt_tokens': 190, 'cost': 1.9}}]
+    result = recorded_usage(events, [], {'prompt_tokens': 190, 'cost': 1.9}, bindings={}, include_snapshots=False)
+    assert result['scope'] == 'selected_interval'
+    assert result['source'] == 'message_usage_lower_bound'
+    assert result['usage']['prompt_tokens'] == 60
+    assert result['usage']['completion_tokens'] == 6
+    assert result['usage']['total_tokens'] == 66
+    assert result['usage']['reported_cost'] == pytest.approx(0.6)
+
+
+def test_missing_message_usage_keeps_partial_prompt_budget_and_unknown_other_totals():
+    from injudge.steps import recorded_usage
+    events = [{'type': 'message_end', 'role': 'assistant', 'msg': 1,
+               'usage': {'prompt_tokens': 40, 'completion_tokens': 4, 'cost': 0.4}},
+              {'type': 'message_end', 'role': 'assistant', 'msg': 2}]
+    result = recorded_usage(events, [], {'prompt_tokens': 30, 'cost': 0.3}, bindings={})
+    assert result['source'] == 'message_usage_lower_bound'
+    assert result['usage']['prompt_tokens'] == 40
+    assert result['usage']['completion_tokens'] is result['usage']['reported_cost'] is None
+    assert recorded_usage([], [], bindings={})['usage']['prompt_tokens'] is None
+
+
+@pytest.mark.parametrize('usage', [None, {}, {'completion_tokens': 4},
+                                  {'prompt_tokens': True}, {'prompt_tokens': -1}])
+def test_unreported_prompt_usage_stays_unknown_in_aggregate_and_summary(usage):
+    from injudge.steps import recorded_usage
+    from injudge.report import build_artifact, build_summary, render_summary
+    events = [{'type': 'message_end', 'role': 'assistant', 'msg': 1, 'usage': usage}]
+    unknown = {**recorded_usage(events, [], bindings={}), 'memory_operations': {}}
+    known = {**recorded_usage([], [], {'prompt_tokens': 100}, bindings={}), 'memory_operations': {}}
+    assert unknown['usage']['prompt_tokens'] is None
+    artifact = build_artifact({}, [{'id': 'T1', 'policy': {'billing': unknown}},
+                                   {'id': 'T2', 'policy': {'billing': known}}], [], [], [])
+    assert artifact['aggregates']['overall']['policy']['billing']['usage']['prompt_tokens'] is None
+    assert build_summary(artifact)['recording_policy']['billing']['usage']['prompt_tokens'] is None
+    assert 'input tokens unknown' in render_summary(artifact)
+
+
+@pytest.mark.parametrize('source', ['run.json', 'agent_end', 'message_usage_lower_bound'])
+def test_explicit_zero_prompt_usage_remains_known(source):
+    from injudge.steps import recorded_usage
+    from injudge.cost import billing_rollup
+    usage = {'prompt_tokens': 0}
+    events = [{'type': 'message_end', 'role': 'assistant', 'msg': 1}]
+    if source == 'agent_end':
+        events.append({'type': 'agent_end', 'usage': usage})
+    elif source == 'message_usage_lower_bound':
+        events.append({'type': 'message_end', 'role': 'assistant', 'msg': 2, 'usage': usage})
+    zero = recorded_usage(events, [], usage if source == 'run.json' else None, bindings={})
+    assert zero['source'] == source
+    assert zero['usage']['prompt_tokens'] == 0
+    known = recorded_usage([], [], {'prompt_tokens': 100}, bindings={})
+    result = billing_rollup([{**b, 'memory_operations': {}} for b in (zero, known)])
+    assert result['usage']['prompt_tokens'] == 100
+
+
+def test_bounded_unreported_usage_does_not_inherit_snapshot_or_context():
+    from injudge.steps import recorded_usage
+    events = [{'type': 'message_end', 'role': 'assistant', 'msg': 1,
+               'usage': {'prompt_tokens': 100}, '_context_only': True},
+              {'type': 'message_end', 'role': 'assistant', 'msg': 2},
+              {'type': 'agent_end', 'usage': {'prompt_tokens': 100}}]
+    result = recorded_usage(events, [], {'prompt_tokens': 100}, bindings={}, include_snapshots=False)
+    assert result['usage']['prompt_tokens'] is None

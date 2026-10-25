@@ -1,11 +1,11 @@
 ---
-description: "injudge.report/v26、injudge.summary/v18、全部字段，以及每项比率如何计数。"
+description: "injudge.report/v27、injudge.summary/v19、全部字段，以及每项比率如何计数。"
 icon: box-archive
 ---
 
 # 产物
 
-当前 schema 为 report v26 和 summary v18。Report v26 在后续副本显示相同或更短文本时（如仍可见完整读取的预览）也保留最早归属，
+当前 schema 为 report v27 和 summary v19。v27 新增按条目占比计算的区间画像、等权区间汇总、episode 覆盖率及已记录的模型计费数据；评分规则、分诊规则和归属规则不变。Summary v19 包含这些统计。Report v26 在后续副本显示相同或更短文本时（如仍可见完整读取的预览）也保留最早归属，
 并将所有条目都没有合格动作步骤的区间按规则判为中性（`auto: no_eligible_step`），不调用评审。
 判定计数与评审本应推导的结果一致，但评分规则、用法与置信度汇总只覆盖评审实际打分的区间，不能与 v25 直接比较。
 同一回合新增可见选择标识符的副本保留该步的动作资格。影响规则也将同条目窗口交接后的共有内容归后续窗口，
@@ -35,7 +35,7 @@ Report 和 summary 区分记忆指导造成的危害和执行中的失败。由�
 随后放弃或纠正且没有产生被使用发现的弯路计为危害。智能体自身的笔误、缺失工具
 或无关环境失败本身不能证明记忆危害；应追踪纠正后的结果。Report v17 引入了这一区分，
 因此 v16 的危害计数不能直接比较。不要混合比较不同评分
-版本的效果标签或比率。旧报告保留为历史产物；memgraph 和 calibration 仅接受 report v26。
+版本的效果标签或比率。旧报告保留为历史产物；memgraph 和 calibration 仅接受 report v27。
 读取历史报告需使用与其版本匹配的旧代码。
 
 {% hint style="info" %}
@@ -44,9 +44,9 @@ injudge 把一次运行的全部产物写入输出容器（`-o DIR`，默认 `ou
 
 | 文件 | Schema | 作用 |
 |---|---|---|
-| `injudge-report.json` | `injudge.report/v26` | 初始快照将待评区间标为 `unjudged`，运行结束时写出完整快照。评审期间，`checkpoint_journal` 指定保存已完成结果的文件。用 `--verdicts` 喂给 memgraph。 |
+| `injudge-report.json` | `injudge.report/v27` | 初始快照将待评区间标为 `unjudged`，运行结束时写出完整快照。评审期间，`checkpoint_journal` 指定保存已完成结果的文件。用 `--verdicts` 喂给 memgraph。 |
 | `injudge-checkpoints.jsonl` | `injudge.checkpoint/v1` | 每个已完成区间追加一条记录。报告带有 `checkpoint_journal` 字段时必须保留；运行完成后作为审计记录保留。 |
-| `summary.json` | `injudge.summary/v18` | 精简最终统计：计数、比率、投递估算及评审运行总量。 |
+| `summary.json` | `injudge.summary/v19` | 精简最终统计：计数、比率、投递估算及评审运行总量。 |
 | `summary.md` | — | 同一批统计的简短可读摘要，列出应优先查看的区间、诊断计数，并链接到 JSON 文件。 |
 | `memgraph-verdicts.html` | — | 仅在 `--html` 时产出（默认关闭）：召回节点按区间判定着色的 memgraph。 |
 | `evidence/<span-dir>/` | — | 评审智能体实际运行的每个区间一个文件夹：它当时可用的原始文件。 |
@@ -104,7 +104,7 @@ memgraph 的 `--json` 产物是 `{tool, trajectories, ops, memories, edges, vali
 
 Episode 数与轨迹/区间数一起呈现。空投递和不可观察消费者分别计为 `empty`、
 `unassessable`，不进入判定比率分母。完整诊断、记忆身份、episode 行和区间记录
-保留在 report。`memgraph --verdicts` 只接受 `injudge.report/v26`。
+保留在 report。`memgraph --verdicts` 只接受 `injudge.report/v27`。
 
 ### Report 的 aggregates
 
@@ -116,6 +116,7 @@ Episode 数与轨迹/区间数一起呈现。空投递和不可观察消费者�
 | `n_trajectories` / `n_episodes` / `n_injections` / `n_spans` / `restated_injections` | 总体计数；`n_trajectories` 仅全局 |
 | `positive` / `negative` / `unresolved` / `neutral` / `error` / `unjudged` / `unassessable` / `empty` | 判定计数——这里是顶层键，不是 summary 的 `verdicts.counts` |
 | `rates` | 已评判区间中 positive/negative/unresolved/neutral 的占比 |
+| `profiles` | 条目计数、平均占比、画像区间分诊、产出、排除项与 episode 覆盖率；见[条目占比画像与已记录计费](#条目占比画像与已记录计费)。 |
 | `cost` / `rubric` / `memory_usage` / `judge_compliance` / `mean_confidence_by_verdict` / `confidence_buckets` / `low_confidence` | 详细 report 块；summary 仅选择精简统计 |
 | `input_paths` / `gold_scored` / `forced_answers` / `policy` | 仅全局 |
 
@@ -200,14 +201,14 @@ negative 记忆包可能有一条记忆帮助了任务，另一条造成损害�
 
 ## summary.json 字段
 
-Summary v18 只保留精简最终统计。条目、区间、评分说明、配置和来源记录仍在
+Summary v19 只保留精简最终统计。条目、区间、评分说明、配置和来源记录仍在
 `injudge-report.json` 中。
 
 | 区域 | 内容 |
 |---|---|
-| `overall` | 计数、判定、rubric、估算投递 token 和评审运行计数。 |
-| `trajectories` | 每条输入轨迹一行：`id`、`run_id`、已记录的 `instance_id` / `model` / `adapter`、计数、判定，以及投递大小非零时的 `approx_delivery_tokens`。 |
-| `recording_policy` | 录制全量策略指标；`scope: whole_input_recordings` 包括评审选择范围外的 episode。驻留指标不含原始字符总量。 |
+| `overall` | 计数、判定、`profiles`、rubric、估算投递 token 和评审运行计数。 |
+| `trajectories` | 每条输入轨迹一行：`id`、`run_id`、已记录的 `instance_id` / `model` / `adapter`、计数（含 `counts.n_profiled_spans`）、判定，以及投递大小非零时的 `approx_delivery_tokens`。 |
+| `recording_policy` | 录制全量策略指标；`scope: whole_input_recordings` 包括评审选择范围外的 episode。含已记录用量、来源和记忆操作成本的 `billing`。驻留指标不含原始字符总量。 |
 | `diagnostics` | 输入校验与评审诊断的 `error`、`warn`、`info` 记录数。完整消息保留在 report 中。 |
 | `selection` | 源报告的选择范围；存在时保留。 |
 | `notes` | 估算口径与区间判定范围的简短说明。 |
@@ -226,6 +227,7 @@ Summary v18 只保留精简最终统计。条目、区间、评分说明、配�
 | 字段 | 含义 |
 |---|---|
 | `counts.n_trajectories` | 输入轨迹数；仅全局。 |
+| `counts.n_profiled_spans` | 有已评估画像的区间数；仅轨迹行。全局使用 `profiles.profiled_spans`。 |
 | `counts.n_episodes` / `n_spans` / `n_injections` / `restated_injections` | 选择范围内的 episode、区间、投递及重复投递数。 |
 | `verdicts.counts` | positive、negative、unresolved、neutral、error、unjudged、unassessable 和 empty 区间数。 |
 | `verdicts.judged_spans` | positive + negative + unresolved + neutral；判定比率的分母。 |
@@ -274,8 +276,8 @@ report 的 `tool` 块给出工具名（`name: "injudge"`）与其 `schema`，并
 ## 来源记录与解释
 
 Report v23 的 `input.read_steps` 同时证明步骤文件全文及其引用的结果章节已读取。
-v22 只证明步骤文件本身；当前读取器不接受或重新解释旧版本。Summary v18 保持不变，
-`shared_action_groups` 仍统计记忆组数，不是共享步骤数。
+v22 只证明步骤文件本身；当前读取器不接受或重新解释旧版本。Summary v19 保留 v18 的
+`shared_action_groups` 计数口径：统计记忆组数，不是共享步骤数。
 
 `tool.provenance` 保存 implementation_sha256 和 prompts_sha256；执行过的区间
 input 保存 evidence_sha256 和 system_prompt_sha256。它们标识当前代码、提示词及
@@ -311,3 +313,26 @@ report 的 `aggregates.overall.policy.residency` 按每个主 lane 输入视图�
 这些逐记忆记录保留在 report，summary 不重复它们。这些是特定投递条件下的观察，不能从预览推断未见全文，也不能把重复投递
 当独立试验，或否定
 从未投递的记忆。负面记录只用于人工复核，不自动触发删除。
+
+## 条目占比画像与已记录计费
+
+`operations[].profile` 仅存储 `n_entries` 和整数 `counts`；每个占比都除以全部条目数。
+仅非空且完整评分的区间有画像，机械跳过、错误及未评估区间为 null。六轴为 relevance、
+corroboration、info_gain、influence、benefit、harm。未知项单独计数，selected/referenced
+属于已评估状态；同一区间可同时有收益与危害，不引入权重或标量。
+`memory_window_owners` 仅用于溯源，不继承评分。
+
+汇总及 summary 的 `overall.profiles` 保留整数计数、等权区间均值、有效画像区间的
+分诊计数、收益/危害产出和 token 效率。均值仅在最终汇总后舍入到四位小数。
+`unprofiled` 按原因保留 `n_spans`、`n_injections`、`approx_tokens`，驻留副本的
+真实投递次数和开销仍计入总量。episode 覆盖率包括无投递的已选 episode。
+高频诊断要求条目出现在至少 10% 且至少两个 episode；绝不改变相关性评分。
+summary 轨迹行仅增加 `counts.n_profiled_spans`；完整轨迹画像和计费保留在 report。
+字段与分母见[英文契约](../en/artifacts.md#entry-share-profiles)。
+
+`policy.billing` 是每条轨迹唯一的计费记录，包含 source、scope、usage 和
+memory_operations。用量来源和计数一次确定；有界区间不使用整次运行快照。
+缓存和推理计数属于输入/输出子集，不重复累加；缺失价格或用量保持未知。
+没有任何有效输入 token 计数时返回 null；显式记录的零保持为零。
+计费覆盖输入录制范围，与 `--episode` 评分范围分开；summary 中只保留总体计费。
+投递注解没有记忆子串的精确 token/价格，因此投递和驻留大小仍明确标为 chars/4 估计。

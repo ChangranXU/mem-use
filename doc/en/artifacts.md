@@ -1,11 +1,14 @@
 ---
-description: "injudge.report/v26, injudge.summary/v18, every field, and how every rate is counted."
+description: "injudge.report/v27, injudge.summary/v19, every field, and how every rate is counted."
 icon: box-archive
 ---
 
 # Artifacts
 
-The current schemas are report v26 and summary v18. Report v26 also keeps the
+The current schemas are report v27 and summary v19. Version 27 adds span entry-share
+profiles, equal-span aggregates, episode coverage, and recorded model billing.
+It does not change the judge rubric, triage rules, or ownership. Summary v19
+includes these statistics. Report v26 also keeps the
 first owner when a later copy shows equal or shorter text (a preview of a
 still-visible full read), and rule-judges a span whose entries have no eligible
 action step as neutral (`auto: no_eligible_step`) without a judge call. Its
@@ -56,7 +59,7 @@ failure alone does not prove memory harm; follow corrected attempts to their
 results. Report v17 introduced this distinction; harm counts from v16 are not
 directly comparable. Do not combine effect labels or rates from different scoring versions.
 Older reports remain historical artifacts; memgraph and calibration accept
-only report v26. Use the matching older code to load historical reports.
+only report v27. Use the matching older code to load historical reports.
 
 {% hint style="info" %}
 injudge writes all artifacts of a run to that run's own `<run-stamp>/` folder under the output container (`-o DIR`, default `output/`) — a run never overwrites another run's artifacts.
@@ -64,9 +67,9 @@ injudge writes all artifacts of a run to that run's own `<run-stamp>/` folder un
 
 | File | Schema | Role |
 |---|---|---|
-| `injudge-report.json` | `injudge.report/v26` | Initial snapshot with pending spans marked `unjudged`, then a complete snapshot when the run ends. During judging, `checkpoint_journal` names the file with completed results. Feed the report to memgraph with `--verdicts`. |
+| `injudge-report.json` | `injudge.report/v27` | Initial snapshot with pending spans marked `unjudged`, then a complete snapshot when the run ends. During judging, `checkpoint_journal` names the file with completed results. Feed the report to memgraph with `--verdicts`. |
 | `injudge-checkpoints.jsonl` | `injudge.checkpoint/v1` | One appended record per completed span. Required while the report has a `checkpoint_journal` field; retained for audit after completion. |
-| `summary.json` | `injudge.summary/v18` | Compact final statistics: counts, rates, delivery estimates, and judge execution totals. |
+| `summary.json` | `injudge.summary/v19` | Compact final statistics: counts, rates, delivery estimates, and judge execution totals. |
 | `summary.md` | — | Short readable summary of the same totals, the spans to inspect first, diagnostic counts, and links to the JSON files. |
 | `memgraph-verdicts.html` | — | Only with `--html` (off by default): memgraph with recall nodes colored by span verdict. |
 | `evidence/<span-dir>/` | — | One folder per span the judge agent ran for: the exact files available to it. |
@@ -140,7 +143,7 @@ Episode counts appear alongside trajectory/span counts. Empty deliveries and
 unobserved consumers use separate classes (`empty`, `unassessable`), outside
 verdict-rate denominators. The report keeps complete diagnostics, memory
 identities, episode rows, and span records. `memgraph --verdicts` accepts only
-`injudge.report/v26`.
+`injudge.report/v27`.
 
 ### The Report's Aggregates
 
@@ -152,6 +155,7 @@ unprojected, in `injudge/aggregate.py`'s flat shape:
 | `n_trajectories` / `n_episodes` / `n_injections` / `n_spans` / `restated_injections` | Population counts; `n_trajectories` is overall-only |
 | `positive` / `negative` / `unresolved` / `neutral` / `error` / `unjudged` / `unassessable` / `empty` | Verdict tallies — top-level keys here, not the summary's `verdicts.counts` |
 | `rates` | Positive/negative/unresolved/neutral shares over judged spans |
+| `profiles` | Entry counts, mean shares, profiled triage, yields, exclusions, and episode coverage; see [Entry-share profiles](#entry-share-profiles). |
 | `cost` / `rubric` / `memory_usage` / `judge_compliance` / `mean_confidence_by_verdict` / `confidence_buckets` / `low_confidence` | Detailed report blocks; summary selects only compact statistics |
 | `input_paths` / `gold_scored` / `forced_answers` / `policy` | Overall only |
 
@@ -242,14 +246,14 @@ Overall only: spans carrying an `input` record — every span the agent ran for,
 
 ## summary.json Fields
 
-Summary v18 contains compact final statistics. Detailed entries, span records,
+Summary v19 contains compact final statistics. Detailed entries, span records,
 rubric notes, configuration, and provenance remain in `injudge-report.json`.
 
 | Section | Contents |
 |---|---|
-| `overall` | Counts, verdicts, rubric, estimated delivery tokens, and judge counters. |
-| `trajectories` | One compact row per input trajectory: `id`, `run_id`, recorded `instance_id` / `model` / `adapter`, counts, verdicts, and `approx_delivery_tokens` when delivery size is nonzero. |
-| `recording_policy` | Recording-wide policy metrics; `scope: whole_input_recordings` includes episodes outside the judge selection. Residency omits raw character totals. |
+| `overall` | Counts, verdicts, `profiles`, rubric, estimated delivery tokens, and judge counters. |
+| `trajectories` | One compact row per input trajectory: `id`, `run_id`, recorded `instance_id` / `model` / `adapter`, counts (including `counts.n_profiled_spans`), verdicts, and `approx_delivery_tokens` when delivery size is nonzero. |
+| `recording_policy` | Recording-wide policy metrics; `scope: whole_input_recordings` includes episodes outside the judge selection. Includes `billing` for recorded usage, sources, and memory-operation costs. Residency omits raw character totals. |
 | `diagnostics` | Input validation and judge diagnostic counts, keyed by `error`, `warn`, and `info`. Full messages remain in the report. |
 | `selection` | Source report selection, when present. |
 | `notes` | Brief estimate and verdict-scope explanations. |
@@ -268,6 +272,7 @@ Both `overall` and trajectory rows contain these blocks:
 | Field | Meaning |
 |---|---|
 | `counts.n_trajectories` | Input trajectory count; overall only. |
+| `counts.n_profiled_spans` | Spans with assessed profiles; trajectory rows only. Overall uses `profiles.profiled_spans`. |
 | `counts.n_episodes` / `n_spans` / `n_injections` / `restated_injections` | Episode, span, delivery, and repeated-delivery counts in the selected population. |
 | `verdicts.counts` | Counts for positive, negative, unresolved, neutral, error, unjudged, unassessable, and empty spans. |
 | `verdicts.judged_spans` | Positive + negative + unresolved + neutral; the verdict-rate denominator. |
@@ -322,8 +327,9 @@ The `injections` array lists every raw delivery with its span, its `episode_exec
 
 Report v23 makes `input.read_steps` certify both complete step files and their
 referenced result sections. Earlier v22 reports certified the step files alone;
-they are not silently reinterpreted or accepted by the current reader. Summary v18
-is unchanged: `shared_action_groups` still counts memory groups, not shared steps.
+they are not silently reinterpreted or accepted by the current reader.
+The `shared_action_groups` count introduced in summary v18 remains a count of
+memory groups, not shared steps, in v19.
 
 `tool.provenance` carries `implementation_sha256` and `prompts_sha256`; each executed
 span input carries `evidence_sha256` and `system_prompt_sha256`. These identify
@@ -372,3 +378,67 @@ an intrinsic memory score: previews cannot judge unseen full text, repeated deli
 not independent trials, and unused or never-delivered items cannot be condemned.
 Use contradictory or harmful exposures as review leads, checking linked spans
 before revising a stored item. No automatic deletion threshold is implied.
+
+## Entry-share profiles
+
+`operations[].profile` stores only `n_entries` and integer `counts`. Every share
+is its count divided by all entries in that span. Nonempty, fully judge-scored
+spans receive profiles; mechanical skips, errors and unjudged spans have null.
+`memory_window_owners` stays in the report as provenance, never inherited scores.
+
+| Axis | Count |
+|---|---|
+| `relevance` | Relevant entries |
+| `corroboration` | Relevant entries with corroborated accuracy |
+| `info_gain` | Relevant entries with novel or confirming novelty |
+| `influence` | Acted-on entries |
+| `benefit` | Acted-on entries with improved effect |
+| `harm` | Acted-on entries with harmed effect |
+
+Uncertainty counts are `uncontradicted_accuracy` / `unknown_novelty` for relevant
+entries, `unknown_influence` for all entries, and `unknown_effect` for acted-on
+entries. Assessed counts are relevant `contradicted` / `redundant`, all `selected`
+/ `referenced`, and acted-on `no_effect`. Uncontradicted earns no partial credit.
+Benefit and harm can coexist; triage and severity remain in the verdict/notes.
+
+Report aggregates and summary `overall.profiles` contain:
+
+- `profiled_spans`, `n_entries`, summed `counts`, and equal-span `mean.axes` /
+  `mean.uncertainty`. All means use the same population and round only the final
+  result to four decimals. Empty denominators yield null.
+- `triage`: profiled-span verdict counts. Unlike existing verdict rates, this
+  population excludes rule-neutral resident copies. Rates are count/profiled_spans.
+- `benefit_per_100_spans`, `harm_per_100_spans`, and
+  `benefit_per_million_delivered_tokens`: entry yields, not positive-span rates.
+  Token efficiency includes every selected span's estimated delivery tokens.
+- `unprofiled`: reasons with `n_spans`, `n_injections`, and `approx_tokens`.
+  Resident copies retain all deliveries and costs.
+- `episodes`: counts/rates with profiles, relevant, beneficial or harmful entries,
+  including recorded episodes without deliveries. Unassigned spans are counted
+  separately and establish no coverage. Frequency uses distinct episodes per
+  `(namespace, item)`. High-frequency items require at least 10% of the group's
+  episodes **and at least two episodes**; frequency never changes a profile.
+  `frequency` records the threshold and relevant-entry counts/share;
+  `relevant_below_high_frequency` reports coverage excluding these items.
+
+Summary trajectory rows keep only `counts.n_profiled_spans`; full per-trajectory
+profiles and billing remain in the report. The graph computes shares from counts
+and shows selected/referenced counts once. Existing rubric rates remain conditional
+on assessed signals and are distinct from mean shares over all span entries.
+
+## Recorded billing versus memory delivery size
+
+`policy.billing` is the single per-trajectory billing record: `source`, `scope`,
+normalized `usage`, and bound search/generation `memory_operations`. Source
+selection and usage calculation happen together. Valid run.json/agent_end
+snapshots replace message totals; bounded views use selected message charges
+with retraction/history rules and source `message_usage_lower_bound`.
+Missing fields/prices stay null; no valid input-token counts means null, not zero.
+Explicit zero counts remain zero. Prices must be finite nonnegative numbers.
+Cache and reasoning counters are subsets, never added to input/output totals.
+Report aggregate and summary `recording_policy.billing` sum complete fields and
+count sources. Billing covers input recordings, independently of judge selection.
+
+Placement annotations contain characters, not memory-only token counts or prices.
+Delivery/residency therefore remain explicitly labelled chars/4 estimates; using
+whole-call billing would charge task text, history and output to memory.

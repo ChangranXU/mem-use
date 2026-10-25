@@ -3,7 +3,7 @@ import json
 import pytest
 
 from annotated_fixtures import AnnotatedBuilder
-from injudge.steps import prompt_tokens_total
+from injudge.steps import recorded_usage
 from memgraph.graph import load_and_build
 from memgraph.html import render_html
 from memgraph.parse_trajectory import parse_trajectory
@@ -22,7 +22,7 @@ def test_nonassistant_retractions_match_the_recorded_slot(record):
         {"type": "message_retracted", "msg": 1},
     ]
     warnings = []
-    assert prompt_tokens_total(events, warnings, bindings={}) == 100
+    assert (recorded_usage(events, warnings, bindings={})["usage"]["prompt_tokens"]) == 100
     assert warnings == []
 
 
@@ -39,7 +39,7 @@ def test_reused_slot_retraction_preserves_usage_from_before_rewrite(record):
         {"type": "message_end", "role": "assistant", "msg": 1, "usage": {"prompt_tokens": 50}},
     ]
     warnings = []
-    assert prompt_tokens_total(events, warnings, bindings={}) == 150
+    assert (recorded_usage(events, warnings, bindings={})["usage"]["prompt_tokens"]) == 150
     assert warnings == []
 
 
@@ -52,7 +52,7 @@ def test_rewrite_controls_retractable_slots_without_refunding_usage(kept, expect
         {"type": "message_end", "role": "assistant", "msg": 1, "usage": {"prompt_tokens": 50}},
     ]
     warnings = []
-    assert prompt_tokens_total(events, warnings, bindings={}) == expected
+    assert (recorded_usage(events, warnings, bindings={})["usage"]["prompt_tokens"]) == expected
     assert len(warnings) == int(kept == 0)
 
 
@@ -65,7 +65,7 @@ def test_duplicate_retraction_does_not_remove_older_billing():
         {"type": "message_retracted", "msg": 0},
     ]
     warnings = []
-    assert prompt_tokens_total(events, warnings, bindings={}) == 100
+    assert (recorded_usage(events, warnings, bindings={})["usage"]["prompt_tokens"]) == 100
     assert len(warnings) == 1 and "message_retracted" in warnings[0]
 
 
@@ -77,7 +77,7 @@ def test_rewrite_does_not_invalidate_another_lanes_retraction():
         {"type": "message_retracted", "proxy_source": "A", "msg": 1},
     ]
     warnings = []
-    assert prompt_tokens_total(events, warnings, bindings={}) == 0
+    assert (recorded_usage(events, warnings, bindings={})["usage"]["prompt_tokens"]) is None
     assert warnings == []
 
 
@@ -88,7 +88,7 @@ def test_invalid_rewrite_prefix_cannot_refund_an_earlier_call():
         {"type": "message_retracted", "msg": 1},
     ]
     warnings = []
-    assert prompt_tokens_total(events, warnings, bindings={}) == 100
+    assert (recorded_usage(events, warnings, bindings={})["usage"]["prompt_tokens"]) == 100
     assert len(warnings) == 2
 
 
@@ -124,8 +124,8 @@ def test_cache_subsets_survive_operation_and_trajectory_totals_without_double_co
     assert '"cache_write_1h_tokens":12' in html or '"cache_write_1h_tokens": 12' in html
     assert "if(o.cost) body.cost=o.cost;" in html
     warnings = []
-    assert prompt_tokens_total([], warnings, {"prompt_tokens": 150, "cache_write_tokens": 20,
-                                               "cache_write_1h_tokens": 12}, bindings={}) == 150
+    assert (recorded_usage([], warnings, {"prompt_tokens": 150, "cache_write_tokens": 20,
+                                               "cache_write_1h_tokens": 12}, bindings={})["usage"]["prompt_tokens"]) == 150
     assert warnings == []
 
 
@@ -155,5 +155,5 @@ def test_bounded_billing_excludes_retained_context_and_whole_run_snapshots():
         {"type": "agent_end", "usage": {"prompt_tokens": 1000}},
     ]
     warnings = []
-    assert prompt_tokens_total(events, warnings, {"prompt_tokens": 1000}, bindings={}, include_snapshots=False) == 700
+    assert (recorded_usage(events, warnings, {"prompt_tokens": 1000}, bindings={}, include_snapshots=False)["usage"]["prompt_tokens"]) == 700
     assert warnings == []
