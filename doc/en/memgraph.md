@@ -1,108 +1,154 @@
----
-description: "Visualize memory operations as a self-contained HTML graph, optionally colored by injudge verdicts."
-icon: share-nodes
----
+# Visualize memory with memgraph
 
-# memgraph
+[Guide index](README.md) · [简体中文](../zh-CN/memgraph.md)
 
-{% hint style="info" %}
-memgraph extracts every memory operation from annotations and renders how memories are created, updated, deleted, and recalled — as a single self-contained HTML file that works offline.
-{% endhint %}
+Use `memgraph` to trace where memories were created, changed, deleted, and
+recalled. It reads recorded annotations and writes one HTML file that opens
+offline. It does not call a model.
+
+## Create a graph
+
+Run this command from the checkout root. Replace `path/to/recordings` with
+[your input path](input-contract.md#input-paths).
 
 ```bash
-uv run -m memgraph <paths> -o memgraph.html --json memgraph.json
+uv run -m memgraph path/to/recordings -o memgraph.html --json memgraph.json
 ```
 
-For each memory, memgraph answers two questions: which `(trajectory, step)` created it, and which `(trajectory, step)` later recalled it. Load several runs together to see cross-trajectory reuse.
+Open `memgraph.html` in a browser. You can pass several paths to trace memory
+reuse across runs. A trajectory without memory annotations is valid. It appears
+in the header count but has no memory operations to draw.
 
-How memories are told apart is defined in [Memory identity](input-contract.md#memory-identity). Trajectories with zero memory operations are valid input; the page counts them in its header instead of drawing empty lanes.
+| Option | Result |
+| --- | --- |
+| `-o PATH`, `--output PATH` | Write the HTML file. Default: `memory-graph.html`. |
+| `--json PATH` | Also write the graph as JSON. |
+| `--verdicts PATH` | Add an `injudge.report/v27` report to the graph. |
 
-## Graph Model
+## Explore the graph
 
-The JSON artifact — the same dict embedded in the HTML — is:
+1. Check the error and warning counts in the header. Open the validation details
+   to inspect input problems.
+2. Find a memory in the searchable list. Search by its display key or content.
+3. Select it to trace its creation, updates, recalls, and deletions.
+4. Open an operation to inspect its entries, recorded costs, and raw JSON.
+5. Click a step on a row to inspect its memory actions. Use the arrow keys to
+   move between steps.
+
+Writes appear as upward triangles. Recalls appear as downward triangles. A
+hollow recall is an empty delivery. Consecutive recalls with the same memory
+set can collapse into a count badge. This display grouping is separate from
+injudge's span grouping.
+
+Rows follow runs, sequences, and episodes. Each episode uses a local step axis;
+the detail panel also shows the global step used in judge citations. Click a
+sequence header to fold its episodes. Runs are ordered by their recorded start
+time, then a timestamp in the directory name, then the directory name.
+
+Hover an operation to trace its links. Select **All links** to show all creation
+to recall links. The graph also provides zoom controls, a no-op-write toggle,
+and bands for recorded history rewrites. Operations without a step appear to
+the right of the step axis.
+
+A dashed **created earlier** marker means the loaded recordings contain a
+recall but no creation for that item. This is valid when the item predates the
+recordings. A `recalled_before_creation` warning keeps the link visible while
+flagging an ordering problem or an earlier item version.
+
+## Add verdicts
+
+Use the report from an earlier judge run:
+
+```bash
+uv run -m memgraph path/to/recordings \
+  --verdicts output/RUN/injudge-report.json \
+  -o memgraph-verdicts.html
+```
+
+Replace `RUN` with the run folder name. You can also pass `--html` to
+`injudge` to create this graph with the report.
+
+| Color | Span verdict |
+| --- | --- |
+| Green | `positive` |
+| Red | `negative` |
+| Violet | `unresolved` |
+| Gray | `neutral` |
+| Amber | `error` |
+| Light blue | `unjudged` |
+
+Click a verdict count to move through its spans. Click a verdict in the key to
+filter episodes. The detail panel shows the analysis, entry usage labels,
+rubric values, cited evidence, and judge-run information. Empty and unassessable
+spans have separate counts.
+
+Reports join to recalls by `(run_id, op seq)`. Display IDs such as `T1` can
+change between invocations and are not join keys. Unmatched records produce
+validation notes. Duplicate run IDs or duplicate join keys cause those joins
+to be skipped. Invalid report IDs or references fail before the merge.
+
+Plain graphs and completed-report overlays do not load judge prompts. Recovery
+of an unfinished report rebuilds totals from its checkpoint journal.
+
+## Graph JSON reference
+
+The JSON file and the data embedded in the HTML contain the same graph:
 
 ```text
 {tool, trajectories, ops, memories, edges, validation}
 ```
 
-| Collection | Contents |
-|---|---|
-| `tool` | Tool identity — `{"name": "memgraph"}`; under `--verdicts` it gains `verdicts`, the merged report's path. |
-| `ops` | Memory operations. `kind` is `extract` (generation) or `recall` (delivery); each op is anchored at `(traj, step, seq)`. Recall ops carry `searches` (the delivery's per-lane `{lane_id, operation_id}` links), `queries` (each linked search's resolved query), `placement_kinds`, and `trigger` from their searches (`explicit` marks an agent-directed read such as a memory tool call; absent means scheduled). Any op that bound model calls carries `cost`: `memory_calls` / `prompt_tokens` / `completion_tokens` from its memory-lane `call_refs` and `embedding_calls` / `embedding_tokens` from its `embedding_call_refs` (a recall sums its linked searches); a count is `null` when any bound call recorded no usage. `reported_cost` appears when the upstream priced a bound call (`usage.cost`); it is never estimated from tokens and is `null` when any bound call was unpriced. Usage is each call's normalized `call.json.response.usage`, which also covers embedding and capture-only calls. Operation `extensions` preserve the anchor annotation’s opaque provenance, including shell call IDs and file-write attempts; they are not used to infer memory identity or cost. Candidate, delivered, and deletion refs carry `grouping_id` for the registry join. `episode` is the op's index into its trajectory's `episodes` (`null` outside every recorded episode). |
-| `trajectories` | One row per loaded run; `memory_cost` totals the op costs as `{generation, search}` (every search once, delivered or not). `searches` lists every recorded search, delivered or not: `operation_id`, `lane_id`, `trigger`, resolved `query`, `status`, `returned_count`, `delivered_by` (the recall ops that placed it), `cost`, and opaque `extensions`. An agent-directed read whose result never reached the model has an empty `delivered_by`. `episodes` lists the recorded episode scopes in order — `episode_id`, `sequence_id`, `status` (`prepared` / `needs_review` / `incomplete`), and the global `first_step` / `last_step` — from the bridge `bridge_episode_open`/`close` events (else episode-scoped `memory_session` events), the same scope rule injudge prepares from; it is empty when the recording names no episode. |
-| `memories` | One record per stable item identity: normally `(namespace, item_id)`, otherwise the documented display-key or content-digest fallback. Each record carries origin, creation site, later updates, recalls, and deletion history — `deletions` lists every observed deletion (a re-creation marks `revived` and never erases it), while `deleted` is the terminal state. |
-| `edges` | Relationships from an op to a memory: `creates`, `supersedes`, `deletes`, `recalls`. |
-| `validation` | The run's `{level, msg}` notes (`error` / `warn` / `info`) for corrupt or skipped input, attribution gaps, and verdict-join mismatches. |
+| Field | Contents |
+| --- | --- |
+| `tool` | Tool name, plus the report path when verdicts are loaded. |
+| `trajectories` | Run identity, episode scopes, searches, recorded usage, and memory-operation cost totals. |
+| `ops` | Extraction and recall operations, each anchored by trajectory, step, and event sequence. |
+| `memories` | Stable item identity and observed creation, updates, recalls, and deletions. |
+| `edges` | `creates`, `supersedes`, `deletes`, and `recalls` relationships. |
+| `validation` | Input and join diagnostics, with `error`, `warn`, or `info` levels. |
 
-Memory-call costs also preserve the recorder's `cached_tokens` (cache reads),
-`cache_write_tokens`, `cache_write_1h_tokens` (the one-hour subset of writes),
-and `reasoning_tokens`. These are subsets of prompt/output usage, not extra
-tokens to add to the bill or injudge's prompt budget. Zero read/reasoning
-details may be omitted by the recorder; write counters retain explicit zero.
-Missing or invalid write counters remain `null`, including in totals when any
-bound call lacks that counter. Operation costs are also visible in the HTML
-raw JSON panel. No response-body parser or rate-card estimate is used here.
+### Operations and identities
 
-Two chronology notes — both valid input rather than errors:
+An operation's `kind` is `extract` for generation or `recall` for delivery.
+Recall records include `searches`, `queries`, `placement_kinds`, and search
+`trigger` values. An `explicit` trigger identifies an agent-directed read.
+`episode` is the index into the trajectory's episode list, or null outside
+recorded scopes.
 
-- A recalled memory with no observed creation in the loaded set is registered with `origin: "not_observed"`; the HTML gathers such memories under one dashed "created earlier" ▲ per lane. The store entry simply predates the loaded trajectories.
-- A recall whose timestamp (or, within one trajectory, file position) precedes the first observed creation is flagged `recalled_before_creation`: the store entry likely predates the loaded trajectories, or the lanes are misordered. The edge is still drawn; the warning is recorded in `validation`.
+Memory refs carry `grouping_id` for the item join. The usual item identity is
+`(namespace, item_id)`; see [memory identity](input-contract.md#memory-identity)
+for display-key and content-based fallbacks. Deletion records remain in
+`deletions` after an item is recreated. `deleted` gives the final observed state.
 
-## HTML Features
+Operation `extensions` retain opaque annotation provenance. They do not determine
+memory identity, exposure, or cost.
 
-Errors have a separate header count and appear before warnings in validation
-details. A warning from the loader and the verdict overlay appears once when
-both report the same problem.
+### Searches and costs
 
-The rendered page provides:
+Each trajectory lists all recorded searches, including searches with no delivery.
+Search rows contain their lane, operation ID, query, trigger, status, result
+count, cost, extensions, and `delivered_by` recall IDs. `memory_cost` totals
+generation and search costs, counting each search once.
 
-- A header summary (runs, episodes and sequences, memories, writes, recalls, errors, warnings) and a one-line key; hover a key item for its full meaning
-- Rows grouped by structure. A run that records several episodes gets a header, then a header per sequence (click it to fold its episodes), then one row per episode with x = step within the episode, so episodes line up and stay readable without zooming. A run of one episode or none is a single row on its own steps. Runs are ordered by `run.json` `started_at` when it parses, else the directory name's `YYYYMMDD-HHMMSS` timestamp prefix, else the plain resolved directory name. The step axis fits the window by default
-- Writes (▲, extraction ops) above each row's line and recalls (▼) below; consecutive-step recalls with the same delivered memory set collapse into ×n pills (never across episodes), and an empty delivery is a hollow ▼
-- Tracing instead of a tangle: hover a node to see where its memories came from (a recall) or where they were recalled later (a write), across episodes; hovering or selecting a memory traces all its recalls plus its dashed update/deletion chain. "All links" draws every creation → recall link at once
-- One dashed "created earlier" ▲ per run, counting the memories first seen there whose origin is not in the loaded set
-- History-rewrite bands (memory-lane rewrites use a distinct color)
-- A searchable memory list (most recalled first, matching key or content) and a detail panel for the selected memory or operation; episode steps are shown with their global step, which injudge's analyses cite
-- A step inspector: click row space to list the memory actions at that step; ←/→ moves it
-- Toggles for all links and for no-op writes (both off by default), zoom (+ / − / fit), and the validation notes in the footer, warnings first
-- Step-less ops parked in a gutter to the right of the last step
+Operation `cost` comes from recorder-bound `call_refs` and `embedding_call_refs`.
+It includes model or embedding call counts and their recorded token usage.
+`reported_cost` comes from upstream usage data; MemUse does not price tokens.
+Missing usage or prices stay null. `recorded_usage` preserves the run's original
+usage snapshot for audit. Totals follow the selected manifest view.
 
-## Options
+Cache-read, cache-write, one-hour cache-write, and reasoning counters retain the
+recorder's values. They are subsets of input or output usage, not extra tokens
+to add to the bill. Missing write counters stay null, including affected totals.
 
-| Flag | Effect |
-|---|---|
-| `-o PATH` | HTML output path (default `memory-graph.html`) |
-| `--json PATH` | Also write the machine-readable graph artifact |
-| `--verdicts PATH` | Merge an `injudge.report/v27` file before rendering |
-
-## Verdict Overlay
-
-`--verdicts` joins the report onto recall ops by `(run_id, op seq)`. Trajectory ids (`T1`, `T2`, …) are assigned per invocation, so the two tools may number them differently on different path sets; `run_id` is the stable join key.
-
-Each recall op is annotated in place:
+### Verdict fields on recalls
 
 | Field | Meaning |
-|---|---|
-| `verdict` | The span's verdict on the span's first injection; `restated` on later identical deliveries (unjudged spans keep `unjudged`) |
-| `span_verdict` | The span's verdict on every injection — this is the coloring key |
-| `verdict_span` | The injudge span id |
-| `verdict_detail` | Confidence, analysis, evidence, per-memory usage, rubric (both keyed by span-local entry id; `memory_labels` maps the ids back to display keys), delivery cost, input regime, `auto` / `error` markers |
+| --- | --- |
+| `verdict` | Span verdict on the first injection; `restated` on later copies. Unjudged spans keep `unjudged`. |
+| `span_verdict` | Span verdict on every injection; controls the graph color. |
+| `verdict_span` | The corresponding injudge span ID. |
+| `verdict_detail` | Analysis, confidence, evidence, entry usage, rubric, delivery cost, and input details. |
 
-Recall nodes are colored by `span_verdict`:
-
-| Color | Verdict |
-|---|---|
-| Green | positive |
-| Red | negative |
-| Violet | unresolved |
-| Gray | neutral |
-| Amber | error |
-
-With verdicts merged, unjudged recalls fade to light blue so judged spans stand out, and the header gains a verdict tally that keeps mechanical skips (`unassessable`, `empty`) apart; clicking a judged verdict's count zooms to each span with that verdict in turn. Clicking a verdict in the key line filters the rows to the episodes holding a recall with that verdict (several can be picked; click again to clear). While a memory is selected or a node is open in the detail panel, the episodes linked to it stay visible with a dashed outline, and they disappear when the selection clears. A recall's detail panel shows each covered span's verdict, the judge's analysis, one row per delivered entry (usage plus R/A/N/I/P rubric marks), the cited evidence, and the span's input record (the `agent` path, with gold / forced markers and the attempt count).
-
-{% hint style="info" %}
-Unmatched or ambiguous joins produce validation notes. If multiple trajectories share a `run_id` in either the loaded graph or the report, all joins for that run are skipped, even when their sequence numbers differ. A `(run_id, seq)` claimed by multiple report injections or recall ops is also skipped. The graph still renders. Invalid report IDs or references fail before the merge.
-{% endhint %}
-
-Plain graph rendering and completed-report overlays do not load judge prompts.
-Recovery of an unfinished report loads the report builder to rebuild totals.
+Entry usage and rubric records use span-local IDs such as `m1`. `memory_labels`
+maps those IDs to display keys. See the [output reference](artifacts.md) for the
+complete judge report.

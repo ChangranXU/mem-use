@@ -1,156 +1,163 @@
----
-description: "Five independent signals, evidence coverage, and deterministic usage and verdict derivation."
-icon: code-branch
----
+# Derive signals and verdicts
 
-# Rubric and Verdict Derivation
+[Guide index](README.md) · [简体中文](../zh-CN/verdict-derivation.md)
 
-The judge scores each exposed entry under its span-local id (`m1`, `m2`, …).
-Display keys are labels, not joins. Python validates the answer and derives
-usage and span verdicts. Task success never decides a memory verdict.
+MemUse scores each exposed entry under its span-local ID (`m1`, `m2`, and so on).
+Display keys are labels. Python validates the judge's signals and derives entry
+usage and the span verdict. Task success does not decide a memory verdict.
 
-## Signals
+## Rubric signals
 
-| Signal | Values and meaning |
-|---|---|
-| `relevance` | `true` / `false`: the exposed claim applies to the task or subgoal at delivery. A cause or remedy offered for the current failure is relevant even when wrong. An account of a different failure is relevant only with the same mechanism: what goes wrong, and what action diagnoses, fixes, or checks it. A shared topic, symptom, or name alone is not enough. An uncertain mechanism match is `false`. |
-| `accuracy` | `corroborated` / `uncontradicted` / `contradicted`, within the claim's own repository/version/situation. Uncontradicted means neither confirmed nor refuted. |
-| `novelty` | `novel` / `confirming` / `redundant` / `null`, relative to the recorded pre-exposure input. Confirming settles a voiced doubt; redundant requires already-established substance. Expected task outputs do not automatically supply the solution mechanism. Mixed entries are redundant only when every material claim was established. An earlier delivery counts as baseline only while still in the consuming input, as `span.md` states; a copy arriving in the same input is not earlier. |
-| `influence` | `none` / `referenced` / `selected` / `acted_on` / `null`, defined below. |
-| `positive_effect` | `improved` / `no_effect` / `harmed` / `null`. Non-null only for `acted_on`; judge observed consequences of the anchored action. Whether the task or the agent could have reached the same action is settled under influence; it never makes an acted-on action `no_effect`. Keeping or submitting a change is not itself a benefit. `harmed` requires misdirection from the memory’s exposed guidance, including abandoned or corrected detours without a used finding. Agent typos, unavailable tools, or unrelated environment failures alone do not establish memory harm; follow corrected attempts to their result. A blocked attempt without a finding has unknown effect. Reading memory content is delivery cost, not added work. `no_effect` requires an acted-on action that made no difference and added no work. Any harm among the entry's actions makes it `harmed`, even after an earlier benefit. Unknown direction remains null. |
+| Signal | Allowed values | Question |
+|---|---|---|
+| `relevance` | `true`, `false` | Does the exposed claim apply to the task or subgoal at delivery? |
+| `accuracy` | `corroborated`, `uncontradicted`, `contradicted` | Does evidence support or refute the claim in its own repository, version, and situation? |
+| `novelty` | `novel`, `confirming`, `redundant`, `null` | What did it add to the recorded input before exposure? |
+| `influence` | `none`, `referenced`, `selected`, `acted_on`, `null` | What did it demonstrably shape within its action window? |
+| `positive_effect` | `improved`, `no_effect`, `harmed`, `null` | What observed consequence followed an action it shaped? |
 
-A historical result retrieved for the task is not automatically a diagnosis of
-that task. Its exposed text must supply the connecting mechanism or applicable
-action; the query, later diagnosis, gold and a fuller read cannot fill a preview’s
-missing mechanism. A feature-introduction history alone does not diagnose a
-defect in an already implemented feature.
+The signals are independent. A wrong claim can suggest a useful diagnostic.
+A redundant claim can receive explicit action credit. `uncontradicted` means
+neither confirmed nor refuted; it does not mean correct. Unknown novelty,
+influence, or effect stays `null`.
 
-Novelty, correctness, influence and effect are independent. A redundant entry
-the agent explicitly credits is still acted_on; an inaccurate claim can trigger a useful diagnostic. A
-passing local check proves only the behavior it checks. Local improvement can
-coexist with task failure, and an execution without a recorded result proves
-only an attempt.
+### Relevance and novelty
 
-A memory title can shape a retrieval without supplying the tool or identifier
-the agent invents to perform it. A failed lookup alone therefore establishes
-neither harmful guidance nor no effect. Harm notes quote the exposed claim and
-connect an action following it to an observed consequence; execution mistakes
-are distinguished from a false location or remedy actually supplied by memory.
-Follow corrected attempts and preserve unknown effect when the record shows
-only retrieval failure.
+A proposed cause or remedy for the current failure is relevant even if wrong.
+A past failure is relevant only when the exposed text supplies the same
+mechanism or an applicable action. A shared topic, symptom, or name is not
+enough. An uncertain mechanism match is `false`.
 
-Gold is one reference solution, not the only valid approach. The same signal
-definitions apply with or without gold. Gold can inform relevance and accuracy;
-influence and benefit still require recorded actions and checks. Verification,
-environment repair, or an avoided dead end can matter even when the gold patch
-omits them. Matching the patch does not prove the memory caused the action.
-Outcome attachments corroborate but do not determine a signal.
+A query, later diagnosis, gold, or fuller read cannot supply a preview's missing
+mechanism. A feature's introduction history alone does not diagnose a defect
+in an existing implementation.
+
+`confirming` settles a stated doubt. `redundant` means the substance was already
+established. A mixed entry is redundant only when all material claims were
+established. A requested task output does not by itself supply the solution.
+An earlier delivery counts in the baseline only while still visible in the
+consuming input. A copy arriving in that same input is not earlier evidence.
 
 ## Influence and action scope
 
-- `referenced`: mentioned, with no changed action established after inspecting
-  the complete window. The mention must single out the entry (its shown
-  identifier, distinctive content, or list position); a remark about the
-  results as a whole references no entry unless only that entry was shown.
-- `selected`: the shown identifier or preview caused retrieval of fuller
-  memory content that was recorded as its own memory delivery, without other
-  demonstrated content use. Anchor the selection action, not the
-  result-delivery step. Its effect is null: the returned content is assessed
-  on that delivery. A retrieval whose result is not a recorded delivery is
-  acted_on: no other span judges what it returned, so its consequence is this
-  entry's effect.
-- `acted_on`: an action uses memory-specific content, the agent explicitly
-  credits the entry, or the agent turns from a recorded prior direction to the
-  one the entry names right after its delivery. Reading, searching, or editing
-  a file, function, or other location only the entry named is acted_on even
-  when its remedy goes unused; what the agent finds there is that action's
-  result. A decision needs subsequent execution.
-- `null`: an action uses content that, before the first consuming step, was
-  stated only as an open possibility (the agent's unverified hypothesis,
-  question, or search query) or only in a prior source the agent had not
-  acted on, and nothing in the record separates the two; or the window was
-  not read completely. Name the action and the quoted prior source, or the
-  unread steps. Effect is null.
-- `none`: after inspecting the complete window, no reference, selection, or
-  attributable action was established, and no action remains ambiguous under
-  the `null` rule. An action that only carries out the task's instruction or
-  the agent's own pre-delivery decision is explained by that source. An open
-  possibility or a prior source the agent had not acted on is not a settled
-  decision: apply `null` first. This does not prove zero effect.
+| Value | Required observation |
+|---|---|
+| `acted_on` | An action uses memory-specific content; the agent explicitly credits the entry for the action; or it changes from a recorded prior direction to the entry's direction just after delivery. |
+| `selected` | A shown identifier or preview caused retrieval of fuller content recorded as a separate memory delivery, without other established content use. Anchor the retrieval action. |
+| `referenced` | The agent mentions the specific entry, but a complete window read establishes no changed action. |
+| `null` | Attribution cannot be separated from an unresolved prior possibility or unused prior source, or the window was not read completely. |
+| `none` | A complete window read establishes no reference, selection, or attributable action, and no action remains ambiguous under the `null` rule. |
 
-Memory-specific content is a specific mechanism, location, identifier, value,
-command, check, or remedy the entry exposed that no prior source states. Prior
-sources are the records before the first consuming step: the task, the visible
-input, earlier steps' reasoning, commands, queries and tool results, and other
-deliveries already in the input. A prior source counts only when the judge can
-quote the same specific content from it. A pattern used elsewhere, content a
-capable agent could derive, outside knowledge, and anything recorded at or after
-the consuming step do not compete. Routine practice (reproducing the failure,
-running tests, reading the code at hand) is not memory-specific unless the action
-uses a detail only the entry named. This makes attribution an observable test
-instead of a weighing of how "equally" two sources explain an action.
+Memory-specific content is a mechanism, location, identifier, value, command,
+check, or remedy exposed by the entry and absent from prior sources. Prior
+sources are the task, visible input, earlier reasoning, commands, queries,
+results, and other deliveries already in the input before the consuming step.
+A competing source must state the same specific content for the same purpose.
 
-The redundant `decisive` tier was removed in v15. Describe a course change in
-an `acted_on` note. A preview can directly shape an edit without being opened;
-selection does not suppress that credit, but the separate action needs its own
-anchor. When a later delivery of the same item takes over an earlier delivery's
-window, shared content is credited to the later delivery, whether or not a
-preview selected it. The earlier copy itself is not a competing source;
-independent task instructions, prior decisions, and other sources still are.
-Otherwise each span could defer to the other and the memory would receive
-no credit. This allocates established influence; it neither creates influence
-nor moves actions shaped before the handoff. A selecting preview stays
-`selected` unless it shaped an action before the handoff or with content
-only it showed. A single step can contain selection and another action, so follow-up step
-numbers alone do not decide the label. Assembly coerces a non-null effect to
-null for any influence other than acted_on and counts it as a pairing
-correction (judge compliance); a separately claimed content use must be
-labeled acted_on with its own anchor.
+Outside knowledge, a pattern used elsewhere, or something a capable agent could
+infer is not a recorded competing source. Routine work such as running tests is
+not memory-specific unless it uses a detail supplied only by memory.
 
-The first consuming step already had the memory in its input. Only earlier
-steps or pre-exposure input can establish a prior plan. Per-entry windows bound
-action anchors; later results within the parent episode can establish an
-anchored action's consequence without becoming out-of-window action anchors.
-Different later exposures of the same item, or narrower ones without proven
-visibility of an earlier copy, can have overlapping windows. Judge each entry by its own window and exposed text. Equal or shorter copies keep the first owner while recorded input proves continuous visibility; other re-exposures follow the handoff rules in [Judge evidence](scoring-input.md). Ownership is accounting, not proof that influence appeared or vanished.
+Reading, searching, or editing a location named only by memory is `acted_on`,
+even if the proposed remedy goes unused. A decision requires later execution.
+A reference must identify the entry by shown identifier, distinctive text, or
+list position. A remark about a result list references no individual entry
+unless the list contains only that entry.
 
-Selection and content use are separate stages. Their counts are diagnostics,
-not additive independent gains. `memory_followups` retains the deterministic
-selection links, and `rubric.shared_anchors` surfaces same-item, same-step credit
-across spans. The latter is a review aid, not a causal deduplication algorithm.
+An explicit task instruction or a settled pre-delivery decision can explain
+an action without memory. An open hypothesis, question, search query, or source
+the agent had not acted on is different: if the record cannot separate that
+source from memory, use `null`. Name the action and quote the competing source.
+A symptom or desired outcome does not specify an implementation action.
+
+A prior code read that shows a location does not compete with memory that
+supplies a remedy absent from that read. Narrative analysis must preserve
+unknown attribution instead of declaring either source the cause.
+
+### Selection and later delivery
+
+Selection has `positive_effect: null`. The fuller delivery receives its own
+judgment. If retrieval is not recorded as a separate memory delivery, it is
+`acted_on`; this entry must account for the result.
+
+A preview can shape another action without a full read. That action needs its
+own anchor and makes the preview `acted_on`. When a same-item delivery takes
+over a window, shared content belongs to the later window. A selecting preview
+stays `selected` unless it shaped an earlier action or one using text only the
+preview showed.
+
+Exact same-item, same-text copies in one input are one memory source. Earlier
+same-item copies do not compete with a later window for the same allocated
+credit. Independent task instructions, prior decisions, and other sources still
+compete. This rule allocates established influence; it does not create influence
+or move actions that happened before the handoff.
+
+Use each entry's [action window](scoring-input.md#action-windows-and-repeated-copies).
+A first consuming step already had the memory. Only earlier steps or
+pre-exposure input establish a prior plan. Later results in the same episode
+can establish an in-window action's consequence, but cannot become new action
+anchors outside the window.
+
+`memory_followups` records proven selection links. `rubric.shared_anchors`
+shows same-item action steps credited across spans. These are review aids.
+Selection and content use are separate stages, not additive independent gains.
+
+## Effect
+
+Only `acted_on` can have a non-null effect. Python sets a non-null effect on
+any other influence to null and counts a pairing correction.
+
+| Value | Required evidence |
+|---|---|
+| `improved` | A check or later use demonstrates a benefit from the memory-shaped action or finding. |
+| `no_effect` | Positive evidence that the action made no difference and added no work. |
+| `harmed` | Exposed guidance led to a wrong action, lost work, or a detour abandoned or corrected without a used finding. |
+| `null` | The direction cannot be established, or required consequence evidence was not read. |
+
+Successful execution, keeping a change, submitting it, or a generic passing test
+count does not establish benefit. A check must test or use the actual
+memory-shaped property. Require a recorded assertion, before/after reproduction,
+or later result that demonstrates that property.
+
+A diagnostic can help even if it disproves the memory's remedy, but later work
+must use the finding. Removing a completed temporary probe is not itself harm.
+A memory-directed detour with no used finding can be harm.
+
+Harm evidence must quote the exposed claim, identify the action that followed
+it, and show the consequence. Compare guidance with execution. An invented
+identifier, agent typo, unavailable tool, or unrelated environment fault does
+not by itself make memory harmful. Follow corrected attempts to their results.
+A failed lookup or blocked attempt alone leaves effect unknown, not `no_effect`.
+Reading or retrieving memory is delivery cost, not proof of harm.
+
+Any observed harm among an entry's actions makes the effect `harmed`, even if
+another action helped. Otherwise, observed benefit makes it `improved`.
+Describe both when they coexist. Costs remain separate.
 
 ## Evidence and output validation
 
-Validation requires exact entry-id coverage, valid signal values, and in-window
-anchors. `selected` and `acted_on` require anchors; `none` requires an empty
-anchor list. All cited anchors and structured `evidence[].steps` must have their
-complete step text retained in the judge conversation.
+Python requires exact entry-ID coverage, valid values, and anchors within the
+entry's window. `selected` and `acted_on` need anchors. `none` needs an empty
+anchor list. All anchors and structured `evidence[].steps` citations must have
+complete retained step reads, including referenced result sections.
 
-Read tracking verifies actual numbered tool-result text against the evidence
-files. Paged reads combine; a truncated line, header-only read, search hit, error
-result or rolled-back read does not certify a complete step. `baseline.md`
-contains visible input, not complete historical step copies; read cited steps
-from their own files.
+The manifest controls required reads:
 
-Every answer requires complete reads of `task.md`, `baseline.md`, the first
-consuming step, and its preceding step within the episode, if present. Baseline
-references do not certify their source files: a non-null novelty or an `acted_on`
-influence also requires every step file `baseline.md` names for visible input,
-or that signal stays null.
-`none`, `referenced`, and `selected` additionally require every eligible step in
-that entry's window. Every non-null acted-on effect requires reading from the
-window's start through the episode's end: re-exposure limits action anchors,
-not when an earlier action's consequences can appear. A later correction can
-decide an apparent benefit, while later use of a finding can refute apparent waste.
-If acted-on influence is established but effect inspection
-is incomplete, keep `acted_on` and use `positive_effect: null`. Unassessed
-attribution uses influence null; do not invent neutrality or benefit to finish
-a budget-limited investigation.
+| Claim | Required coverage |
+|---|---|
+| Every answer | `required_reads.always`: task, baseline, optional messages/gold, first consuming step, and its preceding episode step when present. |
+| Non-null novelty or `acted_on` | All `required_reads.prior_sources`, including baseline step files and visible delivery sections. |
+| `none`, `referenced`, or `selected` | Every eligible step in that entry's window. |
+| Non-null acted-on effect | Every step from window start through episode end. |
 
-Every rejected answer (missing required evidence, malformed or out-of-contract
-JSON, or no final text) takes the same short follow-up over the same history,
-with the evidence tools, while phases remain. Exhaustion is `error`, never
-neutral.
+Paged reads combine. Search hits, header-only reads, truncated lines, failed
+reads, and rolled-back reads do not certify coverage. A baseline pointer does
+not certify the file it points to. See [judge validation](judge-client.md#required-reads).
+
+If influence is established but effect coverage is incomplete, keep `acted_on`
+and set effect to null. If attribution is unassessed, use influence null.
+A rejected answer takes a short follow-up over the same history. Exhaustion
+produces `error`, never neutral.
 
 ## Usage and span verdicts
 
@@ -163,56 +170,45 @@ neutral.
 | `selected` | `null` | `selected` |
 | `referenced` | `null` | `noted` |
 | `none` | `null` | `ignored` |
-| `null`, whole window read | `null` | `ambiguous` |
-| `null`, window not read completely | `null` | `unclear` |
+| `null`, complete window read | `null` | `ambiguous` |
+| `null`, incomplete window read | `null` | `unclear` |
 
-Unproductive use requires evidence that an acted-on action made no difference
-and added no work; it is not harm. Memory-misdirected
-work that contributed nothing is `harmed`. A diagnostic experiment improves work
-only when later actions demonstrably use its finding, such as ruling out a live
-hypothesis to direct the next check. Removing a completed temporary probe is not
-harm; a memory-misdirected detour without a used finding is harm. An unproven
-contribution stays null, and separate harmful actions still dominate.
-Costs are recorded separately. `misused` is reserved for harmful acted-on influence.
+Python applies these rules in order:
 
-The conservative span triage rule is: any `misused` → negative; otherwise any
-`used` → positive; otherwise any `unclear` → unresolved; otherwise neutral.
-Neutral therefore includes selection, reference, ambiguous attribution,
-unproductive use, and no established influence. Unknown influence over a
-completely read window means the memory and an earlier source explain the
-action equally; independent reviewers split on such cases as often as judges
-do, and either way no help or harm is established, so it is `ambiguous` and
-neutral. Python decides this from the judge's recorded reads, never from the
-answer: unknown influence over a window the judge did not read completely stays
-`unclear`, so a budget-limited investigation never becomes a silent neutral. A mixed beneficial/harmful bundle is negative for triage;
-its individual labels remain visible. These signs do not estimate net utility.
+1. Any `misused` entry makes the span **negative**.
+2. Otherwise, any `used` entry makes it **positive**.
+3. Otherwise, any `unclear` entry makes it **unresolved**.
+4. Otherwise, the span is **neutral**.
 
-Ignored-entry reasons remain `irrelevant`, `redundant`, `confirming_ignored`,
-`ignored_novel`, or `ignored_unknown_novelty`. They explain absence of a footprint
-and do not determine the span sign.
+Neutral includes selection, reference, ambiguous attribution, unproductive use,
+and no established influence. Python separates ambiguous from unassessed
+attribution using recorded read coverage, not the answer's claim of completeness.
+A mixed beneficial/harmful bundle is negative for review priority. Individual
+signals remain visible. The sign is not net utility.
+
+Ignored-entry reasons are `irrelevant`, `redundant`, `confirming_ignored`,
+`ignored_novel`, or `ignored_unknown_novelty`. They explain the absence of an
+observed effect; they do not decide the span sign.
 
 ## Missing and failed observations
 
-Empty deliveries and unattributed consumers are mechanically counted without
-paid calls. They are `empty` and `unassessable` in aggregates, outside directional
-denominators. Unselected episodes/limited spans are `unjudged`; judge failures are
-`error`. A span with no eligible action step for any entry is rule-judged
-neutral (`auto: no_eligible_step`) and counted as neutral, since no valid
-answer can anchor influence there. Influence null is counted explicitly and excluded from the assessed
-influence-rate denominator, as novelty null is for novelty.
+Empty deliveries and unattributed consumers require no paid calls. Aggregates
+count them as `empty` and `unassessable`, outside verdict-rate denominators.
+Unselected or limited spans are `unjudged`. Judge failures are `error`.
 
-Report v16 and summary v14 distinguish memory-caused work without a contribution
-from no-effect use. In report v23, `read_steps` certifies complete step files and
-their referenced tool-result sections; baseline references do not count as reads.
-Older reports are not silently reinterpreted. See
-[Artifacts](artifacts.md) and [Judge evidence](scoring-input.md).
+If every entry has no eligible action step, the span is rule-neutral with
+`auto: no_eligible_step`. It enters neutral verdict counts but not judge-scored
+rubric, usage, profile, or confidence statistics.
 
-A prior code read that shows a location without stating the remedy does not
-compete with memory that states it. Exact same-item, same-text copies in one
-consuming input are one memory source.
+Unknown influence and novelty are counted explicitly and excluded from their
+assessed-rate denominators. See [artifacts](artifacts.md) for populations.
 
-An explicit task instruction specifying the same concrete action supports none
-when memory adds nothing and there is no credit. A symptom or desired outcome
-does not specify the implementation action.
-Narrative analysis must preserve a null attribution instead of naming either
-competing source as the established cause.
+## Gold and outcome attachments
+
+Gold is one reference solution. It can inform relevance and accuracy, but
+influence and effect still require recorded actions and consequences. Verification,
+environment repair, or avoiding a dead end can help even when absent from gold.
+A matching patch does not prove memory caused the action.
+
+Outcome attachments provide supporting evidence. Local improvement can coexist
+with task failure. An execution without a recorded result proves only an attempt.

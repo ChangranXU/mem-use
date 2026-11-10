@@ -1,19 +1,20 @@
----
-description: "基于 pi 的评审智能体：运行器协议、预算与强制作答、纠正重试与凭证规则。"
-icon: plug
----
-
 # 评审智能体
 
-{% hint style="info" %}
-评审是构建在 [pi](https://github.com/earendil-works/pi) agent 运行时（`@earendil-works/pi-agent-core` + `@earendil-works/pi-ai`）上的智能体，由一个小型 TypeScript 运行器（`agent/runner.ts`）驱动，Python 为区间对话的每个阶段（首次调查，以及每次答案被拒后的跟进）各生成一个进程，各进程通过 `job.history` 延续同一条对话。Python 拥有判定契约；运行器拥有对话。
-{% endhint %}
+[文档目录](README.md) · [English](../en/judge-client.md)
+
+评审是构建在 [pi](https://github.com/earendil-works/pi) agent 运行时（`@earendil-works/pi-agent-core` + `@earendil-works/pi-ai`）上的智能体，由一个小型 TypeScript 运行器（`agent/runner.ts`）驱动，Python 为区间对话的每个阶段（首次调查，以及每次答案被拒后的跟进）各生成一个进程，各进程通过 `job.history` 延续同一条对话。
+
+Python 拥有判定契约；运行器拥有对话。
 
 端点设置见[配置](configuration.md)（先执行一次 `npm --prefix agent install`；PATH 上需要 node ≥ 22.19）。
 
 ## 对话
 
-一个区间、一条对话，作用域限定在其所属 episode。Python 物化该区间的[证据文件夹](scoring-input.md)，从五信号 rubric 组装系统 prompt，写出一个不含密钥的作业文件；运行器用且仅用两个证据工具构建 pi 智能体。开场消息包含确切的目标区间、紧凑文件导航，以及来自 manifest 的必读清单；详细索引与 episode 文件仍可由工具读取。`read_evidence` 每次调用可读取多个完整文件（`paths`），因为每次模型调用都会重发整个对话：读取一个足迹窗口只需一次调用，而不是每个步骤一次。结果文件返回保留与已执行的调用计数、上报用量（含被回滚的轮次）与上下文回滚。操作的 `input` 汇总各阶段已执行的 LLM/工具调用、上报用量与上下文回滚，保留最后一个阶段的保留调用计数，并携带最终的 `forced` 与任意阶段强制的 `any_phase_forced` 标记；停止原因留在轨迹中。
+一个区间、一条对话，作用域限定在其所属 episode。Python 物化该区间的[证据文件夹](scoring-input.md)，从五信号 rubric 组装系统 prompt，写出一个不含密钥的作业文件；运行器用且仅用两个证据工具构建 pi 智能体。开场消息包含确切的目标区间、紧凑文件导航，以及来自 manifest 的必读清单；详细索引与 episode 文件仍可由工具读取。
+
+`read_evidence` 每次调用可读取多个完整文件（`paths`），因为每次模型调用都会重发整个对话：读取一个足迹窗口只需一次调用，而不是每个步骤一次。结果文件返回保留与已执行的调用计数、上报用量（含被回滚的轮次）与上下文回滚。
+
+操作的 `input` 汇总各阶段已执行的 LLM/工具调用、上报用量与上下文回滚，保留最后一个阶段的保留调用计数，并携带最终的 `forced` 与任意阶段强制的 `any_phase_forced` 标记；停止原因留在轨迹中。
 
 调用数必须是非负整数。缺失或格式错误的计数记为 null；某阶段没有返回结果时，
 其保留调用数也记为未知。
@@ -71,6 +72,7 @@ API key 和端点 URL 通过 `JUDGE_API_KEY`、`JUDGE_BASE_URL` 环境变量从 
 传给运行器，两者都不作为配置字段写入作业或结果文件。端点路径可能包含凭证，
 因此 URL 也需要这种保护。key 只发往配置的端点。回显 key 的端点输出会在进入判定、
 `judge_raw` 或 validation 注记前打码，无论它来自 HTTP 错误还是成功响应。
+
 打码覆盖原始 key 及其全部百分号编码拼写，包括两种十六进制大小写。
 子进程不继承 `OPENAI_*` 或 `ANTHROPIC_*` 环境变量，防止这些变量改变提供方的请求头或端点。
 
@@ -78,9 +80,17 @@ API key 和端点 URL 通过 `JUDGE_API_KEY`、`JUDGE_BASE_URL` 环境变量从 
 同一份已打码文件。报告、检查点记录、摘要和 HTML 也在保存前对已配置的密钥打码。
 离线准备和 dry-run 不加载评审凭证。
 
-打码也覆盖密钥本身的 JSON 序列化拼写。Python 在写入作业前对内容打码；运行器在序列化前对轨迹和结果中的字符串打码，因此进程停止也不会留下未打码的完整记录。打码不改变运行器当前对话中的文本。Python 随后再次检查已保存的轨迹，只解析 JSONL 外层并处理字符串字段，不解码字段内看似 JSON 的文本。不完整或格式错误的记录会被移除，保留的轨迹以换行结束，确保下一次尝试可以安全追加；若无法保存打码后的轨迹，则删除该文件，并将区间记录为带有 input 诊断的错误。
+打码也覆盖密钥本身的 JSON 序列化拼写。Python 在写入作业前对内容打码；运行器在序列化前对轨迹和结果中的字符串打码，因此进程停止也不会留下未打码的完整记录。打码不改变运行器当前对话中的文本。Python 随后再次检查已保存的轨迹，只解析 JSONL 外层并处理字符串字段，不解码字段内看似 JSON 的文本。
 
-每次读取为每个文件返回一个以 `==> path <==` 开头的文本块，`details.files` 给出逐文件元数据（`path`、`lines_read`、`line_start`、`line_end`、`truncated`，无法读取的路径则为 `error`），仅统计单次调用 200,000 字符上限内实际返回的文本；超出上限的文件标为未读。`limit` 在文件最后一个非空行之前截止时，结果末尾会注明剩余行数与下一个 offset。分页读取可以合并；`read_steps` 证明完整步骤文本及 manifest `result_sources` 指向的投递结果章节均已返回；开场输入已有的目标投递无需重复读取。标题、截断行、搜索命中和回滚读取不算。每份答案必须完整读取 manifest 中 `required_reads.always` 的文件：任务和基线文件、存在时的 `messages.md` 和 `gold.md`、首次消费步骤及同一 episode 内的前一步（若存在）；基线索引不代表其引用的文件已读；非空 novelty 与 acted_on 影响还须读取 `required_reads.prior_sources` 的全部条目，否则用 null。none/referenced/selected 须检查完整条目窗口，acted_on 的非空效果还须检查至 episode 结束，因为后果可能晚于动作窗口出现。归因或效果未查明时用 influence 或 positive_effect null。完整读取并不证明判定本身正确。
+不完整或格式错误的记录会被移除，保留的轨迹以换行结束，确保下一次尝试可以安全追加；若无法保存打码后的轨迹，则删除该文件，并将区间记录为带有 input 诊断的错误。
+
+每次读取为每个文件返回一个以 `==> path <==` 开头的文本块，`details.files` 给出逐文件元数据（`path`、`lines_read`、`line_start`、`line_end`、`truncated`，无法读取的路径则为 `error`），仅统计单次调用 200,000 字符上限内实际返回的文本；超出上限的文件标为未读。
+
+`limit` 在文件最后一个非空行之前截止时，结果末尾会注明剩余行数与下一个 offset。分页读取可以合并；`read_steps` 证明完整步骤文本及 manifest `result_sources` 指向的投递结果章节均已返回；开场输入已有的目标投递无需重复读取。标题、截断行、搜索命中和回滚读取不算。
+
+每份答案必须完整读取 manifest 中 `required_reads.always` 的文件：任务和基线文件、存在时的 `messages.md` 和 `gold.md`、首次消费步骤及同一 episode 内的前一步（若存在）；基线索引不代表其引用的文件已读；非空 novelty 与 acted_on 影响还须读取 `required_reads.prior_sources` 的全部条目，否则用 null。
+
+none/referenced/selected 须检查完整条目窗口，acted_on 的非空效果还须检查至 episode 结束，因为后果可能晚于动作窗口出现。归因或效果未查明时用 influence 或 positive_effect null。完整读取并不证明判定本身正确。
 
 先前来源包括基线中可见的其他投递的完整段落。manifest 提供
 它们在 `deliveries.md` 中的行范围，开场消息也会列出；分页读取按步骤文件相同的规则合并覆盖。

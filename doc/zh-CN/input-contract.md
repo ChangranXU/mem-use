@@ -1,13 +1,15 @@
----
-description: "轨迹必须包含什么、记忆身份如何定义，以及损坏输入如何处理。"
-icon: file-lines
----
-
 # 输入约定
 
-{% hint style="info" %}
-两个工具都读取 **schema-v10 gate 轨迹**。记忆动作完全来自录制器的 `memory_*` 注解事件——绝不解析提示词、角色名或标签约定。录制器的 `bridge_*` 生命周期事件不产生记忆操作。成功的 bridge 删除若缺少来自同一会话、同一生成操作的 `memory_*` 退役记录，会给出警告；bridge 原生版本 ID 不能替代可移植 MemoryRef。其余 bridge 事件被跳过；`run.json` 记录的 `schema_version` 不是 10 时会给出版本警告，不提供兼容解析器。
-{% endhint %}
+[文档目录](README.md) · [English](../en/input-contract.md)
+
+两个工具读取由 [traj-recorder](https://github.com/ChangranXU/traj-recorder)
+录制的 **schema-v10 gate 轨迹**。请先按
+[memory-bridge](https://github.com/ChangranXU/memory-bridge) 和录制器的文档配置接入。
+
+记忆操作只来自 `memory_*` 注解；工具不会从提示词、角色名或标签中重建操作。
+`bridge_*` 生命周期事件提供 episode 范围和来源，不产生记忆操作，也不能替代
+可移植的 MemoryRef。成功的 bridge 删除若缺少同一会话、同一生成操作的记忆退役
+记录，会给出警告。`run.json` 的 `schema_version` 不是 10 时也会警告；没有兼容解析器。
 
 保留归档轨迹及其原始验证日志。版本警告不会使历史验证失效；重新验证应使用匹配的录制器版本。不要将旧产物的版本号改为 schema 10。
 
@@ -35,7 +37,9 @@ Schema 10 的 `memory_source_set` 保存用于审计的 bridge 来源历史，�
 
 Placement 保留槽位的记录顺序、名称、种类与全文（全文不可用时保留内容摘要）。槽位安排不同，不会合并为同一评审处理；曝光在各槽位内比较，不跨消息拼接。没有泳道被读取时，空 `searches` 合法。空 `placements` 记录零内容；仅部分槽位有大小时，保留已知成本并警告遗漏的部分。
 
-Generation 的 `retired` 引用补充 delete-change 记录，同一版本只计一次。退役可区分的旧版本不会删除当前条目：原始退役仍保留在操作中，但不添加条目删除边或历史。退役当前版本仍会将条目标记为已删除。状态以最新观察到的候选版本为准；不同版本的退役会明确记入说明，因为不透明的版本 ID 不能推断未观察到的更新顺序；同一生成操作为此前已观察到的退役版本产出可区分的替代版本时属于普通更新，不记说明。即使某个引用没有内容摘要，原生版本 ID 仍可确认这种匹配；操作局部 ID 只能通过已记录的摘要比较。同一生成操作中已记录的连续更新所产生的中间版本也适用此规则。重新产出并退役当前版本仍会删除该条目。
+Generation 的 `retired` 引用补充 delete-change 记录，同一版本只计一次。退役可区分的旧版本不会删除当前条目：原始退役仍保留在操作中，但不添加条目删除边或历史。退役当前版本仍会将条目标记为已删除。
+
+状态以最新观察到的候选版本为准；不同版本的退役会明确记入说明，因为不透明的版本 ID 不能推断未观察到的更新顺序；同一生成操作为此前已观察到的退役版本产出可区分的替代版本时属于普通更新，不记说明。即使某个引用没有内容摘要，原生版本 ID 仍可确认这种匹配；操作局部 ID 只能通过已记录的摘要比较。同一生成操作中已记录的连续更新所产生的中间版本也适用此规则。重新产出并退役当前版本仍会删除该条目。
 
 生成操作与每条轨迹的搜索表保留开始和结束事件的 `extensions`；同一命名空间内以结束事件的字段为准。这样原生工具参数可与结果、用量一起提取，无需在每次快照投递中重复搜索元数据。搜索表的 `delivered_by` 引用最终图中的操作 ID。即使召回以空结果完成，已记录的 `error_codes` 也会保留，因此仍能区分原生超时与正常的无匹配结果。
 
@@ -57,11 +61,9 @@ Generation 的 `retired` 引用补充 delete-change 记录，同一版本只计�
 
 适配器扩展（`extensions.cure`）只贡献**展示**投影：key、`memory_type`、confidence、评审状态、needs_verification、拒绝计数、声明的提取步骤。可移植字段仍是回退，因此非 CURE 适配器也能解析。
 
-{% hint style="info" %}
 **区间指纹回退。** 没有可移植版本身份的记忆（`operation_local` 的 version id 配上未摘要的内容）改用投递的 `(namespace, item, value)` 作指纹。被 redact 的内容不记录 value，因此同一 `(namespace, item)` 下不同的 redact 正文会共用一个区间：录制结果无法区分它们。
 
 没有稳定条目键时，图、使用汇总和足迹窗口采用与指纹相同的规范条目身份。因此，更换本地 ID 后采用新处理方式再次投递，在其重新显示早前处理方式的文本时仍会截断该窗口（不同或更窄的已核实文本则不会截断）；稳定条目 ID 则继续跟踪同一条目的不同版本。
-{% endhint %}
 
 ## Agent 步骤
 
@@ -93,6 +95,35 @@ Generation 的 `retired` 引用补充 delete-change 记录，同一版本只计�
 
 同一目录的两种写法只加载一次。匹配不到任何内容的路径会明确报用法错误，绝不静默跳过。
 
+## 恢复运行
+
+memory-bridge 恢复运行后会生成评估清单。将运行目录或其 `evaluation.json`
+传给任一工具，即可选择检查点认可的录制前缀；不含已完成任务的片段不会计入。
+这里的“认可”表示任务执行已完成并写入检查点，不要求 benchmark 测试通过。
+
+| 输入 | 选取的内容 |
+|---|---|
+| 运行目录或 `evaluation.json` | 检查点认可的前缀，适合评估最终保留的运行。 |
+| `evaluation-attempts.json` | 全部尝试，包括后来废弃的工作；清单也可指向恢复注解后的录制副本。 |
+| `evaluation-discarded.json` | 仅检查点之后、未获检查点认可的尝试。 |
+
+例如，将 `path/to/run` 替换为实际运行目录：
+
+```bash
+uv run -m memgraph path/to/run -o memgraph.html
+uv run -m injudge path/to/run/evaluation-attempts.json --prepare-only -o output/
+```
+
+清单用 `after_seq`（不含该序号）和 `through_seq`（包含该序号）选择事件区间；
+省略或为 null 时不限制该边界。原始事件编号和捕获文件保持不变。
+废弃视图仍可利用更早的消息和历史重写重放输入，但只有所选事件产生步骤、episode、
+记忆操作和计费。`recorded_usage` 保留原始录制用量供审计，不会将废弃工作费用
+计入检查点认可的视图。同一录制的不同区间视图需分开运行，不能在一次调用中混用。
+
+清单中的 `recovery_error` 会成为警告，表示记忆审计恢复不完整。
+递归扫描同时发现原始录制和其派生注解副本时，只保留原始录制一次。
+要分析恢复后的注解，显式传入相应清单或副本路径，以保留所选视图。
+
 ## Episode 准备
 
 会话边界和任务文本只使用注释解析器接受的会话。重复或无效的会话记录会产生
@@ -103,7 +134,9 @@ Generation 的 `retired` 引用补充 delete-change 记录，同一版本只计�
 准备阶段保留解析流中的全局 agent step 序号，在每个主泳道
 `turn_start` 重放泳道消息、工具结果消息槽、历史前缀和撤回。一次消息出现的
 身份由解析后的事件位置确定，proof 只对绑定 consumer 输入中可见的出现生效，
-因此被后续重写复用的槽位无法替代 consumer 当时看到的内容。绑定的 delivery
+因此被后续重写复用的槽位无法替代 consumer 当时看到的内容。
+
+绑定的 delivery
 跟随其 consumer call，即使注释在 episode 关闭后才写入；未绑定 delivery
 保留可观察的 episode 范围，但不会伪造 consumer step。
 
@@ -114,17 +147,23 @@ Placement proof 只在绑定 consumer 的输入中解析，不会匹配后续复
 的内容。Placement 可以只占据消息的一部分：已证实的 placement 会从其宿主出现
 中投影出来，与槽位名无关（录制器的 `input_prefix` 与 `system_suffix` 槽位也
 包括在内）；准备阶段保留其余任务或系统文本，仅将记忆部分关联到 delivery。
+
 `canonical_message` 和 `request_json_pointer` proof 均可离线复核。请求指针需要
 绑定调用的 `calls/<call_id>/request.json`、匹配的 JSON 值摘要，以及文本、角色和
-已录制工具调用标识相符的唯一可见宿主消息。支持消息/input 内容、工具输出，以及
+已录制工具调用标识相符的唯一可见宿主消息。
+
+支持消息/input 内容、工具输出，以及
 Anthropic 的 `/system` 和 `/system/N/text`（使用与已录制系统消息块列表相同的
 `message_text` 投影，以换行分隔）；不会把请求
 数组下标当作录制器消息槽位。
 请求缺失或损坏、宿主有歧义、符号链接越出录制目录时，proof 仍保持未解析。
+
 不安全的 placement 归属和 delivery consumer 的上下文缺口会阻止付费评审，并使
 dry-run 返回 2；其他视图中的缺口仍是复核提示。录制器会用下一条消息填补被撤回的
 槽位，因此每个输入在最高可见槽位之前的每个槽位，以及任何 `history_rewritten(kept=k)`
-保留前缀 `0..k-1` 中，都必须有已录制消息；只有末尾的撤回属于已知移除。有效重写会
+保留前缀 `0..k-1` 中，都必须有已录制消息；只有末尾的撤回属于已知移除。
+
+有效重写会
 清除该 lane 之前的提示，旧视图与审计诊断保持不变。无效重写不会被视为已恢复。
 Episode reset 与已证实的 wrapper 移除分别保留来源事件。
 
@@ -135,10 +174,8 @@ Episode reset 与已证实的 wrapper 移除分别保留来源事件。
 
 ## 损坏输入
 
-{% hint style="warning" %}
 畸形 JSONL 行、损坏的 seq、未知的绑定状态、非列表的载荷字段，以及断裂的
 session / operation 链接，都记入 `validation` 与警告，运行继续。
-{% endhint %}
 
 无法使用的命令行附件则会快速失败，抛出针对性的 `SystemExit`：无法读取或
 schema 不匹配的 `--verdicts` 报告，或空的 `--golden` 文件。

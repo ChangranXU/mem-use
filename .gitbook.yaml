@@ -1,3 +1,0 @@
-# GitBook Git Sync reads this file to scope the book's content: the docs
-# live in doc/ (LANGS.md + en/ + zh-CN/, each language with SUMMARY.md).
-root: ./doc

@@ -1,16 +1,13 @@
----
-description: "将记忆操作可视化为自包含的 HTML 图，并可按 injudge 判定着色。"
-icon: share-nodes
----
-
 # memgraph
 
-{% hint style="info" %}
+[文档目录](README.md) · [English](../en/memgraph.md)
+
 memgraph 从注解中提取每个记忆操作，渲染记忆如何被创建、更新、删除与召回——生成单个自包含的 HTML 文件，可离线打开。
-{% endhint %}
+
+在仓库根目录执行；`path/to/recordings` 代表实际录制路径。
 
 ```bash
-uv run -m memgraph <paths> -o memgraph.html --json memgraph.json
+uv run -m memgraph path/to/recordings -o memgraph.html --json memgraph.json
 ```
 
 对每条记忆回答两个问题：由哪个 `(轨迹, 步骤)` 创建，随后被哪个 `(轨迹, 步骤)` 召回。多条运行一起加载时可以看到跨轨迹复用。
@@ -28,17 +25,45 @@ JSON 产物——嵌在 HTML 里的是同一个 dict——的形状是：
 | 集合 | 内容 |
 |---|---|
 | `tool` | 工具身份——`{"name": "memgraph"}`；在 `--verdicts` 下会多出 `verdicts`，即所合并报告的路径。 |
-| `ops` | 记忆操作。`kind` 为 `extract`（生成）或 `recall`（投递）；每个操作锚定在 `(traj, step, seq)`。召回操作带 `searches`（投递的按泳道 `{lane_id, operation_id}` 链接）、`queries`（每条已链接搜索的解析查询）、`placement_kinds`，以及来自其搜索的 `trigger`（`explicit` 表示智能体主动读取，如记忆工具调用；缺省表示调度读取）。绑定了模型调用的操作带 `cost`：由记忆泳道 `call_refs` 得出 `memory_calls` / `prompt_tokens` / `completion_tokens`，由 `embedding_call_refs` 得出 `embedding_calls` / `embedding_tokens`（召回操作汇总其链接的搜索）；任一绑定调用未记录用量时该计数为 `null`。上游为绑定调用报价时（`usage.cost`）出现 `reported_cost`；它从不由 token 估算，任一绑定调用未报价时为 `null`。用量取自每个调用规范化的 `call.json.response.usage`，也覆盖 embedding 调用和无法折叠为消息的调用。操作的 `extensions` 原样保留锚定注释的来源信息，包括 shell 调用 ID 和文件写入尝试；不用于推断记忆身份或成本。候选、投递与删除引用带 `grouping_id`，用于与注册表联结。`episode` 是该操作在其轨迹 `episodes` 中的下标（不在任何已记录 episode 内时为 `null`）。 |
-| `trajectories` | 每个已加载运行一行；`memory_cost` 按 `{generation, search}` 汇总操作成本（每个搜索只计一次，无论是否投递）。`searches` 列出所有已记录的搜索（无论是否投递）：`operation_id`、`lane_id`、`trigger`、解析后的 `query`、`status`、`returned_count`、`delivered_by`（投递它的召回操作）、`cost` 与原样保留的 `extensions`。结果未到达模型的智能体主动读取，其 `delivered_by` 为空。`episodes` 按顺序列出已记录的 episode 范围——`episode_id`、`sequence_id`、`status`（`prepared` / `needs_review` / `incomplete`）以及全局 `first_step` / `last_step`——取自 bridge 的 `bridge_episode_open`/`close` 事件（否则取 episode 级 `memory_session` 事件），与 injudge 准备 episode 所用的范围规则相同；记录未命名任何 episode 时为空。 |
-| `memories` | 每个稳定条目身份一条记录：通常是 `(namespace, item_id)`，否则采用输入约定中的显示键或内容摘要回退。每条记录包含来源、创建位置、后续更新、召回与删除历史——`deletions` 列出每一次观察到的删除（重新创建会标记 `revived`，绝不抹除历史），`deleted` 是终态。 |
+| `ops` | 记忆生成与召回操作，锚定到轨迹、步骤和序号。 |
+| `trajectories` | 已加载运行、搜索记录、episode 范围与记忆成本。 |
+| `memories` | 按稳定条目身份保存来源、更新、召回和删除历史。 |
 | `edges` | 从操作指向记忆的关系：`creates`、`supersedes`、`deletes`、`recalls`。 |
 | `validation` | 本次运行的 `{level, msg}` 说明（`error` / `warn` / `info`），覆盖损坏或被跳过的输入、归属缺失，以及判定连接不匹配。 |
+
+### 操作字段
+
+`kind` 为 `extract`（生成）或 `recall`（投递）；每个操作锚定在 `(traj, step, seq)`。
+
+召回操作带 `searches`（投递的按泳道 `{lane_id, operation_id}` 链接）、`queries`（每条已链接搜索的解析查询）、`placement_kinds`，以及来自其搜索的 `trigger`（`explicit` 表示智能体主动读取，如记忆工具调用；缺省表示调度读取）。
+
+绑定了模型调用的操作带 `cost`：由记忆泳道 `call_refs` 得出 `memory_calls` / `prompt_tokens` / `completion_tokens`，由 `embedding_call_refs` 得出 `embedding_calls` / `embedding_tokens`（召回操作汇总其链接的搜索）；任一绑定调用未记录用量时该计数为 `null`。
+
+上游为绑定调用报价时（`usage.cost`）出现 `reported_cost`；它从不由 token 估算，任一绑定调用未报价时为 `null`。用量取自每个调用规范化的 `call.json.response.usage`，也覆盖 embedding 调用和无法折叠为消息的调用。
+
+操作的 `extensions` 原样保留锚定注释的来源信息，包括 shell 调用 ID 和文件写入尝试；不用于推断记忆身份或成本。候选、投递与删除引用带 `grouping_id`，用于与注册表联结。`episode` 是该操作在其轨迹 `episodes` 中的下标（不在任何已记录 episode 内时为 `null`）。
+
+### 轨迹字段
+
+每个已加载运行一行；`memory_cost` 按 `{generation, search}` 汇总操作成本（每个搜索只计一次，无论是否投递）。
+
+`searches` 列出所有已记录的搜索（无论是否投递）：`operation_id`、`lane_id`、`trigger`、解析后的 `query`、`status`、`returned_count`、`delivered_by`（投递它的召回操作）、`cost` 与原样保留的 `extensions`。结果未到达模型的智能体主动读取，其 `delivered_by` 为空。
+
+`episodes` 按顺序列出已记录的 episode 范围——`episode_id`、`sequence_id`、`status`（`prepared` / `needs_review` / `incomplete`）以及全局 `first_step` / `last_step`——取自 bridge 的 `bridge_episode_open`/`close` 事件（否则取 episode 级 `memory_session` 事件），与 injudge 准备 episode 所用的范围规则相同；记录未命名任何 episode 时为空。
+
+### 记忆字段
+
+每个稳定条目身份一条记录：通常是 `(namespace, item_id)`，否则采用输入约定中的显示键或内容摘要回退。每条记录包含来源、创建位置、后续更新、召回与删除历史——`deletions` 列出每一次观察到的删除（重新创建会标记 `revived`，绝不抹除历史），`deleted` 是终态。
+
+### 模型调用成本
 
 记忆模型调用的成本还保留 recorder 的 `cached_tokens`（缓存读取）、
 `cache_write_tokens`、`cache_write_1h_tokens`（写入中的一小时缓存部分）和
 `reasoning_tokens`。这些都是输入或输出 token 的子集，不会再次加到成本或
 injudge 的输入预算中。recorder 可以省略零值的缓存读取和推理计数，但缓存写入
-保留显式零值。写入计数缺失或无效时为 `null`；任何绑定调用缺少该计数时，
+保留显式零值。
+
+写入计数缺失或无效时为 `null`；任何绑定调用缺少该计数时，
 相应汇总也为 `null`。HTML 的 raw JSON 面板同样显示操作成本。
 这里不重新解析响应正文，也不根据价格表估算费用。
 
@@ -96,10 +121,10 @@ injudge 的输入预算中。recorder 可以省略零值的缓存读取和推理
 | 灰色 | neutral |
 | 琥珀色 | error |
 
-合并判定后，未评审的召回淡化为浅蓝色以突出已评审区间；页眉加上判定计数，并把机械跳过（`unassessable`、`empty`）单独列出；点击某个已评审判定的计数会依次放大定位到该判定的每个区间。点击图例行中的某个判定会把行过滤为含有该判定召回的 episode（可多选，再次点击取消）。选中某条记忆或在详情面板打开某个节点时，与之关联的 episode 也会以虚线框显示；取消选择后它们随之消失。召回的详情面板展示所覆盖各区间的判定、评审分析、每条投递条目一行（使用情况与 R/A/N/I/P 评分标记）、引用的证据，以及该区间的输入记录（`agent` 路径，含 gold / forced 标记与尝试次数）。
+合并判定后，未评审的召回淡化为浅蓝色以突出已评审区间；页眉加上判定计数，并把机械跳过（`unassessable`、`empty`）单独列出；点击某个已评审判定的计数会依次放大定位到该判定的每个区间。点击图例行中的某个判定会把行过滤为含有该判定召回的 episode（可多选，再次点击取消）。选中某条记忆或在详情面板打开某个节点时，与之关联的 episode 也会以虚线框显示；取消选择后它们随之消失。
 
-{% hint style="info" %}
+召回的详情面板展示所覆盖各区间的判定、评审分析、每条投递条目一行（使用情况与 R/A/N/I/P 评分标记）、引用的证据，以及该区间的输入记录（`agent` 路径，含 gold / forced 标记与尝试次数）。
+
 未匹配或有歧义的连接记为 validation 说明。已加载的图或报告中若有多条轨迹共享同一 `run_id`，就会跳过该 run 的全部连接，即使序号各不相同。同一 `(run_id, seq)` 被多条报告注入或召回操作占用时，也会跳过该键。图仍会渲染。报告的 ID 或引用无效时，在合并前失败。
-{% endhint %}
 
 普通图渲染和完整报告叠加不加载评审提示词。恢复未完成报告时，才加载报告构建器来重建汇总。

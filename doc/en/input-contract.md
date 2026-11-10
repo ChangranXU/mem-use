@@ -1,172 +1,275 @@
----
-description: "What a trajectory must contain, how memories are identified, and how corrupt input is handled."
-icon: file-lines
----
+# Prepare supported input
 
-# Input Contract
+[Guide index](README.md) · [简体中文](../zh-CN/input-contract.md)
 
-{% hint style="info" %}
-Both tools read **schema-v10 gate trajectories**. Memory actions come exclusively from the recorder's `memory_*` annotation events — prompt text, role names, and label conventions are never parsed. The recorder's `bridge_*` lifecycle events do not create memory operations. A successful bridge delete without a `memory_*` retirement from its same-session, same-operation generation produces a warning, since bridge-native revision IDs cannot substitute for portable MemoryRefs. Other bridge events are skipped; a `run.json` recording a `schema_version` other than 10 produces a version warning.
-{% endhint %}
+MemUse requires **memory-bridge and traj-recorder**. Record schema-v10 gate
+trajectories with portable memory annotations and agent-input evidence.
+`memory-bridge` supplies episode scope and memory-system integration.
+`traj-recorder` captures the annotations, calls, and placement evidence that
+`memgraph` and `injudge` read.
 
-Preserve archived trajectories and their original verification logs. A version
-warning does not invalidate that historical verification; re-verification requires
-the matching recorder revision. Do not relabel old artifacts as schema 10.
+Both tools derive memory operations only from `memory_*` annotations. They do
+not infer operations from prompts, role names, or adapter labels. Bridge
+lifecycle events supply scope and provenance; they do not create memory
+operations.
 
-`injudge --prepare-only` is the offline episode preparation path. Episode scope
-comes from a `bridge_episode_open` / `bridge_episode_close` pair, or — when
-none is recorded — from an episode-scoped `memory_session`; either way the
-lifecycle events supply scope and provenance only, and memory operations and
-MemoryRefs remain annotation-only. The preparation artifact records unresolved
-boundaries and assignment gaps.
+## Input paths
 
-A trajectory without annotations is valid input: the run yields zero memory operations plus a validation note, not an error.
+Each CLI path can be:
 
-Schema 10's `memory_source_set` events preserve bridge source history for audits.
-They are not memory operations or agent-visible deliveries. memgraph and injudge
-continue to use the recorded `memory_*` actions, portable MemoryRefs, and placement
-evidence; source snapshots do not change identity, cost, exposure, or scoring.
-Use traj-recorder's verifier to check snapshot hashes, scope, and references.
+- a directory containing `trajectory.jsonl`;
+- a `trajectory.jsonl` file;
+- a root directory to scan recursively for `trajectory.jsonl` files.
 
-## Annotation Events
+The same directory under different path spellings is loaded once. A path with
+no matching trajectory is a usage error.
 
-| Event family | Recorded action |
+A trajectory with no memory annotations is valid input. It produces zero memory
+operations and a validation note. A `run.json` with a schema version other than
+10 produces a warning. Keep historical recordings and their original verifier
+logs unchanged. Reverification needs the matching recorder revision; do not
+relabel older artifacts as schema 10.
+
+## Resumed runs
+
+For a resumed memory-bridge run, pass the run directory containing
+`evaluation.json`, or the manifest itself, to either tool:
+
+```bash
+uv run -m memgraph path/to/run/evaluation.json -o memgraph.html
+uv run -m injudge path/to/run/evaluation.json --prepare-only -o output/
+```
+
+The manifest follows the recording segments and selects the completed history
+credited by the checkpoint. It omits segments with no completed tasks. This keeps
+discarded memory updates out of the resumed store's history. A completed task
+with a failing benchmark score still belongs to the credited history.
+
+| Manifest | Selected events |
 |---|---|
-| `memory_session` / `memory_role_bind` | Session metadata and lane bindings |
-| `memory_generate_*` | Memory creation (produced and retired refs) |
-| `memory_change` | Lifecycle updates and deletions |
-| `memory_search_*` | Retrieval, one operation per read lane (`lane_id`) |
-| `memory_delivery` | Recall injection: one `searches` entry per read lane, one `placements` entry per rendered slot. Only a delivery recorded `status: "placed"` yields a recall op; any other status is warned about and skipped |
+| `evaluation.json` | Checkpoint-credited parent prefixes and completed resumed work. |
+| `evaluation-attempts.json` | All attempts, including discarded work and recovered observations. |
+| `evaluation-discarded.json` | Interrupted or uncheckpointed work after the checkpoint. |
 
-The optional logical `embedding` role binds a separate proxy lane. Generation/search ends may record its own cursor, `embedding_call_refs`, and `embedding_binding_status`; these never replace the memory call references or create agent steps. A recorded embedding cursor requires both status and refs, including an explicit empty `embedding_call_refs` list for `no_call`. Malformed embedding bindings produce validation warnings.
+These use schema `memory-bridge.evaluation/v1`. Each segment's `after_seq` is
+exclusive and `through_seq` is inclusive. Missing or null bounds are unbounded.
+Load one view at a time; conflicting bounds for the same recording fail.
 
-Placement slots retain their recorded order, names, kinds, and text (or content digest when text is unavailable). Different slot arrangements never merge into one judged treatment; exposure is compared within each slot, not across concatenated messages. Empty `searches` is valid when no lane was read. An empty `placements` list records zero content; partially sized deliveries count known sizes and warn about omitted cost.
+Original calls remain available for placement proofs and cost bindings. Earlier
+messages can remain for input replay, but only selected events supply steps,
+episodes, operations, and charges. Views that exclude events use selected
+message billing, without whole-run snapshots or charges from context-only
+messages. Graph `recorded_usage` retains the original `run.json` usage for audit.
+Unknown tool-service charges remain unknown.
 
-Generation `retired` refs supplement delete-change records without counting the same revision twice. Retiring a distinguishably older revision leaves the current item alive: the raw retirement stays on the operation, but creates no item-deletion edge or history entry. Retiring the current revision still deletes the item. State follows the latest observed candidate; a differing retirement is noted explicitly because opaque revision IDs cannot order unobserved updates, unless the same generation produced a distinguishably different replacement for the previously observed revision it retires (an ordinary update). Native revision IDs establish that match even when one ref omits its content digest; operation-local IDs compare only through recorded digests. This also covers intermediate revisions in a recorded chain of updates within one generation. Re-emitting and retiring the current revision still deletes it.
+Recovery copies contain explicit schema-v10 annotations validated by
+traj-recorder. The evaluator does not infer memory actions from shell commands
+or prompt text. A manifest `recovery_error` produces an incomplete-audit warning
+in graph and judge diagnostics.
 
-Generation operations and the per-trajectory search table preserve both start and terminal `extensions`; terminal fields take precedence within each namespace. This retains native tool arguments beside outcomes and usage without repeating search metadata on every snapshot delivery. The search table's `delivered_by` entries name the final graph operation IDs. Recorded `error_codes` remain available even for completed empty recalls, so a native timeout stays distinguishable from a clean no-match.
+A recursive scan that finds an original recording and its recovery copy counts
+the original once. Select `evaluation-attempts.json` explicitly to include
+recovered observations. An explicitly selected copy or manifest keeps its
+requested view. Attempts and discarded views audit execution history; they do
+not represent only the continued store's lifecycle.
 
-## Memory Identity
+## Annotation events
 
-Memories are identified by the recorder's portable MemoryRef fields, never by adapter vocabulary.
+| Event family | Meaning |
+|---|---|
+| `memory_session`, `memory_role_bind` | Session metadata and lane bindings. |
+| `memory_generate_*` | Memory generation, including produced and retired references. |
+| `memory_change` | Lifecycle updates and deletion. |
+| `memory_search_*` | Retrieval, one operation per read lane (`lane_id`). |
+| `memory_delivery` | Recall delivery, with searches per read lane and placements per rendered slot. Only `status: "placed"` creates a recall operation. Other statuses are warned about and skipped. |
+| `memory_source_set` | Source-history audit snapshots. These create no memory operation or agent-visible delivery. |
 
-| Layer | Key | Used for |
+Use traj-recorder's verifier to check source-snapshot hashes, scope, and
+references. Source snapshots do not change identity, exposure, cost, or scores.
+
+A successful bridge delete without a matching `memory_*` retirement from the
+same session and operation generation produces a warning. Native bridge
+revision IDs cannot replace portable MemoryRefs. Other bridge lifecycle events
+are skipped when extracting memory operations.
+
+The optional `embedding` role binds a separate proxy lane. Generation and search
+ends can include its cursor, `embedding_call_refs`, and
+`embedding_binding_status`. These do not replace memory call references or
+create agent steps. A cursor requires status and references, including an
+explicit empty list for `no_call`. Invalid bindings produce warnings.
+
+### Placements and searches
+
+Placements retain their recorded order, name, kind, and text, or digest when
+text is unavailable. Different slot arrangements are different treatments.
+Exposure is checked within each slot, not across concatenated messages.
+
+Empty `searches` is valid when no lane was read. Empty `placements` means no
+content was placed. If only some placement sizes are known, cost includes
+those sizes and warns about the missing amount.
+
+Generation operations and search-table records retain start and terminal
+`extensions`. Terminal fields take precedence within each namespace. Search
+`delivered_by` records use final graph operation IDs. `error_codes` remain
+available even on completed empty recalls, so a timeout remains distinct from
+a clean no-match result.
+
+### Retired versions
+
+Generation `retired` references supplement deletion changes without counting
+a revision twice. Retiring a distinguishably older version keeps the current
+item alive. The operation retains the retirement, but the item gets no deletion
+edge or deletion history entry. Retiring the current version deletes it.
+
+State follows the latest observed candidate. Opaque revision IDs cannot order
+unobserved updates. A different retirement therefore produces a note, except
+when the same generation replaces the known version it retires. Native version
+IDs can establish this match when one reference lacks a digest. Operation-local
+IDs compare only through recorded digests. These rules also apply to intermediate
+versions within one generation. Re-emitting and retiring the current version
+still deletes it.
+
+## Memory identity
+
+Portable MemoryRef fields define identity. Adapter vocabulary does not.
+
+| Layer | Identity | Use |
 |---|---|---|
-| Item | `(namespace, item_id)` or a stable display key | Graph registry, usage roll-ups, and footprint windows. Stable across versions; an operation-local ID used as a display key is withheld. |
-| Content fallback | Canonical entry with local IDs withheld | Cross-operation grouping when only an operation-local display key is available. Same content under a fresh local ID groups together; different content stays separate. |
-| Version | `namespace` / `identity_scheme` / `version_id` / content sha256, plus the recorded item identity (`item_id`, else the display-key fallback) | Span fingerprints and candidate deduplication. |
+| Item | `(namespace, item_id)`, with a stable display-key fallback | Registry, usage totals, and action windows across versions. |
+| Content fallback | Canonical entry with operation-local IDs removed | Grouping when no stable item key exists. Equal content under fresh local IDs can group; different content stays separate. |
+| Version | Namespace, identity scheme, version ID, content digest, and recorded item identity | Span fingerprints and candidate deduplication. |
 
-The same display key minted by two stores — or held by two items in one store — is two distinct memories.
+The same display key in two stores, or on two distinct items in one store, does
+not make them one memory. An operation-local display ID is never a stable item
+identity.
 
-Delivery/search integrity additionally compares each MemoryRef's `lane_id`, matching the recorder's lane-scoped identity. Returned memories must belong to the searched lane; identical versions from another lane cannot satisfy a delivery's ordered-subsequence check.
+If the only version identity is operation-local and the content has no digest,
+the span fingerprint uses delivered namespace, item, and value. Redacted bodies
+with the same namespace/item have no recorded value to distinguish them.
 
-The searched lane comes from the search start, and lane disagreement is checked only when both lane IDs are strings. Foreign-session search links remain visible but supply no query or match count. Repeated operation links contribute queries and match counts only once, while the recorded links remain visible. Duplicate or unresolvable links invalidate the delivery's subsequence check instead of widening its search results.
+Without a stable item key, the registry, usage totals, and action windows use
+the canonical content entry. A changed treatment under a fresh local ID can
+end an earlier window when it re-exposes all the earlier text. Different or
+narrower verified text leaves that window open. Stable item IDs continue to
+track versions of the same item.
 
-Adapter extensions (`extensions.cure`) contribute a **display** projection only: key, `memory_type`, confidence, review status, needs_verification, rejection counts, and the declared extraction step. The portable fields remain the fallback, so a non-CURE adapter still parses.
+### Delivery/search integrity
 
-{% hint style="info" %}
-**Span fingerprint fallback.** A memory with no portable version identity (an `operation_local` version id over undigested content) fingerprints on the delivered `(namespace, item, value)` instead. Redacted content records no value, so distinct redacted bodies under one `(namespace, item)` share a span: nothing recorded can tell them apart.
+Integrity checks include the MemoryRef's `lane_id`. A returned item must belong
+to the searched lane. The same version from another lane cannot satisfy a
+delivery's ordered-subsequence check.
 
-Without a stable item key, the graph, usage roll-ups, and footprint windows use the same canonical entry as the fingerprint. A new treatment under a fresh local ID therefore bounds the earlier treatment's window when it re-exposes that treatment's text (a different or narrower verified text leaves it open); stable item IDs still track revisions of the same item.
-{% endhint %}
+The search start defines its lane. Lane disagreement is checked when both IDs
+are strings. Foreign-session links stay visible but add no query or match
+count. Repeated links contribute query/count information once. Duplicate or
+unresolved links invalidate the subsequence check instead of broadening the
+candidate set.
 
-## Agent Steps
+`extensions.cure` supplies display fields only: key, memory type, confidence,
+review status, verification need, rejection counts, and declared extraction
+step. Portable fields remain the fallback for other adapters.
 
-Operations are attributed to **agent steps**: the 1-based ordinal of a completed turn on the agent's own lane. Lanes come from `memory_role_bind`; with no recorded memory binding they come from the operation events' own lanes, minus the lanes session and delivery events stamped, with a warning. Turns on a memory lane — the memory system's own extractions and searches — are not agent steps.
+## Agent steps
 
-A lane that carries main traffic in **any** session is not a memory lane: it is dropped from the memory-lane set with a warning, and its turns count as agent steps.
+An agent step is the 1-based ordinal of a completed turn on the agent's lane.
+Memory extraction and search turns are not agent steps. Lane bindings come
+from `memory_role_bind`.
 
-A side lane (bound as neither main nor memory — for example an unbound query-rewrite lane) counts as neither an agent step nor a memory turn. Such lanes are derived and listed in `validation` only when main-side evidence exists; without it every lane stays agent traffic.
+Without a recorded memory binding, the parser uses operation lanes, excluding
+lanes stamped by session and delivery events, and warns. A lane that carries
+main traffic in any session is removed from the memory-lane set and warned
+about. Its turns count as agent steps.
 
-Attribution rules:
+A side lane bound as neither main nor memory counts as neither an agent step
+nor a memory turn. Side-lane classification requires main-side evidence.
+Without that evidence, all lanes remain agent traffic.
 
-- An extraction observed before the first agent turn completes is step `0`.
-- Later extractions and rewrite markers use the ordinal of the most recently classified agent turn, including when pipelined responses complete out of turn order.
-- A delivery that cannot be attributed to any agent turn has `step = None`. It can merge only with other unattributable deliveries under the same-treatment span rule. Such a span has no grounded downstream footprint and is rule-judged neutral (see [injudge](injudge.md#injection-spans)).
+Attribution follows these rules:
 
-A delivery naming a consumer call whose turn is missing or unclassified stays unattributable. It cannot fall back to an earlier or declared step.
+- Extraction before the first completed agent turn is step `0`.
+- Later extractions and rewrite markers use the most recently classified
+  agent turn, including pipelined responses that finish out of turn order.
+- A delivery without an attributable consumer has `step = None`. It cannot
+  inherit an earlier or declared step when its named consumer is missing.
 
-Graph attribution and input replay use the first `turn_start` for each turn.
-A call ID shared by distinct turns identifies no consumer. A graph step alone
-does not prove the consumer's input. A nonempty, attributed delivery needs a
-recorded consumer input. If that input is unavailable, judging stops before
-any paid call.
-
-## Input Paths
-
-Each CLI path may be:
-
-- a trajectory directory containing `trajectory.jsonl`,
-- a `trajectory.jsonl` file, or
-- a root directory scanned recursively for `trajectory.jsonl` files.
-
-The same directory under two spellings is loaded once. A path that matches nothing is a usage error, named explicitly — never a silent skip.
+A call ID shared by distinct turns identifies no consumer. Graph attribution
+and input replay use the first `turn_start` for each turn. A graph step alone
+does not prove consumer input. A nonempty attributed delivery needs that input
+before judging can proceed.
 
 ## Episode preparation
 
-Session boundaries and task text use only the sessions accepted by the
-annotation parser. Repeated or invalid session records produce diagnostics;
-they cannot split an episode or add task text.
-Searches without a delivery use only accepted search starts for episode
-assignment; rejected starts cannot create or move a search.
+Run preparation before judging a new adapter or API format:
 
-Preparation keeps the global agent-step ordinals from the parsed stream. It
-replays lane-specific message occurrences at each main-lane `turn_start`,
-including tool-result message slots, history prefixes, and retractions. A
-message occurrence is identified by its parsed event position, and a proof
-resolves only against occurrences visible in the bound consumer's input, so a
-slot reused by a later rewrite cannot stand in for what the consumer saw. A
-bound delivery follows its consumer call even when the annotation was
-written after the episode close; an unbound delivery retains its observed
-scope but has no manufactured consumer step.
+```bash
+uv run -m injudge path/to/recordings --prepare-only -o output/
+```
 
-Both graph and judge apply the recorded episode/session constraints and the
-accepted participant mapping to an unbound delivery. Source position alone
-cannot override those recorded identities.
+Episodes use `bridge_episode_open` / `bridge_episode_close` boundaries. When
+no bridge episode is recorded, an episode-scoped `memory_session` can supply
+the boundary. Preparation preserves unresolved boundaries and assignments
+for review. Memory operations and MemoryRefs still come only from annotations.
 
-Placement proofs resolve only within the bound consumer's input, never against
-a later reuse of the same message slot. A placement can occupy part of a
-message: a proven placement is projected out of its host occurrence,
-whatever its slot name (the recorder's `input_prefix` and `system_suffix`
-slots included), the surrounding task or system text staying with the
-message while only the memory portion links to the delivery. Both
-`canonical_message` and `request_json_pointer` proofs can be verified offline.
-Request pointers require the bound call's `calls/<call_id>/request.json`, a
-matching JSON-value digest, and a unique visible host message with matching
-text, role, and tool-call identity when recorded. Supported request fields
-include message/input content, tool output, and Anthropic `/system` or
-`/system/N/text` (using the same `message_text` projection as recorded system
-block lists, with newline separators). Wire indexes are
-never treated as recorder message slots. Missing or corrupt requests, ambiguous
-hosts, and out-of-root symlinks leave the proof unresolved. Unsafe placement
-ownership and gaps in delivery consumers' context block paid judging and make
-dry-run exit 2; gaps in unrelated views remain review notes. The recorder
-refills a retracted slot, so each input must hold a recorded message in every
-slot through its highest visible slot and in any retained
-`history_rewritten(kept=k)` prefix `0..k-1`; only a retracted tail is a known
-removal. A valid rewrite clears the lane's earlier notes; earlier views and
-audit diagnostics remain intact. Invalid rewrites cannot establish recovery.
-Episode resets and proven wrapper removals retain separate source events.
+Only sessions accepted by the annotation parser can supply boundaries or task
+text. Repeated or invalid session records cannot split episodes or add tasks.
+Undelivered searches use only accepted search starts for assignment.
 
-Recorder-valid `not_in_request` and `adapter_defined` declarations do not prove
-how a placement reached the agent's captured input. They and missing binding
-proofs remain unsupported for input-grounded judging, rather than being treated
-as resolved or harmless by default. Offline preparation still preserves their
-audit records for review. Use `--prepare-only` before judging a new adapter or
-API format; recorder validity alone does not establish evaluator support.
+Preparation keeps global step numbers. At each main-lane `turn_start`, it
+replays lane-specific message occurrences, tool-result slots, retained history,
+and retractions. Each occurrence is identified by its parsed event position.
+A reused slot after a rewrite cannot stand for the text in an earlier input.
 
-## Corrupt Input
+A bound delivery follows its consumer call even if its annotation appears
+after episode close. An unbound delivery retains its recorded scope without
+an invented consumer step. Graph and judge both apply recorded episode/session
+constraints and accepted participant mappings. File position cannot override
+those identities.
 
-{% hint style="warning" %}
-Malformed JSONL lines, corrupt seqs, unknown binding statuses, non-list payload
-fields, and broken session or operation links land in `validation` and
-warnings; the run continues.
-{% endhint %}
+## Placement proof and input gaps
 
-An unusable CLI attachment fails fast instead, with a targeted `SystemExit`:
-an unreadable or wrong-schema `--verdicts` report, or an empty `--golden` file.
+A placement proof must resolve within the bound consumer's input. The evaluator
+removes only the proven memory portion from its host. Surrounding task and
+system text remain. This includes `input_prefix` and `system_suffix` slots.
 
-The event stream keeps file order. File positions determine operation order,
-fallback step attribution, and delivery/search order checks. A missing or
-non-integer seq gets a synthetic seq one past the highest seen so far.
-Non-increasing seq values produce warnings; they do not change event order.
+Supported offline proof types are `canonical_message` and `request_json_pointer`.
+A request pointer needs:
+
+- the bound call's `calls/<call_id>/request.json`;
+- a matching digest of the JSON value;
+- one unique visible host with matching text, role, and recorded tool-call identity.
+
+Supported request fields include message/input content, tool output, and
+Anthropic `/system` or `/system/N/text`. System block lists use the recorder's
+`message_text` projection with newline separators. Wire indexes are not recorder
+message slots.
+
+Missing or corrupt requests, ambiguous hosts, and symlinks outside the recording
+root leave proof unresolved. Recorder-valid `not_in_request` and
+`adapter_defined` declarations do not prove captured input exposure. Missing
+binding proofs also remain unsupported for input-grounded judging. Preparation
+preserves their audit records; recorder validity alone is not evaluator support.
+
+Unsafe ownership or a gap in a delivery consumer's input blocks paid judging
+for the episode and makes dry-run exit with status `2`. Gaps in unrelated input
+views remain review notes.
+
+The recorder refills retracted slots. Each input therefore needs every message
+slot through its highest visible slot and every slot in a retained
+`history_rewritten(kept=k)` prefix `0..k-1`. Only a retracted tail is a known
+removal. A valid rewrite clears earlier lane notes for later views; earlier
+views and audit diagnostics remain. An invalid rewrite cannot prove recovery.
+Episode resets and proven wrapper removals keep separate source events.
+
+## Corrupt input
+
+Malformed JSONL, invalid sequence numbers, unknown binding statuses, non-list
+payload fields, and broken links produce validation diagnostics. Parsing
+continues where possible.
+
+File order controls operations, fallback attribution, and delivery/search order
+checks. A missing or non-integer sequence number gets a synthetic value one
+above the highest seen. Non-increasing values produce warnings; they do not
+reorder events.
+
+CLI and attachment errors fail before paid calls. Examples include an unreadable
+or wrong-schema `--verdicts` report and an empty `--golden` file.

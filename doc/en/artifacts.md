@@ -1,444 +1,418 @@
----
-description: "injudge.report/v27, injudge.summary/v19, every field, and how every rate is counted."
-icon: box-archive
----
+# Read outputs and metrics
 
-# Artifacts
+[Guide index](README.md) · [简体中文](../zh-CN/artifacts.md)
 
-The current schemas are report v27 and summary v19. Version 27 adds span entry-share
-profiles, equal-span aggregates, episode coverage, and recorded model billing.
-It does not change the judge rubric, triage rules, or ownership. Summary v19
-includes these statistics. Report v26 also keeps the
-first owner when a later copy shows equal or shorter text (a preview of a
-still-visible full read), and rule-judges a span whose entries have no eligible
-action step as neutral (`auto: no_eligible_step`) without a judge call. Its
-verdict counts match what the judge would derive, but rubric, usage, and
-confidence rollups now cover only judge-scored spans, so they are not directly
-comparable with v25. Same-turn copies that add a shown selector keep that
-turn eligible. The influence rule also assigns shared content to the later
-window after a same-item handoff without requiring selection; affected
-judgments can change and should not be pooled with older prompt results.
-Report v25 splits unknown
-influence by what the judge read: over a completely read window it is
-`ambiguous` attribution and derives neutral; otherwise it stays `unclear` and
-unresolved. Verdict counts are not directly comparable with v24 (unresolved
-shrinks, neutral grows; positive and negative are unchanged).
-Report v24 keeps the first
-credit owner for identical exposed text while a proven copy remains in the
-consumer input, and records `memory_window_owners` for suppressed copies.
-A break in proven visibility starts a new span with its own input baseline.
-It preserves different-text and proven selected-full-read handoffs.
-Influence, effect, and verdict counts are not directly comparable with v23.
-Report v23 certifies
-referenced result sections as part of complete step reads. It also tightens effect
-evidence: an agent-invented lookup identifier does not itself establish memory
-harm, and a generic passing test count does not establish benefit. Effect and
-verdict counts from v22 and earlier are not directly comparable with v23.
-Report v22 introduced
-the completed-span checkpoint journal without changing rubric labels. Report v20 changed how
-influence is attributed: an action credits memory only when it uses content
-absent from the recorded input before exposure. Influence null no longer means
-"another source explains it equally" (see
-[Verdict derivation](verdict-derivation.md)). Influence, effect, and verdict
-counts from v19 and earlier are not comparable with v20 and later. The v20 change
-kept the artifact shape and summary schema v17; v19 had removed the aggregate
-`headline` block.
-A bundle can contain both useful and harmful entries, so its verdict cannot
-measure how many tokens helped.
+Start with `summary.md` for a MemUse run. Use `summary.json` to compare counts
+and rates. Use `injudge-report.json` to inspect individual judgments, evidence,
+and diagnostics.
 
-Report v22 also removes the duplicate `input.retained_llm_calls` and
-`input.retained_tool_calls` fields. `llm_calls` and `tool_calls` count the
-conversation retained after the last phase. Their values are null when that
-phase has no result. Executed counts still include all phases and discarded
-rounds.
+The current schemas are `injudge.report/v27`, `injudge.summary/v19`,
+`injudge.episode-inputs/v5`, and `injudge.checkpoint/v1`.
+Memgraph and calibration accept only the current report schema. Keep older
+reports with their matching code. Do not combine scores from different rubric
+or evidence rules as if they used one method version.
 
-The report and summary distinguish harm from memory guidance and failures in
-execution. A memory-misdirected detour that is abandoned or corrected without a
-used finding is harm. An agent typo, missing tool, or unrelated environment
-failure alone does not prove memory harm; follow corrected attempts to their
-results. Report v17 introduced this distinction; harm counts from v16 are not
-directly comparable. Do not combine effect labels or rates from different scoring versions.
-Older reports remain historical artifacts; memgraph and calibration accept
-only report v27. Use the matching older code to load historical reports.
+## Run files
 
-{% hint style="info" %}
-injudge writes all artifacts of a run to that run's own `<run-stamp>/` folder under the output container (`-o DIR`, default `output/`) — a run never overwrites another run's artifacts.
-{% endhint %}
+Each run gets a new `<run-stamp>/` folder under `-o DIR`, which defaults to
+`output/`. The stamp uses the local clock: `YYYYMMDD-HHMMSS-<hex>`.
+Artifact `generated_at` timestamps use UTC. Summaries copy the report timestamp.
 
-| File | Schema | Role |
-|---|---|---|
-| `injudge-report.json` | `injudge.report/v27` | Initial snapshot with pending spans marked `unjudged`, then a complete snapshot when the run ends. During judging, `checkpoint_journal` names the file with completed results. Feed the report to memgraph with `--verdicts`. |
-| `injudge-checkpoints.jsonl` | `injudge.checkpoint/v1` | One appended record per completed span. Required while the report has a `checkpoint_journal` field; retained for audit after completion. |
-| `summary.json` | `injudge.summary/v19` | Compact final statistics: counts, rates, delivery estimates, and judge execution totals. |
-| `summary.md` | — | Short readable summary of the same totals, the spans to inspect first, diagnostic counts, and links to the JSON files. |
-| `memgraph-verdicts.html` | — | Only with `--html` (off by default): memgraph with recall nodes colored by span verdict. |
-| `evidence/<span-dir>/` | — | One folder per span the judge agent ran for: the exact files available to it. |
-| `agent-runs/<span-dir>.jsonl` | — | One trajectory per span sent to the judge agent: the pi event-sourced recording of the judging conversation (see [Judge agent](judge-client.md#trajectory-recording)). |
-
-Each checkpoint record contains `schema`, `generated_at`, the completed
-`operation`, its `injections`, and its `validation` notes. A completion appends
-only that span's data. It does not rebuild or rewrite the full report.
-
-Report, checkpoint, and offline-package `generated_at` timestamps use UTC.
-Summaries copy the report timestamp. Run-folder names use the local clock.
-
-On completion or a handled interruption, injudge writes the full report and
-removes `checkpoint_journal`. That report is standalone; its saved journal is
-no longer applied. If the process is killed before that write, keep the initial
-report and adjacent journal together. The shared reader used by memgraph and
-calibration applies complete journal records, restores notes in source span
-order, and rebuilds aggregates once. It ignores a final line without a newline.
-An invalid complete record fails loading. The recovered report is returned in
-memory; loading does not rewrite files. A direct JSON read without journal
-replay sees the initial snapshot until the full report is written.
-
-An offline preparation run writes a different package under its own run folder:
-
-| File | Schema | Role |
-|---|---|---|
-| `episode-inputs.json` | `injudge.episode-inputs/v5` | Episode index, execution and benchmark identities, boundary provenance, readiness, attachment status, counts, audit projections (including every message occurrence and per-turn input view), and unassigned diagnostics. It contains no verdicts; its `tool` block carries `mode: "prepare-only"`. |
-| `episodes/<safe-episode-id>-<8-char digest>/task.md` | — | Recorded user task messages and updates with source provenance. |
-| `episodes/<safe-episode-id>-<8-char digest>/messages.md` | — | When needed: input messages without a task/step home, with source positions and first visible turn/step. |
-| `episodes/<safe-episode-id>-<8-char digest>/deliveries.md` | — | Chronological delivery, search, placement, and exposure evidence, including empty deliveries. |
-| `episodes/<safe-episode-id>-<8-char digest>/searches.json` | — | The episode's recorded searches and their count. |
-| `episodes/<safe-episode-id>-<8-char digest>/manifest.json` | — | Episode identity, preparation status and diagnostics, counts, and every file with its kind, size, and a one-line description. Steps carry source bounds and `result_sources`, the delivery sections containing their referenced tool results. |
-| `episodes/<safe-episode-id>-<8-char digest>/steps/` | — | Original global steps and tool-result availability. |
-| `episodes/<safe-episode-id>-<8-char digest>/gold.md` / `outcome.json` | — | Attachments when recorded: the golden answer, and the outcome status and correctness with its join key. |
-
-The paid path reuses these prepared episode files inside each span's own evidence
-root; no judge can read another episode or the audit-only canonical memory index.
-Version 5 adds step `result_sources`: reading a step's pointer alone cannot
-certify its result. Referenced sections must be read completely; a target
-delivery already in the opening needs no duplicate read.
-The report records episode execution identity, task/attachment provenance,
-evidence bounds, and per-phase judge health.
-
-The audit records gold and outcome attachment provenance separately as
-`gold_join` and `outcome_join`. A benchmark-keyed harness report cannot be
-joined across repeated executions or treatment arms. Conflicting or missing
-harness results remain explicit; a trajectory sidecar cannot override them.
-
-`<span-dir>` is the span id made filesystem-safe — non-`[A-Za-z0-9._-]` characters replaced by `_`, capped at 80 characters, plus an 8-char digest suffix (`span_dir_name`) — so distinct span ids essentially never share a folder name. Preparation packages name their episode folders the same way (`episode_dir_name`). The report's `input.transcript` points at the same derived name.
-
-memgraph's `--json` artifact is `{tool, trajectories, ops, memories, edges, validation}` — the same dict embedded in the HTML. See [memgraph](memgraph.md#graph-model).
-
-## Report vs Summary
-
-The **report** is the judging record. Each operation carries the rubric with notes, `analysis`, `evidence`, `judge_raw` on failures, delivery cost, and the `input` agent-run record on spans the agent ran for (error outcomes included). The report's top level additionally carries the validation log. A span's `operation_id` is the id to look up in this file.
-
-The **summary** is the numbers for reading and comparing memory systems. Judging narrative stays in the report.
-
-Start with `summary.md` for a short view of the run. It uses the same counts as
-`summary.json`. It shows the run date and judge model, the verdict table, and
-entry influence and acted-on effect counts. When there are relevant entries, it
-also shows their accuracy and novelty counts, including unknown novelty. It lists
-up to ten non-neutral or error spans to inspect, each with its episode id and the
-judge analysis or error. It lists up to three unique warning/error diagnostics.
-Input diagnostics cover whole recordings,
-including episodes outside the selection.
-Text from the judge and recordings is escaped in `summary.md`.
-Explicit Markdown links, images, and HTML remain text.
-
-Episode counts appear alongside trajectory/span counts. Empty deliveries and
-unobserved consumers use separate classes (`empty`, `unassessable`), outside
-verdict-rate denominators. The report keeps complete diagnostics, memory
-identities, episode rows, and span records. `memgraph --verdicts` accepts only
-`injudge.report/v27`.
-
-### The Report's Aggregates
-
-`aggregates.per_trajectory.<id>` and `aggregates.overall` hold the same numbers
-unprojected, in `injudge/aggregate.py`'s flat shape:
-
-| Field | Meaning |
+| File | Contents |
 |---|---|
-| `n_trajectories` / `n_episodes` / `n_injections` / `n_spans` / `restated_injections` | Population counts; `n_trajectories` is overall-only |
-| `positive` / `negative` / `unresolved` / `neutral` / `error` / `unjudged` / `unassessable` / `empty` | Verdict tallies — top-level keys here, not the summary's `verdicts.counts` |
-| `rates` | Positive/negative/unresolved/neutral shares over judged spans |
-| `profiles` | Entry counts, mean shares, profiled triage, yields, exclusions, and episode coverage; see [Entry-share profiles](#entry-share-profiles). |
-| `cost` / `rubric` / `memory_usage` / `judge_compliance` / `mean_confidence_by_verdict` / `confidence_buckets` / `low_confidence` | Detailed report blocks; summary selects only compact statistics |
-| `input_paths` / `gold_scored` / `forced_answers` / `policy` | Overall only |
+| `injudge-report.json` | Initial snapshot with pending spans, then full report at completion. Its `checkpoint_journal` field points to completed results while a run is active. |
+| `injudge-checkpoints.jsonl` | One record per completed span. Retained for audit after completion. |
+| `summary.json` | Final counts, rates, delivery estimates, and judge execution totals. |
+| `summary.md` | Readable statistics, spans to inspect, diagnostics, and links to JSON. |
+| `memgraph-verdicts.html` | Verdict-colored graph, only with `--html`. |
+| `evidence/<span-dir>/` | Exact files available to each span's judge. |
+| `agent-runs/<span-dir>.jsonl` | Judge conversation. See [trajectory records](judge-client.md#trajectory-recording). |
 
-## How the Numbers Are Derived
+Span and episode folder names replace characters outside `[A-Za-z0-9._-]` with
+`_`, cap the readable part at 80 characters, and add an eight-character digest.
+`input.transcript` uses this derived span name.
 
-The mapping from rubric signals to usage labels and span verdicts is in [Rubric and verdict derivation](verdict-derivation.md). This section is the counting contract those labels feed; one set of functions (`injudge/aggregate.py`) produces both artifacts' numbers.
+`summary.md` shows profiles, verdicts, influence/effect counts, and relevant-entry
+accuracy/novelty counts. It lists up to ten non-neutral or error spans and up to
+three distinct warning/error diagnostics. Judge and trajectory text is escaped;
+embedded links, images, and HTML remain text.
+
+## Recover completed results
+
+Each journal record has `schema`, `generated_at`, `operation`, `injections`, and
+`validation`. A completion appends that span's data without rebuilding the full
+report.
+
+On completion or a handled interruption, injudge writes a full report and removes
+`checkpoint_journal` from it. The report is then standalone. Its saved journal
+is no longer replayed.
+
+After a forced process exit, keep the initial report beside its journal.
+Memgraph and calibration use a shared reader that replays complete records,
+restores validation notes in span order, and rebuilds aggregates. It ignores an
+unfinished last line without a newline. An invalid complete record fails loading.
+Recovery occurs in memory and does not rewrite the files. A plain JSON reader
+sees only the initial snapshot until the full report is written.
+
+## Offline preparation files
+
+Preparation writes a separate run folder without verdicts or summaries.
+
+| File | Contents |
+|---|---|
+| `episode-inputs.json` | Episode index in `injudge.episode-inputs/v5`. Includes identities, boundaries, readiness, attachments, counts, message occurrences, per-turn input views, and unassigned records. `tool.mode` is `prepare-only`. |
+| `episodes/<episode-dir>/task.md` | Recorded task and updates with source positions. |
+| `messages.md` | Input text without a task/step home, when needed. |
+| `deliveries.md` | Ordered delivery and placement evidence, including empty deliveries. |
+| `searches.json` | Recorded episode searches and count. |
+| `manifest.json` | Identity, preparation status, diagnostics, counts, and file index. Step entries have source bounds and `result_sources`. |
+| `steps/` | Original global steps and tool-result availability. |
+| `gold.md`, `outcome.json` | Optional reference and outcome attachments. |
+
+The files below `task.md` in the table also live in the episode folder.
+The paid path reuses these files inside each span's evidence folder. The judge
+cannot read another episode or the audit-only canonical memory index.
+
+Attachment provenance is separate: `gold_join` and `outcome_join`. Benchmark-only
+harness keys cannot distinguish repeated executions or treatment arms.
+Missing/conflicting outcomes stay explicit; a sidecar cannot override a harness
+join.
+
+Memgraph's `--json` output is `{tool, trajectories, ops, memories, edges,
+validation}`, the same graph data embedded in HTML. See
+[memgraph](memgraph.md#graph-json-reference).
+
+## Report vs summary
+
+The report is the full judgment record. Look up a span by `operation_id` in
+`operations`. Its rubric, notes, analysis, evidence, delivery cost, and judge-run
+record stay here. Episode rows provide provenance without an episode verdict.
+
+The summary keeps comparison statistics. It omits full entries, configuration,
+and judgment narratives. Both outputs use the same aggregation functions.
+
+### The report's aggregates
+
+`aggregates.per_trajectory.<id>` and `aggregates.overall` use these fields:
+
+| Field | Contents |
+|---|---|
+| `n_trajectories`, `n_episodes`, `n_spans`, `n_injections`, `restated_injections` | Population counts. Trajectory count is overall-only. |
+| `positive`, `negative`, `unresolved`, `neutral`, `error`, `unjudged`, `unassessable`, `empty` | Span counts by class. |
+| `rates` | Positive, negative, unresolved, and neutral shares among judged spans. |
+| `profiles` | Entry counts, equal-span mean shares, triage counts, yields, exclusions, and episode coverage. |
+| `cost`, `rubric`, `memory_usage`, `judge_compliance` | Detailed delivery, signal, item-usage, and answer-correction statistics. |
+| `mean_confidence_by_verdict`, `confidence_buckets`, `low_confidence` | Confidence statistics and review list. |
+| `input_paths`, `gold_scored`, `forced_answers`, `policy` | Overall-only input and policy statistics. |
+
+## How the numbers are derived
 
 ### Populations
 
-| Population | Members |
+| Population | Included spans |
 |---|---|
-| Judged spans | `positive` + `negative` + `unresolved` + `neutral`. Denominator for verdict rates. `unresolved` means an acted-on effect could not be determined, or attribution was not assessed over the whole window. Neutral includes selection, reference, ambiguous attribution, unproductive use, and no established influence, plus spans with no eligible action step (`auto: no_eligible_step`), rule-judged without a call. |
-| `empty` | No entries were delivered (`auto: empty_delivery`). No judge call. Counts and delivery cost stay outside verdict rates. |
-| `unassessable` | No delivery has an attributed agent step (`auto: no_subsequent_turn`). The recording cannot support a downstream influence judgment. Counts and delivery cost have their own class, outside verdict rates. Missing observations do not prove zero effect. |
-| LLM-judged spans | Judged spans with no `auto` marker. Population for rubric rates, usage tallies, and confidence. |
-| `error` / `unjudged` | Counts only. Never a rate denominator. |
-| Restated injections | Rolled into their span. Counted in `n_injections` and delivery cost. Absent from rates. |
+| Judged spans | `positive` + `negative` + `unresolved` + `neutral`. Includes rule-neutral spans with no eligible action step. |
+| Judge-scored spans | Judged spans without an `auto` marker. Used for rubric, usage, profile, and confidence statistics. |
+| `empty` | No entries delivered; `auto: empty_delivery`. No judge call. |
+| `unassessable` | No attributed agent step; `auto: no_subsequent_turn`. No judge call. The operation is rule-neutral, but aggregates use this separate class. |
+| `error`, `unjudged` | Visible counts outside verdict-rate denominators. |
+| Restated injections | Repeated deliveries inside a span. Count in delivery volume, not as additional verdict samples. |
 
-Empty `rates` / `rubric` / `confidence` blocks are omitted when there are no judged samples. `cost` is omitted only when both totals are zero. An error-only run with deliveries still carries cost in the `error` class.
+A missing observation does not prove zero effect. Empty, unassessable, error,
+and unjudged spans keep their delivery costs in separate classes.
 
-### Verdict Rates
+### Verdict rates
 
-The denominator is judged spans; restated re-injections never appear in rates, having already rolled into their span.
+For each verdict `v`, the rate is:
 
-$$
-\mathrm{rates}[v] = \frac{\mathrm{count}[v]}{\mathrm{positive} + \mathrm{negative} + \mathrm{unresolved} + \mathrm{neutral}}
-$$
+```text
+count[v] / (positive + negative + unresolved + neutral)
+```
 
-### Rubric Rates
+Rates are omitted when there are no judged spans. Neutral includes complete-read
+ambiguous attribution and automatic resident copies with no eligible action
+step. Unresolved includes unknown acted-on effect or attribution with an
+incompletely read window. See [verdict derivation](verdict-derivation.md).
 
-The population is delivered entries (`span × delivered entry`, keyed by the entry's span-local id) in valid judge answers. Failed answers and mechanical skips are excluded; null signal values never enter a denominator.
+### Rubric rates
 
-| Rate | Numerator | Denominator | Reads as |
-|---|---|---|---|
-| `relevance` | `true` | `true` + `false` | relevant share |
-| `accuracy_corroborated` / `accuracy_uncontradicted` / `accuracy_contradicted` | each value | relevant entries with an accuracy value | the three-way split — never one "accurate" rate: `uncontradicted` asserts nothing, so folding it in would report ≈1.0 on a mostly unverifiable run |
-| `novelty` | `novel` + `confirming` | those + `redundant`, relevant entries only | not-redundant share of relevant entries |
-| `influence` | `referenced` + `selected` + `acted_on` | those + `none` | any-footprint share |
-| `positive_effect` | `improved` | `improved` + `no_effect` + `harmed` | improved share among deliveries that have an effect |
+The population is delivered entries in valid judge answers. Failed answers and
+automatic results are excluded. Null values do not enter assessed denominators.
 
-Novelty and accuracy rates use relevant entries only, counted in `rubric.relevant_counts`. An off-topic entry is new and unverifiable by default. Counting it would measure retrieval misses, not what relevant memories add. `rubric.counts` keeps every entry. `positive_effect` is rated only over deliveries that have an effect judgment — the signal is null unless influence is acted-on. Unknown novelty (`null`) is counted in `rubric.counts.novelty.null` and stays out of the novelty-rate denominator; an all-unknown novelty population has a null novelty rate. Relevant ignored entries with null novelty use `ignored_unknown_novelty`. The signal enums in `rubric.counts` are those in the [rubric table](verdict-derivation.md#rubric-signals).
+| Rate | Numerator | Denominator |
+|---|---|---|
+| `relevance` | Relevant entries | All judged entries |
+| `accuracy_corroborated`, `accuracy_uncontradicted`, `accuracy_contradicted` | Relevant entries with that value | Relevant entries with accuracy values |
+| `novelty` | Relevant `novel` + `confirming` | Relevant `novel` + `confirming` + `redundant` |
+| `influence` | `referenced` + `selected` + `acted_on` | Those values + `none` |
+| `positive_effect` | `improved` | `improved` + `no_effect` + `harmed` |
 
-### Triage Lists
+`rubric.counts` retains all entries. `rubric.relevant_counts` supports the
+accuracy and novelty rates. `uncontradicted` earns no accuracy credit.
+Unknown novelty and influence are counted explicitly. An all-unknown novelty
+population has a null novelty rate.
 
-`inaccurate_keys` collects identities whose `accuracy` was `contradicted`; `irrelevant_keys` collects identities whose `relevance` was `false`. Each entry carries the span ids that produced it. `shared_anchors` lists, per identity, any action step that two or more spans credited as `acted_on` (`{traj, step, spans}`): deliveries of one memory with different text can share a window, each judgment stands, and the shared step is one action, not two benefits. Every delivered entry maps to exactly one `(namespace, item)` identity of its own delivery, so a key delivered under several identities tallies under each of them. An entry with no recorded identity (no `item_id`, no key — e.g. a redacted anonymous ref) has no pair to join on: it tallies span-scoped (its `item_id` records the operation and span-local id), so two spans' identity-less entries never merge.
+The effect rate includes only acted-on entries with an assessed effect.
+Selection receives no effect score and does not inherit a later delivery's benefit.
 
-### Per-Memory Usage
+### Triage lists and per-memory usage
 
-Tallies merge by `(namespace, item)` over LLM-judged spans only. A joint judgment on a multi-item delivery counts under each identity. `value_drift` is true when both the first and last *recorded* values exist and differ; a redacted (unrecorded) end is not drift.
+`inaccurate_keys` lists contradicted identities; `irrelevant_keys` lists
+irrelevant identities. Each has contributing span IDs. `shared_anchors` lists
+same-item action steps credited by multiple spans as `{traj, step, spans}`.
+A shared step is one action, not multiple independent benefits.
 
-Operation-local display IDs are never roll-up identities. Their canonical content identity supplies a synthetic `content:<sha256>` item id; recorded refs stay intact. In memgraph, candidate, delivered, and deletion refs additionally carry `grouping_id` for the browser-to-registry join.
+Usage totals join by `(namespace, item)` over judge-scored spans. One entry maps
+to its own delivery identity. An entry with no recorded item ID or key gets a
+span-scoped identity, so anonymous entries do not merge across spans.
+Operation-local display IDs use canonical content identity, represented as
+`content:<sha256>`. Recorded references remain intact. Graph references also
+carry `grouping_id` for browser joins.
 
-Injection evidence can be traced back to stored items through `aggregates.overall.memory_usage` in the report: each `(namespace, item_id)` lists usage tallies and the contributing span IDs. Resolve each item's stamped entry ID in `operations[].memories`, then read that entry's `rubric` for relevance, accuracy, and action anchors and its position in `memory_exposure` for exposure. This measures observed utility in the sampled tasks, not intrinsic store quality. An ignored off-topic delivery suggests a retrieval mismatch; a relevant ignored delivery may be redundant or poorly presented. Neither justifies deleting the memory. Undelivered items are unassessed, clipped previews do not assess hidden content, and versions or shared action anchors need separate inspection before combining evidence.
+`aggregates.overall.memory_usage` links each stored item to spans, judged
+episodes, and exposures. Each exposure keeps portable version/content identity,
+exposure state, judged-entry count, span links, and five-signal counts.
+`value_drift` is true only when the first and last recorded values both exist
+and differ. A redacted endpoint does not prove drift.
 
-### Delivery Cost and Policy
+To review an item, locate its entry ID in `operations[].memories`, inspect its
+`rubric`, and use the matching position in `memory_exposure`. These are observed
+results in sampled tasks. They are not an intrinsic store score. A preview does
+not assess hidden full text. Repeated deliveries are not independent trials.
+Ignored or undelivered items do not justify automatic deletion.
 
-Each span's delivery estimate sums the recorded placement sizes across all
-deliveries, including repeats, then uses `chars // 4` to estimate tokens.
-The full estimate goes to that span's verdict class. Redacted placements with
-no recorded size count as 0 tokens and produce a warning. Error and unjudged
-spans keep their cost in separate classes.
+### Confidence and input regimes
 
-A negative bundle can contain an entry that helped and another that harmed.
-A positive bundle can contain ignored entries. Costs by verdict show how much
-text was delivered in each class; they cannot measure per-memory token benefit
-or extra cost against a no-memory run.
+Confidence means and buckets (`[0,0.5)`, `[0.5,0.8)`, `[0.8,1.0]`) cover
+judge-scored spans only. Confidence does not weight counts. Values below `0.5`
+appear in `low_confidence`.
 
-Delivery policy measures how heavily the memory system injects, per trajectory and overall, against the trajectory's whole billed prompt-token budget: every lane's usage records count, including the memory lane's extraction calls.
-
-The billed budget uses the largest valid prompt-token total from `run.json`,
-`agent_end`, or recorded assistant messages. Both snapshots include embedding
-calls without conversation turns. A snapshot replaces the message sum; it is
-not added to that sum. Invalid or smaller snapshots produce warnings. Without
-either snapshot, message usage is a lower bound; a bound embedding role adds
-an undercount warning.
-
-A history rewrite removes messages from the input but preserves their charges.
-A message retraction annuls only the current record at its slot. A later user
-or tool message at that slot cannot cancel an earlier assistant charge.
-
-### Confidence
-
-Means and buckets (`[0,0.5)`, `[0.5,0.8)`, `[0.8,1.0]`) cover LLM-judged spans only. Confidence never weights counts. Spans with confidence `< 0.5` are listed in `low_confidence`.
-
-### Input Regimes
-
-Overall only: spans carrying an `input` record — every span the agent ran for, error outcomes included — are counted in `input_paths.agent`, `gold_scored`, and `forced_answers` (the `forced` marker means the *final* answer came from a budget-exhausted round). Mechanically counted empty or unattributable spans and unjudged spans omit `input`.
-
-## summary.json Fields
-
-Summary v19 contains compact final statistics. Detailed entries, span records,
-rubric notes, configuration, and provenance remain in `injudge-report.json`.
-
-| Section | Contents |
-|---|---|
-| `overall` | Counts, verdicts, `profiles`, rubric, estimated delivery tokens, and judge counters. |
-| `trajectories` | One compact row per input trajectory: `id`, `run_id`, recorded `instance_id` / `model` / `adapter`, counts (including `counts.n_profiled_spans`), verdicts, and `approx_delivery_tokens` when delivery size is nonzero. |
-| `recording_policy` | Recording-wide policy metrics; `scope: whole_input_recordings` includes episodes outside the judge selection. Includes `billing` for recorded usage, sources, and memory-operation costs. Residency omits raw character totals. |
-| `diagnostics` | Input validation and judge diagnostic counts, keyed by `error`, `warn`, and `info`. Full messages remain in the report. |
-| `selection` | Source report selection, when present. |
-| `notes` | Brief estimate and verdict-scope explanations. |
-| `report` | `injudge-report.json`, the detailed record in the same run folder. |
-| `generated_at` | Source report timestamp in UTC, copied without conversion. |
-| `tool` | Only `name`, `schema`, `source_report_schema`, and `judge_model`. |
-
-Rates are numeric fractions. Unknown values remain `null`; they are not zero.
-Delivery and residency estimates use `chars // 4`. They are not billed tokens
-or overhead relative to a no-memory run. Span verdicts measure memory influence, not benchmark task success.
-
-### Counts and Verdicts
-
-Both `overall` and trajectory rows contain these blocks:
-
-| Field | Meaning |
-|---|---|
-| `counts.n_trajectories` | Input trajectory count; overall only. |
-| `counts.n_profiled_spans` | Spans with assessed profiles; trajectory rows only. Overall uses `profiles.profiled_spans`. |
-| `counts.n_episodes` / `n_spans` / `n_injections` / `restated_injections` | Episode, span, delivery, and repeated-delivery counts in the selected population. |
-| `verdicts.counts` | Counts for positive, negative, unresolved, neutral, error, unjudged, unassessable, and empty spans. |
-| `verdicts.judged_spans` | Positive + negative + unresolved + neutral; the verdict-rate denominator. |
-| `verdicts.rates` | Four verdict shares; omitted when no spans were judged. |
-
-Empty, unassessable, error, and unjudged spans remain visible as counts. They do
-not enter verdict-rate denominators. Repeated deliveries contribute delivery
-cost but do not create more judged spans.
-
-### Overall Rubric, Delivery, and Judge
-
-| Field | Meaning |
-|---|---|
-| `rubric.judged_entries` | Delivered entries with valid judge answers. |
-| `rubric.counts` / `rubric.relevant_counts` / `rubric.rates` | Five-signal distributions, the novelty and accuracy distributions of relevant entries, and rates. Each rate uses assessed entries for that signal; null values are excluded. Novelty and accuracy rates use relevant entries only. |
-| `rubric.no_footprint_reasons` | Optional counts for irrelevant, redundant, confirming-but-ignored, novel-but-ignored, and unknown-novelty ignored entries. |
-| `rubric.shared_action_groups` | Optional count of memory groups with an action credited by multiple spans; not a count of shared steps. Full anchors stay in the report. |
-| `delivery.approx_tokens_total` / `approx_tokens_by_verdict` | Estimated delivery tokens and their verdict buckets; present when the recorded delivery size is nonzero, even if the estimate rounds to zero. |
-| `judge.attempted_spans` / `gold_scored` | Spans the judge agent ran for, including errors; spans run with gold attached. |
-| `judge.spans_with_followups` | Spans with `attempts > 1`: at least one rejected answer took a follow-up. |
-| `judge.forced_spans` | Spans forced to answer in any phase, not only the final phase. |
-| `judge.context_rollbacks` | Rolled-back rounds across all judge phases. |
-| `judge.executed_llm_calls` / `executed_tool_calls` | Executed calls across all phases, including rolled-back work. |
-| `judge.reported_usage` | Reported `input`, `output`, `cache_read`, and `cache_write` tokens. |
-| `judge.effect_pairing_corrected_spans` / `low_confidence_spans` | Optional nonzero counts of effect-pairing corrections and confidence below 0.5. |
-
-`rubric` is omitted without judged entries. `judge` is omitted when no agent ran.
-An execution count or reported token total is `null` if any judge phase omits
-that value or reports an invalid value. Later valid values cannot fill the gap.
-If the runner returns no readable result, all executed-call, rollback, and
-reported token totals for that span are `null`, including totals from earlier
-phases. Summary totals also remain `null` when any attempted span has an unknown
-value. Stdout prints `unknown` for these execution counts. Reported usage and
-delivery estimates measure different quantities and must not be added as one cost.
-
-`recording_policy` retains injection density, repetition, delivery-token ratio,
-search/extraction counts, extraction failures, and residency estimates. Its
-whole-recording scope differs from the selected population in `overall`. Recorded
-nulls remain. Estimate notes appear once at the top level.
-
-## Report-Only Fields
-
-`injudge-report.json` additionally carries, per operation: `kind` (`recall_injection_span`), `traj`, `seq`, `n_injections`, `steps` (omitted when no delivery has an attributed step), `payload_summary`, and `delivery_cost` (`deliveries`, `content_chars_total`, `approx_tokens_total`); `episode_execution_id` and `episode_last_step`; `memories` (full recorded refs stamped with span-local ids); `memory_exposure` — a **positional** list parallel to `memories` (index `i` describes `memories[i]`), each entry `{state, exposed_chars, value_chars}` with state `full`, `full_normalized`, `clipped`, or `unknown`, unverified canonical values withheld from judge evidence; and `memory_windows` (per-entry global end steps, capped at the episode's last eligible step or the next same-episode credit handoff), with `memory_window_starts` recording delayed or empty action windows, `memory_window_owners` mapping affected entry ids to `{span_id, memory_id}` of the earlier owner (independent re-entry starts a new span and baseline), `memory_variant_steps` the in-window steps where the same memory was delivered with different or narrower text (which leaves the window open), and `memory_followups` the proven explicit selections `{step, delivery_step, tool_call_id, operation_id}` (actual action and result-delivery steps recorded separately). Unlike `memory_exposure`, `rubric`, `memory_usage`, and `memory_windows` are keyed by span-local ids. The operation also retains rubric notes and action `anchors`, `analysis`, `evidence`, `step_gaps`, `auto`, `error`, `judge_raw`, and `pe_pairing_corrections` when present. Spans the judge agent ran for — its own error outcomes included — carry `input`: `path: agent`, attempts, retained `llm_calls` / `tool_calls`, `read_steps` (global steps whose complete step-file text and referenced result sections are retained; the span’s own delivery is already in the opening — every cited anchor and structured evidence step must be one of them), executed call counts, reported usage including rolled-back calls, context rollbacks, `any_phase_forced`, and the transcript path relative to the run folder; a span rejected before the agent ran (an unsafe or incomplete episode boundary, or a parent episode with no recorded task) takes an error verdict with no `input`, no evidence folder, and no transcript. `gold` and final-answer `forced` appear when applicable. Trajectory rows carry `id`, `run_id`, `path`, `instance_id`, `model`, `adapter`, `n_steps`, `n_injections`, `n_spans`, their `episodes` rows, and the trajectory's `policy`; episode rows record boundary, task, attachment, and evidence provenance without an episode verdict.
-
-The report's `tool` block names the tool (`name: "injudge"`) and its `schema`, and carries the resolved, secret-free judge-agent configuration (`config`, endpoint URLs reduced to their origin, `scheme://host[:port]`) with `judge_model`.
-Paths, queries, fragments, and userinfo are omitted because they can contain secrets.
-The known judge credential is also masked if it appears in the origin.
-
-The `injections` array lists every raw delivery with its span, its `episode_execution_id` when the span has one, `role` (`first` or `restated`), `verdict`, `content_chars`, and its `op_id` / `seq` / `step`.
-
-## Provenance and interpretation
-
-Report v23 makes `input.read_steps` certify both complete step files and their
-referenced result sections. Earlier v22 reports certified the step files alone;
-they are not silently reinterpreted or accepted by the current reader.
-The `shared_action_groups` count introduced in summary v18 remains a count of
-memory groups, not shared steps, in v19.
-
-`tool.provenance` carries `implementation_sha256` and `prompts_sha256`; each executed
-span input carries `evidence_sha256` and `system_prompt_sha256`. These identify
-the exact judged inputs and working-copy implementation without credentials.
-They do not establish the source date or cleanliness of a preloaded memory corpus.
-
-Unknown influence is counted in `rubric.counts.influence.null` and excluded from
-the assessed influence-rate denominator. `selected` has no effect score and never
-inherits a follow-up read's benefit; `no_effect` maps to neutral `unproductive`,
-while `misused` requires `harmed`. The span token-share proxy and all sign counts
-remain diagnostics, not additive system gain. Separate exact-task solution reuse
-from transfer before making generalization claims; do not infer provenance from
-text overlap or dates alone.
-
-
-### Delivery volume, residency, and reverse memory assessment
-
-In v17, `delivery_token_ratio` replaces the misleading `injected_token_share`
-name. The report’s `aggregates.overall.policy.residency` reports `proven_resident_chars` and
-`approx_resident_tokens` (`chars // 4`) across recorded main-lane input views.
-Overlapping proven placements in one host count once per view; distinct hosts
-count separately. Each placement must match one unique interval in its original
-host. Evidence removal uses the same matching rule. Proven intervals still count
-when another placement is unresolved. The
-same host occurrence can remain visible across episode boundaries. Retractions
-and rewrites stop the corresponding occurrence.
-`observed_input_views`, `views_with_memory`, `views_with_gaps`, and
-`unresolved_placements` make coverage visible. Unproven or re-recorded hosts can
-undercount. Neither measure includes behavioral overhead or gives exact billed
-cost; matched no-memory trials provide the separate arm-level comparison.
-Policy totals cover whole input recordings, even with `--episode`.
-
-Excluded spans retain compact `unjudged` records, join keys and delivery cost;
-their memory payloads and empty rubric fields are omitted. Aggregate statistics,
-summary counts, and dry-run span counts exclude these spans. A judged
-answer's analysis text cannot exclude its span from statistics. `tool.selection`
-names the selected and discovered episode populations. Unselected episodes do
-not generate missing attachment warnings. Ambiguous execution joins still fail.
-
-`memory_usage` is the reverse lookup from delivered evidence to stored items.
-Each item retains judged `episodes` and `exposures`; each exposure has a portable
-version/content identity, exposure record, `judged_entries`, span links, and
-five-signal counts. These per-memory records remain in the report; summary does
-not repeat them. These are conditional observations, not
-an intrinsic memory score: previews cannot judge unseen full text, repeated deliveries are
-not independent trials, and unused or never-delivered items cannot be condemned.
-Use contradictory or harmful exposures as review leads, checking linked spans
-before revising a stored item. No automatic deletion threshold is implied.
+`input_paths.agent`, `gold_scored`, and `forced_answers` cover spans with an
+`input` record, including errors after an agent run. Here `forced_answers`
+refers to a forced final answer. Summary `judge.forced_spans` instead counts
+spans forced in any phase.
 
 ## Entry-share profiles
 
-`operations[].profile` stores only `n_entries` and integer `counts`. Every share
-is its count divided by all entries in that span. Nonempty, fully judge-scored
-spans receive profiles; mechanical skips, errors and unjudged spans have null.
-`memory_window_owners` stays in the report as provenance, never inherited scores.
+`operations[].profile` contains `n_entries` and integer `counts`. Each share is
+its count divided by **all entries in that span**, including irrelevant entries.
+Only nonempty, fully judge-scored spans receive profiles. Automatic results,
+errors, and unjudged spans have null profiles. Ownership never supplies inherited
+scores.
 
-| Axis | Count |
+| Axis | Counted entries |
 |---|---|
-| `relevance` | Relevant entries |
-| `corroboration` | Relevant entries with corroborated accuracy |
-| `info_gain` | Relevant entries with novel or confirming novelty |
-| `influence` | Acted-on entries |
-| `benefit` | Acted-on entries with improved effect |
-| `harm` | Acted-on entries with harmed effect |
+| `relevance` | Relevant |
+| `corroboration` | Relevant and corroborated |
+| `info_gain` | Relevant and novel or confirming |
+| `influence` | Acted on |
+| `benefit` | Acted on with improved effect |
+| `harm` | Acted on with harmed effect |
 
-Uncertainty counts are `uncontradicted_accuracy` / `unknown_novelty` for relevant
-entries, `unknown_influence` for all entries, and `unknown_effect` for acted-on
-entries. Assessed counts are relevant `contradicted` / `redundant`, all `selected`
-/ `referenced`, and acted-on `no_effect`. Uncontradicted earns no partial credit.
-Benefit and harm can coexist; triage and severity remain in the verdict/notes.
+The profile's influence axis counts only `acted_on`. The rubric influence rate
+also counts references and selections; these are different measures.
+
+Uncertainty counts are relevant `uncontradicted_accuracy` and `unknown_novelty`,
+all `unknown_influence`, and acted-on `unknown_effect`. Additional assessed counts
+are relevant `contradicted` and `redundant`, all `selected` and `referenced`, and
+acted-on `no_effect`. Benefit and harm can coexist in a span.
 
 Report aggregates and summary `overall.profiles` contain:
 
-- `profiled_spans`, `n_entries`, summed `counts`, and equal-span `mean.axes` /
-  `mean.uncertainty`. All means use the same population and round only the final
-  result to four decimals. Empty denominators yield null.
-- `triage`: profiled-span verdict counts. Unlike existing verdict rates, this
-  population excludes rule-neutral resident copies. Rates are count/profiled_spans.
-- `benefit_per_100_spans`, `harm_per_100_spans`, and
-  `benefit_per_million_delivered_tokens`: entry yields, not positive-span rates.
-  Token efficiency includes every selected span's estimated delivery tokens.
-- `unprofiled`: reasons with `n_spans`, `n_injections`, and `approx_tokens`.
-  Resident copies retain all deliveries and costs.
-- `episodes`: counts/rates with profiles, relevant, beneficial or harmful entries,
-  including recorded episodes without deliveries. Unassigned spans are counted
-  separately and establish no coverage. Frequency uses distinct episodes per
-  `(namespace, item)`. High-frequency items require at least 10% of the group's
-  episodes **and at least two episodes**; frequency never changes a profile.
-  `frequency` records the threshold and relevant-entry counts/share;
-  `relevant_below_high_frequency` reports coverage excluding these items.
+| Field | Meaning |
+|---|---|
+| `profiled_spans`, `n_entries`, `counts` | Profile population and summed entry counts. |
+| `mean.axes`, `mean.uncertainty` | Mean of each span's shares. Each span has equal weight. Round only the final result to four decimals. Empty denominators give null. |
+| `triage` | Verdict counts among profiled spans. Divide by `profiled_spans` for rates. This population excludes automatic resident copies. |
+| `benefit_per_100_spans`, `harm_per_100_spans` | Beneficial or harmful entry counts per 100 profiled spans. These are entry yields, not span verdict rates. |
+| `benefit_per_million_delivered_tokens` | Beneficial entries per million estimated delivery tokens. Includes delivery tokens from every selected span. |
+| `unprofiled` | Reasons with `n_spans`, `n_injections`, and `approx_tokens`. Resident copies keep all delivery costs. |
+| `episodes` | Counts and rates with profiles, relevant entries, beneficial entries, or harmful entries. Includes recorded episodes without deliveries. |
 
-Summary trajectory rows keep only `counts.n_profiled_spans`; full per-trajectory
-profiles and billing remain in the report. The graph computes shares from counts
-and shows selected/referenced counts once. Existing rubric rates remain conditional
-on assessed signals and are distinct from mean shares over all span entries.
+Episode frequency uses distinct episodes per `(namespace, item)`. A high-frequency
+item appears in at least 10% of the group's episodes and at least two episodes.
+This threshold never changes a profile. `episodes.frequency` records the
+threshold and relevant-entry counts/share. `relevant_below_high_frequency`
+reports coverage excluding those items. Unassigned spans establish no episode
+coverage and are counted separately.
+
+Summary trajectory rows retain only `counts.n_profiled_spans`. Detailed
+per-trajectory profiles remain in the report.
+
+## Delivery cost and policy
+
+Delivery volume sums recorded placement characters across all deliveries,
+including repeats. The estimate is `chars // 4` tokens. A placement without a
+recorded size contributes zero and produces a warning. Partially known sizes
+retain the known amount.
+
+Each span's full delivery estimate goes into its verdict class. A negative
+bundle can contain helpful entries, and a positive bundle can contain ignored
+ones. Cost by verdict does not measure the number of useful tokens or added
+cost relative to a no-memory run.
+
+`delivery_token_ratio` compares estimated delivery tokens with the recording's
+whole prompt-token budget. That budget includes all lanes, including memory
+extraction and embedding calls when captured by valid snapshots.
+
+Policy totals cover **whole input recordings**, even with `--episode` selection.
+Selected-span statistics in `overall` have a different population.
+
+### Residency
+
+`aggregates.overall.policy.residency` reports `proven_resident_chars` and
+`approx_resident_tokens` across recorded main-lane input views. A placement must
+match one unique interval in its original host. Overlapping intervals in one
+host count once per view; distinct hosts count separately. Proven intervals
+still count when another placement is unresolved.
+
+The same host can remain visible across episodes. Retraction or rewrite ends
+that occurrence. `observed_input_views`, `views_with_memory`, `views_with_gaps`,
+and `unresolved_placements` report coverage. Missing proof and re-recorded hosts
+can cause undercounting. Summary residency omits raw character totals.
+
+Delivery and residency estimates do not include behavioral overhead or exact
+billed cost. Use matched no-memory runs for a separate arm-level comparison.
 
 ## Recorded billing versus memory delivery size
 
-`policy.billing` is the single per-trajectory billing record: `source`, `scope`,
-normalized `usage`, and bound search/generation `memory_operations`. Source
-selection and usage calculation happen together. Valid run.json/agent_end
-snapshots replace message totals; bounded views use selected message charges
-with retraction/history rules and source `message_usage_lower_bound`.
-Missing fields/prices stay null; no valid input-token counts means null, not zero.
-Explicit zero counts remain zero. Prices must be finite nonnegative numbers.
-Cache and reasoning counters are subsets, never added to input/output totals.
-Report aggregate and summary `recording_policy.billing` sum complete fields and
-count sources. Billing covers input recordings, independently of judge selection.
+Each trajectory's `policy.billing` contains `source`, `scope`, normalized
+`usage`, and bound search/generation `memory_operations`.
 
-Placement annotations contain characters, not memory-only token counts or prices.
-Delivery/residency therefore remain explicitly labelled chars/4 estimates; using
-whole-call billing would charge task text, history and output to memory.
+A valid `run.json` or `agent_end` snapshot can replace message totals. The
+selected budget uses the largest valid prompt-token total; snapshots are not
+added to messages. Invalid or smaller snapshots produce warnings. Without a
+valid snapshot, source is `message_usage_lower_bound`. A bound embedding lane
+can make that lower bound incomplete.
+
+Bounded recording views use selected message charges instead of whole-run
+snapshots. A history rewrite removes input text but retains its charge.
+Retraction removes only the current record at its slot. A later user/tool
+message cannot cancel an earlier assistant charge.
+
+Missing usage fields or prices stay null. No valid input-token count means
+null, not zero. Explicit zeros remain zero. Prices must be finite and
+nonnegative. Cache and reasoning counters are subsets and are never added to
+input/output totals. Aggregate billing sums complete fields and counts sources.
+
+Placement annotations provide character sizes, not memory-only token bills or
+prices. Whole-call billing also includes task text, history, and output. Keep
+recorded billing separate from estimated memory delivery size.
+
+## summary.json fields
+
+| Section | Contents |
+|---|---|
+| `overall` | Counts, verdicts, profiles, rubric, delivery estimates, and judge totals. |
+| `trajectories` | Compact rows with `id`, `run_id`, recorded `instance_id`, `model`, `adapter`, counts, verdicts, and delivery estimates when size is nonzero. |
+| `recording_policy` | Whole-recording density, repetition, delivery ratio, searches, extraction failures, residency, and billing. `scope` is `whole_input_recordings`. |
+| `diagnostics` | Counts by `error`, `warn`, and `info`. Full notes stay in the report. |
+| `selection` | Source report selection, when present. |
+| `notes` | Scope and estimate explanations. |
+| `report` | `injudge-report.json` in the same folder. |
+| `generated_at` | Source report timestamp in UTC. |
+| `tool` | `name`, `schema`, `source_report_schema`, and `judge_model`. |
+
+Rates are numeric fractions. Unknown values are null, not zero.
+
+### Counts and verdicts
+
+| Field | Meaning |
+|---|---|
+| `counts.n_trajectories` | Input count; overall only. |
+| `counts.n_profiled_spans` | Profile count in trajectory rows. Overall uses `profiles.profiled_spans`. |
+| `counts.n_episodes`, `n_spans`, `n_injections`, `restated_injections` | Selected population counts. |
+| `verdicts.counts` | All eight span classes. |
+| `verdicts.judged_spans` | Positive + negative + unresolved + neutral. |
+| `verdicts.rates` | Shares among judged spans; omitted with no judged spans. |
+
+### Rubric, delivery, and judge totals
+
+| Field | Meaning |
+|---|---|
+| `rubric.judged_entries` | Entries with valid judge answers. |
+| `rubric.counts`, `relevant_counts`, `rates` | Signal distributions and assessed rates. |
+| `rubric.no_footprint_reasons` | Optional ignored-entry reason counts. |
+| `rubric.shared_action_groups` | Optional count of memory groups with cross-span action credit, not a count of shared steps. |
+| `delivery.approx_tokens_total`, `approx_tokens_by_verdict` | Delivery estimates. Present when character size is nonzero, even if tokens round to zero. |
+| `judge.attempted_spans`, `gold_scored` | Spans the agent ran for, including errors, and those run with gold. |
+| `judge.spans_with_followups` | Spans with more than one phase. |
+| `judge.forced_spans`, `context_rollbacks` | Spans forced in any phase; rolled-back rounds across phases. |
+| `judge.executed_llm_calls`, `executed_tool_calls` | Executed calls, including discarded rounds. |
+| `judge.reported_usage` | Reported input, output, cache-read, and cache-write tokens. |
+| `judge.effect_pairing_corrected_spans`, `low_confidence_spans` | Optional nonzero correction and low-confidence counts. |
+
+`rubric` is omitted without judged entries. `judge` is omitted if no agent ran.
+A missing or invalid phase count/token value makes that span's total null.
+Later valid values cannot fill the gap. If a phase returns no readable result,
+executed counts, rollbacks, and reported usage are all unknown for that span,
+including earlier phases. Summary totals remain null if any attempted span has
+an unknown value. Stdout prints `unknown` for these counts.
+
+## Report-only fields
+
+### Span operations
+
+| Field | Meaning |
+|---|---|
+| `operation_id`, `kind`, `traj`, `seq` | Span ID, `recall_injection_span`, trajectory ID, and first sequence number. |
+| `n_injections`, `steps`, `step_gaps` | Delivery count, global step range, and gaps. `steps` is omitted without attributed deliveries. |
+| `episode_execution_id`, `episode_last_step` | Parent execution and episode bound. |
+| `payload_summary`, `memories` | Display summary and full recorded references stamped with local IDs. |
+| `memory_exposure` | Positional list parallel to `memories`: `{state, exposed_chars, value_chars}`. |
+| `memory_windows`, `memory_window_starts` | Per-entry end and delayed/empty start bounds, keyed by local ID. |
+| `memory_window_owners` | Earlier credit owners as `{span_id, memory_id}`. |
+| `memory_variant_steps` | In-window delivery steps showing different or narrower same-item text. |
+| `memory_followups` | Proven selections with `step`, `delivery_step`, `tool_call_id`, and `operation_id`. |
+| `rubric`, `memory_usage`, `profile` | Signals and notes, derived usage, and entry profile. |
+| `analysis`, `evidence`, `confidence`, `verdict` | Judgment and derived span sign. |
+| `delivery_cost` | `deliveries`, `content_chars_total`, `approx_tokens_total`. |
+| `auto`, `error`, `judge_raw`, `pe_pairing_corrections` | Automatic-result reason, error details, masked rejected answer, and effect-pairing corrections when applicable. |
+
+`memory_exposure` joins by position. Rubric, usage, and window dictionaries join
+by local entry ID. Unverified canonical values stay in audit references but
+are withheld from judge evidence.
+
+### Judge input record
+
+Spans sent to the runner carry `input`, including agent errors. It contains
+`path: agent`, attempts, final retained `llm_calls`/`tool_calls`, executed counts,
+reported usage, rollbacks, `read_steps`, `any_phase_forced`, and transcript path.
+`gold` and final-answer `forced` appear when applicable.
+
+`read_steps` certifies full step text plus referenced result sections. The target
+delivery is already in the opening. Every anchor and structured evidence step
+must belong to this set. A span rejected before the agent runs has no `input`,
+evidence folder, or transcript.
+
+### Trajectories, injections, and tool metadata
+
+Trajectory rows include identity, path, recorded model/adapter, counts, episode
+rows, and policy. Episode rows retain boundary, task, attachment, and evidence
+provenance without a verdict.
+
+`injections` lists raw deliveries with span ID, episode execution when available,
+`role` (`first` or `restated`), verdict, character size, `op_id`, `seq`, and `step`.
+
+The report's `tool` block retains `name: "injudge"`, schema, judge model, and
+resolved configuration without secrets. Endpoint URLs are reduced to their
+origin (`scheme://host[:port]`); paths, queries, fragments, and userinfo are
+omitted. The configured credential is also masked if it occurs in the origin.
+
+`tool.selection` records selected and discovered episode populations. Excluded
+episodes keep compact `unjudged` records with join keys and costs, but no memory
+payloads or empty rubric fields. They are outside aggregates and summary counts.
+Unselected episodes do not create missing-attachment warnings. Ambiguous
+execution joins still fail.
+
+## Provenance and interpretation
+
+`tool.provenance` contains `implementation_sha256` and `prompts_sha256`.
+Executed span inputs contain `evidence_sha256` and `system_prompt_sha256`.
+These identify the working implementation and judged inputs without credentials.
+They do not establish a memory corpus's source date or freedom from task leakage.
+
+Keep exact-task solution reuse separate from transfer claims. Text overlap and
+dates alone do not establish provenance. Entry profiles, verdicts, and delivery
+ratios describe recorded observations. They are not additive system gain or a
+causal estimate against a no-memory run.

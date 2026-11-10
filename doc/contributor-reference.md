@@ -1,742 +1,654 @@
 # Contributor reference
 
-This is the task-specific extension of [AGENTS.md](../AGENTS.md). Use the
-sections relevant to the behavior you are changing; these contracts do not
-require reading the whole reference for every task. Paths and commands below
-are relative to the repository root. Update the affected section when a
-contract changes.
+This reference extends [AGENTS.md](../AGENTS.md) for work on MemUse. Read the
+sections that apply to your change. Paths and commands are relative to the
+repository root. Update the affected section when a contract changes.
 
 ## Commands
 
-From the checkout root:
+Run commands from the checkout root. Install dependencies only when needed.
+Replace `path/to/recordings` and `path/to/injudge-report.json` with your input
+paths. `calibration-cases/` is an example output directory for generated cases.
 
 ```bash
-uv sync                                 # once: create .venv from pyproject.toml
-npm --prefix agent install              # once: the pi agent packages (node >= 22.19)
-uv run pytest tests -q                  # full suite (offline; also runs node --test)
-uv run pytest tests/test_injudge.py -q  # one file
-uv run -m memgraph <paths> -o memgraph.html --json memgraph.json
-uv run -m injudge <paths> -o output/    # one run folder: report + summary.json + summary.md; judged-span evidence/transcripts
-uv run -m injudge <paths> --html        # also memgraph-verdicts.html
-uv run -m injudge <paths> --dry-run     # preview spans that use the agent; no calls or files
-uv run -m injudge <paths> --prepare-only -o output/  # offline episode evidence; no .env/Node/judge
-uv run -m calibration build <dir>       # controlled judge-calibration episodes
-uv run -m calibration score <report.json>...  # agreement, stability, matched-pair novelty
+uv sync
+npm --prefix agent install
+uv run pytest tests/test_injudge.py -q
+uv run pytest tests -q
+uv run -m memgraph path/to/recordings -o memgraph.html --json memgraph.json
+uv run -m injudge path/to/recordings -o output/
+uv run -m injudge path/to/recordings --html
+uv run -m injudge path/to/recordings --dry-run
+uv run -m injudge path/to/recordings --prepare-only -o output/
+uv run -m calibration build calibration-cases/
+uv run -m calibration score path/to/injudge-report.json
 ```
 
-`<paths>` are trajectory dirs (containing `trajectory.jsonl`),
-`trajectory.jsonl` files, or roots scanned recursively. A path that matches
-nothing is a usage error, named explicitly. memgraph's HTML default is
-`memory-graph.html`. injudge's default output container is `output/`, one
-`<run-stamp>/` subfolder per run (`YYYYMMDD-HHMMSS-<8 hex>` — runs never
-share a folder); it exits 2 on any span error or error-level validation
-item (`--dry-run` on the latter, `--prepare-only` also when scope or
-assignment needs review).
+Input paths can be trajectory directories, `trajectory.jsonl` files, or roots
+for recursive discovery. A path with no matches is a usage error. memgraph
+writes `memory-graph.html` by default. injudge creates a separate folder under
+`output/` for each run. Its name is `YYYYMMDD-HHMMSS-<8 hex>`.
 
-`--verdicts output/<run-stamp>/injudge-report.json` merges injudge onto a
-memgraph
-render. injudge also accepts `--golden`, `--correctness`, `--gold-metadata`,
-`--harness-report`, `--episode`, `--limit`, and `--env` (see
-`doc/en/configuration.md`). `--episode ID` (repeatable) judges only the
-episodes whose recorded episode id, benchmark identity, or execution id
-matches; other spans are compact `unjudged` records (joins and delivery cost retained),
-and an unmatched ID fails fast. Aggregate statistics, summary counts, and
-dry-run span counts exclude these out-of-selection spans. Only an `unjudged`
-scheduler placeholder with the exclusion marker is excluded; judged analysis
-text cannot remove a span from statistics. Attachments are joined only to selected episodes,
-while execution/sidecar ambiguity checks still use the complete recording.
-Policy totals explicitly cover whole input recordings.
+Use `--verdicts output/<run-stamp>/injudge-report.json` to add judgments to a
+memgraph render. injudge's `--html` option creates `memgraph-verdicts.html`.
+See [configuration](en/configuration.md) for all flags and `.env` settings.
 
-`--prepare-only` is a staged offline path. It uses bridge episode lifecycle
-events only for scope/provenance, keeps memory operations annotation-only, and
-writes `injudge.episode-inputs/v5` (`episode-inputs.json` plus one inspectable
-folder per episode). It loads no `.env`, Node runtime, network client, or
-judge runner. Scope/assignment ambiguity is preserved in diagnostics; the
-package is written before the command returns status 2 for review.
+`--episode ID` is repeatable. It matches a recorded episode id, benchmark
+identity, or execution id. An unmatched id fails before judging. Excluded
+spans remain compact `unjudged` records, with their joins and delivery costs.
+They do not enter judgment statistics or dry-run span counts. Only scheduler
+placeholders with the exclusion marker receive this treatment. Judge-written
+analysis cannot exclude a span. Attachments join only selected episodes;
+ambiguity checks still use the full recording. Policy totals cover whole
+input recordings.
 
-Judge credentials live in the checkout `.env` (copy `.env.example`; never
-commit `.env`). Every key the tools consume is validated; the API key
-and endpoint reach the runner through `JUDGE_API_KEY` and `JUDGE_BASE_URL`
-environment variables. Both stay out of job files because endpoint paths can
-contain credentials.
-`--dry-run` needs no `.env`, no node, and makes no calls.
+`--dry-run` previews work without loading `.env`, starting Node, making calls,
+or writing files. `--prepare-only` writes `episode-inputs.json` and one folder
+per episode. It uses no `.env`, Node, or judge runner. Scope and assignment
+problems remain in diagnostics. The package is written before exit status 2
+requests review. Bridge lifecycle events define scope and provenance; memory
+operations still come only from annotations.
 
-`uv sync` creates `.venv` from `pyproject.toml` (runtime `tqdm`; tests use
-pytest). memgraph is stdlib-only. The judge agent is TypeScript under
-`agent/` (`@earendil-works/pi-agent-core` + `@earendil-works/pi-ai` +
-`typebox`, ESM, node >= 22.19 with type stripping, no build step);
-`npm install` there once.
+injudge exits 2 for a span error or an error-level validation item. Dry runs
+also fail on error-level validation. Preparation also returns 2 when scope or
+assignment needs review.
+
+Copy `.env.example` to `.env` for paid judging. Never commit `.env`. Validate
+all consumed settings before paid calls. Pass the key and endpoint to the
+runner only through `JUDGE_API_KEY` and `JUDGE_BASE_URL`. Do not put either in
+job files: an endpoint path can contain a credential.
+
+`uv sync` creates `.venv`. Python uses the standard library and `tqdm`;
+memgraph itself uses only the standard library. The TypeScript runner uses
+pi, ESM, and Node >= 22.19 with type stripping. It has no build step.
 
 ## Layout
 
-```
-.env.example               # template for the checkout .env (copy; never commit .env)
-.gitbook.yaml              # GitBook sync: doc/ is the book root
-pyproject.toml             # uv env; package = false; tools run as uv run -m …
-uv.lock                    # locked dependency versions for uv sync
-README.md                  # overview, install, and usage (English)
-README.zh-CN.md            # the same overview in Chinese
-CLAUDE.md                  # @AGENTS.md import only — no second contract
-util.py                    # atomic_write, tmp_sibling, utf8_safe, check_writable,
-                           # print_safe, print_validation
-memgraph/__init__.py       # package docstring (module map; no re-exports)
-memgraph/annotations.py    # schema-v10 annotation index + MemoryRef mapping
-memgraph/model.py          # Trajectory / MemoryOp / MemoryUnit / Edge
-memgraph/parse_trajectory.py  # trajectory.jsonl → ops; shared step rule
-memgraph/episodes.py       # shared episode-scope rule (bridge boundaries) + graph episode rows
-memgraph/graph.py          # path discovery, cross-trajectory linking, validation
-memgraph/html.py           # self-contained HTML (template + embedded graph JSON)
-memgraph/verdicts.py       # merge injudge.report/v27 onto recall ops
-memgraph/__main__.py       # python3 -m memgraph
-injudge/__init__.py        # REPORT_SCHEMA / SUMMARY_SCHEMA / EPISODE_INPUT_SCHEMA / CHECKPOINT_SCHEMA
-injudge/model.py           # AgentStep / ToolExec / InjectionSpan
-injudge/steps.py           # agent-lane step stream + all-lane billed prompt tokens
-injudge/episodes.py        # offline episode preparation and source assignments
-injudge/cost.py            # proven placement residency across recorded input views
-injudge/spans.py           # episode recall ops → injection spans
-injudge/judge.py           # the verdict contract, judge prompts, evidence renderers
-injudge/evidence.py        # one span's judge evidence as a folder of files + manifest
-injudge/agent.py           # .env → AgentConfig, runner subprocess, corrective-retry loop
-injudge/gold.py            # golden-answer / correctness sidecars and CLI joins
-injudge/prompts.py         # loads prompts/ (never inline prompts in code)
-injudge/aggregate.py       # verdict counts/rates, per-memory usage roll-ups
-injudge/report.py          # injudge.report/v27 + injudge.summary/v19 + summary.md + stdout
-injudge/checkpoints.py     # completed-span journal writes and report recovery
-injudge/__main__.py        # python3 -m injudge
-agent/                     # TS judge agent: runner.ts (pi Agent + budgets),
-                           # evidence-tools.ts (scoped read-only tools),
-                           # trajectory.ts (pi event-sourced recording), protocol.ts
-agent/credential-mask.ts   # mask saved values before JSON serialization
-agent/package.json         # pi-agent-core + pi-ai + typebox; node >= 22.19; tsc + node --test
-agent/tsconfig.json        # noEmit; node strips types at runtime, no build step
-agent/*.test.ts            # node:test for evidence-tool path scoping and the runner
-prompts/                   # every LLM prompt, grouped by tool/purpose
-calibration/               # controlled judge cases (real judge) + report scoring
-calibration/__init__.py    # the cases and their expected labels
-calibration/__main__.py    # python3 -m calibration build | score
-doc/                       # GitBook: LANGS.md + en/ + zh-CN/, each with SUMMARY.md
-doc/README.md              # the book's landing page
-tests/conftest.py          # checkout root on sys.path
-tests/annotated_fixtures.py  # schema-v10 synthetic-trajectory builder
-tests/test_*.py            # pytest suite
-```
+| Path | Responsibility |
+| --- | --- |
+| `.env.example` | Template for the untracked `.env` |
+| `pyproject.toml`, `uv.lock` | Python dependencies; tools run with `uv run -m` |
+| `README.md`, `README.zh-CN.md` | Overview, installation, and usage |
+| `CLAUDE.md` | Import of `AGENTS.md`; no separate contract |
+| `util.py` | Atomic writes, safe text output, and path checks |
+| `memgraph/annotations.py` | Annotation index and portable MemoryRef identity |
+| `memgraph/model.py` | Trajectories, operations, memories, and edges |
+| `memgraph/parse_trajectory.py` | Operation parsing and shared step attribution |
+| `memgraph/episodes.py` | Shared episode scopes and graph episode rows |
+| `memgraph/graph.py` | Input discovery, linking, and validation |
+| `memgraph/html.py` | Self-contained HTML and embedded graph JSON |
+| `memgraph/verdicts.py` | Report joins onto recall operations |
+| `memgraph/__main__.py` | memgraph CLI |
+| `injudge/__init__.py` | Shared artifact schema constants |
+| `injudge/model.py` | Steps, tool executions, and injection spans |
+| `injudge/steps.py` | Agent steps and recorded prompt-token billing |
+| `injudge/episodes.py` | Episode preparation and source assignment |
+| `injudge/cost.py` | Proven placement residency in recorded inputs |
+| `injudge/spans.py` | Span grouping and per-entry action windows |
+| `injudge/judge.py` | Verdict validation, derivation, and evidence rendering |
+| `injudge/evidence.py` | Evidence folders and manifests |
+| `injudge/agent.py` | Configuration, subprocess calls, and follow-ups |
+| `injudge/gold.py` | Golden-answer and correctness attachment joins |
+| `injudge/prompts.py` | Prompt loading and composition |
+| `injudge/aggregate.py` | Counts, rates, profiles, and memory usage totals |
+| `injudge/report.py` | Report, summary, Markdown summary, and console output |
+| `injudge/checkpoints.py` | Completed-span journal and report recovery |
+| `injudge/__main__.py` | injudge CLI |
+| `agent/runner.ts` | pi agent and conversation budgets |
+| `agent/evidence-tools.ts` | Read-only tools scoped to the evidence folder |
+| `agent/trajectory.ts`, `agent/protocol.ts` | Judge recording and runner protocol |
+| `agent/credential-mask.ts` | Credential masking before serialization |
+| `agent/*.test.ts`, `agent/tsconfig.json` | Node tests and type checks |
+| `prompts/` | All LLM instruction prose, grouped by tool and purpose |
+| `calibration/` | Controlled judge cases and report scoring |
+| `doc/README.md` | Documentation navigation |
+| `doc/en/`, `doc/zh-CN/` | English and Chinese Markdown guides |
+| `tests/annotated_fixtures.py` | Synthetic schema-v10 trajectory builder |
+| `tests/conftest.py`, `tests/test_*.py` | Python test setup and tests |
 
 ## Input and identity
 
-Memory actions come only from recorded `memory_*` annotation events:
-`memory_session`, `memory_role_bind`, `memory_generate_*`, `memory_change`,
-`memory_search_*`, `memory_delivery`. Never reconstruct them from prompt
-text, role names, or label conventions. A run without annotations is valid:
-zero memory operations plus a validation note. The recorder's `bridge_*`
-lifecycle family does not supply portable memory operations. A successful
-bridge delete missing its same-session, same-operation memory retirement
-is warned about; never reconstruct MemoryRefs from bridge-native ids.
-Other bridge events are skipped. `memory_source_set` definitions are audit
-provenance, not operations or delivered evidence; the recorder verifies their
-hashes and links. Do not expand them into judge evidence. Non-v10 runs get a run.json version warning,
-not a compatibility parser.
+### Annotation sources
 
-Schema v10's lane-aware shape: searches record a `lane_id`; a delivery
-names one `searches` entry per read lane (profile order) and one
-`placements` entry per rendered slot. Its presentation preserves ordered
-slot names, kinds, and resolved texts (content digests when unresolved),
-never a flattened string. Exposure is checked within each slot, not across
-message boundaries. Queries/matched aggregate the linked searches, and the
-delivery↔search integrity check verifies lane agreement plus the ordered
-subsequence over concatenated per-lane results. Empty searches are valid
-when no lane was read. Empty placements cost zero; partially sized slots
-retain known cost with a warning.
+Memory operations come only from `memory_*` annotations: sessions, role
+bindings, generation, changes, searches, and deliveries. Never infer them from
+prompt text, role names, or adapter labels. A run without annotations is
+valid. It has zero memory operations and a validation note.
 
-The optional `embedding` role binds a distinct proxy lane. An operation-end
+Bridge events provide scope and provenance. They do not provide portable
+memory operations. Warn when a successful bridge deletion lacks the matching
+same-session, same-operation memory retirement. Never construct a MemoryRef
+from a bridge-native id. `memory_source_set` definitions are audit provenance;
+do not expand them into judge evidence. A non-v10 recording gets a version
+warning, not a compatibility parser.
+
+A search records its `lane_id`. A delivery has one `searches` entry for each
+read lane, in profile order, and one `placements` entry for each rendered
+slot. Preserve slot order, names, kinds, and resolved text. Use content
+digests when text is unresolved. Check exposure within each slot; never join
+text across message boundaries to prove exposure.
+
+Check that delivery/search links agree on lanes and form an ordered
+subsequence of the combined lane results. Aggregate queries and matches from
+the linked searches. Keep duplicate links visible, but count their query and
+matches once per operation. Empty searches are valid when no lane was read.
+Empty placements cost zero. Partially sized placements retain known cost and
+produce a warning.
+
+### Portable memory identity
+
+Use portable MemoryRef fields for identity. Adapter fields are labels only.
+
+- Group items by `(namespace, item_id)`. If `item_id` is absent, use a stable
+  display key. If that key is only an operation-local id, use canonical
+  version/content identity instead. Graph and usage ids encode this fallback
+  as `content:<sha256>`. Graph references expose `grouping_id` for joins.
+- A span fingerprint combines item identity with `namespace`,
+  `identity_scheme`, `version_id`, and content sha256. Two items that share a
+  digest remain distinct. The same key in two stores also remains distinct.
+- An `operation_local` version id cannot identify content across operations.
+  Omit it from cross-operation comparisons and use the digest. Also omit a
+  display key that is only that local id. A new local id must not invent a
+  new item or reopen an action window.
+- If neither a usable version id nor a digest exists, compare delivered
+  `(namespace, item, value)`. Redacted content has no value. Indistinguishable
+  redacted entries under the same item therefore share a span.
+
+Generation retirements combine delete-change before-references with the end
+annotation's `retired` references. Deduplicate per revision. Retiring a known
+older revision must not delete the current item or add its deletion history.
+Keep the retirement on the operation. The latest observed candidate defines
+item state. Warn when unobserved revisions cannot be ordered. Native version
+ids compare across operations; operation-local ids compare only by digest.
+
+`extensions.cure` supplies display fields, such as key, memory type,
+confidence, review status, and extraction step. Portable fields remain the
+fallback. Use protocol `main_step` when no extraction step was declared.
+Do not use adapter vocabulary for identity, exposure, or cost. Do not search
+prompt text for `"## CURE Memory"`.
+
+### Spans and action windows
+
+A span groups deliveries within one prepared episode. A merged delivery must
+have the same entries in the same order, placement presentation, and exposure.
+A wider exposure, different order, or changed framing starts a new span.
+Unrelated deliveries do not split an observed nonempty span. A different
+treatment of any shared item does split it, even if the old treatment returns.
+Empty and unattributed deliveries merge only when consecutive. Unobserved
+consumers never inherit an observed span's verdict or costs.
+
+Proven residency can keep credit with the first owner. An equal or shorter
+copy adds no action window when it shows no new selector and an earlier copy
+still shows all of its text in the consumer's input. Record the earlier owner
+in `memory_window_owners`. Check continuity at each delivery and reset it for
+each episode. Lost or unknown continuity starts a new span and baseline.
+Wider or different text, new selectors, and a proven selected full read use
+ordinary handoffs. Ownership allocates content credit; it does not prove cause.
+
+Otherwise, a later re-exposure of an item closes its earlier window when it
+shows all previously exposed text. Different or narrower verified text leaves
+the earlier window open and appears in `memory_variant_steps`. Unverifiable
+text uses the item-level convention.
+
+Two deliveries consumed in one turn can both have actions at that step. A
+same-step copy with no new verified text or shown selector opens after that
+step. Keep a separate end reason for each entry. Expose overlapping credit in
+`rubric.shared_anchors`; do not change visibility to prevent overlap.
+
+### Embedding calls and billing
+
+The optional `embedding` role binds a separate proxy lane. An operation-end
 `embedding_after_role_call_index` requires `embedding_binding_status` and
-`embedding_call_refs` (including an explicit empty list for `no_call`). These
-refs never replace memory-call attribution or create agent steps. Billing
-uses the largest valid prompt-token total from run.json, agent_end, and recorded
-message usage for complete recordings; inconsistent smaller snapshots warn.
-When a view excludes events, billing uses message usage only from its selected
-interval and ignores whole-run snapshots, which cannot separate credited and
-discarded attempts. Earlier context retained for replay contributes no charge.
-Without applicable snapshots, message usage misses embedding calls and warns
-when that role is bound in the selected view.
-Duplicate search links remain visible but contribute query/matched once per
-operation.
+`embedding_call_refs`. `no_call` requires an explicit empty list. These
+references neither replace memory-call attribution nor create agent steps.
 
-Generation retirements merge delete-change before-refs with end-event
-`retired` refs, deduplicated per revision. Retiring a distinguishably older
-revision keeps the current item alive: the operation retains the retirement,
-but the item gets no deletion edge/history. State follows the latest
-observed candidate; differing retirements note that unobserved revisions
-cannot be ordered. Native version ids compare across operations;
-operation-local ids compare through content digests only.
+For complete recordings, billing uses the largest valid prompt-token total
+from `run.json`, `agent_end`, and message usage. Warn about inconsistent
+smaller snapshots. A bounded input view uses message usage from its selected
+interval only. Whole-run snapshots cannot separate credited and discarded
+attempts. Earlier context retained for replay contributes no charge.
 
-Identity and grouping use the recorder's portable MemoryRef fields, never
-adapter vocabulary.
-
-- **Item grouping** (graph registry, injudge usage rollups,
-  footprint windows)
-  is `(namespace, item_id)`, stable across versions of one item. Fall back
-  to a stable display key when `item_id` was not recorded. An operation-local
-  id posing as the display key is withheld: use the canonical entry's
-  version/content identity instead. Graph/rollup item ids encode this fallback
-  as `content:<sha256>`; graph refs carry `grouping_id` for the browser join
-  while retaining their recorded fields. The same display key
-  from two stores, or two items in one store, is two memories.
-- **Span fingerprints** use the gate's version tuple — `namespace` /
-  `identity_scheme` / `version_id` / content sha256 — plus the recorded
-  item identity (`item_id`, else the display-key fallback). A content
-  digest names content, not an item: two items sharing one digest, or
-  two redacted entries sharing one key with distinct recorded item ids,
-  stay two memories.
-  - An `operation_local` version_id is withheld: it names nothing
-    outside its own operation, so comparison rides the content digest.
-    When the display "key" IS that local id (no `item_id`, no real key
-    recorded), it is no item identity either, and the item half reads
-    as absent.
-    Footprint windows follow the same content identity when
-    no stable item is known: a fresh local id does not reopen the earlier
-    treatment's window or fabricate a new memory.
-  - With neither a withheld-adjusted version_id nor a digest, the
-    fingerprint is the delivered `(namespace, item, value)`. Redacted
-    content records no value, so redacted bodies indistinguishable
-    under one `(namespace, item)` share a span.
-  - Unobserved consumers stay in separate unassessable spans; their costs and
-    deliveries never inherit an observed span's verdict.
-  - A re-delivery merges into a span only inside the same prepared episode
-    and as the SAME treatment: identical entries in the same order, the same
-    placement presentation, and the same per-entry exposure. A changed
-    exposure, a re-ranked bundle, or a re-framed block starts a new span — a
-    wider later exposure never merges backward onto anchors that predate it.
-    Unrelated deliveries do not split an observed, nonempty span. A different
-    treatment of any shared item closes it, even if its original treatment
-    returns later. Empty and unattributed deliveries merge only consecutively.
-  - Equal or shorter verified exposed text with no newly exposed selector
-    retains its first owner while a proven copy showing all of it remains in
-    the bound consumer input. Later copies receive no eligible
-    actions; a break in proven continuity starts a new span and input baseline.
-    `memory_window_owners` names the earlier span and entry. This is
-    content-credit accounting, not causal proof. Unknown visibility,
-    wider or different text, newly exposed selectors, and proven selected full reads retain ordinary handoffs.
-    Check continuity when merging individual deliveries; reset per episode.
-  - Otherwise footprint windows are per item, but only a RE-EXPOSURE (a later delivery
-    whose verified text contains everything this entry showed) supersedes
-    one. A different verified text of the same item, or a narrower one with
-    no proven visible earlier copy, leaves the earlier window open and is listed in
-    `memory_variant_steps`; unverifiable text keeps the item convention.
-    Deliveries reaching one consuming turn are all eligible there; only a
-    same-step copy adding neither verified text nor a shown selector opens
-    after the shared step.
-    Each entry has its own end reason. A same-step collision for one entry
-    does not change the reason for another entry's window.
-    Overlapping credit is surfaced as `rubric.shared_anchors`, never
-    prevented by falsifying when content was visible.
-- **`extensions.cure`** is a display projection only (key, memory_type,
-  confidence, review status, needs_verification, rejection counts, declared
-  extraction step — falling back to the protocol `main_step` when
-  undeclared). Portable fields remain the fallback so a non-CURE adapter
-  still parses. Nothing may key behavior off one adapter's vocabulary.
-  Matching `"## CURE Memory"` in prompt text is forbidden.
+Without applicable snapshots, message usage can miss embedding calls. Warn
+when the selected view binds an embedding role. Missing usage fields or
+prices remain null. Cache and reasoning counters are subsets, not extra
+input or output tokens. See [recorded billing](en/artifacts.md#recorded-billing-versus-memory-delivery-size).
 
 ## Steps
 
-Both tools attribute steps through one rule:
-`parse_trajectory.classifying_messages`, with the ordinal in
-`parse_trajectory.agent_turns`. Reuse that rule; do not re-derive it.
-Episode scope is likewise one rule, `memgraph.episodes.episode_scopes`
-(bridge open/close pairs by event position, else episode-scoped sessions):
-injudge prepares episodes from it and memgraph lays out its rows by it.
-Both use `episode_participants` and `delivery_episode` for recall membership.
-A bound consumer takes priority; an unbound delivery must satisfy its source
-episode/session constraints and the accepted participant mapping.
-Session boundaries and task text use the sessions accepted by
-`build_annotation_index`. Rejected duplicates and invalid session records
-cannot create another episode or add task text.
-Searches without a delivery use only accepted search starts for episode
-assignment; rejected starts cannot create or move a search.
+Reuse `parse_trajectory.classifying_messages` and the ordinal from
+`parse_trajectory.agent_turns`. A step is the 1-based ordinal of a completed
+turn outside memory and side lanes. Extraction before the first completed
+agent turn is step `0`.
 
-- Agent step = 1-based ordinal of completed turns that are neither memory
-  lane nor side lane.
-- Lanes come from `memory_role_bind`. When bindings are missing, fall back
-  to the operation events' own lanes, minus the lanes session/delivery
-  events stamped (main-lane traffic by protocol), and warn.
-- A lane that is main traffic in any session — every session's main binding
-  joins the guard, not just the first binder's — is dropped from the memory
-  set with a warning; its turns count as agent steps.
-- A side lane (bound as neither main nor memory, e.g. an unbound
-  query-rewrite lane) is observed classifying lanes − memory lanes −
-  main-side, whenever main-side evidence exists. Its turns count as neither
-  agent steps nor memory turns; each side lane is listed in
-  `validation`/warnings.
-- An extraction observed before the first agent turn completes is step `0`.
-- A delivery with no classified agent turn has `step = None`, and its span
-  is rule-judged auto-neutral with no LLM call. When the consumer is KNOWN
-  but unobserved — the bound call's turn classified as memory/side lane or
-  never completed, or a claimed call id has no observed turn_start — never
-  fall back to a declared or most-recent step:
-  that would make a pre-exposure action eligible as downstream evidence.
-  The delivery stays unattributable with a warning. The observed-turn
-  fallback (no binding, no declared step) is an attribution assumption,
-  named in the warnings per use.
+Use `memory_role_bind` to identify lanes. If bindings are missing, use lanes
+from operation events, except lanes marked as main traffic by session or
+delivery events. Warn about this fallback. A lane used as main traffic in any
+session cannot be a memory lane; remove it from that set and warn.
+
+When main-lane evidence exists, other observed lanes outside the main and
+memory sets are side lanes. Their turns count as neither agent nor memory
+turns. Report each side lane in validation.
+
+A delivery without a classified agent turn has `step = None`. Its span is
+mechanically neutral and unassessable; no judge call runs. If its bound
+consumer is known but unobserved, never substitute a declared or previous
+step. This includes incomplete turns, memory or side-lane turns, and claimed
+call ids without a recorded `turn_start`. Such a substitution could credit an
+action that preceded exposure. The unbound observed-turn fallback is an
+assumption; warn on each use.
+
+Use `memgraph.episodes.episode_scopes` for episode boundaries. It uses bridge
+open/close positions, or episode-scoped sessions when bridge boundaries are
+absent. Both tools use `episode_participants` and `delivery_episode` for recall
+membership. A bound consumer takes priority. An unbound delivery must satisfy
+its source episode/session constraints and accepted participant mapping.
+
+Only sessions accepted by `build_annotation_index` can define boundaries or
+supply task text. Invalid or duplicate sessions cannot create an episode.
+Likewise, only accepted search starts can assign undelivered searches to an
+episode. A rejected start cannot create or move a search.
 
 ## Corrupt input
 
-Corrupt recorded data is tolerated, never fatal. Malformed JSONL lines,
-corrupt seqs, unknown binding statuses or logical roles, non-list payload
-list-fields, corrupt matched_count or returned-entry shapes, and broken
-session/operation links land in `validation`/warnings and the run continues.
-The recorder's own retrieval/verify tooling is the strict checker.
+Continue after corrupt recorded data and report diagnostics. Examples include
+malformed JSONL, invalid sequence numbers, unknown roles or binding statuses,
+invalid list fields, corrupt result entries, and broken operation links. The
+recorder's retrieval and verification tools perform strict validation.
 
-Every field read off a possibly-corrupt event is shape-guarded: a JSON
-`true` is never an int index, unhashable values never reach a dict/set
-lookup, and a digit string past the interpreter's int-string limit never
-reaches `int()`.
+Guard every event field before use. A JSON boolean is not an integer index.
+Do not pass unhashable values to dictionary or set lookups. Check oversized
+digit strings before calling `int()`.
 
-Three readings deserve care:
+An absent `proxy_source` means the unprefixed lane because the writer drops
+null fields. A present non-string value is corrupt.
 
-- **`proxy_source`:** an absent key is the unprefixed lane (the JSONL writer
-  drops null). Only a non-string value is corruption.
-- **Seq / file order.** The log is append-only; the event stream keeps file
-  order. Parsed event positions determine operation order and fallback step
-  attribution. They also order same-step deliveries and late tool results,
-  so corrupt seq values cannot change their attribution.
-  - A missing or non-integer seq gets a synthetic seq one past the highest
-    seen so far. Its event keeps its file position.
-  - A genuinely non-increasing seq is noted, never re-sorted.
-  - A real seq colliding with an earlier synthetic one gets its own
-    collision note. The colliding ops share a `(run_id, seq)` join key, so
-    the verdict merge's ambiguity guard refuses both; the corrupt copy costs
-    that one real delivery its verdict annotation.
-  - The delivery/search order check uses file positions. A delivery is
-    "recorded before its search end" only when it appears first in the file,
-    regardless of either seq value.
+Preserve file order. Parsed event positions determine operation order,
+fallback attribution, same-step delivery order, and late tool results.
 
-CLI misuse (unmatched input paths, unwritable report paths, bad `.env`
-values) fails fast with a targeted `SystemExit` before any paid judge call.
+- Give a missing or non-integer sequence number a synthetic value one above
+  the highest value seen. Keep the event at its original position.
+- Warn about non-increasing values; never sort the log to repair them.
+- Warn when a real sequence number collides with a synthetic one. Their
+  ambiguous `(run_id, seq)` join must not receive a verdict.
+- Check delivery/search order by file position, not sequence value.
+
+CLI misuse is different from corrupt input. Unmatched paths, unwritable
+output paths, and invalid configuration fail with a targeted `SystemExit`
+before paid calls.
 
 ## Judging
 
-The span verdict is derived in code: any harmful use (`misused`) ⇒
-negative, else any `used` ⇒ positive, else any `unclear` ⇒ unresolved,
-else neutral. `used` is acted-on influence with `positive_effect: improved`;
-`unproductive` is acted-on influence with `no_effect` and is neutral;
-`misused` requires `harmed`. Memory guidance that misdirects work into an abandoned or corrected detour
-without a used finding is `harmed`. An agent typo, unavailable tool, or unrelated
-environment failure alone does not establish harm from memory; follow corrected
-attempts to their results. A blocked attempt with no finding has unknown effect.
-Reading memory content is delivery cost, not such work.
-`unclear` covers unknown attribution (influence
-null) or acted-on influence with unknown effect. `selected` records
-retrieval of fuller memory content recorded as its own delivery, without
-inheriting that delivery's effect. Whenever a later same-item delivery takes
-over an earlier window, their shared content is credited to the later
-delivery for downstream actions, even without selection. The earlier copy
-itself is not a competing source; independent task instructions, prior
-decisions, and other sources still are. This allocates established influence;
-it does not create influence or transfer actions already shaped before the handoff.
-A retrieval returning no recorded delivery,
-or reading repository code at a memory-supplied distinctive path, is
-acted_on. `referenced` records a mention singling out that entry (a remark on
-the whole result list references none of several entries, but does reference
-the entry when only one was shown); `none` records
-no established influence after complete window inspection. Attribution is an
-observable test, never a weighing of how "equally" two sources explain an
-action: `acted_on` needs an in-window action using memory-specific content (a
-specific mechanism, location, identifier, value, command, check, or remedy no
-pre-exposure record states — quotable from the task, visible input, earlier
-steps, or deliveries already in the input), explicit credit, or a course change
-right after delivery. Derivable content, outside knowledge, patterns used
-elsewhere, and post-exposure findings never compete; routine practice is not
-memory-specific. Content the task instructed or the agent decided before
-delivery gives `none`; content stated before delivery only as an open
-possibility (hypothesis, question, the agent's own query) or in a source the
-agent had not acted on gives influence null. Check these unresolved ties before
-`none`; an open possibility is not a settled decision. Selection and acted-on claims require in-window action
-anchors. Only acted_on keeps a non-null effect; assembly coerces any other
-pairing to null and counts it under judge compliance.
-An explicit search using an entry's shown key is recorded as `memory_followups`
-only when its proven tool-result host links to an in-window action using that
-identifier and returning the same portable item in that specific placement.
-An identifier embedded in a longer identifier is not a shown selector.
-Records carry `step`,
-`delivery_step`, `tool_call_id`, and `operation_id`; delivery timing never
-stands in for action timing. A rejected read can improve work by resolving
-uncertainty only when later work demonstrably uses that finding; rejection
-alone does not establish benefit or `no_effect`. Removing a completed diagnostic
-probe is not harm, while a memory-misdirected abandoned attempt without a used finding is harm.
+### Signals, usage, and verdicts
 
-Historical retrieval relevance requires the connecting mechanism or applicable
-action in the exposed text; a query or later diagnosis cannot supply it. Explicit
-task instructions that already specify the action give none, while a symptom
-alone is not an implementation plan. Narrative summaries preserve null
-attribution instead of naming a competing source as the established cause.
+The judge scores each entry. Python derives usage and the span verdict.
+Novelty, accuracy, influence, and effect are independent signals. No combination
+across signals is itself a contract violation. Preserve unknown values.
 
-The judge is an AGENT, not one prompt. Python prepares episodes before
-grouping spans, then materializes each span's target and parent episode evidence
-under `<output>/<run-stamp>/evidence/` (`injudge/evidence.py`: `span.md`,
+| Recorded judgment | Derived usage | Contribution to span verdict |
+| --- | --- | --- |
+| Acted on; effect `improved` | `used` | Positive |
+| Acted on; effect `harmed` | `misused` | Negative |
+| Acted on; effect `no_effect` | `unproductive` | Neutral |
+| Acted on; effect null | `unclear` | Unresolved |
+| Influence `selected` | `selected` | Neutral |
+| Influence `referenced` | `noted` | Neutral |
+| Influence `none` | `ignored` | Neutral |
+| Influence null; complete window read | `ambiguous` | Neutral |
+| Influence null; incomplete window read | `unclear` | Unresolved |
+
+Any `misused` entry makes the span negative. Otherwise, any `used` entry makes
+it positive. Otherwise, any `unclear` entry makes it unresolved. All remaining
+spans are neutral. A neutral attribution tie is not proof of no influence.
+The final task result never determines the span verdict.
+
+Acted-on influence requires an eligible action that uses memory-specific
+content, explicitly credits memory, or changes course directly after delivery.
+Check the recorded baseline for the same mechanism, location, identifier,
+value, command, check, or remedy. A task instruction or settled prior decision
+can explain `none`. An earlier open possibility, question, query, or unused
+source can leave attribution null. Do not turn an unresolved tie into `none`.
+Outside knowledge, derivable content, and later findings are not recorded
+competing sources. Routine practice alone is not memory-specific content.
+
+`selected` means an action retrieves fuller content that has its own recorded
+delivery. It does not inherit that later delivery's effect. A retrieval with
+no recorded delivery, or a code read at a distinctive memory-supplied path,
+can be acted on. `referenced` requires a mention of the entry. A remark about
+a whole multi-entry list does not reference each entry; it can reference the
+entry when only one was shown.
+
+Ordinary handoffs allocate later actions to the later delivery. Proven
+resident copies can keep the earlier owner, as described above. Neither rule
+creates influence or transfers an action already shaped before the handoff.
+Independent instructions and prior decisions still matter.
+
+Memory guidance that causes an abandoned or corrected detour without a used
+finding is harmful. An agent typo, unavailable tool, or environment failure
+alone does not establish harm. Follow corrected attempts through their
+results. A blocked attempt with no finding has unknown effect. A rejected
+read can help when later work demonstrably uses its finding. Rejection alone
+does not establish benefit or `no_effect`. Reading delivered memory is a
+delivery cost, not evidence of a harmful detour.
+
+Historical retrieval relevance needs a connecting mechanism or applicable
+action in the exposed text. A query or later diagnosis cannot supply it.
+A symptom alone is not an implementation plan. Preserve null attribution in
+narrative summaries. See [verdict derivation](en/verdict-derivation.md) for the
+full signal rules.
+
+### Evidence and recorded exposure
+
+Python prepares episodes before grouping spans. It writes each span's evidence
+under `<output>/<run-stamp>/evidence/`. The folder contains `span.md`,
 `task.md`, `baseline.md`, `deliveries.md`, `searches.json`, `manifest.json`,
-`steps/`, and optional `messages.md` / `gold.md` / `outcome.json`). Each text is stored once:
-`baseline.md` names the file holding a visible message, `deliveries.md`
-points a span's own delivery to `span.md`, and JSON lists hold one record per
-line. The baseline states its recorded visible-message count and known
-reconstruction gaps; no detected gap is not a claim about unrecorded agent knowledge.
-`messages.md` preserves input text without a task/step home, with source
-positions and its first visible turn/step. The full visibility replay stays in
-the offline audit package. The manifest describes every file and lists `required_reads`
-(`always`: task, baseline, messages and gold when present, preceding and first consuming step; `prior_sources`:
-the visible step files and other deliveries' sections) — the one list the
-opening states and agent.py checks. The pi agent in `agent/runner.ts`
-receives `span.md`, compact file navigation, and the required reads in its
-opening; detailed episode evidence is read through tools scoped to that
-folder (absolute paths, `..`, and out-of-root symlinks refused).
-`read_evidence` takes several `paths` per call (one text block per file,
-aligned with `details.files`), because every model call resends the
-conversation; offset/limit/column page each named file. Search matches
-complete lines, shows bounded excerpts, returns at most 200 matched lines, and
-fails after 5 seconds (vm timeout) rather than stalling on a runaway regex.
-Search results never certify read coverage.
-`span.md` states each entry's earlier deliveries in the episode and, from the
-consumer's recorded input view, whether each is still visible, arrived in that
-same input, or is gone, and whether it showed all of the entry's text. Only
-the entry's proven placements still in that input count; a surviving slot
-does not preserve entries from another retracted slot.
-Request-pointer placement proofs are checked against the bound call's recorded
-request and JSON-value digest, then matched uniquely to the consumer's visible
-host occurrence; wire indexes never stand in for recorder message slots.
-Unresolved placement ownership, inseparable host text, or gaps in any delivery
-consumer's context block every assessable span in that episode before a paid
-call (and make dry-run exit 2), including spans before the fault. Thus a judged
-`baseline.md` is the consumer's complete recorded input. Slots are positions
-in the client's contiguous message list and the recorder refills a retracted
-slot, so every input must hold each slot through its highest visible slot and
-its retained `kept` prefix; only a retracted tail is a known removal. A later
-record can fill a hole for later inputs, never an earlier consumer's. No
-suffix length is inferred beyond the recorded prefix. A valid history rewrite
-clears the lane's earlier notes (the prefix check still covers retained
-slots); past views and audit notes keep theirs. Informational preparation
-notes alone do not block judging; empty/unobserved spans retain mechanical skips. `not_in_request`,
-`adapter_defined`, and missing proofs remain unverified for input-grounded
-judging; recorder validity does not establish exposure ownership.
-Two budgets bound the conversation, both ending in a FORCED final answer
-(the harness pattern), never a mid-run failure: MAX_STEPS caps LLM calls,
-and the CONTEXT_WINDOW watermark (minus pi's context reserve,
-MAX_OUTPUT_TOKENS, and the forced message's estimated size) rolls back the overflowing round and injects the
-forced message. Context estimates include system/tools; output-only usage
-cannot stand in for measured input. Python rejects configurations that leave
-no input room after both reservations before parsing trajectories. A defiant
-tool call in the forced round is blocked.
+and `steps/`. Optional files include `messages.md`, `gold.md`, and
+`outcome.json`. See [scoring input](en/scoring-input.md).
 
-Easy to get wrong:
+Store each text once. The baseline points to the file that contains a visible
+message. Delivery records point to `span.md` for the target. JSON lists use
+one record per line. The baseline states visible-message counts and known
+reconstruction gaps. No detected gap is not a claim about unrecorded knowledge.
+`messages.md` holds input text without a task or step home, with source
+positions and first visible turn/step. Full replay remains in the audit package.
 
-- The judge contract keys every rubric entry by a span-local memory id
-  (`m1`, `m2`, … per delivered entry). Display keys are labels only. A judge
-  label includes a key only when its recorded placement shows that exact
-  identifier. Hidden keys remain in the canonical audit and report records.
-- Python owns the contract: the runner reports the final assistant text,
-  and `_strict_parse` + `_verdict_semantics` (injudge/judge.py) decide
-  whether it is a verdict — exact id coverage, action anchors (acted-on/
-  selected claims cite global step numbers in the parent episode and inside
-  that entry's footprint window), and the anchor/influence shape
-  (`anchors` stay empty when influence is `none`); injudge/agent.py adds
-  that every cited anchor and structured `evidence[].steps` citation names a
-  step whose complete text the retained conversation read (paged reads of a
-  step file combine). A step's manifest `result_sources` must also be read:
-  a pointer to a delivery is not its tool-result text. The span's own delivery
-  is already in the opening and needs no duplicate read. Header-only reads do not count. Every answer also requires
-  the manifest's `required_reads.always` files completely; baseline references
-  do not certify their source files, so non-null novelty and acted_on influence
-  also require every `prior_sources` entry (a delivery section by its manifest
-  line range; the target's text is already in the opening).
-  Identical placement text proven in the same host occurrence uses the earliest
-  known consumer's section once; repeated residency annotations add no baseline
-  text. Different host occurrences or placement text remain separate sources.
-  Consumer order takes precedence over annotation arrival order. All deliveries
-  remain in the evidence and audit records.
-  Later spans can have more prior sources. Under a fixed context budget,
-  this can increase their null labels even when memory quality is unchanged.
-  Keep coverage checks and report this limit when comparing judgments.
-  None/referenced/selected require the complete footprint window; a non-null acted-on effect requires reading from its start
-  through the episode end, since consequences can outlive action credit. Incomplete investigation must use
-  influence (or effect) null, not fabricate neutrality or benefit. Harm in any
-  of an entry's shaped actions makes its effect harmed. Every rejected answer
-  (malformed, out of contract, empty, or missing required reads) takes the same
-  follow-up: the conversation continues over job.history with the rejection
-  reason and the evidence tools, for min(MAX_STEPS, 4) calls including its
-  forced final answer; the initial investigation keeps MAX_STEPS. MAX_ATTEMPTS
-  (default 3) bounds all phases; exhaustion is a visible `error` with text
-  kept (masked), never a silently partial verdict. Novelty, accuracy, influence, and
-  effect are ORTHOGONAL signals — no cross-signal combination is a
-  contract violation. Novelty, influence, and positive_effect accept null:
-  unknown novelty is missing baseline evidence, not a forced tier or an
-  influence verdict. Ignored relevant entries with null novelty carry
-  `ignored_unknown_novelty`; `counts.novelty.null` records them and novelty
-  rates exclude them. Scoring, forced-answer, and follow-up prompts
-  share `prompts/injudge/scoring/uncertainty.md`.
-- The evidence grounds every memory to its recorded placement exposure
-  (adapter-free value-vs-placement compare: full / whitespace-and-escape
-  normalized full (`full_normalized`) — prose-safe whitespace normalization,
-  lossless JSON-string decoding, or contiguous numbered tool-result lines
-  with exact code whitespace — clipped
-  prefix only / unknown-marked with the canonical value WITHHELD from the
-  folder; the memory's `memory_type` label is withheld alongside
-  confidence). The judged evidence never exceeds what the agent could have
-  seen.
-- The API key and endpoint travel to the runner via the JUDGE_API_KEY and
-  JUDGE_BASE_URL environment variables, never as fields in the job/result files.
-  The child environment omits ambient OPENAI_* and ANTHROPIC_* variables so
-  provider defaults cannot change request headers or endpoints. Python masks
-  job content before writing it; the runner masks transcript and result
-  strings before serialization. Endpoint
-  output that echoes it is masked before any text reaches a verdict,
-  `judge_raw`, or validation note (raw key and every percent-encoded
-  spelling in either hex case, plus literal JSON-serialized spellings; a key shorter than 8 characters is no
-  credential). A runner-level failure mid-run (the subprocess fails to
-  start, exits non-zero, or writes no
-  readable result) is that span's error verdict with a note, not a
-  retry; a missing node, runner, or agent-package tree is setup misuse
-  that fails fast with a targeted SystemExit before any paid call
-  (`_check_runner`).
-- TIMEOUT limits idle waits for response headers and each body chunk. Active
-  streams can take longer; there is no total elapsed deadline. Each native
-  retry starts a new wait.
-- Shape and semantic violations, empty final texts, and output-budget cuts
-  take the same follow-up as missing reads.
+The opening contains `span.md`, file navigation, and required reads. Tools
+can access only that evidence folder. Refuse absolute paths, `..`, and
+symlinks outside the folder. `read_evidence` accepts several paths and returns
+aligned `details.files` metadata. Paging uses offset, limit, and column.
+Search returns bounded excerpts from at most 200 matched lines and has a
+5-second regex timeout. Search never certifies read coverage.
+
+The target lists earlier deliveries and their visibility in its consumer's
+input. Only proven placements count. One surviving slot cannot preserve an
+entry from a removed slot. Request-pointer proofs must match the bound call's
+recorded request and JSON-value digest, then one unique visible host occurrence.
+Wire indexes are not recorder message slots.
+
+Unresolved placement ownership, inseparable host text, or context gaps at any
+delivery consumer block all assessable spans in that episode before paid
+calls. Dry-run returns 2 as well. A judged baseline therefore represents the
+complete recorded input. Every input must contain all message slots through
+its highest visible slot and retained `kept` prefix. Only a removed tail is a
+known removal. Later records cannot fill an earlier consumer's gap. Do not
+infer a suffix length beyond the recorded prefix.
+
+A valid history rewrite clears earlier lane notes for future views; retained
+slots still need validation. Past views and audit notes keep their diagnostics.
+Informational preparation notes do not block judging. Empty or unobserved
+spans keep their mechanical skips. `not_in_request`, `adapter_defined`, and
+missing proofs do not prove exposure ownership.
+
+Evidence cannot exceed recorded placement exposure. Full exposure may be exact
+or `full_normalized`: safe prose whitespace normalization, lossless JSON-string
+decoding, or contiguous numbered tool-result lines with exact code whitespace.
+Otherwise expose only a verified prefix, or mark exposure unknown and withhold
+the canonical value. Withhold memory type and confidence from judge evidence.
+Show a key only when the placement exposes that exact identifier. Keep hidden
+keys and canonical values in audit and report records.
+
+### Validation and required reads
+
+Rubric ids are span-local: `m1`, `m2`, and so on. Display keys are labels.
+Python's `_strict_parse` and `_verdict_semantics` enforce exact entry coverage
+and valid action anchors. Acted-on and selected claims need global step
+anchors within the parent episode and entry window. `none` requires empty
+anchors. Only acted-on influence can retain a non-null effect; assembly clears
+other effect pairings and counts the correction.
+
+Every answer must completely read `required_reads.always`. Non-null novelty
+and acted-on influence also require all `prior_sources`. These can be complete
+step files or specified delivery line ranges. Baseline references do not count
+as reads of their sources. The target text is already in the opening.
+
+Every cited anchor and `evidence[].steps` entry must be in `input.read_steps`.
+This means the retained conversation read the complete step and all manifest
+`result_sources`. A pointer is not the tool-result text. Paged reads combine;
+headers, navigation, search, or truncated reads do not certify complete text.
+
+`none`, `referenced`, and `selected` require the complete action window.
+A non-null acted-on effect requires reading from the window start through the
+episode end. Consequences can outlast the action window. Incomplete reading
+requires null influence or effect. Harm in any shaped action makes the entry's
+effect `harmed`.
+
+Identical placement text in one proven host occurrence needs its earliest
+known consumer's section once. Repeated residency annotations add no baseline
+text. Different hosts or text remain separate sources. Use consumer order,
+not annotation arrival order. Preserve all deliveries for audit.
+
+Later spans can have more prior sources. A fixed context budget can therefore
+produce more null labels even when memory quality stays constant. Preserve
+coverage checks and report this comparison limit. Unknown novelty remains
+null; relevant ignored entries use `ignored_unknown_novelty`. Count these in
+`counts.novelty.null` and exclude them from novelty-rate denominators.
+
+`memory_followups` requires an explicit search using a shown entry identifier.
+Its proven tool-result host must link to an eligible action that uses that
+identifier and returns the same portable item in that placement. A substring
+inside a longer identifier is not a selector. Records retain `step`,
+`delivery_step`, `tool_call_id`, and `operation_id`. Delivery time cannot
+replace action time.
+
+### Budgets, follow-ups, and credentials
+
+The judge is a pi agent with evidence tools. `MAX_STEPS` limits model calls.
+The context watermark reserves space for pi, `MAX_OUTPUT_TOKENS`, and the
+forced message. An overflowing round is rolled back. Either budget can force
+a final answer; tools are blocked in that final round. Estimates include the
+system prompt and tools. Output-only usage cannot measure input. Reject a
+configuration with no input room before parsing trajectories.
+
+Every rejected answer uses the same follow-up path. This includes malformed
+or empty answers, semantic failures, missing reads, and output-budget cuts.
+Continue `job.history` with the rejection reason and evidence tools. The
+initial phase has `MAX_STEPS` calls. Each follow-up has `min(MAX_STEPS, 4)`,
+including its forced answer. `MAX_ATTEMPTS` defaults to 3 and includes all
+phases. Exhaustion produces an `error` with masked text retained.
+
+A runner that fails to start, exits unsuccessfully, or returns no readable
+result produces a span error without a corrective retry. Missing Node,
+runner files, or agent packages are setup errors. `_check_runner` rejects
+these before paid calls. `TIMEOUT` limits idle waits for response headers
+and each body chunk, not total duration. Each native retry starts a new wait.
+
+Keep credentials out of artifacts. The child environment omits ambient
+`OPENAI_*` and `ANTHROPIC_*` settings. Python masks job content before writing;
+the runner masks results and transcripts before serialization. Mask endpoint
+echoes before they reach verdicts, `judge_raw`, or diagnostics. Cover raw keys,
+all percent-encoded spellings in either hex case, and literal JSON-serialized
+spellings. Keys shorter than eight characters are treated as no credential.
+Decode only the transcript JSONL envelope, never JSON-looking strings inside
+it. Discard malformed or incomplete records; keep complete records replayable.
+See [judge client](en/judge-client.md) and [AGENTS.md](../AGENTS.md#security).
 
 ## Artifacts
 
-Bump the report schema version deliberately, and call out any
-artifact-format change in the PR. Schema strings live in
-`injudge/__init__.py`: `REPORT_SCHEMA`, `SUMMARY_SCHEMA`, `EPISODE_INPUT_SCHEMA`,
-and `CHECKPOINT_SCHEMA`. Writers and readers use these shared names.
+Schema constants live in `injudge/__init__.py`. Current values are
+`injudge.report/v27`, `injudge.summary/v19`, `injudge.episode-inputs/v5`, and
+`injudge.checkpoint/v1`. Update writers and readers together. Change versions
+deliberately and describe format changes in the PR. See
+[artifacts](en/artifacts.md) for fields, denominators, profiles, and billing.
 
-**memgraph** (`--json`; also embedded verbatim in the HTML) is `{tool,
-trajectories, ops, memories, edges, validation}`. Recall ops carry `searches`
-(the delivery's per-lane `{lane_id, operation_id}` links, schema v10) and
-`queries` (each linked search's resolved query) — never a single
-search-operation id or query. Recall ops also carry `placement_kinds` and
-their searches' `trigger` (`explicit` = agent-directed). An op's `cost` is
-read only from the calls the recorder bound to it (`call_refs` and
-`embedding_call_refs`, using each call's normalized `call.json.response.usage`),
-never from adapter extensions; trajectory rows total it as `memory_cost`. Operation
-`extensions` preserve opaque provenance from the anchor annotation (generation
-end or delivery). Prepared search audit records also preserve their start
-extensions; judge-readable `searches.json` omits these opaque fields. They
-can carry configuration or unexposed content and are not grounding evidence.
-These fields never drive identity, exposure, or cost inference. Fields the HTML does not read (e.g. `edges`,
-recall `content_chars`, the per-injection verdict role marker, the singular
-`memory_lane`) are still part of the JSON contract.
-Candidate, delivered, and deletion refs carry `grouping_id`, the registry's
-item identity, so content-grouped local refs link correctly in HTML.
-Trajectory rows carry `episodes` (`{episode_id, sequence_id, status,
-first_step, last_step}` per recorded scope, in order) and every op carries
-`episode`, its index there (null outside every scope). Recalls follow their
-bound consumer turn when recorded, including incomplete turns; otherwise
-operations use their annotation position. A delayed delivery annotation cannot
-move a recall into a later episode. The HTML groups rows
-run → sequence → episode by them and adds no validation notes of its own
-(injudge's preparation reports scope problems).
-The HTML colors rewrite markers by each marker's own `on_memory_lane` flag,
-computed at parse time against the final lane set. Do not prune a field
-from one consumer only.
+### Graph and input views
 
-Continuation inputs (`evaluation.json`) select the checkpoint-credited prefix
-of each recorder segment; segments with no completed tasks are omitted.
-`evaluation-attempts.json` retains all attempts. `evaluation-discarded.json`
-selects only attempts after the checkpoint, using an exclusive `after_seq`
-lower bound; `through_seq` is the inclusive upper bound. Omitted/null bounds
-are unbounded. Event sequence numbers and source captures stay unchanged.
-Discarded views retain earlier messages and history edits to replay retained
-input slots. Their steps, episodes, and memory operations come only from the
-selected interval.
-Graph trajectories expose `recorded_usage`, the recorder's `run.json` usage
-snapshot for audit. Operation costs and prompt-token billing follow the
-selected view; discarded attempts do not enter the credited continuation's
-totals. Neither view rewrites source captures or infers memory actions from
-agent commands.
-Manifest `recovery_error` entries become graph/judge validation warnings.
-Recursive discovery skips a derived annotation copy when its original is also
-selected; an explicitly selected copy or manifest keeps its requested view.
-Recovery copies may share the original `calls/` directory through a symlink.
-Request-pointer placement proofs resolve within that capture directory;
-per-call or request-file symlinks cannot escape it.
+Graph JSON contains `{tool, trajectories, ops, memories, edges, validation}`.
+The HTML embeds the same graph, with safe JSON escaping. Recall operations
+retain per-lane `searches`, resolved `queries`, `placement_kinds`, and search
+`trigger`. They do not flatten searches to one id or query.
 
-**injudge** writes `injudge.report/v27` (`{tool, generated_at, trajectories,
-operations, injections, aggregates, validation}`). Before paid work, the initial
-snapshot marks pending spans `unjudged` and sets `checkpoint_journal` to
-`injudge-checkpoints.jsonl`. Each completion appends one `injudge.checkpoint/v1`
-record with `schema`, `generated_at`, `operation`, `injections`, and `validation`.
-It does not rebuild the full report. Normal completion or a handled interruption
-writes a full standalone report and removes the pointer; the journal stays for
-audit. The shared memgraph/calibration reader recovers a killed run from complete
-journal lines and rebuilds aggregates once. It ignores a final line without a
-newline and rejects invalid complete records. The first interruption cancels
-queued jobs, waits for active jobs, and saves their results before the full
-report is written, including with one worker. A second interruption stops the
-runners and leaves unfinished spans unjudged. Node runs in a separate session;
-loss of its parent-owned pipe stops it and removes its temporary job/result
-files. A direct parent kill needs journal recovery, not a final report flush.
-Validation notes retain source span order even when completion order differs.
-All of a run's artifacts land
-in that run's own `<output>/<run-stamp>/` folder — no run overwrites or
-mixes another run's artifacts, and the folder name traces every artifact
-to its run.
+Operation `cost` comes only from bound `call_refs` and `embedding_call_refs`,
+using normalized `call.json.response.usage`. Trajectories sum this as
+`memory_cost`. Opaque `extensions` preserve anchor-annotation provenance.
+Prepared search audits also retain start extensions; judge `searches.json`
+omits them. These fields can contain unexposed content or configuration and
+must not affect identity, exposure, or cost.
 
-- Rubric and `memory_usage` are keyed by span-local entry ids (`m1`, `m2`,
-  …), stamped on the operation's `memories`. Display keys are labels only,
-  so two entries sharing a key are judged independently. Each rubric entry
-  carries judged action `anchors` (validated against `memory_windows` and
-  `memory_window_starts`; `memory_variant_steps` and `memory_followups`
-  record the deterministic window and selection facts).
-  `memory_exposure` records per entry what the placement showed (`full` /
-  `full_normalized` / clipped prefix length / `unknown`). Canonical values
-  and digests are
-  never overwritten.
-- Trajectory episode rows carry execution/boundary identity, task and attachment
-  provenance, global step bounds, and their span ids. Operations carry parent
-  `episode_execution_id` and `episode_last_step`; memgraph keeps these links.
-- `tool.config` is the resolved, secret-free judge-agent configuration
-  (endpoint URLs reduced to `scheme://host[:port]`). `tool.provenance` hashes
-  the implementation and prompt files. Each judge input hashes the composed
-  system prompt and exact evidence files; no credential is part of these hashes.
-- Each operation the agent ran for carries an `input` record (error
-  outcomes included):
-  `{"path": "agent", "attempts", "llm_calls", "tool_calls", "transcript"}`
-  `llm_calls` and `tool_calls` count the conversation retained after the last
-  phase; they are null when that phase has no result. Executed counts and
-  reported usage cover all phases, including rolled-back calls. Context
-  rollbacks and any-phase forced status are also recorded. `"gold"`
-  and `"forced"` appear when they apply (`forced`: the
-  conversation's final answer came from a budget-exhausted forced round).
-  Only mechanically counted empty/unattributable spans and unjudged spans
-  omit it.
-  `read_steps` lists global steps whose complete text and referenced
-  `result_sources` remain in the retained conversation (the target delivery
-  is already in the opening); reading headers or navigation cannot validate a judgment,
-  and every cited anchor or structured evidence step must be in `read_steps`.
-  Tool-result metadata records the actual returned line range and
-  truncation; a partial read is not proof that the whole step was inspected.
-  A limit-bounded read ending before the file's last non-blank line says how
-  many lines remain and where to continue.
-- `aggregates.overall` counts the regimes: `input_paths`, `gold_scored`,
-  `forced_answers`.
-- Residency and evidence removal share the unique placement-interval rule.
-  Residency retains proven intervals when another placement is unresolved,
-  counts overlapping intervals once per host and input view, and follows the
-  same host occurrence across episode boundaries while it remains visible.
-- The run also writes `<output>/<run-stamp>/evidence/<span-dir>/` — the
-  exact folders the agents read (audit/replay value; only exposed memory
-  content is included) — and
-  `<output>/<run-stamp>/agent-runs/<span-dir>.jsonl` — the
-  pi event-sourced trajectory of each judging conversation (message lines
-  as they happen, `tombstone` lines for budget rollbacks, the injected
-  forced message, per-phase `attempt_end` diagnostics with cumulative
-  retained-conversation counts/usage; `attempt` 1 is the investigation and
-  later attempts are follow-ups; masked by the runner before each write,
-  checked again by Python after every attempt; `seq` is
-  attempt-local). `<span-dir>` is the span id made filesystem-safe
-  (non-`[A-Za-z0-9._-]` replaced by `_`, capped at 80 chars) plus an
-  8-char digest suffix — `evidence.span_dir_name`.
+Candidate, delivered, and deletion references carry `grouping_id`. Trajectory
+`episodes` retain ordered scope rows with episode id, sequence id, status,
+and step bounds. Each operation's `episode` is the row index, or null outside
+all scopes. A bound consumer determines recall membership even for an
+incomplete turn. Otherwise use annotation position. A delayed annotation
+cannot move a recall into a later episode.
 
-The companion `summary.json` (`injudge.summary/v19`) contains compact final
-statistics. Every completed run also writes `summary.md`, a short readable view
-of those same totals: run date and judge model, the verdict table, entry
-influence and acted-on effect counts, accuracy and novelty counts for relevant
-entries (including unknown novelty), up to ten non-neutral or error spans to
-inspect (episode id and the judge analysis or error), judge counters, diagnostic
-counts with up to three unique warning/error messages, delivery estimates, and
-links to the JSON files. Input diagnostics cover whole recordings.
-`overall` holds counts, verdict counts/rates with `judged_spans`,
-five-signal rubric counts/rates with `judged_entries`, estimated tokens for nonzero
-recorded delivery sizes, and judge execution counters. Judge counters cover attempted
-spans, gold-scored spans, spans with follow-up phases, any-phase forced rounds,
-context rollbacks, executed calls, and reported usage; unknown counters are null. Nonzero effect
-pairing correction and low-confidence counts are optional. Rubric reason counts
-and shared-action group counts are optional.
-`spans_with_followups` counts spans with `attempts > 1`.
-`trajectories` contains compact identity/count/verdict rows and delivery token
-totals when delivery size is nonzero. `recording_policy` explicitly covers `whole_input_recordings`,
-including episodes outside the judge selection. It retains policy metrics and
-residency estimates, without raw resident-character totals.
-`diagnostics` counts error/warning/info records; optional `selection` retains
-the source selection. `report` points to `injudge-report.json`. `generated_at`
-is the source report's UTC time, copied without conversion. `tool` contains only name, schema,
-source_report_schema, and judge_model. `notes` states that delivery/residency
-estimates use chars divided by four and are not billing or overhead relative
-to a no-memory run. Span verdicts measure
-memory influence, not benchmark task success.
-Report v27 adds `operations[].profile`, aggregate/summary `profiles`, and
-recorded billing under policy. These are deterministic projections of the
-existing rubric, with no judge prompt or triage change. See
-[entry-share profiles](en/artifacts.md#entry-share-profiles). Summary v19 carries
-overall profile/billing statistics; trajectory rows add only the profiled-span count.
-Report v26 extends ownership to equal-or-shorter copies and rule-judges spans
-with no eligible action step as neutral (`auto: no_eligible_step`), outside the
-rubric, usage, and confidence rollups.
-Report v24 adds `memory_window_owners` and retains the first owner of identical
-text while proven copies remain visible. Its influence/effect/verdict counts
-are not directly comparable with v23. Report v23 strengthens `input.read_steps` to certify referenced tool-result
-sections as well as step files. The evidence manifest is v5. Summary v18 keeps
-`shared_action_groups` as a count of memory groups, not shared steps.
-Report v22 added journal checkpoints and removed the duplicate
-`retained_llm_calls` / `retained_tool_calls` input fields. Rubric rules are unchanged. Report v21
-dropped the runner's duplicate `retained_evidence` count
-(`read_steps` is the certified list) and replaces the tool-free repair with one
-follow-up path; the evidence folders drop `context.json` and the manifest gains
-`required_reads` and `target_baseline`. Judge labels and rules are those of
-v20, which narrowed influence null to unread windows and open-possibility ties
-(attribution is the memory-specific-content test above); v19 and earlier
-influence/effect/verdict counts are not comparable. The report keeps verdict
-counts, rates, costs by verdict, and the same judge labels. A mixed bundle can
-contain useful and harmful entries, so costs by verdict do not measure
-per-memory token benefit. Summary v18 renames `spans_with_repairs` to
-`spans_with_followups`.
-Summary has no span or episode index, memory lists, confidence
-means/buckets, configuration, or provenance. Those details remain in report v27.
-Empty/unassessable/error/unjudged spans stay outside verdict-rate denominators.
-Rates are omitted when no spans were judged; rubric is omitted without judged
-entries, and judge counters without agent runs. JSON uses two-space indentation.
+The HTML groups run, sequence, and episode rows. It adds no scope diagnostics;
+preparation supplies those. Rewrite markers use their own `on_memory_lane`
+flag, computed against the final lane set. Fields unused by HTML still belong
+to the JSON contract, including `edges`, `content_chars`, verdict role markers,
+and `memory_lane`.
 
-memgraph joins the report by `(run_id, op seq)`. Unmatched entries in
-either direction are validation notes, never errors. An ambiguous join key
-— a run_id shared by several loaded or report trajectories, or one `(run_id, seq)`
-claimed by several report injections or several recall ops — is skipped
-with a warning, never cross-annotated.
+Continuation manifests select recorded event intervals:
+
+| Manifest | Selected view |
+| --- | --- |
+| `evaluation.json` | Checkpoint-credited prefix; omit segments with no completed tasks |
+| `evaluation-attempts.json` | All attempts |
+| `evaluation-discarded.json` | Attempts after the checkpoint |
+
+`after_seq` is exclusive; `through_seq` is inclusive. Missing or null bounds
+are unbounded. Preserve source event numbers and captures. Discarded views
+retain earlier messages and history edits for replay, but only selected events
+supply steps, episodes, operations, and charges. Expose `recorded_usage` for
+audit without charging discarded work to the credited view.
+
+Manifest `recovery_error` entries become warnings. Recursive discovery skips
+a derived annotation copy when its original is also selected. An explicit
+copy or manifest keeps its requested view. Recovery copies may symlink the
+original `calls/` directory. Request proofs stay within that capture directory;
+per-call and request-file symlinks cannot escape it.
+
+### Reports, recovery, and evidence
+
+The report contains `{tool, generated_at, trajectories, operations, injections,
+aggregates, validation}`. Each run has its own output folder. Before paid work,
+write an initial report with pending spans `unjudged` and a
+`checkpoint_journal` pointer to `injudge-checkpoints.jsonl`.
+
+Each completed span appends a checkpoint with `schema`, `generated_at`,
+`operation`, `injections`, and `validation`. Do not rebuild the full report
+for every completion. Normal completion or a handled interruption writes a
+standalone report and removes the pointer. Keep the journal for audit.
+
+The shared memgraph/calibration reader recovers complete journal lines and
+rebuilds aggregates once. Ignore a final line without a newline; reject an
+invalid complete record. The first interruption cancels queued jobs and waits
+for active jobs before saving a full report, including with one worker.
+A second interruption stops runners and leaves unfinished spans unjudged.
+Node runs in a separate session. Loss of its parent-owned pipe stops it and
+removes temporary job/result files. A direct parent kill needs journal
+recovery. Keep validation in source-span order, not completion order.
+
+Report contracts include:
+
+- Rubric and `memory_usage` use span-local ids stamped on operation memories.
+  Preserve action anchors, `memory_windows`, `memory_window_starts`,
+  `memory_window_owners`, `memory_variant_steps`, and `memory_followups`.
+  `memory_exposure` records full, normalized full, clipped-prefix, or unknown
+  exposure. Never overwrite canonical values or digests.
+- Episode rows retain execution/boundary identity, task and attachment
+  provenance, global step bounds, and span ids. Operations retain
+  `episode_execution_id` and `episode_last_step`. Keep these in graph joins.
+- `tool.config` contains resolved settings without secrets. Reduce endpoint
+  URLs to `scheme://host[:port]`. `tool.provenance` hashes implementation and
+  prompt files. Judge inputs hash the composed system prompt and exact
+  evidence files, excluding credentials.
+- Every operation sent to the agent has an `input` record, including errors.
+  It records `path: agent`, attempts, retained `llm_calls` and `tool_calls`,
+  and transcript path. Counts are null if the last phase has no result.
+  Executed counts and usage include all phases and rolled-back calls.
+  Preserve context rollbacks, any-phase forced status, and applicable gold
+  metadata. The `forced` flag describes the retained final answer.
+- `input.read_steps` certifies complete retained step text and result sources.
+  Tool metadata records returned ranges and truncation. A limited read states
+  the remaining lines and continuation point.
+- Evidence folders contain the exact files read by the agent. Transcripts in
+  `agent-runs/<span-dir>.jsonl` contain message events, rollback tombstones,
+  forced messages, and `attempt_end` diagnostics. Counts and usage describe
+  the retained conversation at each phase end; `seq` is attempt-local.
+  Mask on every runner write and check again in Python after each attempt.
+
+`evidence.span_dir_name` replaces unsafe id characters with `_`, caps the
+base at 80 characters, and adds an eight-character digest. Mechanical skips
+and unjudged spans have no agent input record.
+
+Residency and evidence removal share the unique placement-interval rule.
+Keep proven intervals when another placement is unresolved. Count overlapping
+intervals once per host and input view. Follow the same visible host occurrence
+across episode boundaries.
+
+### Summaries and joins
+
+`summary.json` contains final compact statistics. `summary.md` presents those
+totals, selected non-neutral/error spans, diagnostics, judge counters, and
+artifact links. The summary copies the report's UTC `generated_at` unchanged.
+It omits full span/episode indexes, memory lists, confidence distributions,
+configuration, and provenance. Those remain in the report.
+
+Keep these populations distinct:
+
+- Empty, unassessable, error, and unjudged spans stay outside verdict rates.
+  Resident copies with no eligible step are mechanically neutral and count
+  in verdict totals, but add no rubric, usage, confidence, or profile scores.
+- Profiles describe nonempty, fully judge-scored spans. They do not inherit
+  earlier owners' scores. Preserve delivery counts and costs for unprofiled
+  spans. See [entry-share profiles](en/artifacts.md#entry-share-profiles).
+- Rubric rates use their documented assessed-entry denominators. Unknown
+  novelty is counted but excluded from novelty rates. Profile shares use
+  all entries in each profiled span.
+- Policy and billing cover `whole_input_recordings`, including episodes
+  outside judge selection. Delivery and residency estimates use characters
+  divided by four. They are neither billing nor overhead measured against
+  a no-memory run.
+
+Judge counters cover attempted and gold-scored spans, follow-ups, forced
+rounds, rollbacks, executed calls, and reported usage. Unknown counters remain
+null. `spans_with_followups` means `attempts > 1`. Omit rates with no judged
+spans, rubric totals with no judged entries, and judge counters with no agent
+runs. Use two-space JSON indentation.
+
+memgraph joins verdicts by `(run_id, op seq)`. Unmatched records produce notes,
+not errors. Skip ambiguous joins with a warning. This includes duplicate run
+ids across trajectories and keys claimed by multiple injections or recall
+operations. Never annotate several operations from one ambiguous match.
 
 ## Test fixtures
 
-Fixtures are synthetic schema-v10 trajectories from
-`tests/annotated_fixtures.py` (`AnnotatedBuilder`). Python judge tests need neither network nor Node:
-stub the agent runner by monkeypatching `injudge.agent._invoke_runner`
-with canned results (the corrective loop, input records, and evidence
-folders all run for real). Assert on artifacts written to disk. The TS
-evidence tools' path-scoping is security-bearing. `npm --prefix agent test`
-checks types with `tsc`, then runs `node --test` in `agent/`, driven from pytest by
-`tests/test_agent_tools.py` (skipped when Node, npm, or the installed
-TypeScript compiler is missing).
+Use synthetic schema-v10 recordings from `AnnotatedBuilder` in
+`tests/annotated_fixtures.py`. Python judge tests need no network or Node.
+Monkeypatch `injudge.agent._invoke_runner` with canned results. Let the actual
+follow-up, input-record, and evidence-folder code run. Assert on disk artifacts.
 
-Name tests `test_<behavior>`. When a test is warranted, hit a real failure
-point (corrupt input, step attribution, verdict joins, retry routing),
-not a status code. Payload-based HTML tests (poison in, exact escaped
-payload out) are the shape to follow; template-text pins exist only where
-the guarded behavior is JS-side and the stdlib-only rule bars a JS engine.
+`npm --prefix agent test` runs TypeScript checks and `node --test`.
+`tests/test_agent_tools.py` invokes it from pytest and skips it when Node, npm,
+or the installed compiler is missing. Evidence-tool path scoping is a security
+contract.
+
+Name tests `test_<behavior>`. Exercise the failure point, such as corrupt input,
+step attribution, joins, or retry routing. For HTML, inject unsafe content and
+assert the exact escaped payload. Pin template text only for JavaScript
+behavior that cannot be tested under the standard-library-only constraint.
+
+Documentation-only changes need a diff and link review, not runtime tests.
+Prompt changes need real-judge calibration as well as offline tests. Canned
+answers test the contract, not judgment quality. Follow
+[development](en/development.md#judge-calibration) and the paid-run rules in
+[AGENTS.md](../AGENTS.md#verification).
 
 ## Commits
 
-- `ci:` testing and GitHub workflows
-- `dev:` development-related changes, including Cursor or Claude rules
-- `fix(component):` bug fixes
-- `feat(component):` new features
-- `enh(component):` enhancements
-- `docs:` documentation
-- `ref(component):` refactoring
-- `chore:` maintenance (pre-commit hooks, imports, …)
+| Prefix | Purpose |
+| --- | --- |
+| `ci:` | Tests and GitHub workflows |
+| `dev:` | Development setup and contributor rules |
+| `fix(component):` | Bug fixes |
+| `feat(component):` | New features |
+| `enh(component):` | Enhancements |
+| `docs:` | Documentation |
+| `ref(component):` | Refactoring |
+| `chore:` | Maintenance, hooks, and imports |
 
-Describe intent, not implementation. Do not add `Co-authored-by: Cursor`
-lines.
+Describe intent. Do not add `Co-authored-by: Cursor` lines.
 
-Components for `fix` / `feat` / `enh` / `ref`:
-
-- `memgraph` — `memgraph/`: annotation index, parsing, shared step rule,
-  linking, HTML, verdict merge
-- `injudge` — `injudge/`: step stream, spans, judge client, aggregates,
-  report
-- `util` — `util.py`, the fixture builder
-- `calibration` — `calibration/`: controlled judge cases and report scoring
+Use `memgraph`, `injudge`, `util`, or `calibration` as the component. `memgraph`
+covers parsing, shared attribution, linking, HTML, and verdict joins. `injudge`
+covers spans, the judge, aggregation, and reporting. `util` includes the fixture
+builder. `calibration` covers controlled cases and report scoring.

@@ -1,23 +1,23 @@
----
-description: "按召回注入对 agent 的后续影响打分，并写出判定报告。"
-icon: gavel
----
-
 # injudge
 
-{% hint style="info" %}
-injudge 根据召回区间在后续 agent 回合中的足迹，将可评判区间判为 **positive**、**negative**、**unresolved**（归因或效果未定）或 **neutral**。没有可归属 agent 步骤的区间单独报告为 **unassessable**。
-{% endhint %}
+[文档目录](README.md) · [English](../en/injudge.md)
+
+injudge 是 MemUse 的评审命令：按 episode 内的召回区间，评估每条暴露记忆
+对后续 agent 行为的影响。它输出五个信号、六轴条目占比和区间结论。
+没有可归属 agent 步骤的区间计为 `unassessable`；最终任务结果不能决定记忆结论。
+
+输入须由 [memory-bridge](https://github.com/ChangranXU/memory-bridge) 与
+[traj-recorder](https://github.com/ChangranXU/traj-recorder) 配合录制为 schema-v10
+轨迹。首次使用见[安装与配置](configuration.md)。先检查离线证据，再运行评审：
+
+在仓库根目录执行；`path/to/recordings` 代表实际录制路径。
 
 ```bash
-uv run -m injudge <paths>    # 写出 output/<run-stamp>/injudge-report.json 与 summary.json
+uv run -m injudge path/to/recordings --prepare-only -o output/
+uv run -m injudge path/to/recordings --dry-run --limit 3
 
-# 评审的 TS 半边（一个 pi 智能体）需要先安装一次依赖：
-npm --prefix agent install
-
-# 预览模式：打印每个原本会送入智能体的区间的证据文档、文件索引与开场消息，
-# 全程不访问网络、不启动 node、不写文件：
-uv run -m injudge <paths> --dry-run --limit 3
+# 已安装 agent 依赖并填写 .env 后运行；会调用配置的模型
+uv run -m injudge path/to/recordings --html -o output/
 ```
 
 进度在 stderr 报告已评区间：终端上显示 tqdm 进度条；管道输出时每完成一个区间输出一行。
@@ -48,12 +48,15 @@ uv run -m injudge <paths> --dry-run --limit 3
 处理时，写出保留已完成结果和显式待评区间的完整报告。若进程被强制结束，应将
 初始报告与日志一起保留；memgraph 和 calibration 会自动重放日志。格式见[产物](artifacts.md)。
 第一次中断会取消排队任务，等待正在运行的任务结束，并保存其结果后再写出完整报告，单 worker 也如此。
+
 第二次中断会停止活动运行器，未完成区间保持 `unjudged`。Python 进程被终止时，运行器也会停止，
 并删除自己的临时作业和结果文件。已写入日志的结果仍可恢复。validation 诊断按源区间顺序排列。
 
 ## 离线准备
 
-`--prepare-only` 写出离线 episode 包，而不是一次评审运行：`<run-stamp>/episode-inputs.json`（`injudge.episode-inputs/v5` 索引），外加每个物化 episode 一个 `<run-stamp>/episodes/<episode-dir>/` 文件夹。它不加载 `.env`、不需要 Node，也不发起任何评审调用；若边界或归属需要复核，包会先写出，再以非零状态退出。参见[配置](configuration.md#离线准备)。
+`--prepare-only` 写出离线 episode 包，而不是一次评审运行：`<run-stamp>/episode-inputs.json`（`injudge.episode-inputs/v5` 索引），外加每个物化 episode 一个 `<run-stamp>/episodes/<episode-dir>/` 文件夹。
+
+它不加载 `.env`、不需要 Node，也不发起任何评审调用；若边界或归属需要复核，包会先写出，再以非零状态退出。参见[配置](configuration.md#离线准备)。
 
 ## 注入区间
 
@@ -62,7 +65,7 @@ uv run -m injudge <paths> --dry-run --limit 3
 先划分 episode，再归并区间。跨 episode 的相同处理方式绝不合并；每个 episode 各自保留全局步骤编号、自己的任务/上下文，以及自己的 gold/outcome 连接。空投递与无法归属的区间按机械规则计数，不消耗付费调用。
 
 - 步骤间隔不切段；记入 `step_gaps` 并展示给评审。
-- 无关投递不切断已观测的非空区间：交替出现且未变化的 profile 块与 skill 块形成两个区间。空投递与无法归属的投递只与紧邻的前一次投递归并。
+- 无关投递不切断已观测的非空区间：交替出现且未变化的用户资料块与技能块形成两个区间。空投递与无法归属的投递只与紧邻的前一次投递归并。
 - 无法证明连续可见时，即使 treatment 相同也另起区间，让独立的重新投递使用自己的录制输入基线。
 - 涉及区间内任一条目的内容或处理方式变化都会切段——重新排序的包、重新框定的块、或单条目曝光的变化都会开启新区间，即使投递内容完全相同；之后恢复原处理方式也会再开启一个新区间。每个投递条目按各自的足迹窗口评判；窗口边界与逐条目曝光的规格见[评审证据](scoring-input.md)。
 - 重复投递归并为 `restated`：计入投递成本与 `n_injections`，但绝不进入判定率。
@@ -79,7 +82,7 @@ uv run -m injudge <paths> --dry-run --limit 3
 
 1. **物化证据。** 目标区间及其父 episode 已录制的任务、可见上下文、其他投递、原始全局步骤与可选附件，写入同一个由工具访问范围限定的文件夹。→ [评审证据](scoring-input.md)
 2. **按评分规则打分。** 一条智能体对话检索证据，为每条投递记忆返回五个信号——`relevance`、`accuracy`、`novelty`、`influence`、`positive_effect`——绝不返回判定。→ [评分规则与判定推导](verdict-derivation.md)
-3. **代码推导判定。** 先得出使用标签，再得出区间判定：任一有害使用即为 negative；否则任一采纳即为 positive；否则任一归因或效果未定即为 unresolved；否则为 neutral。→ [评分规则与判定推导](verdict-derivation.md)
+3. **代码推导判定。** 先得出使用标签，再得出区间判定：任一有害使用即为 negative；否则任一采纳即为 positive；否则任一使用标签为 unclear 即为 unresolved；其余为 neutral。完整调查后仍无法区分来源的 ambiguous 归入 neutral。→ [评分规则与判定推导](verdict-derivation.md)
 
 预算、强制作答与对话的重试/失败行为见[评审智能体](judge-client.md)。
 
@@ -94,6 +97,8 @@ uv run -m injudge <paths> --dry-run --limit 3
 | Golden answer 正文 | `golden.txt`（与可用的 `golden.md` 同时存在时优先）、`--gold-metadata PATH`（verified-metadata.json：按 episode 记录的 benchmark 身份连接 gold `patch`），或 `--golden PATH` | 将该 episode 的区间调用切换到 **gold 评分规则**（`GOLD_SYSTEM_PROMPT`），并提供 `gold.md`。同样五个信号、同样的 schema 与推导；参考文本不是判定。 |
 | 已记录的 correctness | `correctness.json`、`--harness-report PATH`（按 episode 的 benchmark 身份连接 SWE-bench 风格结果），或 `--correctness resolved\|unresolved` | 提供 `outcome.json`，仅作佐证；它不能决定信号，也不会选用 gold 规则。 |
 
-`correctness.json` 接受简单的 `{"resolved": true|false, "score": …}` 记录，或 SWE-bench 风格的评测报告（`resolved_ids` / `unresolved_ids`）。harness 中的错误、未完成、缺失与冲突结果都保留为显式状态，不会被猜成 resolved/unresolved；边车绝不覆盖 harness 连接；而仅按 benchmark 标识的报告——它无法识别重复执行或不同实验组——会在评审前失败，不可用的 linkage 文件也同样如此；请改用执行级的结果。
+`correctness.json` 接受简单的 `{"resolved": true|false, "score": …}` 记录，或 SWE-bench 风格的评测报告（`resolved_ids` / `unresolved_ids`）。
+
+harness 中的错误、未完成、缺失与冲突结果都保留为显式状态，不会被猜成 resolved/unresolved；边车绝不覆盖 harness 连接；而仅按 benchmark 标识的报告——它无法识别重复执行或不同实验组——会在评审前失败，不可用的 linkage 文件也同样如此；请改用执行级的结果。
 
 两者都没有时，评分使用朴素规则。gold 体系记录在该操作的 `input` 上（`"gold": true`），并计入 `aggregates.overall.gold_scored`。

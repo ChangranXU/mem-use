@@ -1,137 +1,80 @@
----
-description: "mem-eval evaluates memory-system quality from recorded agent trajectories."
-icon: book-open
----
+# MemUse guide
 
-# Introduction
+[Project overview and quick start](../../README.md) · [简体中文](../zh-CN/README.md)
 
-{% hint style="info" %}
-**What is mem-eval?** A read-only analysis toolkit that measures how well an agent's memory system works — visualizing every memory operation and scoring every recall injection with an LLM rubric.
-{% endhint %}
+MemUse evaluates memory at its point of use. It connects the text delivered to
+an agent with the agent's prior context, later actions, and observed results.
+Use it to find useful guidance, unused information, and harmful detours.
 
-**mem-eval** takes what the gate's traj-recorder produced — schema-v10 `trajectory.jsonl` files where every memory action is recorded as an explicit `memory_*` annotation event — and turns it into actionable quality metrics.
+## Start here
 
-Memory actions are never inferred from prompt text, role names, or label conventions. A trajectory without annotations is valid input and yields zero memory operations.
+1. Set up [memory-bridge](https://github.com/ChangranXU/memory-bridge) and
+   [traj-recorder](https://github.com/ChangranXU/traj-recorder). Both are required
+   to collect the annotated recordings used by this workflow.
+2. Follow the [quick start](../../README.md#quick-start) to inspect a recording
+   and prepare evidence offline.
+3. Configure a judge endpoint, then run `injudge` on a small sample.
+4. Read `summary.md`. Inspect individual verdicts and their evidence in the
+   report or graph before you judge a complete dataset.
 
-## Tools
+## Choose a task
 
-Two read-only tools share one parsing core:
+| Task | Guide |
+| --- | --- |
+| Check files, annotations, or resumed-run manifests | [Input requirements](input-contract.md) |
+| Trace a memory across runs | [Visualize with memgraph](memgraph.md) |
+| Judge a sample, an episode, or all recordings | [Evaluate with injudge](injudge.md) |
+| Change the model, budgets, or number of workers | [Configuration](configuration.md) |
+| Understand what the judge can read | [Judge evidence](scoring-input.md) |
+| Explain a label or verdict | [Rubric and verdict rules](verdict-derivation.md) |
+| Inspect forced answers, retries, or failures | [Judge agent](judge-client.md) |
+| Read JSON fields, profiles, and cost totals | [Output reference](artifacts.md) |
+| Change the implementation or calibrate prompts | [Development](development.md) |
 
-| Tool | Purpose |
-|---|---|
-| **memgraph** | Renders every memory operation and its relationships as a self-contained HTML graph, with an optional JSON artifact. |
-| **injudge** | Scores episode-scoped recall spans against a five-signal rubric and writes the `injudge.report/v27` artifact, which overlays onto the graph with `--verdicts`. |
+## How MemUse works
 
-One principle runs through both: a recall injection is judged by its **subsequent influence** on the agent. The final task result may corroborate a judgment; it never decides one.
+1. **Record.** The memory bridge identifies memory operations. The trajectory
+   recorder captures model calls and verifies which delivered text reached
+   each input.
+2. **Prepare.** MemUse separates task episodes. It reconstructs exposed text
+   and prior context, then groups repeated deliveries into injection spans.
+3. **Assign credit windows.** Each entry gets a range of steps whose actions
+   can receive credit from that delivery. Later deliveries can change ownership.
+4. **Judge.** A judge agent reads the evidence and rates each entry's relevance,
+   accuracy, novelty, influence, and observed effect.
+5. **Check and report.** Python validates evidence coverage and derives usage
+   labels, span verdicts, and entry-share profiles. The graph links results to
+   the recorded memory history.
 
-## Quick Start
+Repeated deliveries share a span only when their entries, presentation, and
+exposure match, and an earlier copy remains visible. Every delivery still
+contributes to the delivered-text total.
 
-```bash
-# Install dependencies (once, inside the checkout)
-uv sync
-npm --prefix agent install   # the TS judge agent's packages (node ≥ 22.19)
+## Key terms
 
-# 1 — Visualize every memory operation
-uv run -m memgraph <paths> -o memgraph.html --json memgraph.json
+| Term | Meaning |
+| --- | --- |
+| Trajectory | A recorded stream of model calls and events. It can contain several episodes. |
+| Episode | One recorded execution of an agent on a task. |
+| Step | A completed agent model call, with its response and associated tool results. |
+| Delivery | Memory text placed in a model input. The graph calls this a recall operation. |
+| Entry | One memory item as presented in a delivery. The same stored item can appear in different forms. |
+| Exposure | The part of an entry that the recorded input proves the agent received. |
+| Span | One delivery, or a group of matching repeated deliveries, judged together. |
+| Credit window | The steps where an entry can receive credit for shaping actions. Later steps can still show consequences. |
 
-# 2 — Judge recall injections (copy .env.example → .env and fill it in first)
-uv run -m injudge <paths> -o output/
+## Interpret results carefully
 
-# 3 — Overlay the verdicts onto the graph
-uv run -m memgraph <paths> -o memgraph-verdicts.html --verdicts output/<run-stamp>/injudge-report.json
-```
+The four main verdicts are `positive`, `negative`, `neutral`, and `unresolved`.
+Harmful use takes priority over useful use within a span. `neutral` includes
+unused content, unproductive use, and attribution ties after complete evidence
+review. `unresolved` includes incomplete investigation or an unknown effect of
+established use. See the [exact rules](verdict-derivation.md).
 
-{% hint style="tip" %}
-A path may be a trajectory directory, a `trajectory.jsonl` file, or a root directory scanned recursively — see [Input contract](input-contract.md#input-paths). Use `--dry-run` to preview every span that would be sent to the judge, without making calls or writing files.
-{% endhint %}
+The report also marks empty, unassessable, errored, and unjudged spans. Some
+resident copies have no eligible action step and receive a mechanical neutral
+verdict. These cases do not have judge-scored entry profiles.
 
-## Workflow
-
-{% stepper %}
-{% step %}
-### Visualize
-
-memgraph shows which `(trajectory, step)` created each memory and which `(trajectory, step)` later recalled it. Load several runs together to see cross-trajectory reuse.
-{% endstep %}
-
-{% step %}
-### Judge
-
-injudge groups same-treatment re-injections into **spans** and scores every delivered memory with an LLM. A span with no attributed agent step is rule-judged without an LLM call and tallied as **unassessable**. The span verdict is then derived in code. Harm dominates: any misused memory makes the span negative; otherwise any used memory makes it positive; otherwise a memory with undetermined attribution or effect makes it unresolved; otherwise it is neutral.
-{% endstep %}
-
-{% step %}
-### Overlay
-
-The verdict report merges back into the graph, coloring each recall node by its span's verdict.
-{% endstep %}
-{% endstepper %}
-
-## Methodology
-
-The LLM never emits a span verdict. It scores five signals per delivered memory — `relevance`, `accuracy`, `novelty`, `influence`, `positive_effect` — and injudge derives usage labels and the span verdict from those signals in code.
-
-The signals, the harm-dominates rule, and the mapping are documented in [Rubric and verdict derivation](verdict-derivation.md); how the labels are counted into statistics is in [Artifacts](artifacts.md#how-the-numbers-are-derived).
-
-{% hint style="info" %}
-A correct final patch can still contain harmful injections the agent happened to survive. A failed task can still contain useful injections the agent failed to exploit. injudge scores the injection's footprint, not the agent's coding ability.
-{% endhint %}
-
-## Contents
-
-<table data-view="cards">
-  <thead>
-    <tr>
-      <th></th>
-      <th></th>
-      <th data-hidden data-card-target data-type="content-ref"></th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td><strong>Input contract</strong></td>
-      <td>Annotation events, memory identity, agent steps, and corrupt-input handling.</td>
-      <td><a href="input-contract.md">input-contract</a></td>
-    </tr>
-    <tr>
-      <td><strong>memgraph</strong></td>
-      <td>Graph model, HTML visualization, and verdict overlay.</td>
-      <td><a href="memgraph.md">memgraph</a></td>
-    </tr>
-    <tr>
-      <td><strong>injudge</strong></td>
-      <td>Spans, outputs, the three judging stages, and golden answers.</td>
-      <td><a href="injudge.md">injudge</a></td>
-    </tr>
-    <tr>
-      <td><strong>Judge evidence</strong></td>
-      <td>One evidence folder per LLM-judged span, available through read-only tools.</td>
-      <td><a href="scoring-input.md">scoring-input</a></td>
-    </tr>
-    <tr>
-      <td><strong>Rubric and verdict derivation</strong></td>
-      <td>The five signals the LLM scores; usage labels and verdicts derived in code.</td>
-      <td><a href="verdict-derivation.md">verdict-derivation</a></td>
-    </tr>
-    <tr>
-      <td><strong>Judge agent</strong></td>
-      <td>Budgets and forced answers, corrective retries, failure handling, credentials.</td>
-      <td><a href="judge-client.md">judge-client</a></td>
-    </tr>
-    <tr>
-      <td><strong>Configuration</strong></td>
-      <td>Every <code>.env</code> key and CLI flag.</td>
-      <td><a href="configuration.md">configuration</a></td>
-    </tr>
-    <tr>
-      <td><strong>Artifacts</strong></td>
-      <td>Report and <code>summary.json</code> field reference, counting rules, and the readable <code>summary.md</code>.</td>
-      <td><a href="artifacts.md">artifacts</a></td>
-    </tr>
-    <tr>
-      <td><strong>Development</strong></td>
-      <td>Tests, layout, and contributing conventions.</td>
-      <td><a href="development.md">development</a></td>
-    </tr>
-  </tbody>
-</table>
+A verdict describes observed memory use in that episode. It does not measure
+the change in task success that memory caused. Use matched benchmark runs for
+that separate question. See [comparison guidance](development.md#compare-memory-systems).

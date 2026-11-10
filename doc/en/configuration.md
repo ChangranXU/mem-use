@@ -1,97 +1,116 @@
----
-description: "Judge agent endpoint, budgets, and CLI flags."
-icon: sliders
----
+# Configure the judge
 
-# Configuration
+[Guide index](README.md) · [简体中文](../zh-CN/configuration.md)
 
-{% hint style="info" %}
-Only injudge is configured, via a `.env` file (memgraph takes CLI flags alone). Copy `.env.example` — it carries full comments — and fill it in; every key is read and validated, there are no dead knobs. The judge is an agent, so the knobs are deliberately few: the endpoint and wire format, sampling and thinking level, two budgets, retries, the idle timeout, and span parallelism.
-{% endhint %}
+The MemUse tools read recordings made with **memory-bridge and traj-recorder**.
+Only paid `injudge` runs need judge configuration. `memgraph` uses CLI options.
+Offline preparation and dry-run do not load judge credentials.
 
 ## Setup
 
-The judge agent is TypeScript under `agent/` (built on the pi agent packages) and driven by Python:
+Run from the checkout root:
 
 ```bash
-uv sync                    # Python side (tqdm, pytest)
-npm --prefix agent install    # TS side once (node >= 22.19 required on PATH)
+uv sync
+npm --prefix agent install
+cp .env.example .env
 ```
+
+Edit `.env` before a paid run. The judge uses Python and the TypeScript runner
+in `agent/`. Node 22.19 or later must be on `PATH`.
 
 ## Endpoint
 
-| Key | Default | Purpose |
+| Key | Default | Meaning |
 |---|---|---|
-| `MODEL` | required | Judge model; `--judge-model` overrides |
-| `API_KEY`, `BASE_URL` | required | Judge endpoint; `OPENAI_API_KEY` / `OPENAI_BASE_URL` shadow them |
-| `API` | `openai-chat` | Wire format: `openai-chat` (any OpenAI-compatible endpoint, `BASE_URL` at the `/chat/completions` root) or `anthropic` (`BASE_URL` at the API host root) |
-| `TEMPERATURE` | `0.0` | Sampling temperature |
-| `THINKING_LEVEL` | `off` | Agent thinking level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` |
+| `MODEL` | Required | Judge model. `--judge-model` overrides it. |
+| `API_KEY` | Required | Judge API key. `OPENAI_API_KEY`, when set in the env file, takes precedence. |
+| `BASE_URL` | Required | Judge endpoint. `OPENAI_BASE_URL`, when set in the env file, takes precedence. |
+| `API` | `openai-chat` | `openai-chat` or `anthropic`. |
+| `TEMPERATURE` | `0.0` | Sampling temperature. |
+| `THINKING_LEVEL` | `off` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. |
 
-Thinking levels are requests, not provider-independent effort guarantees. The installed pi mapping clamps `xhigh` and `max` to `high` for custom models. [DeepSeek](https://api-docs.deepseek.com/guides/thinking_mode/) also maps `medium` and `high` to the same effort, so comparing those settings here does not test different reasoning budgets. `off` is passed as a disable request through the provider compatibility layer.
+For `openai-chat`, set `BASE_URL` to the root that serves `/chat/completions`.
+For `anthropic`, use the API host root. The key is sent only to that endpoint.
+See [credential handling](judge-client.md#credentials).
 
-## The Two Budgets
+Thinking levels are requests to the provider. They do not guarantee distinct
+reasoning budgets. The installed pi mapping limits `xhigh` and `max` to `high`
+for custom models. `off` requests disabled thinking through the provider layer.
 
-During a conversation, either budget can trigger a **forced final answer** from the evidence already read.
-Before the first paid call, the runner estimates the size of the opening and required evidence.
-It rejects a span that exceeds the input budget. See [Judge agent](judge-client.md#budgets-and-forced-answers).
+## Budgets and forced answers
 
-| Key | Default | Purpose |
+| Key | Default | Meaning |
 |---|---|---|
-| `MAX_STEPS` | `40` | Initial investigation’s LLM-call cap, forced final round included. Each follow-up after a rejected answer gets `min(MAX_STEPS, 4)` calls. |
-| `CONTEXT_WINDOW` | `131072` | The judge model's context window in tokens. The watermark subtracts pi's context reserve, `MAX_OUTPUT_TOKENS`, and the forced-message estimate before forcing a final answer. |
-| `MAX_OUTPUT_TOKENS` | `32768` | Max output tokens per LLM call. The context watermark reserves this space for output, leaving less room for input evidence; billing is on tokens actually generated. Together with pi's context reserve and the forced-message estimate, it must leave input room inside `CONTEXT_WINDOW`. Invalid settings or required input fail before paid calls. `--judge-max-tokens` overrides. |
+| `MAX_STEPS` | `40` | Maximum model calls in the first investigation, including a forced final call. Each follow-up gets at most `min(MAX_STEPS, 4)` calls. |
+| `CONTEXT_WINDOW` | `131072` | Model context limit in tokens. |
+| `MAX_OUTPUT_TOKENS` | `32768` | Output limit per model call. `--judge-max-tokens` overrides it. |
 
-A verdict cut mid-answer is not a failure class: the answer simply fails the contract parse and the corrective retry answers again, continuing the same conversation.
+The input budget subtracts pi's context reserve, the output allowance, and the
+estimated forced-message size from `CONTEXT_WINDOW`. These settings must leave
+room for input. The runner also checks required evidence before its first paid
+call. A span that cannot fit fails without that call.
 
-## Retries and Parallelism
+During a conversation, the call or context budget can force a final answer from
+the retained evidence. An answer cut at the output limit fails validation and
+takes a follow-up. See [budget rules](judge-client.md#budgets-and-forced-answers).
 
-| Key | Default | Purpose |
+## Retries and parallelism
+
+| Key | Default | Meaning |
 |---|---|---|
-| `MAX_ATTEMPTS` | `3` | Total runner phases per span: the investigation plus a follow-up after each rejected answer. `--max-attempts` overrides. |
-| `TIMEOUT` | `300` | Maximum idle wait in seconds for response headers or the next body chunk. Active streams can run longer; there is no total elapsed deadline. Each retry starts a new wait. `--timeout` overrides. |
-| `JUDGE_PARALLEL` | `1` | Spans judged in parallel across all input trajectories (cap 32). Each in-flight span is one agent conversation. |
+| `MAX_ATTEMPTS` | `3` | Total runner phases per span: investigation plus follow-ups after rejected answers. |
+| `TIMEOUT` | `300` | Idle limit in seconds for response headers or the next response chunk. An active stream can run longer. |
+| `JUDGE_PARALLEL` | `1` | Concurrent span conversations across all input trajectories. Maximum: `32`. |
 
-## CLI Flags
+`TIMEOUT` is not a total run deadline. Each transport retry starts a new idle
+wait. Transport retries and answer follow-ups are separate; see
+[failure handling](judge-client.md#failure-handling).
 
-| Flag | Default | Purpose |
+## CLI flags
+
+| Flag | Default | Meaning |
 |---|---|---|
-| `--env PATH` | checkout `.env` | Alternate env file |
-| `--judge-model` | `MODEL` | Override the judge model |
-| `--timeout` | `300` | Idle timeout in seconds for response headers or the next body chunk |
-| `--max-attempts` | `MAX_ATTEMPTS` | Total runner phases per span (investigation plus follow-ups) |
-| `--judge-max-tokens` | `MAX_OUTPUT_TOKENS` | Per-call output cap |
-| `--episode ID` | unset | Judge only episodes whose recorded episode id, benchmark identity, or execution id equals *ID* (repeatable). Other spans retain compact `unjudged` audit records and are excluded from aggregate statistics, summary counts, and dry-run span counts. Policy totals cover whole recordings. An unmatched *ID* fails fast before any call. Not combinable with `--prepare-only`. |
-| `--limit N` | unset | Judge at most *N* episode-scoped, nonempty spans with the agent; validate all episode and attachment scopes first. `--prepare-only` instead limits materialized episodes. A value below 1 fails fast. |
-| `--dry-run` | off | Print each paid span job's target document, file index, and opening message; no calls or files. Cannot be combined with `--html`. |
-| `--golden PATH` | unset | Golden answer for exactly one episode; use keyed metadata otherwise |
-| `--correctness resolved\|unresolved` | unset | Recorded outcome for exactly one episode, corroboration only |
-| `--gold-metadata PATH` | unset | verified-metadata.json patches joined by recorded episode benchmark identity |
-| `--harness-report PATH` | unset | Harness results joined by episode identity; repeated executions or treatment arms are rejected without execution-specific provenance |
-| `-o DIR` | `output/` | Artifact container — each run gets a `<run-stamp>/` subfolder; spans sent to the agent add `evidence/` and `agent-runs/` entries |
-| `--html` | off | Also write `memgraph-verdicts.html` |
+| `--env PATH` | Checkout `.env` | Use another judge env file. |
+| `--judge-model NAME` | `MODEL` | Override the judge model. |
+| `--timeout SECONDS` | `TIMEOUT`, else `300` | Override the idle limit. |
+| `--max-attempts N` | `MAX_ATTEMPTS` | Override the phase limit. |
+| `--judge-max-tokens N` | `MAX_OUTPUT_TOKENS` | Override the output limit per call. |
+| `--episode ID` | All episodes | Select by exact recorded episode ID, benchmark identity, or execution ID. Repeat this flag to select more than one ID. An unmatched ID fails before calls. |
+| `--limit N` | No limit | Limit agent-judged spans, or printed spans in dry-run. In preparation mode, limit materialized episodes. `N` must be positive. |
+| `--dry-run` | Off | Print span evidence, file index, and opening message. Make no calls and write no files. |
+| `--prepare-only` | Off | Write offline episode evidence. See below. |
+| `--golden PATH` | Unset | Attach a golden answer to a single-episode input. |
+| `--correctness resolved\|unresolved` | Unset | Attach an outcome to a single-episode input. |
+| `--gold-metadata PATH` | Unset | Join `verified-metadata.json` patches by recorded episode benchmark identity. |
+| `--harness-report PATH` | Unset | Join harness outcomes by episode identity. Repeated executions need execution-specific provenance. |
+| `-o DIR`, `--output DIR` | `output/` | Create a new run folder inside this container. |
+| `--html` | Off | Also write `memgraph-verdicts.html`. |
 
-### Offline preparation
+Episode selection leaves compact `unjudged` audit records for excluded spans.
+They are outside aggregates, summary counts, and dry-run counts. Policy totals
+still cover the whole recordings. `--limit` validates episode and attachment
+scope before it limits agent work.
 
-Use `--prepare-only` to partition recordings into bridge-delimited episodes and
-write inspectable `injudge.episode-inputs/v5` evidence without loading `.env`,
-Node, or contacting a judge:
+`--golden` and `--correctness` require one episode across the complete input.
+Selection and limits do not change that requirement.
+
+## Offline preparation
 
 ```bash
-uv run -m injudge <paths> --prepare-only -o output/
+uv run -m injudge path/to/recordings --prepare-only -o output/
 ```
 
-The mode accepts `--limit` (counting materialized episodes), the two
-single-episode attachments (`--golden` / `--correctness`), and the keyed gold
-and harness attachment options. `--dry-run`, `--html`, and the judge options
-(`--env`, `--judge-model`, `--timeout`, `--max-attempts`,
-`--judge-max-tokens`) are rejected. A package is written before exit status 2
-when scope, assignment, episode evidence, or conflicting outcome attachments
-need review, or an error-level diagnostic exists. Ordinary warnings alone
-do not fail preparation. Status follows these recorded conditions, never
-words in a warning or an input identifier. `--limit` only limits materialized
-episodes; it does not hide problems elsewhere in the input.
+This writes `episode-inputs.json` (`injudge.episode-inputs/v5`) and episode
+folders. It needs no `.env`, Node, network, or judge. It produces no verdicts
+or summary.
 
-{% hint style="warning" %}
-The judge API key must not appear in artifacts, reports, logs, or error messages; [Credentials](judge-client.md#credentials) documents how it travels to the runner and how echoed endpoint output is masked.
-{% endhint %}
+Preparation accepts `--limit`, `--golden`, `--correctness`, `--gold-metadata`,
+and `--harness-report`. It rejects `--episode`, `--dry-run`, `--html`, and all
+judge options: `--env`, `--judge-model`, `--timeout`, `--max-attempts`, and
+`--judge-max-tokens`. Dry-run also rejects `--html`.
+
+Preparation writes the package before exit status `2` when scope, assignment,
+episode evidence, conflicting outcomes, or error-level diagnostics need
+review. Ordinary warnings do not cause failure. `--limit` limits files written;
+it does not hide problems elsewhere in the input.

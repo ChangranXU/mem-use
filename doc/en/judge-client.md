@@ -1,124 +1,166 @@
----
-description: "The pi-based judge agent: runner protocol, budgets and forced answers, follow-ups, and credential rules."
-icon: plug
----
+# Inspect the judge agent
 
-# Judge Agent
+[Guide index](README.md) · [简体中文](../zh-CN/judge-client.md)
 
-{% hint style="info" %}
-The judge is an agent built on the [pi](https://github.com/earendil-works/pi) agent runtime (`@earendil-works/pi-agent-core` + `@earendil-works/pi-ai`), driven by a small TypeScript runner (`agent/runner.ts`) that Python spawns once per phase of a span's conversation (the investigation, then a follow-up after each rejected answer), each process continuing the same conversation through `job.history`. Python owns the verdict contract; the runner owns the conversation.
-{% endhint %}
+The MemUse judge uses the pi agent runtime through `agent/runner.ts`.
+Python starts one runner process for each conversation phase. The first phase
+investigates one span. A later phase continues the same history after a rejected
+answer. Python validates the answer and derives the verdict.
 
-See [Configuration](configuration.md) for endpoint setup (`npm --prefix agent install` once; node ≥ 22.19 on PATH).
+See [configuration](configuration.md) for installation, endpoint settings,
+budgets, and parallelism.
 
-## The Conversation
+## The conversation
 
-One span, one conversation, scoped to its parent episode. Python materializes the span's [evidence folder](scoring-input.md), assembles the system prompt from the five-signal rubric, and writes a secret-free job file; the runner builds the pi agent with exactly two evidence tools. The opening includes the exact target span, compact file navigation, and the required reads from the manifest; the detailed manifest and episode files remain tool-readable. `read_evidence` reads several whole files per call (`paths`), because every model call resends the conversation: a footprint window costs one call, not one per step. The result file returns retained and executed call counts, reported usage (including rolled-back rounds), and context rollbacks. The operation's `input` sums executed calls, reported usage, and context rollbacks across phases, keeps the last phase's retained counts, and carries the final `forced` and any-phase `any_phase_forced` markers; stop reasons stay in the transcript.
+Each span gets one conversation and one [evidence folder](scoring-input.md),
+limited to its parent episode. The opening contains the target span, file
+navigation, and required reads. The full manifest and episode files are
+available through two read-only tools: `read_evidence` and `search_evidence`.
 
-Call counts must be nonnegative integers. Missing or malformed counts are
-recorded as null. A phase that produces no result also leaves its retained
-call counts unknown.
+The runner receives a job file without the key or endpoint. It returns answer
+text, history, retained call counts, executed call counts, reported usage, and
+context rollbacks. The operation's `input` record sums executed work across
+phases. It keeps retained counts from the last phase. Missing or invalid counts
+stay `null`; valid counts are nonnegative integers.
 
-## Trajectory Recording
+## Required reads
 
-Every conversation is recorded as a pi event-sourced trajectory: the runner subscribes to the agent's event stream and appends each completed message to `<output>/<run-stamp>/agent-runs/<span-dir>.jsonl` as it happens. One JSONL per span, replaced per judging run; each line is `{seq, type, …}` with attempt-local `seq`:
+Python checks both answer structure and evidence coverage. A file access alone
+does not prove a complete read. The check compares retained numbered tool
+output with the evidence files.
 
-- `attempt` — opens each runner process's lines; attempt 1 is the investigation, later attempts are follow-ups. Phases append to the same file; seeded history fires no events, so no duplication.
-- `message` — one full message (user opening, assistant turns with their tool calls and per-call usage, tool results), including turns a budget later rolled back.
-- `tombstone` — `{removedSeqs, reason}` for what the context-budget rollback (`context_budget_rollback`) or a forced round's stripped tool tail (`forced_tool_tail`) removed from the live conversation.
-- `attempt_end` — answer, stop reason, forced flag, error, retained-conversation counts/usage, and this phase's executed calls/usage and rollbacks. Only the latter are summed across phases.
+Every answer needs the manifest's `required_reads.always` files:
 
-The forced-answer message joins the conversation by context rewrite (no event fires for it), so the runner appends it to the trajectory explicitly. The runner masks credential echoes before it writes each record. Python checks the file again after each attempt and removes incomplete records. The operation's `input.transcript` names the file relative to the run folder — `agent-runs/<span-dir>.jsonl`.
+- `task.md` and `baseline.md`;
+- `messages.md` and `gold.md`, when present;
+- the first consuming step and its preceding episode step, when present.
 
-When a forced answer also contains blocked tool calls, the runner records the retained assistant text after tombstoning the tool tail, so replay preserves the final answer.
+A non-null novelty or an `acted_on` influence also needs all
+`required_reads.prior_sources`. These include baseline step files and complete
+sections for other deliveries visible in that input. The target delivery is
+already in the opening.
 
-## Budgets and Forced Answers
+`none`, `referenced`, and `selected` need the entry's complete action window.
+A non-null acted-on effect needs every step from the window start through the
+episode end. Later consequences can confirm or overturn an apparent effect.
+Use `null` when the required coverage is incomplete.
+
+Every action anchor and structured `evidence[].steps` citation must name a
+completely read step. A complete step read includes its manifest
+`result_sources` sections. `input.read_steps` records the steps that passed
+this check.
+
+Paged reads can combine. Header-only reads, search hits, truncated lines,
+failed reads, and rolled-back reads do not establish full coverage. Each read
+has a 200,000-character cap. A partial read supplies the next `offset` and
+`column`, so even a single long line can be read in full. Columns count Unicode
+characters from 1. Continued lines use `line@column: text`.
+
+Coverage checks establish what the judge read. They do not prove its judgment
+is correct.
+
+## Budgets and forced answers
 
 Before the first paid call, the runner estimates the opening, system prompt,
-tool schemas, and all `required_reads.always` text. It rejects the span if
-this estimate exceeds the input budget. The estimate excludes blank lines,
-read formatting, and optional evidence; passing this check does not prove that
-the full investigation will fit.
-The input budget uses pi's context reserve, so the preflight follows the same
-limit as the library that sends the request.
+tool schemas, and `required_reads.always` text. If these exceed the input budget,
+the span fails without a call. The estimate excludes blank lines, read-format
+text, and optional evidence. Passing does not guarantee the whole investigation
+will fit.
 
-Once a conversation starts, two budgets can end it with a **forced final answer**:
+Two limits can force a final answer:
 
-- **Step budget** (`MAX_STEPS`): when the LLM-call count reaches the cap, the conversation is cut to one final round: the forced-answer message tells the agent its budget is exhausted and to stop calling tools and write its final answer now from the evidence already gathered, and any defiant tool call in the forced round is blocked.
-- **Context budget** (`CONTEXT_WINDOW`): the estimate uses the last applicable assistant usage plus trailing messages; without usable input usage (including output-only usage), it estimates that content from messages, the system prompt, and tool schemas. The watermark includes pi's context reserve, `MAX_OUTPUT_TOKENS`, and the forced message's estimated size. Crossing it rolls back the overflowing round and injects the forced message.
+| Limit | Behavior |
+|---|---|
+| Call budget (`MAX_STEPS`) | Reserves a final round. The forced message asks for an answer from evidence already read. Tool calls in that round are blocked. |
+| Context budget (`CONTEXT_WINDOW`) | Uses reported input usage plus trailing messages, or estimates message content when usage is unavailable. It reserves pi's context allowance, output space, and the forced message. An overflowing round is rolled back before the forced answer. |
 
-A follow-up gets **at most four model calls including its final answer**, or `MAX_STEPS` if that is lower. At the four-call limit this allows three evidence-gathering rounds and one forced final round; it does not regain the initial full investigation budget. The existing context watermark can force an answer earlier. This is a fixed policy, not another configuration knob.
+A follow-up gets at most four model calls, including its final answer, or
+`MAX_STEPS` if lower. It does not get a second full investigation budget.
+The existing context limit can force an earlier answer.
 
 During a follow-up, the runner recalculates output room after each tool round.
-It keeps new evidence that fits and reduces the output cap, up to
-`MAX_OUTPUT_TOKENS`. The cap cannot fall below the estimated size of the
-shortest allowed answer for that span. If the opening cannot leave that room,
-the runner rejects it before a paid call. Reads that exceed the remaining
-budget still roll back. Rejected history is kept. This size estimate does not
-guarantee a complete or correct answer.
+It keeps evidence that fits and can reduce the output cap. The cap must still
+fit the estimated shortest valid answer. If the opening cannot leave that
+room, the phase fails before a paid call. Evidence that exceeds the budget
+still rolls back. The estimate does not guarantee a complete answer.
 
-A forced answer can be a valid verdict after retained investigation. Without a successful step-file read still in the conversation, even syntactically valid JSON fails the evidence checks; reading only navigation files is insufficient. The operation's `input` carries `"forced": true` only when the final answer was forced, while `any_phase_forced` preserves earlier forced phases across follow-ups.
+A forced answer can pass after sufficient retained reads. Without a successful
+retained step read, valid JSON alone cannot pass. `input.forced` describes the
+final answer. `input.any_phase_forced` records whether any phase was forced.
 
 ## Follow-ups
 
-Python checks strict JSON shape and span-relative semantics (exact id coverage, action-anchor windows, anchors empty for `none`). It also checks that every cited anchor and structured `evidence[].steps` citation names a step whose complete text and manifest `result_sources` were read in the retained conversation (`read_steps` in the operation's `input`; the target delivery is already in the opening). An answer that passes all checks needs no additional model call.
+Python validates strict JSON, signal values, exact entry-ID coverage, action
+windows, and required reads. `selected` and `acted_on` need anchors. `none`
+requires an empty anchor list. A valid answer ends the conversation.
 
-Every rejected answer — malformed JSON, an out-of-contract value, an empty final message, or missing required reads — takes the same **follow-up**: the next runner restores the complete `job.history`, keeps the evidence tools, and appends one message naming every rejection reason (`prompts/injudge/agent/followup.md`). The follow-up fixes only what was named, reading the named files when needed, within `min(MAX_STEPS, 4)` calls. Python validates the new answer again.
+Every rejected answer takes the same follow-up path while phases remain.
+The runner restores `job.history`, keeps the evidence tools, and receives a
+message listing the rejection reasons. This applies to malformed JSON,
+invalid values, empty answers, and missing reads. A response cut at the output
+limit also takes this path.
 
-`MAX_ATTEMPTS` (default 3) bounds all runner phases. Exhaustion keeps a visible error and the masked answer text. The parser is strict: no format-stripping fallback, and a valid answer is not sent back to the model.
+`MAX_ATTEMPTS` limits all phases, including the first investigation. When the
+limit is reached, the span has an `error` verdict and retains masked answer
+text. The parser does not strip formatting to rescue an invalid answer.
 
-An answer cut at the output cap fails the contract parse and takes the follow-up. An oversized trajectory means the agent reads the evidence folder selectively.
+## Trajectory recording
 
-## Failure Handling
+Each span's judge conversation is saved to
+`agent-runs/<span-dir>.jsonl`. Phases append to the same file. Sequence numbers
+are local to each attempt.
 
-- A runner-level failure mid-run (the subprocess fails to start, exits non-zero, or writes no readable result) is that span's `error` verdict with a validation note; the run continues. It is not retried — an identical retry would re-pay the fault. Missing Node, Node older than 22.19, a missing runner, or missing agent packages fail with a setup error before input preparation. The installed pi library supplies the context reserve used in configuration checks.
-- An agent-level error (endpoint auth, persistent transport failure) surfaces as the run's `error` field and becomes that span's error verdict the same way.
-- `TIMEOUT` limits the idle wait for response headers or the next body chunk. An active stream can run longer than this value; there is no total elapsed deadline. Before streaming starts, pi can retry a transient request failure up to twice. Each retry starts a new wait. A failure after streaming starts is not retried. A requested retry delay above 60 seconds also fails. `MAX_OUTPUT_TOKENS` limits each model response.
+| Record type | Contents |
+|---|---|
+| `attempt` | Starts a runner phase. Attempt 1 is the investigation. |
+| `message` | A completed user, assistant, or tool message, including usage. Seeded history does not produce duplicate records. |
+| `tombstone` | `removedSeqs` and a reason: `context_budget_rollback` or `forced_tool_tail`. These records identify messages removed from the live conversation. |
+| `attempt_end` | Answer, stop reason, forced flag, error, retained counts, executed counts, usage, and rollbacks. |
+
+The runner records forced messages explicitly because a context rewrite does
+not emit the normal event. If a forced answer also contains blocked tool calls,
+it records the retained answer text after removing the tool tail.
+
+`input.transcript` gives the path relative to the run folder. Executed counts
+include discarded rounds. Retained counts describe the final conversation.
+
+## Failure handling
+
+Missing Node, Node older than 22.19, a missing runner, or missing packages cause
+a setup error before input preparation. The installed pi library supplies the
+context reserve used to check configuration.
+
+A runner that cannot start, exits with an error, or writes no readable result
+produces a span `error` and a validation note. Other spans continue. The same
+runner failure is not retried. Agent-level errors, such as failed authentication
+or persistent transport faults, also produce a span error.
+
+`TIMEOUT` limits idle waits for headers or the next body chunk. An active stream
+has no total elapsed deadline. Before streaming starts, pi can retry a transient
+request failure up to twice. Each retry gets a new idle wait. A failure after
+streaming starts is not retried. A requested retry delay above 60 seconds fails.
 
 ## Credentials
 
-The key and endpoint URL reach the runner through the `JUDGE_API_KEY` and
-`JUDGE_BASE_URL` environment variables. Neither is a configuration field in
-the job or result files. An endpoint path can contain a credential, so the
-URL also needs this protection. The key is sent only to the configured endpoint.
-The child process does not inherit `OPENAI_*` or `ANTHROPIC_*` environment
-variables. These could change the provider's headers or endpoint.
+The key and endpoint reach the runner only through `JUDGE_API_KEY` and
+`JUDGE_BASE_URL`. Neither appears as a configuration value in job or result
+files. An endpoint path can contain a key, so the URL needs the same protection.
+The child does not inherit `OPENAI_*` or `ANTHROPIC_*` variables that could
+change provider headers or the endpoint.
 
-Endpoint output that repeats the key is masked before it reaches a verdict,
-`judge_raw`, or a validation note. This applies to HTTP errors and successful
-responses. Masking covers the raw key, all percent-encoded spellings in either
-hex case, and the key's literal JSON-serialized spelling.
+Endpoint output can repeat the key in errors or successful responses. Masking
+covers its raw text, percent-encoded forms in either hex case, and literal
+JSON-serialized spelling before it reaches verdicts, `judge_raw`, or notes.
+Keys shorter than eight characters are treated as absent by masking.
 
-With judge credentials loaded, Python masks span evidence before writing it.
-The opening, evidence hashes, and read checks use these same masked files.
-Reports, checkpoint records, summaries, and HTML also mask the configured key
-before persistence. Offline preparation and dry-run do not load judge credentials.
+When credentials are loaded, Python masks evidence before writing it.
+Openings, hashes, and coverage checks use those masked files. Jobs, reports,
+checkpoints, summaries, and HTML also mask the key before saving.
+Offline preparation and dry-run do not load judge credentials.
 
-Python masks job content before writing it. The runner masks transcript and
-result strings before serialization, so a stopped process cannot leave an
-unmasked completed record. Masking does not change the runner's live
-conversation. Python then checks the saved transcript. It decodes the JSONL
-envelope and masks its string fields, without decoding JSON-looking strings
-inside them. Incomplete or malformed records are discarded. The retained
-transcript ends at a newline so the next attempt can append safely. If the
-masked transcript cannot be saved, the file is removed and the span records
-an error with its input diagnostics.
-
-Each read returns one text block per file, headed `==> path <==`, and `details.files` holds per-file metadata (`path`, `lines_read`, `line_start`, `line_end`, `truncated`, or `error` for a path that could not be read) counting only text actually returned after the call's 200,000-character cap; files past the cap are marked unread. A read whose `limit` stops before the file's last non-blank line ends with a note giving the remaining line count and the next offset. Paged reads combine. `read_steps` certifies complete step text plus the delivery sections listed in its manifest `result_sources`; the target delivery already in the opening needs no duplicate read. File access alone is insufficient: header-only reads, truncated lines, search hits and rolled-back reads do not qualify. Every answer requires the manifest's `required_reads.always` files completely: task and baseline files, `messages.md` and `gold.md` when present, the first consuming step, and its preceding episode step if present. The baseline index does not certify its referenced files: non-null novelty and acted-on influence also require every `required_reads.prior_sources` entry, or use null. None/referenced/selected require the full entry window; a non-null acted-on effect requires the episode remainder as well, because consequences can outlive an action window. Incomplete attribution or effect uses influence or positive_effect null. Complete coverage does not prove the judgment itself is correct.
-
-Prior sources include the complete sections of other deliveries visible in
-the baseline. The manifest supplies their line ranges in `deliveries.md`, and
-the opening lists them; partial retained reads combine under the same rules as
-step files. Target text is already in the opening, and deliveries absent from
-that input do not need extra baseline reads.
-
-A character-capped read gives an exact continuation `offset` and `column`.
-`column` counts Unicode characters within the first requested line, starting
-at 1; a continued fragment is displayed as `line@column: text`. This lets even
-one oversized line be read completely. Coverage combines only matching
-retained character ranges; gaps or rolled-back fragments do not count.
-
-Referenced results can require extra reads even for a neutral answer that cites
-what a lookup returned. The cost depends on result packaging: a delivery may
-contain repository output as well as memory text. Track actual model usage and
-follow-ups; unread character counts are not measured token or monetary overhead.
+The runner masks transcript and result strings before serialization. This does
+not change the live conversation. Python checks the saved transcript after each
+phase. It decodes the JSONL envelope and masks string fields, without parsing
+JSON-looking text inside those fields. It drops incomplete or malformed records
+and keeps a final newline for safe append. If it cannot save the masked
+transcript, it removes the file and records a span error with input diagnostics.

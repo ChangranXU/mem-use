@@ -1,89 +1,83 @@
-# mem-eval
+# MemUse
 
 [English](README.md) | 简体中文
 
-从录制的 agent 轨迹评估记忆系统质量。两个只读工具消费 schema-v10 gate 轨迹
-（extension/traj-recorder）：
+MemUse 从录制的 agent 行为评估记忆是否相关、可信、提供新信息，以及是否影响行动并带来收益或伤害。它评估记忆对后续行为的可观察影响；任务最终成功与否不能直接决定记忆结论。
 
-- **memgraph** — 把每次记忆操作及其关系渲染成自包含、可离线打开的 HTML 图。
-- **injudge** — 用智能体式 LLM 评分规则判定每次召回注入对后续行为的影响，
-  产出可叠加回图上的报告。
+本仓库仍名为 `mem-eval`，提供两个只读命令：
 
-> 注入由它对 agent 的**后续影响**评判——绝不看最终任务结果。
+- **memgraph**：把记忆创建、更新、删除和召回渲染为可离线打开的 HTML 图。
+- **injudge**：按 episode 内的召回区间评审，输出逐条信号、区间结论和汇总；结果可叠加到图上。
 
-## 环境
+![MemUse 录制、评审与可视化流程](doc/assets/overview.png)
 
-- Python 3.11+ 与 [uv](https://docs.astral.sh/uv/)
-- Node.js ≥ 22.19（injudge 智能体运行与 TypeScript 测试需要）
+*图源：MemUse 论文概览图。流程与文档入口见[中文文档](doc/zh-CN/README.md)。*
 
-Python 依赖声明在 `pyproject.toml`（memgraph 只用标准库，injudge 另需
-`tqdm`）。评审是 `agent/` 下的 TypeScript 智能体，构建于
-[pi](https://github.com/earendil-works/pi)，用 npm 安装。
+## 先准备录制
+
+使用前必须按以下两个项目的说明配置记忆接入和轨迹录制：
+
+- [memory-bridge](https://github.com/ChangranXU/memory-bridge)：接入记忆系统并提供投递、作用域和来源信息。
+- [traj-recorder](https://github.com/ChangranXU/traj-recorder)：录制 schema-v10 gate 轨迹和显式 `memory_*` 注解。
+
+MemUse 分析已有录制，不会替你运行任务或接入记忆系统。输入需要 `trajectory.jsonl` 及其录制目录；请保留 `run.json` 和 `calls/` 等辅助文件，以便核验消费输入和用量。没有记忆注解的轨迹会得到零记忆操作，无法靠提示词补推。
+
+本地需要 Python 3.11+ 和 [uv](https://docs.astral.sh/uv/)。实际评审和 TypeScript 测试还需要 Node.js ≥ 22.19；画图、`--dry-run` 和 `--prepare-only` 不需要 Node 或评审凭证。
 
 ## 快速开始
 
+在本仓库根目录运行，将示例中的 `path/to/recordings` 替换为实际录制路径。它可以是轨迹目录、`trajectory.jsonl` 文件或递归扫描的根目录，也可提供多个路径。
+
 ```bash
-uv sync                        # 首次——创建 .venv
-npm --prefix agent install     # 首次——pi 智能体包（需要 node >= 22.19）
+uv sync
 
-# 1. 可视化记忆操作——离线，不调用评审
-uv run -m memgraph <paths> -o memgraph.html --json memgraph.json
+# 离线画图
+uv run -m memgraph path/to/recordings -o memgraph.html --json memgraph.json
 
-# 2. 评审召回注入——先配置评审端点
-cp .env.example .env
-uv run -m injudge <paths> --dry-run --limit 3   # 预览证据；不发请求、不写文件
-uv run -m injudge <paths>                       # 单独运行目录；已评审区间另有 evidence/ 与 agent-runs/
-
-# 3. 把判定结果叠加到图上（或给 injudge 加 --html）
-uv run -m memgraph <paths> --verdicts output/<run-stamp>/injudge-report.json -o memgraph-verdicts.html
+# 离线检查 episode 与评审证据
+uv run -m injudge path/to/recordings --prepare-only -o output/
+uv run -m injudge path/to/recordings --dry-run --limit 3
 ```
 
-每个 `<path>` 可以是轨迹目录（含 `trajectory.jsonl`）、`trajectory.jsonl`
-文件本身，或递归扫描的根目录。
+确认输入可用后，安装评审依赖并配置端点：
 
-## 工作原理
+```bash
+npm --prefix agent install
+cp .env.example .env
+```
 
-injudge 在每个 episode 内把处理方式相同的重复注入归并为**区间（span）**，
-再为每个送入评审的区间建立独立的证据文件夹——目标区间及其所属 episode 的
-任务、上下文、投递与原始步骤——由一个 pi 智能体用只读工具探索。智能体对
-每条投递记忆打五个信号；再由代码推导区间判定：任一记忆使用造成伤害 →
-**negative**，否则任一被采纳 → **positive**，否则任一归因或效果未定 →
-**unresolved**，否则 **neutral**。仅选择后续读取与无收益使用单独记录，不等于伤害。没有可归属
-agent 步骤的区间不送评审，计为 **unassessable**。
+在 `.env` 中填写 `MODEL`、`API_KEY`、`BASE_URL`，然后运行评审（会调用所配置的模型并产生费用）：
 
-被评判的证据不超出录制 placement 实际曝光的内容，acted-on 的影响力断言
-必须携带落在该记忆足迹窗口内的动作步骤锚点。每条引用都须以保留对话中
-完整读取的步骤文本为依据；无内容使用的断言及所有已知效果判定
-还须读完整个条目窗口。每条评审对话只受两个预算约束——最大步数与上下文
-窗口——且都以强制作答收尾，而非中途失败。
+```bash
+uv run -m injudge path/to/recordings --html -o output/
+```
 
-完整流程见[中文文档](doc/zh-CN/README.md)；信号、使用标签与汇总公式见
-[判定推导](doc/zh-CN/verdict-derivation.md)。
+每次运行写入独立的 `output/<run-stamp>/`。先读 `summary.md`，再按需查看 `injudge-report.json`、证据和评审对话。`--html` 同时生成判定叠加图。已有报告也可单独用于画图。将下例中的 `RUN` 替换为实际运行文件夹名：
 
-## 输入约定
+```bash
+uv run -m memgraph path/to/recordings --verdicts output/RUN/injudge-report.json -o memgraph-verdicts.html
+```
 
-工具只读录制器写下的显式 `memory_*` 注解事件——不解析提示词、不认标签
-约定。没有注解的轨迹是合法输入：零记忆操作，外加一条 validation 说明，
-不是错误。详见[输入约定](doc/zh-CN/input-contract.md)。
+## 如何读结果
 
-## 文档
+同一 episode 内处理方式相同、可见性连续的重复投递会合并为区间。评审模型为每个暴露条目返回五个信号：`relevance`、`accuracy`、`novelty`、`influence`、`positive_effect`；Python 验证证据后推导结论。
 
-完整文档在 [`doc/`](doc/)（English + 简体中文，GitBook 布局），从
-[中文文档](doc/zh-CN/README.md)或 [English book](doc/en/README.md) 进入：
+汇总同时保留六个条目占比：相关、得到证实、信息增益、影响行动、收益和伤害，以及未知项与覆盖率。它们不合成为单一总分。区间结论用于筛选待复核记录：有害使用优先为 negative，其次为 positive，再是调查不足或效果未知的 unresolved，其余为 neutral。完整调查后仍无法区分来源的归因歧义单独记为 ambiguous，归入 neutral。
 
-- [输入约定](doc/zh-CN/input-contract.md)——轨迹需要包含什么
-- [memgraph 指南](doc/zh-CN/memgraph.md) · [injudge 指南](doc/zh-CN/injudge.md)
-- [判定推导](doc/zh-CN/verdict-derivation.md)——使用标签、区间判定与比率
-- [配置参考](doc/zh-CN/configuration.md)——`.env` 键与 CLI 参数
-- [产物](doc/zh-CN/artifacts.md)——report、`summary.json` 与可读摘要 `summary.md`
-- [开发](doc/zh-CN/development.md)——目录结构、测试、风格规则
+空投递、不可观察的消费者、评审失败和未评审区间单独计数。仍在输入中的副本若没有合格动作步骤，会自动判为 neutral，不调用评审，也不获得条目画像。详见[判定推导](doc/zh-CN/verdict-derivation.md)和[产物](doc/zh-CN/artifacts.md)。
 
-## 测试
+## 文档与测试
+
+[中文文档](doc/zh-CN/README.md) · [English documentation](doc/en/README.md)
+
+- [输入约定](doc/zh-CN/input-contract.md)：录制要求、记忆身份和缺失证据。
+- [memgraph](doc/zh-CN/memgraph.md) · [injudge](doc/zh-CN/injudge.md)：命令和工作流。
+- [配置](doc/zh-CN/configuration.md)：端点、预算和全部参数。
+- [产物](doc/zh-CN/artifacts.md)：文件、字段、分母和覆盖率。
+- [开发](doc/zh-CN/development.md)：离线测试和真实评审校准。
 
 ```bash
 uv run pytest tests -q
 ```
 
-测试不走网络：Python 测试用预制结果替换付费评审调用。TypeScript 运行器与
-证据工具经 `node --test` 由 `tests/test_agent_tools.py` 驱动，缺 node 或
-尚未安装 agent 包时跳过。
+测试不访问网络；评审判断质量需另做真实模型校准，不能由预制答案测试证明。

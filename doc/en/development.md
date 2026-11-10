@@ -1,110 +1,76 @@
----
-description: "Tests, project layout, and contributing conventions."
-icon: wrench
----
+# Develop MemUse
 
-# Development
+[Guide index](README.md) · [简体中文](../zh-CN/development.md)
 
-## Running Tests
+Start with [AGENTS.md](../../AGENTS.md) for repository rules. Use the
+[contributor reference](../contributor-reference.md) when you change parsing,
+step attribution, judging, or output formats.
+
+## Run tests
+
+Run from the checkout root:
 
 ```bash
-uv sync                                # once, inside the checkout
-npm --prefix agent install             # once: pi agent packages (node >= 22.19)
-uv run pytest tests -q                 # full suite (also runs the TS tests)
-uv run pytest tests/test_injudge.py -q # single file
+uv sync
+npm --prefix agent install
+uv run pytest tests/test_injudge.py -q
+uv run pytest tests -q
 ```
 
-{% hint style="info" %}
-The suite does not use the network. Python tests stub paid judge calls with canned results. `npm --prefix agent test` checks TypeScript types, then runs the runner and evidence-tool tests under `node --test`. Pytest invokes the same command (skipped when Node, npm, or the installed TypeScript compiler is missing). Fixtures are synthetic schema-v10 trajectories built by `tests/annotated_fixtures.py`.
-{% endhint %}
+Use Python 3.11+ and Node.js 22.19+. The suite runs offline. Python tests use
+canned judge responses and synthetic schema-v10 recordings. They do not make
+paid calls.
 
-## Project Layout
+`npm --prefix agent test` checks TypeScript types, then runs `node --test`.
+Pytest invokes the same command. It skips this check when Node, npm, or the
+installed TypeScript compiler is missing.
 
-| Path | Role |
-|---|---|
-| `pyproject.toml` | uv environment: `package = false` (the tools run as `uv run -m …`), the `tqdm` runtime dependency, and the `pytest` dev group |
-| `util.py` | Shared helpers (atomic artifact writes, safe printing) |
-| `memgraph/` | Annotation index, parsing, linking, HTML renderer, verdict merge, CLI (`python3 -m memgraph`) |
-| `injudge/` | Step stream, injection spans, verdict contract and judge prompts (`judge.py`), evidence folders (`evidence.py`), the agent-runner client and corrective loop (`agent.py`), gold sidecars (`gold.py`), aggregates, report writer, CLI (`python3 -m injudge`) |
-| `injudge/checkpoints.py` | Save completed spans and recover reports from their journals |
-| `injudge/__init__.py` | Shared report, summary, episode-input, and checkpoint schema constants |
-| `agent/` | TypeScript judge agent: pi runner with budgets and forced answers (`runner.ts`), read-only evidence tools (`evidence-tools.ts`), event-sourced recording (`trajectory.ts`), job/result protocol (`protocol.ts`) |
-| `agent/credential-mask.ts` | Mask credentials in saved values before JSON serialization |
-| `prompts/` | Every LLM prompt as a file, grouped by tool and purpose (loaded via `injudge/prompts.py`) |
-| `calibration/` | Controlled judge-calibration cases and report scoring (`python3 -m calibration`) |
-| `tests/` | pytest suite and shared schema-v10 fixture builder |
-| `doc/` | This book (GitBook layout: `LANGS.md` + `en/` + `zh-CN/`) |
+For a code change, start with the affected tests. Run the full offline suite
+before opening a code PR. For prose-only changes, review the diff, links, and
+formatting. No runtime suite is needed.
 
-## Judge Calibration
+## Project layout
 
-Canned answers test the contract, not judgment quality. `calibration/` contains
-controlled development regressions for explicit and uncited use, routine
-practice, source and novelty distinctions, uncertainty, plan execution and
-reversal, harmful and unproductive actions, a memory's own remedy tested and
-dropped, a change kept without a check that could show its benefit, historically
-scoped claims and issue summaries, mixed known and new advice, a correction
-after re-exposure, reading a listed candidate whose unrecorded full text
-is used or set aside, recorded preview/full-read pairs, whole-list versus
-named-entry remarks on a result list, a repeated search re-showing entries
-still in the agent's input, and paraphrased baselines. Each case pins
-only the labels its construction establishes. A case delivering a list scores
-each further entry as its own target (`case/m2`, …).
+| Path | Purpose |
+| --- | --- |
+| `memgraph/` | Parse annotations, identify steps and episodes, build the graph, render HTML, and merge verdicts. |
+| `injudge/` | Prepare evidence, group spans, validate judge answers, derive results, and write reports. |
+| `injudge/profiles.py` | Derive entry-share profiles, episode coverage, and recorded billing summaries. |
+| `injudge/checkpoints.py` | Save completed spans and recover reports from journals. |
+| `injudge/__init__.py` | Define shared artifact schema names. |
+| `agent/` | Run the TypeScript pi judge, provide evidence tools, record conversations, and mask credentials. |
+| `prompts/` | Store all LLM instructions, loaded by `injudge/prompts.py`. |
+| `calibration/` | Build controlled cases and compare judge reports with expected labels. |
+| `tests/` | Offline checks and the shared synthetic recording builder. |
+| `util.py` | Shared helpers, including atomic file writes. |
+| `doc/` | English and Chinese Markdown guides, references, and shared images. |
 
-A new control keeps effect unknown despite a matching gold patch and resolved
-task outcome, because no check or later use shows the change's benefit.
+The tools run from the checkout with `uv run -m`; this repository is not an
+installable Python package. Python runtime dependencies are the standard library
+and `tqdm`. The TypeScript agent runs without a build step.
 
-Recorded follow-up cases contain a preview and a separately bound full read.
-Calibration scores both targets (`case` and `case/read`), preserving each
-verdict and marking missing or errored targets unavailable. The controls
-cover useful reads, unused reads, and preview actions predating the read.
-Broader-search controls also cover an unselected fuller copy: useful and
-harmful actions on shared content belong to the later window, while a plan
-established before either delivery stays uncredited.
-Credit ownership is an accounting convention after influence is established;
-it cannot override earlier actions or manufacture influence from matching text.
+## Judge calibration
+
+Canned responses test the answer contract. They do not test judgment quality.
+Changes to LLM prompts need real-judge calibration and a report of disagreements
+and stability. Paid runs require user authorization under
+[AGENTS.md](../../AGENTS.md#verification).
+
+Build the cases offline:
 
 ```bash
 uv run -m calibration build calibration-cases/
-uv run -m injudge calibration-cases/ -o output/calibration   # paid; repeat for stability
+```
+
+After paid runs are authorized, judge the cases and score the reports:
+
+```bash
+uv run -m injudge calibration-cases/ -o output/calibration
 uv run -m calibration score output/calibration/*/injudge-report.json
 ```
 
-`score` reports every disagreement, per-label stability across repeats, and
-matched-pair novelty consistency. It accepts only the current report schema
-and checks report IDs and references before scoring. Unsupported or malformed
-reports fail instead of producing agreement scores. It also breaks agreement down by signal and
-by expected effect in acted-on cases (improved, harmed, no effect, unknown),
-so unused entries with null effects cannot dominate the effect score. Effect
-stability is reported separately. Judge health reports forced answers in any
-phase, spans with follow-ups, executed calls, context rollbacks, and reported
-input/output/cache tokens; executed usage includes discarded rounds.
-Missing or failed targets are reported as
-unavailable and excluded from the agreement denominator; with no answers, it
-reports no assessed labels rather than an agreement score. Use identical settings to measure repeatability;
-changed settings measure sensitivity. Inspect source claims as well as labels:
-a neutral verdict can still misdescribe its evidence. Paid calibration requires
-the user's go-ahead under `AGENTS.md`.
-
-All included cases are regressions. A held-out set must be newly written, with
-its cases, expected labels, and judge prompt frozen before its first paid run.
-Once its results inform tuning, it becomes regression data and a fresh set is
-needed for held-out validation.
-
-The diagnostic controls distinguish code being exercised from its relevant
-output being verified. The preview controls include repository work before
-a recorded full read, with either a used finding or an abandoned failed search.
-These are controlled regressions, not labels imposed on ambiguous real traces.
-The retrieval controls hold actions fixed while varying who supplied a false
-locator and repair instruction. They also cover a corrected read with a verified
-benefit and a blocked read with unknown effect. Preserve genuine harmful-guidance
-controls when reducing false harm from agent execution mistakes.
-The task-known-fix control distinguishes a task-prescribed edit from useful
-memory-supplied reproduction cases. Compare it with `selected_then_rejected`,
-where a read is set aside without a used finding or extra work: a hypothetical
-same final outcome cannot establish `no_effect`.
-Use repeatable `--case NAME` with both `build` and `score` to limit a calibration
-experiment explicitly; follow-up deliveries remain included and missing targets
-inside the selected cases stay unavailable. For example:
+Repeat the judge command with identical settings to measure stability. Use
+repeatable `--case NAME` on both `build` and `score` to select cases. For example:
 
 ```bash
 uv run -m calibration build output/calibration/effects/cases --case diagnostic_verified_harm
@@ -112,61 +78,83 @@ uv run -m injudge output/calibration/effects/cases -o output/calibration/effects
 uv run -m calibration score output/calibration/effects/runs/*/injudge-report.json --case diagnostic_verified_harm
 ```
 
-Change one treatment at a time when comparing prompts or budgets, then repeat
-with identical settings. Reports retain settings and prompt/evidence hashes;
-the scorer flags differing run provenance or evidence hashes rather than claiming
-fixed-input repeatability. The 32,768-token default reserves more space for evidence inside
-the 131,072-token context. An existing `.env` value still overrides it; use
-`--judge-max-tokens 32768` for an explicit experiment. Check output cuts, errors,
-and agreement as well as fewer forced answers before claiming improvement.
+### Read calibration results
 
-Finite context can affect which labels remain known. Later spans can have
-more visible prior sources, all of which must be read for non-null novelty
-or acted-on influence. A fixed budget can therefore produce more nulls in
-later spans, even when their memories have the same quality. Keep the coverage
-checks. Report missing reads, nulls, forced answers, and context rollbacks
-alongside agreement, and compare spans with similar evidence requirements.
-A budget limit does not establish that an entry lacked novelty or influence.
+The scorer reports disagreements, per-label stability, matched-pair novelty
+consistency, and agreement by signal. It reports effect agreement separately for
+acted-on entries. Missing or failed targets are unavailable and stay outside
+the agreement denominator. No answered labels means no agreement score.
 
-## Comparing memory systems and reviewing stored items
+Follow-up deliveries have their own targets, such as `case/read`. Lists have
+separate targets for later entries, such as `case/m2`. Keep these targets when
+you compare runs.
 
-Keep three units separate: a task attempt for benchmark outcomes, a
-span × exposed entry for attribution, and a portable stored item for diagnosis.
-Multiple injections, entries, or spans within an attempt are not independent
-trials. Four attempts of each task estimate per-task repeatability: report the
-mean per-task success fraction, its 0–4 success distribution, and all-four/any-one
-success separately. Any-one success is not single-attempt performance.
+Inspect the judge's claims as well as its labels. Also report:
 
-Compare memory and no-memory runs on matched task IDs, with the same model,
-harness, budgets, task order, and reset policy. Keep harness errors and missing
-attempts explicit. A baseline trace is a separate trial, not evidence the
-memory-enabled agent saw: do not insert it into `baseline.md`. Join its test
-outcomes and resource costs outside the injection judge. A solved task does not
-make every injected memory helpful, and an injection verdict is not a causal
-estimate of the system's task-success delta. With persistent memory, preserve
-sequence/run clusters when estimating uncertainty; resampling individual
-injections creates false precision. Four runs alone give limited information
-about run-level variability.
+- Unknown labels and missing evidence reads.
+- Forced answers, follow-up phases, and context rollbacks.
+- Executed calls and reported token usage, including discarded rounds.
+- Errors and answers cut by output limits.
 
-Reverse review already starts from `aggregates.overall.memory_usage`, joined
-through its span IDs to per-entry rubric notes, action anchors, exposed text,
-and episode identity. This is useful for finding contradicted content, harmful
-uses, repeated retrieval mismatches, and demonstrated useful advice. Review
-versions/exposures separately before judging an item's current revision. An
-ignored entry can indicate irrelevant retrieval, redundancy, or uncertain
-attribution; it does not establish that the stored item is bad. Never-delivered
-items have no evidence here. Keep unknown/error/unjudged coverage and shared
-action anchors explicit; do not turn these selected observations into an
-intrinsic quality score, a net benefit estimate, or automatic deletion policy.
+Change one setting at a time. Identical settings measure repeatability; changed
+settings measure sensitivity. Reports retain configuration and prompt/evidence
+hashes. The scorer flags differing provenance or evidence.
 
-Prefer this existing evidence join over another paid grader or scalar score.
-The five rubric signals answer different questions, and coverage checks,
-episode preparation, and credit windows protect those distinctions. Simplify
-navigation and instructions before removing these checks. Synthetic calibration,
-manual review of real disagreements, and deterministic benchmark outcomes
-provide complementary checks, as described in
-[Anthropic's agent-evaluation guide](https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents).
+The default output limit is 32,768 tokens within a 131,072-token context window.
+An existing `.env` value can override it. Larger output reservations leave less
+room for evidence. Later spans can require more prior-source reads, so the same
+budget can produce more unknown labels. Compare spans with similar evidence
+requirements. A budget limit is not evidence of low novelty or no influence.
 
-## Contributing
+### Maintain useful controls
 
-Working conventions start in `AGENTS.md` at the repository root. Use its task-specific references for detailed contracts and follow its verification guidance for the kind of change you are making.
+The cases distinguish explicit use from routine practice, prior knowledge from
+new information, and useful actions from harmful or unproductive actions. They
+also cover previews and full reads, later corrections, repeated visible content,
+and a matching final patch without evidence of benefit.
+
+Preserve controls that separate harmful guidance from an agent's execution
+mistake. Preserve checks for actual verification: exercising code is not the
+same as checking the relevant output. Credit-window ownership applies after
+influence is established; ownership cannot prove influence by itself.
+
+All included cases are development regressions. For held-out validation, write
+new cases and freeze their expected labels and the judge prompt before the
+first paid run. Once results guide tuning, those cases become regression data.
+
+## Compare memory systems
+
+Keep three units separate:
+
+| Unit | Use it for |
+| --- | --- |
+| Task attempt | Benchmark success and repeatability. |
+| Span × exposed entry | Attribution of recorded memory use. |
+| Stored item | Diagnosis across its versions and deliveries. |
+
+Multiple entries or spans in one attempt are not independent trials. Match task
+IDs, model, harness, budgets, task order, and reset policy across systems. Keep
+missing attempts and harness errors visible. Report per-task success fractions;
+any-one success across repeated attempts is not single-attempt performance.
+
+A no-memory baseline is a separate run. Do not put its trace in `baseline.md`,
+which must contain only context the judged agent could see. Compare task
+outcomes and resource costs outside the injection judge.
+
+With persistent memory, preserve run and sequence groups when estimating
+uncertainty. Resampling individual injections overstates precision. A small
+number of runs gives limited evidence of run-level variability.
+
+## Review stored memories
+
+Start from `aggregates.overall.memory_usage` and follow span IDs to entry notes,
+action anchors, exposed text, and episodes. Review each version and exposure
+before you assess an item's current content.
+
+Repeated retrieval mismatches, contradicted content, harmful uses, and useful
+advice can guide review. An ignored entry alone does not show that the stored
+item is bad. Items never delivered have no use evidence here. Keep unknown,
+error, and unjudged coverage visible, along with shared action anchors.
+
+Use the existing evidence to diagnose problems. These observations do not form
+an intrinsic item-quality score or an automatic deletion rule.

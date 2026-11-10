@@ -1,8 +1,14 @@
-# mem-eval Documentation
+# MemUse documentation
 
-The **mem-eval** book: how the two read-only tools parse recorded memory
-operations, visualize their relationships, and score recall injections, with
-the full artifact, configuration, and development reference.
+MemUse evaluates memory deliveries from recorded agent runs. Use `memgraph` to
+inspect memory histories. Use `injudge` to assess memory use and its observed
+effects.
 
-- [English](en/)
-- [简体中文](zh-CN/)
+- [English guide](en/README.md)
+- [简体中文指南](zh-CN/README.md)
+- [Installation and quick start](../README.md#quick-start)
+- [Contributor reference](contributor-reference.md)
+
+The recording workflow requires
+[memory-bridge](https://github.com/ChangranXU/memory-bridge) and
+[traj-recorder](https://github.com/ChangranXU/traj-recorder).
