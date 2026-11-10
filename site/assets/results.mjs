@@ -16,8 +16,15 @@ function options(select, values, allLabel) {
 	for (const value of values) select.add(new Option(value, value));
 	select.disabled = false;
 }
+function availableRows() {
+	return view === 'radar' ? rows.filter(row => row.profile) : rows;
+}
 function visibleRows() {
-	return sortRows(filterRows(rows, filters, systems, $('#result-query').value), sortKey, sortDirection);
+	return sortRows(filterRows(availableRows(), filters, systems, $('#result-query').value), sortKey, sortDirection);
+}
+function renderSystemOptions() {
+	const choices = [...new Set(availableRows().map(row => row.memory_system))];
+	$('#system-options').innerHTML = choices.map(system => `<label><input type="checkbox" value="${escape(system)}" ${systems.has(system) ? 'checked' : ''}>${escape(system)}</label>`).join('');
 }
 function renderColumns() {
 	const groups = [...new Set(COLUMNS.map(column => column.group))];
@@ -131,8 +138,8 @@ function renderResults() {
 	closeDetail(false);
 	selectorMenus?.sync();
 	const items = visibleRows();
-	$('#rows-summary').textContent = `Showing ${items.length} of ${rows.filter(row => row.benchmark === filters.benchmark).length} configurations`;
-	const active = ['harness', 'model', 'thinking_effort'].filter(key => filters[key]).length + (systems.size !== new Set(rows.map(row => row.memory_system)).size ? 1 : 0);
+	$('#rows-summary').textContent = `Showing ${items.length} of ${availableRows().filter(row => row.benchmark === filters.benchmark).length} configurations`;
+	const active = ['harness', 'model', 'thinking_effort'].filter(key => filters[key]).length + (availableRows().some(row => !systems.has(row.memory_system)) ? 1 : 0);
 	$('#filter-count').textContent = active || '';
 	$('#column-count').textContent = shown.size;
 	$('#empty-results').hidden = items.length > 0;
@@ -151,11 +158,11 @@ function renderRadarView(items) {
 	const profiled = rows.filter(row => row.profile);
 	const series = profiled.filter(row => items.includes(row)).map(row => ({ id: row.id, label: row.memory_system, slot: profiled.indexOf(row), row }));
 	renderRadar($('#radar-view'), series, selectedSeries, escape);
-	const unplotted = items.filter(row => !row.profile).map(row => row.memory_system);
-	$('#radar-note').textContent = `Logarithmic radial scale: 0.001% at the centre, tenfold per ring, 100% at the rim. Zero plots at the centre.${unplotted.length ? ` ${unplotted.join(', ')} ${unplotted.length > 1 ? 'have' : 'has'} no memory profile and ${unplotted.length > 1 ? 'are' : 'is'} not plotted.` : ''}`;
+	$('#radar-note').textContent = 'Logarithmic radial scale: 0.001% at the centre, tenfold per ring, 100% at the rim. Zero plots at the centre.';
 }
 function setView(next) {
 	view = next;
+	renderSystemOptions();
 	const url = new URL(location.href);
 	if (view === 'radar') url.searchParams.set('view', 'radar'); else url.searchParams.delete('view');
 	history.replaceState(null, '', url);
@@ -187,7 +194,7 @@ try {
 	}
 	filters.benchmark = $('#benchmark').value;
 	selectorMenus = enhanceSelects([...document.querySelectorAll('.results-toolbar select')]);
-	$('#system-options').innerHTML = [...systems].map(system => `<label><input type="checkbox" value="${escape(system)}" checked>${escape(system)}</label>`).join('');
+	renderSystemOptions();
 	$('#system-options').addEventListener('change', event => { if (event.target.checked) systems.add(event.target.value); else systems.delete(event.target.value); renderResults(); });
 	renderColumns();
 	$('#column-options').addEventListener('change', event => { const key = event.target.dataset.column; if (!key) return; if (event.target.checked) shown.add(key); else shown.delete(key); renderResults(); });
