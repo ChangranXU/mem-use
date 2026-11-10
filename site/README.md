@@ -6,10 +6,13 @@ traj-recorder. It is plain HTML and CSS. It has no build step.
 | File | Contents |
 | --- | --- |
 | `index.html` | Landing page: case studies, method, project workflow, paper, and entry paths. |
-| `results.html` | Results table with filters and selectable, sortable columns. |
+| `results.html` | Results explorer: a sortable table and a six-axis radar view (`?view=radar`), with filters and per-form breakdowns. |
 | `data/results.json` | Verified paper cohort; see [data provenance](data/README.md). |
+| `data/delivered_forms.py` | Adds per-form breakdowns to `results.json` from the retained reports. |
 | `assets/results-select.mjs` | Keyboard-accessible result selectors, styled to match the page. |
 | `assets/results.mjs` | Results UI. Pure filtering and sorting logic lives in `results-core.mjs`. |
+| `assets/results-radar.mjs` | Radar view of six-axis profiles on the paper's logarithmic scale. |
+| `assets/img/favicon.svg` | Browser tab icon for every page. |
 | `concepts.html` | How MemUse works: spans, credit windows, signals, and verdicts. |
 | `tutorial.html` | Evaluate a recording; optional instructions for creating one sample run. |
 | `build.html` | Choose an extension point and follow its repository tutorial; development and contribution checks. |

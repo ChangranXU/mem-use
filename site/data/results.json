@@ -3,7 +3,7 @@
   "source": {
     "title": "Delivered, Not Used: Evaluating Agent Memory at Its Point of Use",
     "url": "https://arxiv.org/abs/2611.01718",
-    "notes": "Profile means, verdict counts, and pass counts verified against retained run artifacts. Reported pass-rate means, across-run standard deviations, eight-decimal episode costs, and baseline-relative cost changes were supplied by the study author on 2026-11-11. Medium thinking effort follows the paper.",
+    "notes": "Profile means, verdict counts, and pass counts verified against retained run artifacts. Reported pass-rate means, across-run standard deviations, eight-decimal episode costs, and baseline-relative cost changes follow the study author's 2026-11-11 table, except TencentDB's cost and increase, recomputed from retained execution call records. Medium thinking effort follows the paper.",
     "sections": [
       "Experimental setup",
       "Task success and mean cost per episode",
@@ -43,7 +43,66 @@
       "empty_spans": 0,
       "pass_rate": 73.4,
       "pass_rate_std": 0.6,
-      "cost_change_percent": 8.77
+      "cost_change_percent": 8.77,
+      "forms": {
+        "items": [
+          {
+            "key": "search_preview",
+            "label": "Search preview",
+            "route": "A"
+          },
+          {
+            "key": "full_card",
+            "label": "Full card",
+            "route": "A"
+          }
+        ],
+        "verdicts": {
+          "positive": {
+            "full_card": 81.0,
+            "search_preview": 3.0
+          },
+          "negative": {
+            "full_card": 10.0
+          },
+          "neutral": {
+            "search_preview": 2053.0,
+            "full_card": 604.0
+          },
+          "unresolved": {
+            "full_card": 15.0
+          }
+        },
+        "profile": {
+          "relevance": {
+            "search_preview": 3.33333333,
+            "full_card": 11.74981923
+          },
+          "corroboration": {
+            "search_preview": 0.71583514,
+            "full_card": 2.67534346
+          },
+          "information_gain": {
+            "search_preview": 2.04989154,
+            "full_card": 9.07447578
+          },
+          "acted_on": {
+            "search_preview": 0.01084599,
+            "full_card": 3.9407086
+          },
+          "benefit": {
+            "search_preview": 0.01084599,
+            "full_card": 2.92841649
+          },
+          "harm": {
+            "full_card": 0.3615329
+          }
+        },
+        "delivered_tokens": {
+          "search_preview": 87.522272,
+          "full_card": 12.477728
+        }
+      }
     },
     {
       "id": "swe-mem0-local-global",
@@ -76,7 +135,80 @@
       "empty_spans": 1101,
       "pass_rate": 72.7,
       "pass_rate_std": 0.7,
-      "cost_change_percent": 37.68
+      "cost_change_percent": 37.68,
+      "forms": {
+        "items": [
+          {
+            "key": "task_recall",
+            "label": "Task recall",
+            "route": "H"
+          },
+          {
+            "key": "search_result",
+            "label": "Search result",
+            "route": "A"
+          },
+          {
+            "key": "copy",
+            "label": "Copy of visible entries",
+            "route": "H, A"
+          },
+          {
+            "key": "other",
+            "label": "Empty or unclassified",
+            "route": ""
+          }
+        ],
+        "verdicts": {
+          "positive": {
+            "task_recall": 57.0,
+            "search_result": 16.0
+          },
+          "negative": {
+            "task_recall": 2.0
+          },
+          "neutral": {
+            "task_recall": 1402.0,
+            "copy": 1582.0,
+            "search_result": 1812.0
+          },
+          "unresolved": {
+            "search_result": 9.0,
+            "task_recall": 13.0
+          }
+        },
+        "profile": {
+          "relevance": {
+            "task_recall": 0.87306381,
+            "search_result": 0.54959326
+          },
+          "corroboration": {
+            "task_recall": 0.1563691,
+            "search_result": 0.0712853
+          },
+          "information_gain": {
+            "task_recall": 0.82937826,
+            "search_result": 0.19792096
+          },
+          "acted_on": {
+            "task_recall": 0.35649566,
+            "search_result": 0.04454847
+          },
+          "benefit": {
+            "task_recall": 0.26606837,
+            "search_result": 0.02642706
+          },
+          "harm": {
+            "task_recall": 0.00755059
+          }
+        },
+        "delivered_tokens": {
+          "other": 0.00091,
+          "task_recall": 12.939533,
+          "copy": 67.667025,
+          "search_result": 19.392533
+        }
+      }
     },
     {
       "id": "swe-mem0-local",
@@ -109,7 +241,80 @@
       "empty_spans": 1001,
       "pass_rate": 72.8,
       "pass_rate_std": 0.6,
-      "cost_change_percent": 38.05
+      "cost_change_percent": 38.05,
+      "forms": {
+        "items": [
+          {
+            "key": "task_recall",
+            "label": "Task recall",
+            "route": "H"
+          },
+          {
+            "key": "search_result",
+            "label": "Search result",
+            "route": "A"
+          },
+          {
+            "key": "copy",
+            "label": "Copy of visible entries",
+            "route": "H, A"
+          },
+          {
+            "key": "other",
+            "label": "Empty or unclassified",
+            "route": ""
+          }
+        ],
+        "verdicts": {
+          "positive": {
+            "task_recall": 65.0,
+            "search_result": 25.0
+          },
+          "negative": {
+            "task_recall": 2.0
+          },
+          "neutral": {
+            "task_recall": 1437.0,
+            "copy": 1626.0,
+            "search_result": 1793.0
+          },
+          "unresolved": {
+            "task_recall": 18.0,
+            "search_result": 13.0
+          }
+        },
+        "profile": {
+          "relevance": {
+            "task_recall": 0.91811881,
+            "search_result": 0.51191878
+          },
+          "corroboration": {
+            "task_recall": 0.13573488,
+            "search_result": 0.08238891
+          },
+          "information_gain": {
+            "task_recall": 0.86664868,
+            "search_result": 0.16682343
+          },
+          "acted_on": {
+            "task_recall": 0.43397526,
+            "search_result": 0.07857214
+          },
+          "benefit": {
+            "task_recall": 0.30130563,
+            "search_result": 0.04597873
+          },
+          "harm": {
+            "task_recall": 0.00852115
+          }
+        },
+        "delivered_tokens": {
+          "other": 0.000875,
+          "task_recall": 12.983928,
+          "copy": 68.485113,
+          "search_result": 18.530084
+        }
+      }
     },
     {
       "id": "swe-tencentdb",
@@ -122,7 +327,7 @@
       "tasks_per_run": 500,
       "episodes": 2000,
       "passed": 1453,
-      "cost": 0.01779264,
+      "cost": 0.01778329,
       "profiled_spans": 5841,
       "profile": {
         "relevance": 28.47514606,
@@ -142,7 +347,134 @@
       "empty_spans": 119,
       "pass_rate": 72.7,
       "pass_rate_std": 0.8,
-      "cost_change_percent": 293.4
+      "cost_change_percent": 293.19,
+      "forms": {
+        "items": [
+          {
+            "key": "skill_catalog",
+            "label": "Skill catalog",
+            "route": "H"
+          },
+          {
+            "key": "persona",
+            "label": "Persona",
+            "route": "H"
+          },
+          {
+            "key": "scene_index",
+            "label": "Scene index",
+            "route": "H, A"
+          },
+          {
+            "key": "skill_search_preview",
+            "label": "Skill search preview",
+            "route": "A"
+          },
+          {
+            "key": "full_skill",
+            "label": "Full skill",
+            "route": "A"
+          },
+          {
+            "key": "scene_content",
+            "label": "Scene content",
+            "route": "A"
+          },
+          {
+            "key": "copy",
+            "label": "Copy of visible entries",
+            "route": "H, A"
+          },
+          {
+            "key": "other",
+            "label": "Empty or unclassified",
+            "route": ""
+          }
+        ],
+        "verdicts": {
+          "positive": {
+            "full_skill": 123.0,
+            "scene_content": 9.0,
+            "skill_search_preview": 5.0,
+            "persona": 5.0
+          },
+          "negative": {
+            "scene_content": 1.0,
+            "full_skill": 1.0
+          },
+          "neutral": {
+            "persona": 601.75,
+            "scene_index": 1310.25,
+            "skill_catalog": 1986.0,
+            "full_skill": 750.0,
+            "skill_search_preview": 515.0,
+            "scene_content": 404.0,
+            "copy": 3.0
+          },
+          "unresolved": {
+            "full_skill": 38.0,
+            "scene_index": 78.0,
+            "skill_catalog": 7.0,
+            "scene_content": 2.0,
+            "skill_search_preview": 2.0,
+            "persona": 3.0
+          }
+        },
+        "profile": {
+          "relevance": {
+            "persona": 10.69594248,
+            "scene_index": 7.31467215,
+            "skill_catalog": 0.11213833,
+            "full_skill": 3.32134908,
+            "skill_search_preview": 0.14866087,
+            "scene_content": 6.88238315
+          },
+          "corroboration": {
+            "persona": 0.01284027,
+            "scene_index": 1.25406608,
+            "skill_catalog": 0.02225646,
+            "full_skill": 0.66769389,
+            "skill_search_preview": 0.02614147,
+            "scene_content": 0.20544427
+          },
+          "information_gain": {
+            "persona": 9.56599897,
+            "scene_index": 6.94658449,
+            "skill_catalog": 0.10871426,
+            "full_skill": 3.28710837,
+            "skill_search_preview": 0.1098218,
+            "scene_content": 6.11196713
+          },
+          "acted_on": {
+            "persona": 0.05992125,
+            "scene_index": 0.34240712,
+            "skill_catalog": 0.00770416,
+            "full_skill": 3.26998802,
+            "skill_search_preview": 0.0088623,
+            "scene_content": 0.39376819
+          },
+          "benefit": {
+            "persona": 0.03424071,
+            "full_skill": 2.1058038,
+            "skill_search_preview": 0.00543823,
+            "scene_content": 0.1540832
+          },
+          "harm": {
+            "full_skill": 0.01712036,
+            "scene_content": 0.01712036
+          }
+        },
+        "delivered_tokens": {
+          "persona": 26.053383,
+          "scene_index": 9.108733,
+          "skill_catalog": 59.543351,
+          "full_skill": 1.988959,
+          "skill_search_preview": 2.103758,
+          "scene_content": 1.147021,
+          "other": 0.019981,
+          "copy": 0.034814
+        }
+      }
     },
     {
       "id": "swe-no-memory",

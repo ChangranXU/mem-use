@@ -1,11 +1,14 @@
 import { enhanceSelects } from './results-select.mjs';
-import { COLUMNS, DEFAULT_COLUMNS, prepareRows, filterRows, sortRows, formatValue } from './results-core.mjs';
+import { renderRadar, bindRadar } from './results-radar.mjs';
+import { COLUMNS, DEFAULT_COLUMNS, VERDICTS, prepareRows, filterRows, sortRows, formatValue, formBreakdown } from './results-core.mjs';
 const $ = selector => document.querySelector(selector);
 const byKey = Object.fromEntries(COLUMNS.map(column => [column.key, column]));
 const escape = value => String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 let rows = [], systems = new Set(), shown = new Set(DEFAULT_COLUMNS);
 let filters = { benchmark: '', harness: '', model: '', thinking_effort: '' };
 let sortKey = 'pass_rate', sortDirection = 'desc', selectorMenus;
+let view = new URLSearchParams(location.search).get('view') === 'radar' ? 'radar' : 'table';
+let selectedSeries = null;
 const display = (row, key) => formatValue(row[key], byKey[key], row);
 function options(select, values, allLabel) {
 	select.replaceChildren();
@@ -59,14 +62,73 @@ function tableValue(row, column) {
 	const number = `<strong>${mean.toFixed(1)}%</strong> ${Number.isFinite(row.pass_rate_std) ? `<span>± ${row.pass_rate_std.toFixed(1)} pp</span>` : ''}`;
 	return `<div class="pass-rate-cell"><span class="pass-rate-number">${number}</span><span class="pass-rate-track" aria-hidden="true"><span class="pass-rate-fill" style="width:${mean}%"></span><span class="pass-rate-whisker" style="left:${low}%;width:${high-low}%"></span></span></div>`;
 }
+function cellContent(row, column) {
+	const value = tableValue(row, column);
+	if (!formBreakdown(row, column.key)) return value;
+	return `<button type="button" class="cell-detail" data-row="${escape(row.id)}" data-detail="${column.key}" aria-haspopup="dialog" aria-expanded="false" aria-label="${escape(`${column.label} by memory form for ${row.memory_system}: ${display(row, column.key)}`)}">${value}</button>`;
+}
+const NOTES = {
+	positive: 'Each positive span counts once, credited to the forms of its beneficial entries.',
+	negative: 'Each negative span counts once, credited to the forms of its harmful entries.',
+	unresolved: 'Each unresolved span counts once, credited to the forms of entries whose influence or effect remains unknown.',
+	neutral: 'Each neutral span counts once, split across its entries’ forms. Copies of still-visible entries are neutral automatically.',
+	cost: 'Cost per episode includes the agent’s model calls and memory extraction, so it cannot be split by form. Shares show approximate delivered memory tokens instead.',
+};
+const detail = $('#form-detail');
+let detailTrigger = null;
+const amount = value => value >= 0.01 ? value.toFixed(2) : value.toPrecision(2);
+const share = value => value < 0.001 ? '<0.1%' : `${(100 * value).toFixed(1)}%`;
+const formColor = part => part.slot === null ? 'var(--text-3)' : `var(--cat-${part.slot + 1})`;
+const closeIcon = '<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>';
+function openDetail(button) {
+	if (detailTrigger === button) { closeDetail(true); return; }
+	closeDetail(false);
+	const row = rows.find(item => item.id === button.dataset.row), key = button.dataset.detail, column = byKey[key];
+	const breakdown = formBreakdown(row, key);
+	if (!breakdown) return;
+	const { parts } = breakdown, cost = key === 'cost', verdict = VERDICTS.includes(key);
+	const headline = cost ? `$${row.cost.toFixed(8)}` : `${row[key] >= 0.01 ? row[key].toFixed(2) : row[key].toPrecision(2)}%`;
+	const lead = cost ? 'mean cost per episode' : verdict ? `of spans with a verdict were ${column.label.toLowerCase()}` : `mean ${column.label.toLowerCase()} share per profiled span`;
+	const note = NOTES[key] || 'Each profiled span weighs equally, so form contributions add up to the column value.';
+	detail.innerHTML = `<div class="detail-head"><div><p class="detail-kicker">${escape(row.memory_system)}</p><h2 id="form-detail-title">${escape(cost ? 'Delivered memory tokens' : column.label)} by memory form</h2></div><button type="button" class="detail-close" aria-label="Close">${closeIcon}</button></div>
+	<p class="detail-total"><strong>${headline}</strong> ${escape(lead)}</p>
+	<div class="form-bar" aria-hidden="true">${parts.map(part => `<span style="flex-grow:${part.share};background:${formColor(part)}"></span>`).join('')}</div>
+	<table class="form-list"><thead><tr><th scope="col">Form</th>${cost ? '' : '<th scope="col">Points</th>'}<th scope="col">Share</th></tr></thead><tbody>${parts.map(part => `<tr><th scope="row"><span class="form-swatch" style="background:${formColor(part)}"></span><span>${escape(part.label)}${part.route ? `<small>${escape(part.route)}</small>` : ''}</span></th>${cost ? '' : `<td>${amount(part.value)}</td>`}<td>${share(part.share)}</td></tr>`).join('')}</tbody></table>
+	<p class="detail-note">${escape(note)} Pooled over ${row.runs} runs.</p>`;
+	detailTrigger = button; button.setAttribute('aria-expanded', 'true');
+	detail.hidden = false; placeDetail(); detail.focus({ preventScroll: true });
+	detail.querySelector('.detail-close').addEventListener('click', () => closeDetail(true));
+}
+function closeDetail(restoreFocus) {
+	if (!detailTrigger) return;
+	const button = detailTrigger; detailTrigger = null;
+	button.setAttribute('aria-expanded', 'false'); detail.hidden = true;
+	if (restoreFocus && button.isConnected) button.focus();
+}
+function placeDetail() {
+	if (!detailTrigger) return;
+	const anchor = detailTrigger.getBoundingClientRect();
+	const top = Math.max(0, document.querySelector('body > header')?.getBoundingClientRect().bottom || 0) + 16, bottom = innerHeight - 16;
+	if (anchor.bottom < top || anchor.top > bottom) { closeDetail(false); return; }
+	// Measure without touching max-height, which would reset the panel's own scroll position.
+	const width = Math.min(420, innerWidth - 32), room = bottom - top;
+	const height = Math.min(detail.scrollHeight + detail.offsetHeight - detail.clientHeight, room);
+	// Prefer the side of the cell that fits the whole panel; otherwise overlap the table.
+	const y = anchor.bottom + 10 + height <= bottom ? anchor.bottom + 10
+		: anchor.top - 10 - height >= top ? anchor.top - 10 - height
+		: Math.min(Math.max(top, anchor.bottom + 10), bottom - height);
+	Object.assign(detail.style, { width: `${width}px`, maxHeight: `${room}px`, top: `${y}px`,
+		left: `${Math.max(16, Math.min(anchor.right - width, innerWidth - width - 16))}px` });
+}
 function renderTable(items) {
 	const columns = COLUMNS.filter(column => shown.has(column.key));
 	$('#results-head').innerHTML = `<tr>${columns.map(column => `<th scope="col" class="${column.type === 'text' ? '' : 'number'} ${column.key === 'pass_rate' ? 'rate-column' : ''}" aria-sort="${sortKey === column.key ? sortDirection === 'asc' ? 'ascending' : 'descending' : 'none'}"><button type="button" data-sort="${column.key}" title="${escape(column.description || `Sort by ${column.label}`)}">${escape(column.label)}<span class="sort-icon" aria-hidden="true">${sortKey === column.key ? sortDirection === 'asc' ? '↑' : '↓' : '↕'}</span></button></th>`).join('')}</tr>`;
-	$('#results-body').innerHTML = items.map(row => `<tr>${columns.map(column => `<td class="${column.type === 'text' ? '' : 'number'} ${row[column.key] == null ? 'missing-value' : `metric-${column.key}`}"${row[column.key] == null ? ' title="Not applicable"' : ''}>${tableValue(row, column)}</td>`).join('')}</tr>`).join('');
+	$('#results-body').innerHTML = items.map(row => `<tr>${columns.map(column => `<td class="${column.type === 'text' ? '' : 'number'} ${row[column.key] == null ? 'missing-value' : `metric-${column.key}`}"${row[column.key] == null ? ' title="Not applicable"' : ''}>${cellContent(row, column)}</td>`).join('')}</tr>`).join('');
 	layoutColumns();
 	$('#sort-summary').textContent = `Sorted by ${byKey[sortKey].label.toLowerCase()}, ${sortDirection === 'asc' ? 'ascending' : 'descending'}. Select a heading to change the order.`;
 }
 function renderResults() {
+	closeDetail(false);
 	selectorMenus?.sync();
 	const items = visibleRows();
 	$('#rows-summary').textContent = `Showing ${items.length} of ${rows.filter(row => row.benchmark === filters.benchmark).length} configurations`;
@@ -74,11 +136,30 @@ function renderResults() {
 	$('#filter-count').textContent = active || '';
 	$('#column-count').textContent = shown.size;
 	$('#empty-results').hidden = items.length > 0;
-	$('#table-view').hidden = !items.length;
-	renderTable(items);
+	const radar = view === 'radar';
+	document.querySelectorAll('.view-switch button').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.view === view)));
+	$('#columns-menu').hidden = radar;
+	$('#table-view').hidden = radar || !items.length;
+	$('#radar-view').hidden = !radar || !items.length;
+	if (radar) renderRadarView(items); else renderTable(items);
 	const cohort = rows.filter(row => row.benchmark === filters.benchmark);
 	const runs = [...new Set(cohort.map(row => row.runs))], tasks = [...new Set(cohort.map(row => row.tasks_per_run))];
 	$('#data-scope').textContent = runs.length === 1 && tasks.length === 1 ? `${runs[0]} runs × ${tasks[0]} tasks per configuration. Pass rates show mean ± standard deviation. Costs show USD per episode and change from baseline.` : 'Run and task counts vary by configuration.';
+}
+// Series keep one colour and marker per configuration, whatever the filters show.
+function renderRadarView(items) {
+	const profiled = rows.filter(row => row.profile);
+	const series = profiled.filter(row => items.includes(row)).map(row => ({ id: row.id, label: row.memory_system, slot: profiled.indexOf(row), row }));
+	renderRadar($('#radar-view'), series, selectedSeries, escape);
+	const unplotted = items.filter(row => !row.profile).map(row => row.memory_system);
+	$('#radar-note').textContent = `Logarithmic radial scale: 0.001% at the centre, tenfold per ring, 100% at the rim. Zero plots at the centre.${unplotted.length ? ` ${unplotted.join(', ')} ${unplotted.length > 1 ? 'have' : 'has'} no memory profile and ${unplotted.length > 1 ? 'are' : 'is'} not plotted.` : ''}`;
+}
+function setView(next) {
+	view = next;
+	const url = new URL(location.href);
+	if (view === 'radar') url.searchParams.set('view', 'radar'); else url.searchParams.delete('view');
+	history.replaceState(null, '', url);
+	renderResults();
 }
 function clearFilters() {
 	for (const key of ['harness', 'model', 'thinking_effort']) { filters[key] = ''; $(`#${key}`).value = ''; }
@@ -112,6 +193,9 @@ try {
 	$('#column-options').addEventListener('change', event => { const key = event.target.dataset.column; if (!key) return; if (event.target.checked) shown.add(key); else shown.delete(key); renderResults(); });
 	$('#default-columns').addEventListener('click', () => { shown = new Set(DEFAULT_COLUMNS); renderColumns(); renderResults(); });
 	$('#results-head').addEventListener('click', event => { const button = event.target.closest('[data-sort]'); if (!button) return; const key = button.dataset.sort; sortDirection = sortKey === key && sortDirection === 'desc' ? 'asc' : sortKey !== key && byKey[key].type === 'text' ? 'asc' : 'desc'; sortKey = key; renderResults(); });
+	$('#results-body').addEventListener('click', event => { const button = event.target.closest('.cell-detail'); if (button) openDetail(button); });
+	document.querySelector('.view-switch').addEventListener('click', event => { const button = event.target.closest('[data-view]'); if (button && button.dataset.view !== view) setView(button.dataset.view); });
+	bindRadar($('#radar-view'), { onSelect: id => { selectedSeries = selectedSeries === id ? null : id; renderResults(); $(`.radar-key[data-series="${CSS.escape(id)}"]`)?.focus(); }, onOpen: openDetail });
 	$('#result-query').addEventListener('input', renderResults);
 	$('#clear-filters').addEventListener('click', clearFilters);
 	$('#empty-reset').addEventListener('click', clearFilters);
@@ -132,10 +216,10 @@ try {
 		}
 	}
 	document.querySelectorAll('.toolbar-menu').forEach(menu => menu.addEventListener('toggle', positionMenus));
-	addEventListener('resize', positionMenus);
-	addEventListener('scroll', positionMenus, { passive: true });
-	document.addEventListener('click', event => { if (event.target.closest('.result-select-menu')) return; document.querySelectorAll('.toolbar-menu[open]').forEach(menu => { if (!menu.contains(event.target)) menu.open = false; }); });
-	document.addEventListener('keydown', event => { if (event.key === 'Escape') document.querySelectorAll('.toolbar-menu[open]').forEach(menu => { menu.open = false; menu.querySelector('summary').focus(); }); });
+	addEventListener('resize', () => { positionMenus(); placeDetail(); });
+	addEventListener('scroll', event => { if (detail.contains(event.target)) return; positionMenus(); placeDetail(); }, { passive: true, capture: true });
+	document.addEventListener('click', event => { if (detailTrigger && !detail.contains(event.target) && !event.target.closest('.cell-detail, .radar-point') && !event.radarPoint) closeDetail(false); if (event.target.closest('.result-select-menu')) return; document.querySelectorAll('.toolbar-menu[open]').forEach(menu => { if (!menu.contains(event.target)) menu.open = false; }); });
+	document.addEventListener('keydown', event => { if (event.key === 'Escape' && detailTrigger) { closeDetail(true); return; } if (event.key === 'Escape') document.querySelectorAll('.toolbar-menu[open]').forEach(menu => { menu.open = false; menu.querySelector('summary').focus(); }); });
 	renderResults();
 } catch (error) {
 	$('#results-error').hidden = false; $('#table-view').hidden = true;
