@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How MemUse works · MemUse Docs</title>
+<meta name="description" content="How MemUse turns a recorded agent run into memory-use verdicts: spans, credit windows, five signals, and verdict rules.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap">
+<link rel="stylesheet" href="assets/style.css">
+<script>try { const t = localStorage.getItem("theme"); if (t) document.documentElement.dataset.theme = t; } catch {}</script>
+</head>
+<body>
+<div class="layout">
+<aside class="sidebar" aria-label="Documentation"></aside>
+<main class="content">
+
+<div class="eyebrow">Getting started</div>
+<h1>How MemUse works</h1>
+<p class="desc">For each memory delivery, MemUse compares the exposed text with the agent’s prior context, later actions, and observed consequences.</p>
+
+<h2 id="terms">Start with a delivery</h2>
+<div class="table-wrap"><table>
+	<tr><th>Term</th><th>Meaning</th></tr>
+	<tr><td>Trajectory</td><td>A recording of model calls and events. It can contain several task episodes.</td></tr>
+	<tr><td>Episode</td><td>One execution of an agent on one task.</td></tr>
+	<tr><td>Step</td><td>A completed agent model call, with its response and associated tool results.</td></tr>
+	<tr><td>Delivery</td><td>Memory text placed in a model input. The graph calls this a recall operation.</td></tr>
+	<tr><td>Entry</td><td>One memory item as presented in a delivery.</td></tr>
+	<tr><td>Exposure</td><td>The text that the recording proves the agent received. Hidden or clipped content cannot receive credit.</td></tr>
+</table></div>
+
+<h2 id="pipeline">From recording to report</h2>
+<figure>
+	<div class="frame"><img src="assets/img/overview.png" alt="MemUse pipeline: record memory operations and model inputs, prepare delivery evidence, judge entry signals, and link verdicts to memory histories." loading="lazy"></div>
+	<figcaption>The recording, evidence, judge, and memory graph. Figure from the paper.</figcaption>
+</figure>
+<ol class="steps">
+	<li><strong>Prepare the evidence</strong>Reconstruct the exposed text and the context visible before delivery. Keep task episodes separate.</li>
+	<li><strong>Group repeated deliveries</strong>Form injection spans and assign each entry the steps where it can receive action credit.</li>
+	<li><strong>Assess each entry</strong>A judge agent reads the evidence and returns five signals.</li>
+	<li><strong>Validate and derive</strong>Python checks signal values and required evidence reads, then derives entry usage and span verdicts. Reports retain the supporting evidence.</li>
+</ol>
+
+<h2 id="spans">Spans and credit windows</h2>
+<p>A <strong>span</strong> is one delivery or a group of matching deliveries within the same episode. Repeated copies share a span only when their entries, order, presentation, and exposure match, and an earlier copy remains visible. Each copy still contributes to delivered-text volume.</p>
+<p>A <strong>credit window</strong> is the range of steps whose actions can be attributed to an entry. A later delivery can take over that credit. Consequences after the window can still support or overturn the assessment of an earlier action.</p>
+<figure>
+	<div class="frame"><img src="assets/img/credit-windows.png" alt="Repeated deliveries share a span while visible; a shorter resident copy has no action credit; re-exposure after removal starts a new window." loading="lazy"></div>
+	<figcaption>Copies of A at steps 2 and 4 share S1. A shorter resident copy adds no action credit. After A leaves the input, its return starts a new span. S3 receives an automatic neutral result; S1, S2, and S4 go to the judge. Figure from the paper.</figcaption>
+</figure>
+
+<h2 id="signals">Five independent signals</h2>
+<div class="table-wrap"><table>
+	<tr><th>Signal</th><th>JSON values</th><th>Question</th></tr>
+	<tr><td><code>relevance</code></td><td><code>true</code>, <code>false</code></td><td>Does the exposed content apply to the task at delivery?</td></tr>
+	<tr><td><code>accuracy</code></td><td>corroborated, uncontradicted, contradicted</td><td>Does evidence support or refute the claim in its stated context?</td></tr>
+	<tr><td><code>novelty</code></td><td>novel, confirming, redundant, <code>null</code></td><td>What did it add to the input the agent already had?</td></tr>
+	<tr><td><code>influence</code></td><td>none, referenced, selected, acted_on, <code>null</code></td><td>Did the entry shape an action, prompt a full read, or only get mentioned?</td></tr>
+	<tr><td><code>positive_effect</code></td><td>improved, no_effect, harmed, <code>null</code></td><td>What consequence followed the action it shaped?</td></tr>
+</table></div>
+<p><code>null</code> marks unknown novelty or influence. Effect is assessed only for <code>acted_on</code> entries: it is <code>null</code> when the effect is unknown or the entry was not acted on. <code>uncontradicted</code> means neither confirmed nor refuted; it does not mean verified correct. Accuracy, novelty, influence, and effect remain separate: a wrong suggestion can still lead to a useful diagnostic.</p>
+<p>For example, a memory suggests resetting a shared test fixture. The agent makes that change, and a targeted isolation check demonstrates the benefit. That can support <code>acted_on</code> and <code>improved</code>. A matching edit alone is insufficient if the agent had already committed to it before delivery.</p>
+<p>The judge assigns these signals. Python validates the answer and its reading coverage. The <a href="https://github.com/ChangranXU/mem-use/blob/agentic_search/doc/en/verdict-derivation.md">full rubric</a> defines the evidence required for each value.</p>
+
+<h2 id="verdicts">Derive one span verdict</h2>
+<p>Python applies these rules in order:</p>
+<div class="table-wrap"><table>
+	<tr><th>Verdict</th><th>Rule</th></tr>
+	<tr><td><span class="chip neg">negative</span></td><td>At least one entry was used with observed harm. Harm takes priority over benefit.</td></tr>
+	<tr><td><span class="chip pos">positive</span></td><td>No harmful use, and at least one beneficial use.</td></tr>
+	<tr><td><span class="chip unr">unresolved</span></td><td>Neither rule above applies, and an entry has an unknown effect of established use or incompletely assessed influence.</td></tr>
+	<tr><td><span class="chip neu">neutral</span></td><td>All other judged spans, including unused entries, selection or reference alone, unproductive use, and ambiguous attribution after a complete window review.</td></tr>
+</table></div>
+<p>An effect can remain unknown even after all required evidence was read. Ambiguous attribution is different: the record may leave competing explanations for an action. Neither case proves benefit or harm.</p>
+
+<h2 id="coverage">Keep missing observations visible</h2>
+<p>An unused memory is not the same as a delivery that cannot be assessed. Reports distinguish these cases:</p>
+<div class="table-wrap"><table>
+	<tr><th>Status</th><th>Meaning</th></tr>
+	<tr><td>Empty / unassessable</td><td>No entries were delivered, or no observed agent step can be attributed as the consumer. No judge call; excluded from verdict rates.</td></tr>
+	<tr><td>No eligible step</td><td>All entries have no eligible action credit, such as a redundant resident copy. Automatic neutral result, without a judge-scored profile.</td></tr>
+	<tr><td>Error / unjudged</td><td>The assessment failed, or the span was not judged. Inspect diagnostics and selection limits before comparing runs.</td></tr>
+</table></div>
+
+<h2 id="profiles">Read profiles alongside verdicts</h2>
+<p>A span can contain both useful and harmful entries. Its verdict gives review priority; its profile preserves six entry shares: relevance, corroboration, information gain, acted-on influence, benefit, and harm.</p>
+<p>Each share divides by all entries in that profiled span. Aggregate means weight spans equally. These shares differ from the proportion of spans with positive or negative verdicts. Unknown values and unprofiled spans remain separate. See the <a href="https://github.com/ChangranXU/mem-use/blob/agentic_search/doc/en/artifacts.md#entry-share-profiles">metric definitions</a>.</p>
+<div class="callout">
+	<svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v5h1"/></svg>
+	<p>A verdict describes recorded memory use. It is not a causal estimate of how memory changed task success. That question needs a separate comparison of matched runs.</p>
+</div>
+
+</main>
+<aside class="toc" aria-label="On this page"></aside>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

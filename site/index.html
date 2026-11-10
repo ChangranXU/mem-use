@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Overview · MemUse Docs</title>
+<meta name="description" content="MemUse evaluates how an LLM agent uses delivered memory, from recorded runs. With memory-bridge, traj-recorder, memgraph, and injudge.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap">
+<link rel="stylesheet" href="assets/style.css">
+<script>try { const t = localStorage.getItem("theme"); if (t) document.documentElement.dataset.theme = t; } catch {}</script>
+</head>
+<body>
+<div class="layout">
+<aside class="sidebar" aria-label="Documentation"></aside>
+<main class="content">
+
+<div class="eyebrow">Getting started</div>
+<h1>Overview</h1>
+<p class="desc">MemUse evaluates agent memory at its point of use. It checks which delivered memories shaped an agent’s actions and what followed from their use.</p>
+<div class="actions">
+	<a class="btn-dark" href="tutorial.html"><span>Start the quickstart</span><svg class="i" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></a>
+	<a class="btn-line" href="concepts.html">How it works</a>
+</div>
+
+<section class="paper-card" aria-label="Research paper">
+	<div class="card-icon"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h6"/></svg></div>
+	<div>
+		<p class="paper-label">Paper · arXiv 2611.01718</p>
+		<h2 class="paper-title">Delivered, Not Used: Evaluating Agent Memory at Its Point of Use</h2>
+		<p class="affil">
+			<span>Changran Xu, Zeju Li, Qiang Xu</span>
+			<span class="org"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 21h18M4 10h16M12 3l8.5 4.5h-17L12 3zM6 10v8M10 10v8M14 10v8M18 10v8"/></svg>The Chinese University of Hong Kong</span>
+		</p>
+		<div class="paper-links">
+			<a class="btn-line" href="https://arxiv.org/abs/2611.01718">Read on arXiv <svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 17 17 7M8 7h9v9"/></svg></a>
+			<a class="btn-line" href="https://arxiv.org/pdf/2611.01718">PDF</a>
+			<a class="btn-line" href="paper.html#findings">Findings</a>
+			<a class="btn-line" href="paper.html#citation">Cite</a>
+		</div>
+	</div>
+</section>
+
+<div class="callout wip">
+	<svg class="i" viewBox="0 0 24 24"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.5 2.5-2.4-.6-.6-2.4z"/></svg>
+	<p><strong>Work in progress.</strong> Interfaces and formats can change. <strong>Contributions are welcome:</strong> report a bug, improve the docs, or add an integration. See <a href="build.html#develop">how to contribute</a>.</p>
+</div>
+
+<h2 id="why">Look beyond task success</h2>
+<p>A successful task can include a harmful memory detour. A failed task can include useful guidance. MemUse follows each delivery through the recorded actions and consequences, so you can inspect both cases. See the <a href="paper.html#findings">paper’s results</a>.</p>
+
+<h2 id="projects">Record, then evaluate</h2>
+<p>The three projects form one workflow. To analyze existing annotated recordings, install only MemUse. Its tools read the recording without changing the memory store or rerunning the task.</p>
+<div class="cards three">
+	<a class="card" href="https://github.com/ChangranXU/memory-bridge">
+		<div class="card-icon"><svg class="i" viewBox="0 0 24 24"><path d="M3 17h18M5 17V9m14 8V9M5 9c3 0 4-4 7-4s4 4 7 4M9 17v-5m6 5v-5"/></svg></div>
+		<h4>memory-bridge</h4>
+		<p>Connects an agent harness to a memory system. Marks memory searches, writes, deliveries, and task boundaries.</p>
+		<span class="meta">branch v2</span>
+	</a>
+	<a class="card" href="https://github.com/ChangranXU/traj-recorder">
+		<div class="card-icon"><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3" fill="currentColor"/></svg></div>
+		<h4>traj-recorder</h4>
+		<p>A local proxy between the agent and the LLM provider. Saves each call in a schema-10 run folder.</p>
+		<span class="meta">branch memory</span>
+	</a>
+	<a class="card" href="https://github.com/ChangranXU/mem-use">
+		<div class="card-icon"><svg class="i" viewBox="0 0 24 24"><path d="M9 11l3 3 8-8"/><path d="M20 12v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h9"/></svg></div>
+		<h4>MemUse</h4>
+		<p><code>memgraph</code> draws the memory graph. <code>injudge</code> judges memory use and writes a report.</p>
+		<span class="meta">branch agentic_search</span>
+	</a>
+</div>
+
+<h2 id="start">Choose where to start</h2>
+<div class="table-wrap"><table>
+	<tr><th>If you…</th><th>Go to</th></tr>
+	<tr><td>Have no recordings yet</td><td><a href="tutorial.html#record">Create a sample recording</a></td></tr>
+	<tr><td>Have schema-10 recordings with <code>memory_*</code> annotations</td><td><a href="tutorial.html">Install MemUse and inspect a recording</a></td></tr>
+	<tr><td>Want to understand spans, credit windows, and verdicts</td><td><a href="concepts.html">How MemUse works</a></td></tr>
+	<tr><td>Want to connect your own agent, memory system, or benchmark</td><td><a href="build.html">Extend the workflow</a></td></tr>
+</table></div>
+
+</main>
+<aside class="toc" aria-label="On this page"></aside>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

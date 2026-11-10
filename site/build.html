@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Extend the workflow · MemUse Docs</title>
+<meta name="description" content="Connect your own agent harness, memory system, or benchmark to memory-bridge, record it with traj-recorder, and evaluate it with MemUse.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap">
+<link rel="stylesheet" href="assets/style.css">
+<script>try { const t = localStorage.getItem("theme"); if (t) document.documentElement.dataset.theme = t; } catch {}</script>
+</head>
+<body>
+<div class="layout">
+<aside class="sidebar" aria-label="Documentation"></aside>
+<main class="content">
+
+<div class="eyebrow">Build</div>
+<h1>Extend the workflow</h1>
+<p class="desc">Choose the layer you need to change, then use its repository tutorial for the implementation. The guides include working examples, source files, and verification steps.</p>
+
+<h2 id="layers">Choose an extension point</h2>
+<div class="cards three">
+	<a class="card" href="#harness"><h4>Agent harness</h4><p>Your agent loop needs memory placement, tool dispatch, or lifecycle wiring.</p></a>
+	<a class="card" href="#memory"><h4>Memory system</h4><p>A new product exposes tools, MCP, skills, hooks, or a memory proxy.</p></a>
+	<a class="card" href="#benchmark"><h4>Benchmark</h4><p>A new task collection needs loading, ordering, environments, or scoring.</p></a>
+</div>
+<p>A <strong>sequence</strong> is an ordered group of tasks that can share memory. Writable state is isolated between sequences; a read-only integration can share a fixed corpus. The shared bridge handles memory lifecycle and ordering. Task grading belongs to the benchmark.</p>
+<p>First complete <a href="https://github.com/ChangranXU/memory-bridge/blob/v2/docs/getting-started.md">workspace setup</a>. The <a href="https://github.com/ChangranXU/memory-bridge/blob/v2/docs/integrating-agent-hosts.md#try-the-lifecycle">offline lifecycle example</a> runs two tasks with a fake provider and needs no model keys.</p>
+
+<h2 id="harness">Add an agent harness</h2>
+<p>A harness runs the agent’s task input, model requests, tools, and stopping logic. Choose who controls memory execution:</p>
+<ul>
+	<li><strong>Your loop controls memory:</strong> use <code>shared_bridge.Session</code>. Map task boundaries, reads, directed actions, exposure receipts, and closure to the bridge lifecycle.</li>
+	<li><strong>A native plugin or service controls memory:</strong> preserve that loop. Report observed operations through <code>shared_bridge.observed</code> and <code>EpisodeAnnotator</code>.</li>
+</ul>
+<p>For the Session path, check each result and close scopes in order. A prepared delivery is not proof of consumption: use <code>NOT_EXPOSED</code> only when non-delivery is known, and <code>UNKNOWN</code> when evidence is insufficient.</p>
+<p>The <a href="https://github.com/ChangranXU/memory-bridge/blob/v2/docs/integrating-agent-hosts.md">harness tutorial</a> includes a runnable example, multi-turn call order, failure handling, and recorder wiring. It also explains how to connect application tasks outside the supplied benchmarks.</p>
+
+<h2 id="memory">Add a memory system</h2>
+<p>Start with one host and one operation. Preserve the product’s native tool descriptions, timing, results, and storage rules.</p>
+<div class="table-wrap"><table>
+	<tr><th>Native interface</th><th>Implementation path</th><th>Example</th></tr>
+	<tr><td>Search/read/write APIs</td><td><a href="https://github.com/ChangranXU/memory-bridge/blob/v2/docs/integrating-memory-systems.md#tool-based-provider">Implement a typed provider</a></td><td>MemGovern, mem0</td></tr>
+	<tr><td>MCP server</td><td><a href="https://github.com/ChangranXU/memory-bridge/blob/v2/docs/integrating-memory-systems.md#mcp-service">Connect native tools and record operations</a></td><td>SimpleMem</td></tr>
+	<tr><td>Skill, CLI, plugin, or hooks</td><td><a href="https://github.com/ChangranXU/memory-bridge/blob/v2/docs/integrating-memory-systems.md#skills-and-native-hooks">Install and observe native behavior</a></td><td>MemoraX, OpenViking</td></tr>
+	<tr><td>Memory proxy</td><td><a href="https://github.com/ChangranXU/memory-bridge/blob/v2/docs/integrating-memory-systems.md#memory-proxy">Capture the request after memory insertion</a></td><td>TencentDB Agent Memory</td></tr>
+</table></div>
+<p>The <a href="https://github.com/ChangranXU/memory-bridge/blob/v2/docs/integrating-memory-systems.md">memory-system tutorial</a> covers package layout, a complete lane/profile example, settings, runner registration, publication checks, and isolation tests. There is no universal plugin-registration API.</p>
+
+<h2 id="benchmark">Add a benchmark</h2>
+<div class="table-wrap"><table>
+	<tr><th>Task source</th><th>Work required</th></tr>
+	<tr><td>Compatible pinned Harbor Hub dataset</td><td>Select a fixed revision and an ordered task list. Qualify the environment with the existing runner.</td></tr>
+	<tr><td>Harbor suite with special setup or checks</td><td>Extend the benchmark package and its tests.</td></tr>
+	<tr><td>Different task format or evaluator</td><td>Add a loader, sequence planner, runner, evaluator, and explicit trace joins.</td></tr>
+</table></div>
+<p>Keep reference answers, hidden tests, and scoring data separate from public task input. Save task score, agent completion, memory health, and trace completeness as distinct outcomes.</p>
+<p>The <a href="https://github.com/ChangranXU/memory-bridge/blob/v2/docs/integrating-benchmarks.md">benchmark tutorial</a> gives concrete extension points and a public/private task-splitting example. The <a href="https://github.com/ChangranXU/memory-bridge/blob/v2/benchmarks/README.md">task catalog</a> lists ready-to-use runners and their limits.</p>
+
+<h2 id="recording">Record evidence for MemUse</h2>
+<p>Bridge trace sinks record lifecycle events. They do not capture model traffic. MemUse needs schema-10 recorder data with explicit <code>memory_*</code> annotations.</p>
+<ul>
+	<li>Open episode scope before model traffic, and keep agent and memory-model lanes distinct.</li>
+	<li>Bind each delivery to its consuming call and exact placement. A bridge input hash alone does not prove what crossed the API boundary.</li>
+	<li>Retain search results even when they were not delivered. Preserve the exposed subset and full source provenance.</li>
+	<li>Record confirmed writes and incomplete evidence separately. Never treat an uncertain mutation as a confirmed write.</li>
+</ul>
+<p>Use the <a href="https://github.com/ChangranXU/traj-recorder/blob/memory/docs/annotations.md">annotation contract</a> with the <a href="https://github.com/ChangranXU/mem-use/blob/agentic_search/doc/en/input-contract.md">MemUse input requirements</a>. Session hosts also need request-placement hooks; installing a trace sink alone is insufficient.</p>
+
+<h2 id="verify">Verify the integration</h2>
+<p>Use offline service doubles and scripted agent traffic to check isolation, native schemas, publication, consuming-call attribution, failure handling, and credential masking. Run the affected package tests before a live sample.</p>
+<p>Then qualify the actual integration with an authorized live run. A writable system needs at least one write and a later recall; a read-only corpus needs relevant and no-match cases. A successful task with no memory operations does not verify the integration.</p>
+<p>Check each recording with the recorder verifier, from the memory-bridge root:</p>
+<div class="code"><pre><code>uv run --project ../extension/traj-recorder python \
+  ../extension/traj-recorder/tests/verify_trajectory.py path/to/recorded-run</code></pre></div>
+<p>Replace the path with one recorder directory. Next, follow the <a href="tutorial.html#prepare">offline evidence check</a>. Report skipped checks and unverified combinations in your contribution.</p>
+
+<h2 id="develop">Develop MemUse</h2>
+<p>After installing MemUse’s Python and agent dependencies, run the relevant offline tests from <code>mem-use</code>:</p>
+<div class="code"><pre><code>uv run pytest tests/test_injudge.py -q
+uv run pytest tests -q</code></pre></div>
+<p>For code changes, use the focused file while iterating and run the full suite before a code PR. For prose-only edits, check links, commands, and the diff. See <a href="https://github.com/ChangranXU/mem-use/blob/agentic_search/doc/en/development.md">development</a> for the module map and checks.</p>
+<div class="callout">
+	<svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v5h1"/></svg>
+	<p><strong>Judge prompt changes need calibration.</strong> Canned responses test the contract. Use authorized real-judge runs to assess judgment quality, and report disagreements and stability.</p>
+</div>
+<p>Report bugs or questions in the relevant project: <a href="https://github.com/ChangranXU/mem-use/issues">MemUse</a>, <a href="https://github.com/ChangranXU/memory-bridge/issues">memory-bridge</a>, or <a href="https://github.com/ChangranXU/traj-recorder/issues">traj-recorder</a>. Read the <a href="https://github.com/ChangranXU/memory-bridge/blob/v2/CONTRIBUTING.md">bridge contribution guide</a> or <a href="https://github.com/ChangranXU/mem-use/blob/agentic_search/AGENTS.md">MemUse repository rules</a> before a PR.</p>
+
+</main>
+<aside class="toc" aria-label="On this page"></aside>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

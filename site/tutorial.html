@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quickstart · MemUse Docs</title>
+<meta name="description" content="Record an agent run with memory-bridge and traj-recorder, then evaluate memory use with memgraph and injudge.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap">
+<link rel="stylesheet" href="assets/style.css">
+<script>try { const t = localStorage.getItem("theme"); if (t) document.documentElement.dataset.theme = t; } catch {}</script>
+</head>
+<body>
+<div class="layout">
+<aside class="sidebar" aria-label="Documentation"></aside>
+<main class="content">
+
+<div class="eyebrow">Getting started</div>
+<h1>Quickstart</h1>
+<p class="desc">Turn an annotated recording into a memory graph and a judge report. Start with an existing recording, or create the sample below.</p>
+<div class="callout tip">
+	<svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v5h1"/></svg>
+	<p><strong>No recording yet?</strong> Install MemUse in step 1, then follow <a href="#record">Create a sample recording</a> before step 2.</p>
+</div>
+
+<h2 id="requirements">Before you begin</h2>
+<div class="table-wrap"><table>
+	<tr><th>Task</th><th>Requirements</th></tr>
+	<tr><td>Inspect a recording offline</td><td>Git, <a href="https://docs.astral.sh/uv/">uv</a>, Python 3.11+, and schema-10 recordings with <code>memory_*</code> annotations.</td></tr>
+	<tr><td>Run the judge</td><td>Node.js 22.19+, npm, and a judge endpoint/key.</td></tr>
+	<tr><td>Create the optional sample</td><td>Docker, an agent model endpoint/key, and a mem0 Platform account/key. The recipe installs memory-bridge and traj-recorder.</td></tr>
+</table></div>
+<p>Keep the complete recording directory, including its call captures. A plain model transcript cannot reconstruct memory annotations.</p>
+<p>Cloning and dependency installation need network access. Graph rendering and evidence preparation make no model calls. Recording a live task and running the judge can incur charges.</p>
+
+<h2 id="install">1. Install MemUse</h2>
+<p>Run from the directory where you keep your checkouts:</p>
+<div class="code" data-language="bash"><pre><code>git clone --branch agentic_search https://github.com/ChangranXU/mem-use.git mem-use
+cd mem-use
+uv sync</code></pre></div>
+<p>All evaluation commands below run from the <code>mem-use</code> folder.</p>
+
+<h2 id="graph">2. Inspect the memory graph</h2>
+<p>Replace the example path with your recorder directory, a <code>trajectory.jsonl</code> file, or a directory of recordings:</p>
+<div class="code" data-language="bash"><pre><code>REC=/absolute/path/to/recording
+uv run -m memgraph "$REC" -o memgraph.html --json memgraph.json</code></pre></div>
+<p>Open <code>memgraph.html</code> in a browser. Check the validation notes, then select a memory to trace its creation, updates, recalls, and deletion. Upward triangles mark writes; downward triangles mark recalls.</p>
+<details>
+	<summary>Choose the right input for a resumed run</summary>
+	<div class="body">
+		<p>When the runner provides manifests, use <code>evaluation.json</code> for checkpoint-credited history. Use <code>evaluation-attempts.json</code> for all attempts, or <code>evaluation-discarded.json</code> for interrupted or uncheckpointed work. Load one view at a time; do not combine it with a recursive scan of the same recordings.</p>
+		<p>See the <a href="https://github.com/ChangranXU/mem-use/blob/agentic_search/doc/en/input-contract.md#resumed-runs">input guide</a> for supported views.</p>
+	</div>
+</details>
+
+<h2 id="prepare">3. Check the judge input offline</h2>
+<div class="code" data-language="bash"><pre><code>uv run -m injudge "$REC" --dry-run --limit 3
+uv run -m injudge "$REC" --prepare-only -o output/prepared/</code></pre></div>
+<p><code>--dry-run</code> prints evidence for up to three eligible spans and writes no files. <code>--prepare-only</code> saves episode evidence under <code>output/prepared/&lt;run-stamp&gt;/</code>. Neither needs Node.js or judge credentials.</p>
+<p>Review diagnostics before paying for a judgment. Missing episode boundaries or gaps in a delivery’s consuming input can block that episode. The <a href="concepts.html#terms">method guide</a> defines episodes, entries, and exposure.</p>
+
+<h2 id="judge">4. Judge a small sample</h2>
+<p>Install the judge dependencies and copy its configuration template. Keep an existing configured <code>.env</code> file:</p>
+<div class="code" data-language="bash"><pre><code>npm --prefix agent install
+test -f .env || cp .env.example .env</code></pre></div>
+<p>Edit these values in <code>.env</code>:</p>
+<div class="code" data-language="dotenv"><div class="code-head">.env</div><pre><code>MODEL="your-judge-model"
+API_KEY="your-judge-api-key"
+BASE_URL="https://your-endpoint.example"
+API="openai-chat"</code></pre></div>
+<p>For an OpenAI-compatible endpoint, use the base URL that serves <code>/chat/completions</code>. For Anthropic, set <code>API="anthropic"</code> and use its API host root. See <a href="https://github.com/ChangranXU/mem-use/blob/agentic_search/doc/en/configuration.md">configuration</a> for budgets and concurrency.</p>
+<div class="code" data-language="bash"><div class="code-head">Makes judge model calls</div><pre><code>uv run -m injudge "$REC" --limit 3 --html -o output/</code></pre></div>
+<p>Review the sample before removing <code>--limit 3</code>. To select episodes, add <code>--episode TASK_ID</code> with an exact recorded ID; the flag is repeatable.</p>
+<p>No reference answer or task score is required. To attach them, use the <a href="https://github.com/ChangranXU/mem-use/blob/agentic_search/doc/en/injudge.md#golden-answer-and-correctness">gold and outcome guide</a>.</p>
+
+<h2 id="results">5. Inspect one judgment</h2>
+<p>Each judge run creates a new <code>output/&lt;run-stamp&gt;/</code> folder:</p>
+<div class="table-wrap"><table>
+	<tr><th>Output</th><th>Use</th></tr>
+	<tr><td><code>summary.md</code></td><td>Start with the counts, coverage, diagnostics, and suggested spans to review.</td></tr>
+	<tr><td><code>memgraph-verdicts.html</code></td><td>Open a recall to inspect its entry signals, verdict, and cited steps.</td></tr>
+	<tr><td><code>injudge-report.json</code> / <code>summary.json</code></td><td>Read the full record or compact statistics programmatically.</td></tr>
+	<tr><td><code>evidence/</code> / <code>agent-runs/</code></td><td>Audit the files the judge could read and its recorded conversation.</td></tr>
+</table></div>
+<p>Choose a non-neutral span, read its analysis, and follow the cited steps. Check unknown values, errors, and unjudged spans before comparing runs. Use <a href="concepts.html#verdicts">verdict rules</a> and <a href="concepts.html#profiles">entry-share profiles</a> to interpret the result.</p>
+<details>
+	<summary>Render an existing report again</summary>
+	<div class="body">
+		<p>Use the same recording view and replace <code>RUN</code> with the report folder:</p>
+		<div class="code" data-language="bash"><pre><code>uv run -m memgraph "$REC" \
+  --verdicts output/RUN/injudge-report.json -o memgraph-verdicts.html</code></pre></div>
+	</div>
+</details>
+
+<h2 id="record">Create a sample recording</h2>
+<p>This optional path runs MiniSWE with mem0 Platform on a small SWE-bench sample. It needs Docker and separate credentials for the agent and mem0. For other products or task suites, use the <a href="https://github.com/ChangranXU/memory-bridge/blob/v2/benchmarks/README.md">runner catalog</a>.</p>
+<h3 id="record-install">Install the recording projects</h3>
+<p>Start from the parent directory containing your <code>mem-use</code> checkout. If your terminal is still in <code>mem-use</code> after step 1, run <code>cd ..</code> first.</p>
+<div class="code" data-language="bash"><pre><code>mkdir -p extension
+git clone --branch v2 https://github.com/ChangranXU/memory-bridge.git
+git clone --branch memory https://github.com/ChangranXU/traj-recorder.git extension/traj-recorder
+cd memory-bridge
+git clone https://github.com/SWE-agent/mini-swe-agent.git mini-swe-agent
+git -C mini-swe-agent checkout 04d809ceab9df28f9adaed044884180159172930
+uv sync</code></pre></div>
+<p>The runner starts the recorder from the sibling checkout and resolves its dependencies. Keep running the following commands from <code>memory-bridge</code>.</p>
+<h3 id="settings">Configure and check</h3>
+<div class="code" data-language="bash"><pre><code>test -f settings/shared/llm.env || cp settings/shared/llm.env.example settings/shared/llm.env
+test -f settings/recorder/roles.env || cp settings/recorder/roles.env.example settings/recorder/roles.env
+test -f settings/memory/mem0.env || cp settings/memory/mem0.env.example settings/memory/mem0.env</code></pre></div>
+<p>Fill in the agent endpoint, model, and key in <code>settings/shared/llm.env</code>. Set <code>MEM0_OPTION=cloud</code> and <code>MEM0_API_KEY</code> in <code>settings/memory/mem0.env</code>. Check the applicable model card and required settings in the <a href="https://github.com/ChangranXU/memory-bridge/blob/v2/integration/mem0/README.md">mem0 setup guide</a>. Keep existing settings files if already configured.</p>
+<div class="code" data-language="bash"><pre><code>uv run python scripts/check_settings.py --provider mem0 --mem0-option cloud</code></pre></div>
+<p>This check starts no task or paid model call. For a credentials-free API exercise, use the <a href="https://github.com/ChangranXU/memory-bridge/blob/v2/docs/integrating-agent-hosts.md#try-the-lifecycle">offline bridge example</a>.</p>
+<h3 id="record-run">Run and verify</h3>
+<div class="code" data-language="bash"><div class="code-head">Runs Docker tasks and calls the agent and memory service</div><pre><code>uv run python scripts/swebench/swe-mini-agent/run.py \
+  --ids scripts/swebench/swe-mini-agent/ids.smoke.txt \
+  --output runs/mem0-smoke --provider mem0 --mem0-option cloud --strict</code></pre></div>
+<p>Use a new output directory. Inspect <code>runs/mem0-smoke/verify.log</code> and <code>summary.json</code> for trace and memory failures. A completed task alone does not verify memory use.</p>
+<p>Return to <code>mem-use</code> with <code>cd ../mem-use</code>. Continue at <a href="#graph">step 2</a>, setting <code>REC=../memory-bridge/runs/mem0-smoke/recorder</code>.</p>
+
+<h2 id="recorder-only">Record without memory-bridge</h2>
+<p>traj-recorder can record compatible model traffic on its own. Your client must use the proxy endpoint, and a host must supply annotations for memory analysis. Follow the <a href="https://github.com/ChangranXU/traj-recorder/blob/memory/README.md">standalone recorder quickstart</a>.</p>
+
+<h2 id="problems">Common problems</h2>
+<div class="accordion-group">
+<details><summary>The memory graph is empty</summary><div class="body"><p>Check that you selected the intended recording and that it contains <code>memory_*</code> events. A <code>none</code> baseline or standalone unannotated proxy recording correctly has no memory operations.</p></div></details>
+<details><summary>A recall shows “created earlier”</summary><div class="body"><p>The loaded recordings contain a recall but no observed creation for that item. Load earlier runs if you need that history.</p></div></details>
+<details><summary>Spans are unassessable</summary><div class="body"><p>No observed agent step can be attributed as the delivery’s consumer. This is missing consumption evidence, not a judgment that the agent ignored the memory.</p></div></details>
+<details><summary>injudge exits with status 2</summary><div class="body"><p>Read the console diagnostics. A normal judge run can also report span errors in <code>summary.md</code>. Offline preparation writes diagnostics to its evidence package; dry-run creates no report.</p></div></details>
+</div>
+
+</main>
+<aside class="toc" aria-label="On this page"></aside>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

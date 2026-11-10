@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Paper and results · MemUse Docs</title>
+<meta name="description" content="Delivered, Not Used: Evaluating Agent Memory at Its Point of Use. Findings, case studies, and citation.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap">
+<link rel="stylesheet" href="assets/style.css">
+<script>try { const t = localStorage.getItem("theme"); if (t) document.documentElement.dataset.theme = t; } catch {}</script>
+</head>
+<body>
+<div class="layout">
+<aside class="sidebar" aria-label="Documentation"></aside>
+<main class="content">
+
+<div class="eyebrow">Research</div>
+<h1>Delivered, Not Used: Evaluating Agent Memory at Its Point of Use</h1>
+<p class="affil">
+	<span>Changran Xu, Zeju Li, Qiang Xu</span>
+	<span class="org"><svg class="i" viewBox="0 0 24 24"><path d="M3 21h18M4 10h16M12 3l8.5 4.5h-17L12 3zM6 10v8M10 10v8M14 10v8M18 10v8"/></svg>The Chinese University of Hong Kong</span>
+</p>
+
+<div class="actions">
+	<a class="btn-dark" href="https://arxiv.org/abs/2611.01718"><span>arXiv 2611.01718</span><svg class="i" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></a>
+	<a class="btn-line" href="https://arxiv.org/pdf/2611.01718">PDF</a>
+	<a class="btn-line" href="#citation">BibTeX</a>
+</div>
+
+<details>
+	<summary id="abstract">Read the paper abstract</summary>
+	<div class="body"><p>Task success, retrieval quality, and cost do not show whether an LLM agent used a delivered memory or what followed from that use. We introduce MemUse, which evaluates memory at its point of use in recorded trajectories: each memory delivery is compared with what the agent could already see and followed through the agent's later actions and their consequences. An agentic judge rates each delivered entry's relevance, accuracy, novelty, influence, and observed effect; programmatic checks enforce complete reading of cited evidence, and fixed rules aggregate the ratings into verdicts linked to memory histories and delivery cost. On 8,000 SWE-bench Verified episodes from three memory systems, resolve rates stay within 0.4 percentage points of a no-memory baseline, yet MemUse shows that most delivered entries were irrelevant, most relevant entries went unused, and in two systems most deliveries restated content the agent could still see. It also surfaces effects that outcomes hide: 23.2% of episodes with beneficial memory use still failed, and 5 of 16 with harmful use still succeeded.</p></div>
+</details>
+
+<h2 id="findings">Key findings</h2>
+<p>The study uses 500 SWE-bench Verified tasks, three memory systems in four configurations, and four runs per configuration. The 8,000 memory episodes are compared with 2,000 no-memory episodes.</p>
+<div class="stats">
+	<div class="stat"><b>8,000</b><span>Memory-enabled episodes across four configurations</span></div>
+	<div class="stat"><b>≤ 0.4 pp</b><span>Largest absolute resolve-rate difference from baseline (percentage points)</span></div>
+	<div class="stat"><b>23.2%</b><span>Beneficial-use episodes that still failed</span></div>
+	<div class="stat"><b>5 of 16</b><span>Harmful-use episodes that still passed</span></div>
+</div>
+<p>The beneficial/harmful-use outcome figures include only episodes with recorded harness results.</p>
+<ul>
+	<li>Most delivered entries were not relevant to the task.</li>
+	<li>Most relevant entries were not used by the agent.</li>
+	<li>In two systems, most deliveries repeated text that the agent could still see.</li>
+	<li>Each pair of memory systems differs at least tenfold in relevance share or beneficial entries per delivered token. Task resolve rates alone barely separate them.</li>
+</ul>
+
+<h2 id="case-studies">Outcomes hide memory effects</h2>
+<figure>
+	<div class="frame"><img src="assets/img/case-studies.png" alt="Two case studies. (a) A memory sends the agent into the wrong component, but the task passes. (b) A memory helps the agent add a correct handler, but the task fails." loading="lazy"></div>
+	<figcaption>(a) A skill for a different bug sends the agent into the wrong component at steps 2–5. The agent finds the real fix at step 9, and the task passes. (b) A memory card helps the agent add a subset handler at step 8. The agent leaves another error unfixed, and the task fails. Figure from the paper.</figcaption>
+</figure>
+
+<h2 id="profiles">Memory profiles</h2>
+<p>The six axes summarize entry shares: relevance, corroboration, information gain, acted on, benefit, and harm. Each profiled span has equal weight in the plotted means. See <a href="concepts.html#profiles">how profiles differ from verdicts</a>.</p>
+<figure>
+	<div class="frame"><img src="assets/img/profiles.png" alt="Radar plot and heatmap of six memory-use shares for MemGovern, Mem0 (L+G), Mem0 (L), and TencentDB." loading="lazy"></div>
+	<figcaption>Six-axis memory profiles, pooled over four runs per configuration, on a logarithmic scale. Lower harm is better. Figure from the paper.</figcaption>
+</figure>
+<p>The <a href="tutorial.html">Quickstart</a> produces the underlying profile statistics in <code>summary.md</code> and <code>summary.json</code>. The plots above are paper figures, not automatic CLI output.</p>
+
+<h2 id="scope">Scope of these results</h2>
+<p>These findings describe the studied configurations on SWE-bench Verified. The paper supplied gold patches to the judge but withheld harness outcomes. Recorded attribution is an observational assessment; it does not establish a memory system’s causal effect on task success or its performance on other tasks.</p>
+
+<h2 id="citation">Citation</h2>
+<p>If MemUse, memory-bridge, or traj-recorder helps your research, please cite the paper.</p>
+<div class="code"><div class="code-head">BibTeX</div><pre><code>@misc{xu2026deliveredusedevaluatingagent,
+      title={Delivered, Not Used: Evaluating Agent Memory at Its Point of Use},
+      author={Changran Xu and Zeju Li and Qiang Xu},
+      year={2026},
+      eprint={2611.01718},
+      archivePrefix={arXiv},
+      primaryClass={cs.AI},
+      url={https://arxiv.org/abs/2611.01718},
+}</code></pre></div>
+
+</main>
+<aside class="toc" aria-label="On this page"></aside>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>
