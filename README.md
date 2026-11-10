@@ -3,6 +3,7 @@
 > This repository accompanies the paper: **Delivered, Not Used: Evaluating Agent Memory at Its Point of Use**. <br>
 >
 > [![MemUse paper on arXiv](https://img.shields.io/badge/arXiv-2611.01718-b31b1b?style=flat-square)](https://arxiv.org/abs/2611.01718)
+> [![MemUse docs on GitHub Pages](https://img.shields.io/badge/Docs-GitHub%20Pages-222222?style=flat-square&logo=githubpages&logoColor=white)](https://changranxu.github.io/mem-use/)
 
 English | [简体中文](README.zh-CN.md)
 
