@@ -304,6 +304,8 @@ figcaption { font-size: 14px; color: var(--text-3); margin-top: 10px; line-heigh
 	.bar { padding: 0 16px; gap: 10px; }
 	.tabs-row { padding: 0 16px; }
 	.bar-link, .search-btn span, .search-btn kbd { display: none; }
+	.bar-link.home-link, .bar-link.results-link { display: inline-flex; padding: 6px; }
+	.home-link span, .results-link span { display: none; }
 	.search-btn { width: 36px; padding: 0; justify-content: center; margin: 0 0 0 auto; }
 	.cards, .cards.three { grid-template-columns: 1fr; }
 	.stats { grid-template-columns: repeat(2, 1fr); }

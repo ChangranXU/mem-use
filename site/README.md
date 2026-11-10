@@ -6,6 +6,10 @@ traj-recorder. It is plain HTML and CSS. It has no build step.
 | File | Contents |
 | --- | --- |
 | `index.html` | Landing page: case studies, method, project workflow, paper, and entry paths. |
+| `results.html` | Results table with filters and selectable, sortable columns. |
+| `data/results.json` | Verified paper cohort; see [data provenance](data/README.md). |
+| `assets/results-select.mjs` | Keyboard-accessible result selectors, styled to match the page. |
+| `assets/results.mjs` | Results UI. Pure filtering and sorting logic lives in `results-core.mjs`. |
 | `concepts.html` | How MemUse works: spans, credit windows, signals, and verdicts. |
 | `tutorial.html` | Evaluate a recording; optional instructions for creating one sample run. |
 | `build.html` | Choose an extension point and follow its repository tutorial; development and contribution checks. |
@@ -50,6 +54,9 @@ full methods, paper figures, and commands in the docs.
 Give each topic one main home: verdict rules in `concepts.html`, commands in
 `tutorial.html`, and research results in `paper.html`. Link to that section when
 another page needs it. Keep full integration contracts in the repository guides.
+
+For results changes, run `node --test site/tests/results.test.mjs`. Keep missing
+metrics as missing values, and keep profile shares separate from verdict shares.
 
 Edit the HTML files, preview the site, and check local links and command examples
 before publishing. Keep commands and flags the same as the

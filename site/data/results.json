@@ -1,0 +1,169 @@
+{
+  "schema": "memuse.results/v1",
+  "source": {
+    "title": "Delivered, Not Used: Evaluating Agent Memory at Its Point of Use",
+    "url": "https://arxiv.org/abs/2611.01718",
+    "notes": "Profile means, verdict counts, and pass counts verified against retained run artifacts. Reported pass-rate means, across-run standard deviations, eight-decimal episode costs, and baseline-relative cost changes were supplied by the study author on 2026-11-11. Medium thinking effort follows the paper.",
+    "sections": [
+      "Experimental setup",
+      "Task success and mean cost per episode",
+      "Memory profiles, uncertainty, and coverage",
+      "Evaluation units, span triage, and judge usage"
+    ]
+  },
+  "rows": [
+    {
+      "id": "swe-memgovern",
+      "memory_system": "MemGovern",
+      "benchmark": "SWE-bench Verified",
+      "harness": "mini-SWE-agent 2.4.6",
+      "model": "gpt-6-luna",
+      "thinking_effort": "medium",
+      "runs": 4,
+      "tasks_per_run": 500,
+      "episodes": 2000,
+      "passed": 1467,
+      "cost": 0.0049196,
+      "profiled_spans": 2766,
+      "profile": {
+        "relevance": 15.08315257,
+        "corroboration": 3.3911786,
+        "information_gain": 11.12436732,
+        "acted_on": 3.95155459,
+        "benefit": 2.93926247,
+        "harm": 0.3615329
+      },
+      "verdicts": {
+        "positive": 84,
+        "negative": 10,
+        "neutral": 2657,
+        "unresolved": 15
+      },
+      "automatic_neutral": 0,
+      "empty_spans": 0,
+      "pass_rate": 73.4,
+      "pass_rate_std": 0.6,
+      "cost_change_percent": 8.77
+    },
+    {
+      "id": "swe-mem0-local-global",
+      "memory_system": "Mem0 (L+G)",
+      "benchmark": "SWE-bench Verified",
+      "harness": "mini-SWE-agent 2.4.6",
+      "model": "gpt-6-luna",
+      "thinking_effort": "medium",
+      "runs": 4,
+      "tasks_per_run": 500,
+      "episodes": 2000,
+      "passed": 1454,
+      "cost": 0.00622713,
+      "profiled_spans": 3311,
+      "profile": {
+        "relevance": 1.42265707,
+        "corroboration": 0.22765441,
+        "information_gain": 1.02729922,
+        "acted_on": 0.40104414,
+        "benefit": 0.29249543,
+        "harm": 0.00755059
+      },
+      "verdicts": {
+        "positive": 73,
+        "negative": 2,
+        "neutral": 4796,
+        "unresolved": 22
+      },
+      "automatic_neutral": 1582,
+      "empty_spans": 1101,
+      "pass_rate": 72.7,
+      "pass_rate_std": 0.7,
+      "cost_change_percent": 37.68
+    },
+    {
+      "id": "swe-mem0-local",
+      "memory_system": "Mem0 (L)",
+      "benchmark": "SWE-bench Verified",
+      "harness": "mini-SWE-agent 2.4.6",
+      "model": "gpt-6-luna",
+      "thinking_effort": "medium",
+      "runs": 4,
+      "tasks_per_run": 500,
+      "episodes": 2000,
+      "passed": 1455,
+      "cost": 0.00624387,
+      "profiled_spans": 3353,
+      "profile": {
+        "relevance": 1.4300376,
+        "corroboration": 0.21812378,
+        "information_gain": 1.03347211,
+        "acted_on": 0.5125474,
+        "benefit": 0.34728436,
+        "harm": 0.00852115
+      },
+      "verdicts": {
+        "positive": 90,
+        "negative": 2,
+        "neutral": 4856,
+        "unresolved": 31
+      },
+      "automatic_neutral": 1626,
+      "empty_spans": 1001,
+      "pass_rate": 72.8,
+      "pass_rate_std": 0.6,
+      "cost_change_percent": 38.05
+    },
+    {
+      "id": "swe-tencentdb",
+      "memory_system": "TencentDB",
+      "benchmark": "SWE-bench Verified",
+      "harness": "mini-SWE-agent 2.4.6",
+      "model": "gpt-6-luna",
+      "thinking_effort": "medium",
+      "runs": 4,
+      "tasks_per_run": 500,
+      "episodes": 2000,
+      "passed": 1453,
+      "cost": 0.01779264,
+      "profiled_spans": 5841,
+      "profile": {
+        "relevance": 28.47514606,
+        "corroboration": 2.18844244,
+        "information_gain": 26.13019503,
+        "acted_on": 4.08265104,
+        "benefit": 2.29956595,
+        "harm": 0.03424071
+      },
+      "verdicts": {
+        "positive": 142,
+        "negative": 2,
+        "neutral": 5570,
+        "unresolved": 130
+      },
+      "automatic_neutral": 3,
+      "empty_spans": 119,
+      "pass_rate": 72.7,
+      "pass_rate_std": 0.8,
+      "cost_change_percent": 293.4
+    },
+    {
+      "id": "swe-no-memory",
+      "memory_system": "No memory",
+      "benchmark": "SWE-bench Verified",
+      "harness": "mini-SWE-agent 2.4.6",
+      "model": "gpt-6-luna",
+      "thinking_effort": "medium",
+      "runs": 4,
+      "tasks_per_run": 500,
+      "episodes": 2000,
+      "passed": 1459,
+      "cost": 0.00452279,
+      "profiled_spans": 0,
+      "profile": null,
+      "verdicts": null,
+      "automatic_neutral": 0,
+      "empty_spans": 0,
+      "pass_rate": 73.0,
+      "pass_rate_std": 1.5,
+      "cost_change_percent": null
+    }
+  ]
+}

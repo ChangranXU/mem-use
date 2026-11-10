@@ -14,6 +14,7 @@ const NAV = [
 		["Record evidence", "build.html#recording"],
 		["Develop MemUse", "build.html#develop"],
 	] },
+	{ group: "Results", tab: "Results", items: [["Results explorer", "results.html"]] },
 	{ group: "Research", tab: "Paper", items: [
 		["Paper and results", "paper.html"],
 		["Citation", "paper.html#citation"],
@@ -24,10 +25,13 @@ const NAV = [
 		["traj-recorder", `${REPO}/traj-recorder`],
 	] },
 ];
-const PAGES = ["index.html", "tutorial.html", "concepts.html", "build.html", "paper.html"];
-const TITLES = { "index.html": "MemUse", "concepts.html": "How MemUse works", "tutorial.html": "Quickstart", "build.html": "Extend the workflow", "paper.html": "Paper and results" };
+const PAGES = ["index.html", "results.html", "tutorial.html", "concepts.html", "build.html", "paper.html"];
+const TITLES = { "index.html": "MemUse", "results.html": "Results", "concepts.html": "How MemUse works", "tutorial.html": "Quickstart", "build.html": "Extend the workflow", "paper.html": "Paper and results" };
 
 const ICONS = {
+	docs: '<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v15M3 4h5a4 4 0 0 1 4 2 4 4 0 0 1 4-2h5v15h-5a4 4 0 0 0-4 2 4 4 0 0 0-4-2H3z"/></svg>',
+	results: '<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 3v18h17M8 17v-5M13 17V7M18 17V4"/></svg>',
+	home: '<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="m3 10 9-7 9 7M5 9v12h14V9M9 21v-8h6v8"/></svg>',
 	mark: '<svg class="i mark" viewBox="0 0 24 24"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="12" cy="18" r="2.5"/><path d="M8 7.5l3 8M16 7.5l-3 8M8.5 6h7"/></svg>',
 	search: '<svg class="i" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>',
 	menu: '<svg class="i" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg>',
@@ -53,9 +57,9 @@ header.innerHTML = isLanding ? `
 	<div class="landing-bar landing-wrap">
 		<a class="logo" href="index.html">${ICONS.mark}<span>MemUse</span></a>
 		<nav class="landing-nav" aria-label="Main navigation">
-			<a href="concepts.html">How it works</a>
-			<a href="tutorial.html">Documentation</a>
-			<a href="paper.html">Paper</a>
+			${page === "results.html" ? `<a href="index.html">${ICONS.home}Home</a>` : `<a href="results.html">${ICONS.results}Results</a>`}
+			<a href="tutorial.html">${ICONS.docs}Docs</a>
+			<a href="paper.html">${ICONS.paper}Paper</a>
 		</nav>
 		<div class="landing-tools">
 			<button class="icon-btn theme-btn" type="button" aria-label="Switch light or dark theme">${ICONS.theme}</button>
@@ -67,6 +71,8 @@ header.innerHTML = isLanding ? `
 		<a class="logo" href="index.html">${ICONS.mark}<span><b>MemUse</b> Docs</span></a>
 		<button class="search-btn" type="button" aria-label="Search">${ICONS.search}<span>Search…</span><kbd>⌘K</kbd></button>
 		<div class="bar-right">
+			<a class="bar-link home-link" href="index.html" aria-label="Home">${ICONS.home}<span>Home</span></a>
+			<a class="bar-link results-link" href="results.html" aria-label="Results">${ICONS.results}<span>Results</span></a>
 			<a class="bar-link" href="https://arxiv.org/abs/2611.01718">${ICONS.paper}<span>Paper</span></a>
 			<button class="icon-btn theme-btn" type="button" aria-label="Switch light or dark theme">${ICONS.theme}</button>
 			<a class="btn-dark" href="${REPO}/mem-use" aria-label="GitHub">${ICONS.github}<span>GitHub</span></a>

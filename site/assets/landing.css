@@ -21,6 +21,7 @@
 .landing-bar .logo { font-size: 30px; gap: 9px; }
 .landing-bar .logo .mark { width: 26px; height: 26px; color: var(--landing-accent); }
 .landing-nav { display: flex; align-items: center; gap: 30px; margin-left: auto; font-size: 16px; }
+.landing-nav a { display: inline-flex; align-items: center; gap: 6px; }
 .landing-nav a:hover, .landing-footer a:hover { color: var(--landing-accent); }
 .landing-tools { display: flex; align-items: center; gap: 12px; }
 .landing-tools .theme-btn { display: grid; }
