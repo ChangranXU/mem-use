@@ -1,5 +1,9 @@
 # MemUse
 
+> This repository accompanies the paper: **Delivered, Not Used: Evaluating Agent Memory at Its Point of Use**. <br>
+>
+> [![MemUse paper on arXiv](https://img.shields.io/badge/arXiv-2611.01718-b31b1b?style=flat-square)](https://arxiv.org/abs/2611.01718)
+
 English | [简体中文](README.zh-CN.md)
 
 **Evaluate how an agent uses memory, from the recorded run.** MemUse checks
@@ -7,7 +11,7 @@ what each memory delivery showed the agent, which later actions used it, and
 what happened after those actions. A successful task can contain harmful memory
 use. A failed task can contain useful memory use.
 
-This repository contains the implementation for the MemUse paper:
+MemUse provides two tools:
 
 | Tool | Use it to | Output |
 | --- | --- | --- |
@@ -121,3 +125,17 @@ can support a judgment, but the final task result does not determine it.
 
 The full guides are available in [English](doc/en/README.md) and
 [简体中文](doc/zh-CN/README.md).
+
+## Citation
+
+```bibtex
+@misc{xu2026deliveredusedevaluatingagent,
+      title={Delivered, Not Used: Evaluating Agent Memory at Its Point of Use},
+      author={Changran Xu and Zeju Li and Qiang Xu},
+      year={2026},
+      eprint={2611.01718},
+      archivePrefix={arXiv},
+      primaryClass={cs.AI},
+      url={https://arxiv.org/abs/2611.01718},
+}
+```

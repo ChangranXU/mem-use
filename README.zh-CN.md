@@ -1,5 +1,9 @@
 # MemUse
 
+> 本仓库提供以下论文的实现：**Delivered, Not Used: Evaluating Agent Memory at Its Point of Use**。<br>
+>
+> [![MemUse paper on arXiv](https://img.shields.io/badge/arXiv-2611.01718-b31b1b?style=flat-square)](https://arxiv.org/abs/2611.01718)
+
 [English](README.md) | 简体中文
 
 MemUse 从录制的 agent 行为评估记忆是否相关、可信、提供新信息，以及是否影响行动并带来收益或伤害。它评估记忆对后续行为的可观察影响；任务最终成功与否不能直接决定记忆结论。
@@ -81,3 +85,17 @@ uv run pytest tests -q
 ```
 
 测试不访问网络；评审判断质量需另做真实模型校准，不能由预制答案测试证明。
+
+## 引用
+
+```bibtex
+@misc{xu2026deliveredusedevaluatingagent,
+      title={Delivered, Not Used: Evaluating Agent Memory at Its Point of Use},
+      author={Changran Xu and Zeju Li and Qiang Xu},
+      year={2026},
+      eprint={2611.01718},
+      archivePrefix={arXiv},
+      primaryClass={cs.AI},
+      url={https://arxiv.org/abs/2611.01718},
+}
+```
