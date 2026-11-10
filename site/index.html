@@ -3,88 +3,158 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Overview · MemUse Docs</title>
-<meta name="description" content="MemUse evaluates how an LLM agent uses delivered memory, from recorded runs. With memory-bridge, traj-recorder, memgraph, and injudge.">
+<title>MemUse · Evaluate agent memory at its point of use</title>
+<meta name="description" content="Follow memory from delivery to action. MemUse evaluates how agents use memory in recorded runs, with evidence linked to each judgment.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap">
 <link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/landing.css">
 <script>try { const t = localStorage.getItem("theme"); if (t) document.documentElement.dataset.theme = t; } catch {}</script>
 </head>
-<body>
-<div class="layout">
-<aside class="sidebar" aria-label="Documentation"></aside>
-<main class="content">
+<body class="landing">
+<a class="skip-link" href="#main">Skip to content</a>
+<main class="content landing-content" id="main">
 
-<div class="eyebrow">Getting started</div>
-<h1>Overview</h1>
-<p class="desc">MemUse evaluates agent memory at its point of use. It checks which delivered memories shaped an agent’s actions and what followed from their use.</p>
-<div class="actions">
-	<a class="btn-dark" href="tutorial.html"><span>Start the quickstart</span><svg class="i" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></a>
-	<a class="btn-line" href="concepts.html">How it works</a>
-</div>
-
-<section class="paper-card" aria-label="Research paper">
-	<div class="card-icon"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h6"/></svg></div>
-	<div>
-		<p class="paper-label">Paper · arXiv 2611.01718</p>
-		<h2 class="paper-title">Delivered, Not Used: Evaluating Agent Memory at Its Point of Use</h2>
-		<p class="affil">
-			<span>Changran Xu, Zeju Li, Qiang Xu</span>
-			<span class="org"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 21h18M4 10h16M12 3l8.5 4.5h-17L12 3zM6 10v8M10 10v8M14 10v8M18 10v8"/></svg>The Chinese University of Hong Kong</span>
-		</p>
-		<div class="paper-links">
-			<a class="btn-line" href="https://arxiv.org/abs/2611.01718">Read on arXiv <svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 17 17 7M8 7h9v9"/></svg></a>
-			<a class="btn-line" href="https://arxiv.org/pdf/2611.01718">PDF</a>
-			<a class="btn-line" href="paper.html#findings">Findings</a>
-			<a class="btn-line" href="paper.html#citation">Cite</a>
+<section class="hero landing-wrap" aria-labelledby="hero-title">
+	<div class="hero-copy">
+		<h1 id="hero-title">Evaluate memory<br> beyond task success.</h1>
+		<p class="hero-desc">MemUse traces delivered memory through recorded agent actions. See which memories helped, hindered, or went unused.</p>
+		<div class="hero-actions">
+			<a class="landing-button primary" href="tutorial.html">Evaluate a recording <span aria-hidden="true">↗</span></a>
+			<a class="landing-button secondary" href="https://arxiv.org/abs/2611.01718">Read the paper <span aria-hidden="true">↗</span></a>
+		</div>
+	</div>
+	<div class="case-demo">
+		<div class="demo-topline"><span class="demo-mark" aria-hidden="true">◎</span><span>One task. Two different signals.</span></div>
+		<div class="tabs case-tabs">
+			<div class="tab-panel" data-title="A task that passed">
+				<div class="case-body">
+					<h2>A detour hidden by success.</h2>
+					<ol class="trace">
+						<li><span class="trace-point" aria-hidden="true"></span><div><span class="trace-label">Memory delivered</span><p>A skill suggests a fix for a different bug.</p></div></li>
+						<li class="trace-harm"><span class="trace-point" aria-hidden="true"></span><div><span class="trace-label">Agent action <span>Steps 2–5</span></span><p>The agent follows it into the wrong component.</p></div></li>
+						<li><span class="trace-point" aria-hidden="true"></span><div><span class="trace-label">Later action <span>Step 9</span></span><p>The agent finds the real fix and completes the task.</p></div></li>
+					</ol>
+					<div class="case-result"><div><span>Memory use</span><strong class="result-harm">↘ Harmful</strong></div><div><span>Task result</span><strong>✓ Passed</strong></div></div>
+				</div>
+			</div>
+			<div class="tab-panel" data-title="A task that failed">
+				<div class="case-body">
+					<h2>Useful guidance in a failed task.</h2>
+					<ol class="trace">
+						<li><span class="trace-point" aria-hidden="true"></span><div><span class="trace-label">Memory delivered</span><p>A memory card points to a needed subset handler.</p></div></li>
+						<li class="trace-benefit"><span class="trace-point" aria-hidden="true"></span><div><span class="trace-label">Agent action <span>Step 8</span></span><p>The agent uses the guidance to add the correct handler.</p></div></li>
+						<li><span class="trace-point" aria-hidden="true"></span><div><span class="trace-label">Remaining error</span><p>Another error remains unfixed, so the task fails.</p></div></li>
+					</ol>
+					<div class="case-result"><div><span>Memory use</span><strong class="result-benefit">↗ Beneficial</strong></div><div><span>Task result</span><strong>× Failed</strong></div></div>
+				</div>
+			</div>
 		</div>
 	</div>
 </section>
 
-<div class="callout wip">
-	<svg class="i" viewBox="0 0 24 24"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.5 2.5-2.4-.6-.6-2.4z"/></svg>
-	<p><strong>Work in progress.</strong> Interfaces and formats can change. <strong>Contributions are welcome:</strong> report a bug, improve the docs, or add an integration. See <a href="build.html#develop">how to contribute</a>.</p>
-</div>
+<div class="landing-wrap"><div class="research-byline"><span>From the paper <a href="https://arxiv.org/abs/2611.01718">Delivered, Not Used <span aria-hidden="true">↗</span></a></span><span>Changran Xu · Zeju Li · Qiang Xu<br> The Chinese University of Hong Kong</span></div></div>
 
-<h2 id="why">Look beyond task success</h2>
-<p>A successful task can include a harmful memory detour. A failed task can include useful guidance. MemUse follows each delivery through the recorded actions and consequences, so you can inspect both cases. See the <a href="paper.html#findings">paper’s results</a>.</p>
+<section class="method-section landing-wrap" aria-labelledby="why">
+	<div class="section-intro">
+		<div><h2 id="why">Pass rate is only<br> part of the story.</h2></div>
+		<div class="section-copy"><p>Pass rate measures the agent and memory system together. It does not show which delivered memories helped or hindered the agent.</p><p>MemUse assesses memory use from recorded actions and consequences. These observations do not isolate memory’s causal effect.</p><a class="text-link" href="concepts.html">Explore the method <span aria-hidden="true">↗</span></a></div>
+	</div>
+	<div class="memory-demo" data-phase="0" data-delivery="used">
+		<div class="playback-toolbar">
+			<div class="playback-steps" role="group" aria-label="Memory evaluation process">
+				<button type="button" data-phase="0" aria-pressed="true"><span>01</span> Memory action</button>
+				<button type="button" data-phase="1" aria-pressed="false"><span>02</span> Record</button>
+				<button type="button" data-phase="2" aria-pressed="false"><span>03</span> Collect evidence</button>
+				<button type="button" data-phase="3" aria-pressed="false"><span>04</span> Judge</button>
+			</div>
+			<button class="playback-toggle" type="button" aria-label="Pause automatic playback"><span aria-hidden="true">Ⅱ</span><span class="playback-label">Pause</span></button>
+		</div>
+		<div class="demo-workspace">
+			<div class="graph-panel">
+				<div class="panel-heading"><h3>Memory graph</h3><span>memgraph</span></div>
+<svg class="trace-graphic" viewBox="23 100 750 334" xmlns="http://www.w3.org/2000/svg" role="group" aria-label="Select a memory delivery">  <defs>
+    <pattern id="grid" width="42" height="42" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="1" fill="#deded5" opacity=".6"/></pattern>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="m2 2 5 3-5 3" stroke="#8a987a" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="focus-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="m2 2 5 3-5 3" stroke="#577357" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker>
+  </defs><g font-family="Inter, system-ui, sans-serif" fill="none">    <rect x="155" y="110" width="590" height="312" fill="url(#grid)"/>
+    <g font-size="16" fill="#8b9086"><text x="182" y="132">Earlier</text><text x="667" y="132">Later</text><path d="M246 128h408" stroke="#d9ddd1" marker-end="url(#arrow)"/></g>
+    <g stroke="#d6dacf" stroke-width="1.5"><path d="M168 190h550"/><path d="M168 284h550"/><path d="M168 378h550"/></g>
+    <g font-size="18" fill="#565f50"><text x="52" y="195">Task 01</text><text x="52" y="289">Task 02</text><text x="52" y="383">Task 03</text></g>
+    <g fill="#fdfdf9" stroke="#c7cec0" stroke-width="1.5">
+      <circle cx="181" cy="190" r="4"/><circle cx="346" cy="190" r="4"/><circle cx="444" cy="190" r="4"/><circle cx="629" cy="190" r="4"/><circle cx="710" cy="190" r="4"/>
+      <circle cx="181" cy="284" r="4"/><circle cx="265" cy="284" r="4"/><circle cx="444" cy="284" r="4"/><circle cx="710" cy="284" r="4"/>
+      <circle cx="181" cy="378" r="4"/><circle cx="265" cy="378" r="4"/><circle cx="346" cy="378" r="4"/><circle cx="629" cy="378" r="4"/><circle cx="710" cy="378" r="4"/>
+    </g>
+    <path class="demo-recorded path-used" d="M265 190C300 190 292 284 346 284" stroke="#577357" stroke-width="2.5"/>
+    <path class="demo-recorded path-ignored" d="M265 190C405 190 338 378 479 378" stroke="#a6b49b" stroke-width="1.7" stroke-dasharray="5 5"/>
+    <path class="demo-evidence path-used" d="M358 284h181" stroke="#577357" stroke-width="2.5" marker-end="url(#focus-arrow)"/>
+    <path class="demo-evidence path-used" d="M558 284h62" stroke="#577357" stroke-width="2.5" marker-end="url(#focus-arrow)"/>
+    <rect id="demo-write" x="254" y="179" width="22" height="22" rx="4" fill="#b98667" stroke="#fdfdf9" stroke-width="3"/>
+    <circle cx="346" cy="284" r="22" fill="#e7edde"/>
+    <circle cx="346" cy="284" r="12" fill="#577357" stroke="#fdfdf9" stroke-width="3"/>
+    <circle cx="549" cy="284" r="9" fill="#fdfdf9" stroke="#577357" stroke-width="2.5"/>
+    <circle cx="629" cy="284" r="9" fill="#577357"/>
+    <path d="m625 284 3 3 5-6" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="479" cy="378" r="9" fill="#fdfdf9" stroke="#a6b49b" stroke-width="2"/>
+    <g font-size="17" text-anchor="middle">
+      <text x="265" y="164" fill="#93674d">Write M1</text>
+      <text x="346" y="253" fill="#486346" font-weight="500">Recall M1</text>
+      <text x="549" y="258" fill="#486346">Action</text>
+      <text x="629" y="258" fill="#486346">Check</text>
+      <text x="479" y="408" fill="#7c8773">Recall M1</text>
+    </g>
+    <rect class="selection-tag" x="286" y="314" width="120" height="27" rx="13.5" fill="#e8eddf"/>
+    <text class="selection-tag" x="346" y="332" text-anchor="middle" font-size="13" fill="#486346">Selected delivery</text>
 
-<h2 id="projects">Record, then evaluate</h2>
-<p>The three projects form one workflow. To analyze existing annotated recordings, install only MemUse. Its tools read the recording without changing the memory store or rerunning the task.</p>
-<div class="cards three">
-	<a class="card" href="https://github.com/ChangranXU/memory-bridge">
-		<div class="card-icon"><svg class="i" viewBox="0 0 24 24"><path d="M3 17h18M5 17V9m14 8V9M5 9c3 0 4-4 7-4s4 4 7 4M9 17v-5m6 5v-5"/></svg></div>
-		<h4>memory-bridge</h4>
-		<p>Connects an agent harness to a memory system. Marks memory searches, writes, deliveries, and task boundaries.</p>
-		<span class="meta">branch v2</span>
-	</a>
-	<a class="card" href="https://github.com/ChangranXU/traj-recorder">
-		<div class="card-icon"><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3" fill="currentColor"/></svg></div>
-		<h4>traj-recorder</h4>
-		<p>A local proxy between the agent and the LLM provider. Saves each call in a schema-10 run folder.</p>
-		<span class="meta">branch memory</span>
-	</a>
-	<a class="card" href="https://github.com/ChangranXU/mem-use">
-		<div class="card-icon"><svg class="i" viewBox="0 0 24 24"><path d="M9 11l3 3 8-8"/><path d="M20 12v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h9"/></svg></div>
-		<h4>MemUse</h4>
-		<p><code>memgraph</code> draws the memory graph. <code>injudge</code> judges memory use and writes a report.</p>
-		<span class="meta">branch agentic_search</span>
-	</a>
-</div>
+    <g class="graph-control" role="button" tabindex="0" data-delivery="used" aria-label="Inspect memory used in Task 02" aria-pressed="true"><rect x="308" y="249" width="76" height="63" rx="15" fill="transparent"/><circle class="focus-ring" cx="346" cy="284" r="24"/></g>
+    <g class="graph-control" role="button" tabindex="0" data-delivery="ignored" aria-label="Inspect memory ignored in Task 03" aria-pressed="false"><rect x="440" y="343" width="78" height="62" rx="15" fill="transparent"/><circle class="focus-ring" cx="479" cy="378" r="24"/></g>
+</g></svg>
+				<div class="memory-entry"><span class="memory-symbol" aria-hidden="true">M1</span><div><strong>Input validation</strong><p>Handle empty inputs before the batch loop.</p></div></div>
+				<div class="trajectory-events"><div class="trajectory-heading">Recorded trajectory</div><div class="trajectory-row"><span>memory_write</span><span>M1 stored</span></div><div class="trajectory-row"><span>memory_delivery</span><span class="delivery-event">M1 → Task 02</span></div><div class="trajectory-row"><span>agent_action</span><span class="action-event">Add input guard</span></div></div>
+			</div>
+			<div class="assessment-panel">
+				<div class="panel-heading"><h3>Evaluation</h3><span>injudge</span></div>
+				<div class="assessment-body">
+					<p class="assessment-state">Memory action</p>
+					<p class="assessment-description">The agent retrieves a memory before it edits the code.</p>
+					<ul class="evidence-list"><li><span class="evidence-check" aria-hidden="true">○</span><div><strong>Delivered memory</strong><span>The text the agent received</span></div></li><li><span class="evidence-check" aria-hidden="true">○</span><div><strong>Later agent action</strong><span class="action-evidence">The code change after delivery</span></div></li><li><span class="evidence-check" aria-hidden="true">○</span><div><strong>Observed consequence</strong><span class="result-evidence">The result of the following check</span></div></li></ul>
+					<dl class="assessment-signals" hidden><div><dt>Relevance</dt><dd data-signal="relevance">Relevant</dd></div><div><dt>Accuracy</dt><dd data-signal="accuracy">Corroborated</dd></div><div><dt>Novelty</dt><dd data-signal="novelty">Novel</dd></div><div><dt>Influence</dt><dd data-signal="influence">Acted on</dd></div><div><dt>Effect</dt><dd data-signal="effect">Improved</dd></div></dl>
+					<p class="assessment-foot">Select a step or a recall to inspect it.</p>
+				</div>
+			</div>
+		</div>
+	</div>
+</section>
 
-<h2 id="start">Choose where to start</h2>
-<div class="table-wrap"><table>
-	<tr><th>If you…</th><th>Go to</th></tr>
-	<tr><td>Have no recordings yet</td><td><a href="tutorial.html#record">Create a sample recording</a></td></tr>
-	<tr><td>Have schema-10 recordings with <code>memory_*</code> annotations</td><td><a href="tutorial.html">Install MemUse and inspect a recording</a></td></tr>
-	<tr><td>Want to understand spans, credit windows, and verdicts</td><td><a href="concepts.html">How MemUse works</a></td></tr>
-	<tr><td>Want to connect your own agent, memory system, or benchmark</td><td><a href="build.html">Extend the workflow</a></td></tr>
-</table></div>
+<section class="workflow-section" aria-labelledby="projects">
+	<div class="landing-wrap">
+		<div class="section-intro"><div><h2 id="projects">Connect. Record. Evaluate.</h2></div><div class="section-copy"><p>To create new annotated runs with this workflow, you need <strong>memory-bridge</strong> and <strong>traj-recorder</strong>. To evaluate existing compatible recordings, install only <strong>MemUse</strong>.</p></div></div>
+		<div class="project-list">
+			<a class="project-row" href="https://github.com/ChangranXU/memory-bridge"><span class="project-number">01</span><h3>memory-bridge</h3><p>Connect your agent harness to a memory system. Mark memory operations and task boundaries.</p><span class="project-arrow" aria-hidden="true">↗</span></a>
+			<a class="project-row" href="https://github.com/ChangranXU/traj-recorder"><span class="project-number">02</span><h3>traj-recorder</h3><p>Capture model calls and memory annotations in a recording that MemUse can read.</p><span class="project-arrow" aria-hidden="true">↗</span></a>
+			<a class="project-row" href="https://github.com/ChangranXU/mem-use"><span class="project-number">03</span><h3>MemUse</h3><p>Inspect the graph with <code>memgraph</code>. Judge memory use and read the evidence with <code>injudge</code>.</p><span class="project-arrow" aria-hidden="true">↗</span></a>
+		</div>
+		<div class="workflow-foot"><span>Your own harness, memory system, or benchmark?</span><a class="text-link" href="build.html">Follow an integration guide <span aria-hidden="true">↗</span></a></div>
+	</div>
+</section>
+
+<section class="research-section" aria-labelledby="research">
+	<div class="landing-wrap research-layout">
+		<div class="research-copy"><h2 id="research">Delivered,<br> Not Used.</h2><p class="research-subtitle">Evaluating Agent Memory at Its Point of Use</p><p>Most delivered entries were irrelevant. Most relevant entries went unused. The paper shows where useful guidance and harmful detours appeared in the recorded runs.</p><div class="research-links"><a class="landing-button" href="paper.html">Explore the findings <span aria-hidden="true">↗</span></a><a class="text-link" href="paper.html#citation">Cite the paper <span aria-hidden="true">↗</span></a></div></div>
+		<div class="study-numbers"><div><strong>8,000</strong><p>Memory-enabled episodes<br> on SWE-bench Verified</p></div><div><strong>≤ 0.4 <span>pp</span></strong><p>Largest absolute resolve-rate difference<br> from the no-memory baseline</p></div><p class="study-note">Three memory systems. Four configurations.<br> Findings apply to the studied SWE-bench configurations.</p></div>
+	</div>
+</section>
+
+<section class="start-section landing-wrap" aria-labelledby="start">
+	<div><h2 id="start">See what your<br> agent remembered.</h2><p>Inspect a memory graph, prepare the evidence, then judge a small sample.</p><a class="landing-button primary" href="tutorial.html">Open the quickstart <span aria-hidden="true">↗</span></a></div>
+	<div class="contribute-panel"><p class="status-label"><span aria-hidden="true"></span>Work in progress</p><h3>Help shape what comes next.</h3><p>Contributions are welcome. Report a bug, improve the docs, or connect a new harness, memory system, or benchmark. Interfaces and formats can change.</p><a class="text-link" href="build.html#develop">How to contribute <span aria-hidden="true">↗</span></a></div>
+</section>
 
 </main>
-<aside class="toc" aria-label="On this page"></aside>
-</div>
+<footer class="landing-footer landing-wrap"><a class="footer-brand" href="index.html">MemUse</a><p>Evaluate agent memory at its point of use.</p><nav aria-label="Footer"><a href="tutorial.html">Documentation</a><a href="https://arxiv.org/abs/2611.01718">Paper</a><a href="https://github.com/ChangranXU/mem-use"><svg class="i gh" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>GitHub</a></nav></footer>
 <script src="assets/site.js"></script>
+<script src="assets/landing.js"></script>
 </body>
 </html>

@@ -1,9 +1,8 @@
-// Shared page frame: header, left navigation, "On this page", search, tabs,
+// Shared page frame: product/docs headers, navigation, search, tabs,
 // copy buttons, and the previous/next pager. One list drives every page.
 const REPO = "https://github.com/ChangranXU";
 const NAV = [
 	{ group: "Getting started", tab: "Getting started", items: [
-		["Overview", "index.html"],
 		["Quickstart", "tutorial.html"],
 		["How MemUse works", "concepts.html"],
 	] },
@@ -26,7 +25,7 @@ const NAV = [
 	] },
 ];
 const PAGES = ["index.html", "tutorial.html", "concepts.html", "build.html", "paper.html"];
-const TITLES = { "index.html": "Overview", "concepts.html": "How MemUse works", "tutorial.html": "Quickstart", "build.html": "Extend the workflow", "paper.html": "Paper and results" };
+const TITLES = { "index.html": "MemUse", "concepts.html": "How MemUse works", "tutorial.html": "Quickstart", "build.html": "Extend the workflow", "paper.html": "Paper and results" };
 
 const ICONS = {
 	mark: '<svg class="i mark" viewBox="0 0 24 24"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="12" cy="18" r="2.5"/><path d="M8 7.5l3 8M16 7.5l-3 8M8.5 6h7"/></svg>',
@@ -42,14 +41,27 @@ const ICONS = {
 	list: '<svg class="i" viewBox="0 0 24 24"><path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"/></svg>',
 };
 
+const isLanding = document.body.classList.contains("landing");
 const page = location.pathname.split("/").pop() || "index.html";
 const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 
 // Header
 const currentGroup = NAV.find((g) => g.items.some(([, href]) => href.split("#")[0] === page));
 const header = document.createElement("header");
-header.className = "site-header";
-header.innerHTML = `
+header.className = isLanding ? "landing-header" : "site-header";
+header.innerHTML = isLanding ? `
+	<div class="landing-bar landing-wrap">
+		<a class="logo" href="index.html">${ICONS.mark}<span>MemUse</span></a>
+		<nav class="landing-nav" aria-label="Main navigation">
+			<a href="concepts.html">How it works</a>
+			<a href="tutorial.html">Documentation</a>
+			<a href="paper.html">Paper</a>
+		</nav>
+		<div class="landing-tools">
+			<button class="icon-btn theme-btn" type="button" aria-label="Switch light or dark theme">${ICONS.theme}</button>
+			<a class="btn-dark" href="${REPO}/mem-use">${ICONS.github} GitHub</a>
+		</div>
+	</div>` : `
 	<div class="bar">
 		<button class="icon-btn menu-btn" type="button" aria-label="Open navigation">${ICONS.menu}</button>
 		<a class="logo" href="index.html">${ICONS.mark}<span><b>MemUse</b> Docs</span></a>
@@ -67,28 +79,30 @@ document.body.prepend(header);
 
 // Left navigation
 const sidebar = document.querySelector(".sidebar");
-sidebar.innerHTML = NAV.map((g) => `
-	<div class="nav-group">
-		<h5>${g.group}</h5>
-		${g.items.map(([label, href]) => {
-			const external = href.startsWith("http");
-			return `<a href="${href}"${external ? ' target="_blank" rel="noopener"' : ""}>${label}${external ? ICONS.ext : ""}</a>`;
-		}).join("")}
-	</div>`).join("");
+if (sidebar) {
+	sidebar.innerHTML = NAV.map((g) => `
+		<div class="nav-group">
+			<h5>${g.group}</h5>
+			${g.items.map(([label, href]) => {
+				const external = href.startsWith("http");
+				return `<a href="${href}"${external ? ' target="_blank" rel="noopener"' : ""}>${label}${external ? ICONS.ext : ""}</a>`;
+			}).join("")}
+		</div>`).join("");
 
-function markActive() {
-	const links = [...sidebar.querySelectorAll("a")];
-	links.forEach((a) => a.classList.remove("active"));
-	const here = links.filter((a) => a.getAttribute("href").split("#")[0] === page);
-	const exact = here.find((a) => a.hash && a.hash === location.hash);
-	(exact || here.find((a) => !a.hash))?.classList.add("active");
+	function markActive() {
+		const links = [...sidebar.querySelectorAll("a")];
+		links.forEach((a) => a.classList.remove("active"));
+		const here = links.filter((a) => a.getAttribute("href").split("#")[0] === page);
+		const exact = here.find((a) => a.hash && a.hash === location.hash);
+		(exact || here.find((a) => !a.hash))?.classList.add("active");
+	}
+	markActive();
+	addEventListener("hashchange", markActive);
+
+	const menuBtn = header.querySelector(".menu-btn");
+	menuBtn.addEventListener("click", () => sidebar.classList.toggle("open"));
+	sidebar.addEventListener("click", (e) => { if (e.target.closest("a")) sidebar.classList.remove("open"); });
 }
-markActive();
-addEventListener("hashchange", markActive);
-
-const menuBtn = header.querySelector(".menu-btn");
-menuBtn.addEventListener("click", () => sidebar.classList.toggle("open"));
-sidebar.addEventListener("click", (e) => { if (e.target.closest("a")) sidebar.classList.remove("open"); });
 
 // Theme switch: follows the system until the reader picks one.
 header.querySelector(".theme-btn").addEventListener("click", () => {
@@ -121,20 +135,32 @@ document.querySelectorAll(".tabs").forEach((tabs, n) => {
 	const list = document.createElement("div");
 	list.className = "tab-list";
 	list.setAttribute("role", "tablist");
+	list.setAttribute("aria-label", "Paper case studies");
 	panels.forEach((panel, i) => {
 		const b = document.createElement("button");
 		b.type = "button";
 		b.role = "tab";
 		b.id = `tab-${n}-${i}`;
 		b.textContent = panel.dataset.title;
+		panel.id = `panel-${n}-${i}`;
+		panel.tabIndex = 0;
+		b.setAttribute("aria-controls", panel.id);
 		panel.setAttribute("role", "tabpanel");
 		panel.setAttribute("aria-labelledby", b.id);
 		b.addEventListener("click", () => select(i));
+		b.addEventListener("keydown", (e) => {
+			const next = { ArrowRight: (i + 1) % panels.length, ArrowLeft: (i + panels.length - 1) % panels.length, Home: 0, End: panels.length - 1 }[e.key];
+			if (next === undefined) return;
+			e.preventDefault();
+			select(next);
+			list.children[next].focus();
+		});
 		list.appendChild(b);
 	});
 	const select = (i) => panels.forEach((p, j) => {
 		p.hidden = i !== j;
 		list.children[j].setAttribute("aria-selected", String(i === j));
+		list.children[j].tabIndex = i === j ? 0 : -1;
 	});
 	tabs.prepend(list);
 	select(0);
@@ -162,7 +188,7 @@ document.querySelectorAll(".code").forEach((block) => {
 
 // Previous / next pager and footer
 const at = PAGES.indexOf(page);
-if (at !== -1) {
+if (!isLanding && at !== -1) {
 	const prev = PAGES[at - 1], next = PAGES[at + 1];
 	const pager = document.createElement("nav");
 	pager.className = "pager";
@@ -171,11 +197,13 @@ if (at !== -1) {
 		(next ? `<a class="next" href="${next}"><small>Next</small><span>${TITLES[next]} →</span></a>` : "<span></span>");
 	content.appendChild(pager);
 }
-const foot = document.createElement("footer");
-foot.className = "page-foot";
-foot.innerHTML = `<span>MemUse · <a href="https://arxiv.org/abs/2611.01718">arXiv 2611.01718</a></span>
-	<span><a href="${REPO}/mem-use">mem-use</a> · <a href="${REPO}/memory-bridge">memory-bridge</a> · <a href="${REPO}/traj-recorder">traj-recorder</a></span>`;
-content.appendChild(foot);
+if (!isLanding) {
+	const foot = document.createElement("footer");
+	foot.className = "page-foot";
+	foot.innerHTML = `<span>MemUse · <a href="https://arxiv.org/abs/2611.01718">arXiv 2611.01718</a></span>
+		<span><a href="${REPO}/mem-use">mem-use</a> · <a href="${REPO}/memory-bridge">memory-bridge</a> · <a href="${REPO}/traj-recorder">traj-recorder</a></span>`;
+	content.appendChild(foot);
+}
 
 // Search over the h1/h2/h3 sections of every page. Built on first open.
 const dialog = document.createElement("div");
@@ -227,7 +255,7 @@ async function openSearch() {
 	render("");
 }
 const closeSearch = () => dialog.classList.remove("open");
-header.querySelector(".search-btn").addEventListener("click", openSearch);
+header.querySelector(".search-btn")?.addEventListener("click", openSearch);
 input.addEventListener("input", () => index && render(input.value));
 dialog.addEventListener("click", (e) => { if (e.target === dialog || e.target.closest("a")) closeSearch(); });
 input.addEventListener("keydown", (e) => {

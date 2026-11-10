@@ -5,12 +5,14 @@ traj-recorder. It is plain HTML and CSS. It has no build step.
 
 | File | Contents |
 | --- | --- |
-| `index.html` | Orientation: why memory use matters, the three-project workflow, and entry paths. |
+| `index.html` | Landing page: case studies, method, project workflow, paper, and entry paths. |
 | `concepts.html` | How MemUse works: spans, credit windows, signals, and verdicts. |
 | `tutorial.html` | Evaluate a recording; optional instructions for creating one sample run. |
 | `build.html` | Choose an extension point and follow its repository tutorial; development and contribution checks. |
 | `paper.html` | Study scope, findings, figures, the collapsible paper abstract, and citation. |
-| `assets/site.js` | Header, left navigation, "On this page", search, tabs, and pager. Edit `NAV` to add a page. |
+| `assets/site.js` | Product and docs headers, left navigation, search, tabs, and pager. Edit `NAV` to add a docs page. |
+| `assets/landing.js` | Memory-action playback and selectable delivery assessments. |
+| `assets/landing.css` | Full-width landing layout; shares fonts and theme tokens with the docs. |
 | `assets/` | Style, script, and paper figures. |
 | `.nojekyll` | Tells GitHub Pages to serve the files as they are. |
 
@@ -38,6 +40,12 @@ Pages availability depends on the repository and account settings. To show the
 site link on the repository page, add its URL to the repository’s **About** section.
 
 ## Update the site
+
+Keep the landing page concise. Its case studies come from the paper. The inline SVG
+explains a memory trace and its assessment; it is a schematic, not a reported
+research result. Playback pauses on interaction and when off screen. Reduced
+motion preferences disable automatic playback; readers can still start it. Keep
+full methods, paper figures, and commands in the docs.
 
 Give each topic one main home: verdict rules in `concepts.html`, commands in
 `tutorial.html`, and research results in `paper.html`. Link to that section when

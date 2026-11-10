@@ -138,8 +138,8 @@ p, ul, ol { margin: 0 0 16px; }
 li { margin-bottom: 6px; }
 li::marker { color: var(--text-3); }
 strong { color: var(--text); font-weight: 600; }
-.content a:not(.card):not(.btn-dark):not(.btn-line):not(.pager a) { color: var(--text); font-weight: 600; text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 3px; text-decoration-thickness: 1.5px; }
-.content a:not(.card):not(.btn-dark):not(.btn-line):hover { text-decoration-color: var(--accent); }
+.content:not(.landing-content) a:not(.card):not(.btn-dark):not(.btn-line):not(.pager a) { color: var(--text); font-weight: 600; text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 3px; text-decoration-thickness: 1.5px; }
+.content:not(.landing-content) a:not(.card):not(.btn-dark):not(.btn-line):hover { text-decoration-color: var(--accent); }
 code { font: 500 .86em var(--mono); background: var(--inline-code); padding: .15em .4em; border-radius: 6px; color: var(--text); overflow-wrap: anywhere; }
 kbd { font: 500 .8em var(--mono); border: 1px solid var(--line-strong); border-bottom-width: 2px; border-radius: 5px; padding: 0 5px; }
 hr { border: 0; border-top: 1px solid var(--line); margin: 40px 0; }
