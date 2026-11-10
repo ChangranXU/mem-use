@@ -2,7 +2,7 @@
 
 [English](../en/README.md) | [仓库首页](../../README.zh-CN.md)
 
-MemUse 用录制证据评估记忆对 agent 后续行为的影响。命令仍为 `memgraph` 和 `injudge`，仓库仍名为 `mem-eval`。
+MemUse 用录制证据评估记忆对 agent 后续行为的影响。命令为 `memgraph` 和 `injudge`。GitHub 仓库名为 `mem-use`，示例中的本地目录名为 `mem-eval`。
 
 ## 开始使用
 

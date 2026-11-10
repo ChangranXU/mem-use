@@ -19,8 +19,8 @@ MemUse provides two tools:
 | `injudge` | Judge delivered memories against recorded evidence. | Verdicts, summaries, evidence files, and judge transcripts. |
 
 Both tools read existing recordings. They do not change the memory store or
-rerun the task. The repository is named `mem-eval`; the commands remain
-`memgraph` and `injudge`.
+rerun the task. The GitHub repository is named `mem-use`. These examples use a
+local checkout named `mem-eval`; the commands remain `memgraph` and `injudge`.
 
 ![MemUse workflow: the memory bridge and trajectory recorder capture deliveries; processing groups them into spans; a judge checks evidence and the memory graph links results to entry histories.](doc/assets/overview.png)
 
