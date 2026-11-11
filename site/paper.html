@@ -10,6 +10,8 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap">
 <link rel="icon" href="assets/img/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/radar.css">
+<link rel="stylesheet" href="assets/paper.css">
 <script>try { const t = localStorage.getItem("theme"); if (t) document.documentElement.dataset.theme = t; } catch {}</script>
 </head>
 <body>
@@ -52,18 +54,28 @@
 </ul>
 
 <h2 id="case-studies">Outcomes hide memory effects</h2>
-<figure>
-	<div class="frame"><img src="assets/img/case-studies.png" alt="Two case studies. (a) A memory sends the agent into the wrong component, but the task passes. (b) A memory helps the agent add a correct handler, but the task fails." loading="lazy"></div>
-	<figcaption>(a) A skill for a different bug sends the agent into the wrong component at steps 2–5. The agent finds the real fix at step 9, and the task passes. (b) A memory card helps the agent add a subset handler at step 8. The agent leaves another error unfixed, and the task fails. Figure from the paper.</figcaption>
-</figure>
+<p>Follow the recorded actions in two episodes. Select a marked step to inspect the evidence.</p>
+<div class="tabs paper-cases">
+	<div class="tab-panel" data-title="Harmful use · task passed" data-case="detour">
+		<p>A TencentDB skill sends the agent into the wrong component at steps 2–5. The agent finds the real fix at step 9, and the task passes.</p>
+	</div>
+	<div class="tab-panel" data-title="Beneficial use · task failed" data-case="repair">
+		<p>A MemGovern card helps the agent add a subset handler at step 8. Another error remains unfixed, and the task fails.</p>
+	</div>
+</div>
+<p class="paper-note">Memory effects are judge assessments. Task outcomes come from the SWE-bench harness. Step numbers are local to each episode.</p>
 
 <h2 id="profiles">Memory profiles</h2>
 <p>The six axes summarize entry shares: relevance, corroboration, information gain, acted on, benefit, and harm. Each profiled span has equal weight in the plotted means. See <a href="concepts.html#profiles">how profiles differ from verdicts</a>.</p>
-<figure>
-	<div class="frame"><img src="assets/img/profiles.png" alt="Radar plot and heatmap of six memory-use shares for MemGovern, Mem0 (L+G), Mem0 (L), and TencentDB." loading="lazy"></div>
-	<figcaption>Six-axis memory profiles, pooled over four runs per configuration, on a logarithmic scale. Lower harm is better. Figure from the paper.</figcaption>
-</figure>
-<p>The <a href="tutorial.html">Quickstart</a> produces the underlying profile statistics in <code>summary.md</code> and <code>summary.json</code>. The plots above are paper figures, not automatic CLI output.</p>
+<div id="paper-profiles" class="paper-profiles" hidden>
+	<div class="paper-profile-head"><p>Select a system to highlight it, or a point to compare that axis.</p><div class="radar-legend" role="group" aria-label="Highlight a memory system"></div></div>
+	<div class="radar-chart"></div>
+	<p class="paper-scale">Logarithmic scale · 0.001% at the center, 100% at the edge. Lower harm is better.</p>
+	<details><summary>View exact values</summary><div class="radar-values-wrap" tabindex="0" aria-label="Profile values"><table class="radar-values"></table></div></details>
+</div>
+<p id="profile-fallback" role="status" hidden></p>
+<noscript><p>Enable JavaScript to explore the profiles, or view the figures in the <a href="https://arxiv.org/pdf/2611.01718">paper PDF</a>.</p></noscript>
+<p>Compare verdicts, pass rates, and cost in the <a href="results.html">Results explorer</a>.</p>
 
 <h2 id="scope">Scope of these results</h2>
 <p>These findings describe the studied configurations on SWE-bench Verified. The paper supplied gold patches to the judge but withheld harness outcomes. Recorded attribution is an observational assessment; it does not establish a memory system’s causal effect on task success or its performance on other tasks.</p>
@@ -83,6 +95,11 @@
 </main>
 <aside class="toc" aria-label="On this page"></aside>
 </div>
+<dialog class="paper-profile-detail" aria-labelledby="profile-detail-title">
+	<form method="dialog"><button class="icon-btn" aria-label="Close axis comparison"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></form>
+	<div class="profile-detail-body"></div>
+</dialog>
 <script src="assets/site.js"></script>
+<script type="module" src="assets/paper.mjs"></script>
 </body>
 </html>

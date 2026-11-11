@@ -12,11 +12,13 @@ traj-recorder. It is plain HTML and CSS. It has no build step.
 | `assets/results-select.mjs` | Keyboard-accessible result selectors, styled to match the page. |
 | `assets/results.mjs` | Results UI. Pure filtering and sorting logic lives in `results-core.mjs`. |
 | `assets/results-radar.mjs` | Radar view of six-axis profiles on the paper's logarithmic scale. |
+| `assets/radar.css` | Shared profile-chart styles for the Results and Paper pages. |
+| `assets/paper.mjs` | Selectable case-study timelines and profile-axis comparisons. |
 | `assets/img/favicon.svg` | Browser tab icon for every page. |
 | `concepts.html` | How MemUse works: spans, credit windows, signals, and verdicts. |
 | `tutorial.html` | Evaluate a recording; optional instructions for creating one sample run. |
 | `build.html` | Choose an extension point and follow its repository tutorial; development and contribution checks. |
-| `paper.html` | Study scope, findings, figures, the collapsible paper abstract, and citation. |
+| `paper.html` | Study scope, findings, interactive cases and profiles, the paper abstract, and citation. |
 | `assets/site.js` | Product and docs headers, left navigation, search, tabs, and pager. Edit `NAV` to add a docs page. |
 | `assets/landing.js` | Memory-action playback and selectable delivery assessments. |
 | `assets/landing.css` | Full-width landing layout; shares fonts and theme tokens with the docs. |
@@ -52,7 +54,11 @@ Keep the landing page concise. Its case studies come from the paper. The inline 
 explains a memory trace and its assessment; it is a schematic, not a reported
 research result. Playback pauses on interaction and when off screen. Reduced
 motion preferences disable automatic playback; readers can still start it. Keep
-full methods, paper figures, and commands in the docs.
+full methods and commands in the docs. The Paper page redraws the case studies
+as selectable SVG timelines. Keep its milestones and step numbers aligned with
+Figure 4 and its caption. Do not infer actions for unmarked steps. Its profile
+chart uses `data/results.json` and the same radar component as the Results page;
+axis comparisons use a linear 0–100% scale. Keep the chart scales explicit.
 
 Give each topic one main home: verdict rules in `concepts.html`, commands in
 `tutorial.html`, and research results in `paper.html`. Link to that section when
@@ -63,7 +69,7 @@ metrics as missing values, and keep profile shares separate from verdict shares.
 
 Edit the HTML files, preview the site, and check local links and command examples
 before publishing. Keep commands and flags the same as the
-project READMEs and `uv run -m injudge --help`. Paper figures come from the
+project READMEs and `uv run -m injudge --help`. The remaining static figures come from the
 paper source (`fig/*.pdf`), exported as transparent RGBA PNGs at 2,400 pixels
 wide. Only the full-page white canvas fills are removed from export copies;
 the source PDFs, labels, plots, and colored panels remain unchanged. Figures

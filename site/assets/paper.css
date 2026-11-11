@@ -1,0 +1,92 @@
+/* Paper visuals reuse the docs card surface, label, and type scale. --pad is the one inner inset, so every card row shares a left edge. */
+.paper-note, .paper-scale { font-size: 13.5px; line-height: 1.55; color: var(--text-3); }
+.paper-case-card, .paper-profiles { --pad: 24px; border: 1px solid var(--line); border-radius: 16px; background: var(--bg-raised); }
+.paper-case-card { overflow: hidden; }
+.paper-case-heading { padding: 20px var(--pad) 0; }
+.paper-case-source { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 16px; margin: 0 0 6px; font-size: 13px; font-weight: 500; color: var(--accent); }
+.paper-case-source code { padding: 0; background: none; font-size: 12px; font-weight: 400; color: var(--text-3); }
+.paper-case-heading h3 { margin: 0 0 6px; text-wrap: balance; font: 400 22px/1.3 var(--serif); letter-spacing: -.01em; }
+.paper-case-heading > p:last-child { margin: 0; font-size: 14.5px; line-height: 1.6; }
+.paper-memory { display: flex; gap: 12px; margin: 16px var(--pad) 0; padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; background: color-mix(in srgb, var(--bg-raised) 50%, var(--bg-muted)); font-size: 14px; line-height: 1.6; }
+.paper-memory > svg { margin-top: 3px; color: var(--accent); }
+.paper-memory strong { font-size: 13px; font-weight: 500; color: var(--accent); }
+.paper-memory p { margin: 2px 0 0; overflow-wrap: anywhere; }
+
+/* The timeline scales with the card instead of scrolling; its 24-unit inset lands near --pad at every width. */
+.paper-timeline-wrap { margin-top: 8px; }
+.paper-timeline { display: block; width: 100%; height: auto; overflow: visible; font-family: var(--sans); }
+.paper-credit { fill: var(--accent-soft); }
+.paper-timeline-line { stroke: var(--line-strong); stroke-width: 2; }
+.paper-delivery-arrow { fill: none; stroke: var(--accent); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.paper-timeline-label { fill: var(--text-3); font-size: 11.5px; }
+.paper-step text { fill: var(--text-3); font-size: 12px; }
+.step-hit { fill: transparent; }
+.step-dot { fill: var(--bg-raised); stroke: var(--line-strong); stroke-width: 2; }
+.paper-step.has-evidence { cursor: pointer; outline: none; }
+.paper-step.has-evidence .step-dot { stroke: var(--text-3); }
+.paper-step.memory-action .step-dot { fill: var(--accent); stroke: var(--accent); }
+.paper-step[aria-pressed="true"] .step-hit { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1; }
+.paper-step[aria-pressed="true"] text { fill: var(--text); font-weight: 600; }
+.paper-step:hover .step-dot, .paper-step:focus-visible .step-hit { stroke: var(--accent); stroke-width: 3; }
+
+.paper-milestones { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; margin: 8px var(--pad) 0; padding: 4px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg-muted); }
+.paper-milestones button { min-width: 0; padding: 8px 6px; border: 0; border-radius: 8px; background: transparent; color: var(--text-2); cursor: pointer; font-size: 13px; line-height: 1.45; }
+.paper-milestones button span { display: block; font-size: 11.5px; color: var(--text-3); }
+.paper-milestones button:hover { background: var(--bg-hover); }
+.paper-milestones button[aria-pressed="true"] { background: var(--bg-raised); color: var(--text); font-weight: 500; box-shadow: 0 0 0 1px var(--line), 0 1px 3px rgba(0, 0, 0, .06); }
+.paper-milestones button:focus-visible { outline-offset: 1px; }
+
+/* All events share one grid cell; hidden copies reserve the tallest height, the live copy is what readers see and hear. */
+.paper-evidence { display: grid; padding: 18px var(--pad) 20px; }
+.paper-evidence > * { grid-area: 1 / 1; }
+.paper-evidence > [aria-hidden] { visibility: hidden; }
+.paper-evidence-step { font-size: 13px; font-weight: 500; }
+.paper-evidence h4 { margin: 2px 0 6px; font-size: 15.5px; font-weight: 600; line-height: 1.45; color: var(--text); }
+.paper-evidence p { margin: 0; font-size: 14.5px; line-height: 1.6; }
+
+.paper-case-result { display: grid; grid-template-columns: 1fr 1fr; padding: 14px var(--pad); border-top: 1px solid var(--line); background: color-mix(in srgb, var(--bg-raised) 50%, var(--bg-muted)); }
+.paper-case-result > div + div { padding-left: var(--pad); border-left: 1px solid var(--line); }
+.paper-case-result span { display: block; font-size: 13px; color: var(--text-3); }
+.paper-case-result strong { font: 400 20px/1.35 var(--serif); }
+.paper-good { color: var(--good); }
+.paper-bad { color: var(--bad); }
+
+.paper-profiles { margin: 0 0 24px; padding: 20px var(--pad) var(--pad); }
+.paper-profile-head > p { margin: 0 0 12px; font-size: 14.5px; }
+.paper-profiles .radar-chart { max-width: 560px; margin: 20px auto 0; }
+.paper-profiles .radar-tooltip { max-width: calc(100% - 8px); white-space: normal; }
+.paper-profiles .paper-scale { margin: 8px 0 20px; text-align: center; text-wrap: balance; }
+.paper-profiles details { margin: 0; }
+.paper-profiles .radar-values-wrap { padding: 4px 18px 8px; }
+.paper-profiles .radar-values { font-size: 13.5px; }
+.paper-profiles .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+.paper-profile-detail { width: min(460px, calc(100% - 32px)); max-height: calc(100dvh - 48px); padding: 24px; color: var(--text-2); background: var(--bg-raised); border: 1px solid var(--line); border-radius: 16px; box-shadow: 0 20px 60px rgba(0, 0, 0, .2); }
+.paper-profile-detail::backdrop { background: rgba(10, 10, 10, .35); }
+.paper-profile-detail form { float: right; margin: -8px -8px 0 12px; }
+.paper-profile-detail h2 { margin: 0 0 8px; font-size: 24px; }
+.paper-profile-detail p { font-size: 14.5px; line-height: 1.6; }
+.paper-axis-row { margin: 16px 0; }
+.paper-axis-row > div:first-child { display: flex; justify-content: space-between; gap: 12px; font-size: 14px; }
+.paper-axis-row.is-selected > div:first-child { color: var(--text); font-weight: 600; }
+.paper-axis-row strong { font-variant-numeric: tabular-nums; font-weight: 500; }
+.paper-axis-track { height: 6px; margin-top: 6px; overflow: hidden; border-radius: 3px; background: var(--bg-muted); }
+.paper-axis-track span { display: block; height: 100%; background: var(--c); }
+.paper-profile-detail .paper-note { margin: 20px 0 0; }
+
+@media (max-width: 600px) {
+	.paper-case-card, .paper-profiles { --pad: 16px; }
+	.paper-cases .tab-list { gap: 16px; }
+	.paper-cases .tab-list button { font-size: 13px; }
+	.paper-case-heading h3 { font-size: 20px; }
+	/* The SVG renders at about half size here; larger user-unit type keeps labels readable. */
+	.paper-timeline-label { font-size: 20px; }
+	.paper-step text { font-size: 21px; }
+	.step-dot { stroke-width: 3; }
+	.paper-milestones { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+	.paper-case-result strong { font-size: 18px; }
+}
+/* Below the width where both case labels fit on one line, they share it and wrap instead of scrolling out of view. */
+@media (max-width: 380px) {
+	.paper-cases .tab-list button { flex: 1 1 0; white-space: normal; text-align: left; line-height: 1.4; }
+}

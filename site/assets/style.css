@@ -315,6 +315,11 @@ figcaption { font-size: 14px; color: var(--text-3); margin-top: 10px; line-heigh
 @media (max-width: 420px) {
 	.paper-card { flex-direction: column; gap: 12px; }
 	.site-header .btn-dark span, .theme-btn { display: none; }
+	/* The logo already links home and the tab row links Results; dropping both keeps the bar within 320px without squeezing its buttons. */
+	.bar { gap: 8px; }
+	.logo { font-size: 19px; }
+	.bar .icon-btn, .search-btn { flex: none; }
+	.bar-link.home-link, .bar-link.results-link { display: none; }
 	.site-header .btn-dark { padding: 0 10px; }
 	.pager { flex-direction: column; }
 	.pager > span:empty { display: none; }
