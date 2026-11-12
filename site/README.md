@@ -50,9 +50,10 @@ site link on the repository page, add its URL to the repository’s **About** se
 
 ## Update the site
 
-Keep the landing page concise. Its case studies come from the paper. The inline SVG
-explains a memory trace and its assessment; it is a schematic, not a reported
-research result. Playback pauses on interaction and when off screen. Reduced
+Keep the landing page concise. Its case studies come from the paper. The memory graph
+demo explains a memory trace and its assessment; it is a schematic, not a reported
+research result. Its entrance animations replay when `landing.js` re-adds
+`.is-entering`; every other state is plain CSS keyed on the demo's attributes. Playback pauses on interaction and when off screen. Reduced
 motion preferences disable automatic playback; readers can still start it. Keep
 full methods and commands in the docs. The Paper page redraws the case studies
 as selectable SVG timelines. Keep its milestones and step numbers aligned with
