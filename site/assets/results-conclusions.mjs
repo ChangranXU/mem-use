@@ -50,9 +50,14 @@ export function conclusions(rows) {
 	const items = [];
 	const relate = (points, unit) => ({ ...spearman(points.map(point => [point.x, point.y])), unit });
 	const percent = value => value > 0 ? `${small(value)}%` : '0%';
+	// The text names the observed relation, so it cannot disagree with the coefficient beside it.
+	const related = (relation, pair) => { const { tone, label } = relationStrength(relation); return !Number.isFinite(relation.rho) ? [] : [`${pair} have ${tone === 'none' ? '' : 'a '}${label.toLowerCase()}.`]; };
+	const total = (row, key) => sum(row.run_metrics, run => run.relevant_use[key]);
+	// Joint entry counts give the unused share of relevant entries; a ratio of profile averages does not.
+	const use = runs.every(({ run }) => run.relevant_use?.relevant > 0 && run.relevant_use?.unused > 0 && Number.isFinite(run.relevant_use?.unused_novel));
+	const unused = use ? range(memory.map(row => 100 * total(row, 'unused') / total(row, 'relevant')), share) : null;
 	// Task outcomes and delivery volume are retained per run; a cohort without them keeps the profile conclusions.
 	const outcomes = memory.every(row => row.run_metrics.every(run => run.beneficial_use && Number.isFinite(run.passed)));
-	const helped = row => sum(row.run_metrics, run => run.beneficial_use.episodes) / row.episodes;
 	const passRate = (row, run) => 100 * run.passed / row.tasks_per_run;
 
 	// 1: what arrives against what helps. Benefit requires use, so use against benefit
@@ -60,12 +65,14 @@ export function conclusions(rows) {
 	if (windows.length) {
 		const points = windows.map(({ row, part, name }) => ({ series: row.id, x: part.profile.relevance, y: part.profile.benefit, name }));
 		const values = points.flatMap(point => [point.x, point.y]), tick = value => value ? `${trim(value)}%` : '0';
-		items.push({ id: 'relevance-benefit', short: 'Relevance and action', relation: relate(points, 'task windows'),
+		const relation = relate(points, 'task windows');
+		items.push({ id: 'relevance-benefit', short: 'Relevance and action', relation,
 			title: 'Relevant memory does not always lead to action.',
-			body: ['Across task windows, higher relevance is linked to more beneficial use.',
-				'Yet the agent acts on only a small share of delivered entries. A match to the task does not guarantee useful action.'],
-			summary: 'A benchmark based only on recall cannot fully evaluate agent memory.',
-			stats: [...(outcomes ? [[range(memory.map(row => 100 * helped(row)), value => share(value, 1)), 'of episodes have a benefit']] : []),
+			body: [...related(relation, 'Across task windows, relevance and benefit'),
+				'But the agent acts on only a small share of the delivered entries.',
+				'Relevance to the task does not guarantee useful action.'],
+			summary: 'A benchmark that measures only retrieval cannot fully evaluate agent memory.',
+			stats: [...(unused ? [[unused, 'of relevant entries go unused']] : []),
 				[range(memory.map(row => row.acted_on), value => share(value, 1)), 'of delivered entries lead to action']],
 			figure: { type: 'scatter', points, guides: [{ ratio: 1, label: 'Each relevant entry gives a benefit' }],
 				x: logAxis('Relevance', '% of entries', values, percent, tick), y: logAxis('Benefit', '% of entries', values, percent, tick) },
@@ -79,17 +86,19 @@ export function conclusions(rows) {
 	const low = Math.floor(Math.min(...rates)) - 1, high = Math.ceil(Math.max(...rates)) + 1;
 	const passAxis = () => linearAxis('Pass rate', '% of tasks', low, high, Array.from({ length: Math.floor((high - low) / 2) + 1 }, (_, index) => low + 2 * index), value => share(value, 1), value => `${trim(value)}%`);
 	const band = reference.length > 1 ? { from: Math.min(...reference), to: Math.max(...reference), label: `No-memory runs: ${range(reference, value => share(value, 1))}` } : null;
-	if (scored.length > 2) {
+	const episodes = sum(scored, ({ run }) => run.beneficial_use.episodes), passed = sum(scored, ({ run }) => run.beneficial_use.passed);
+	// The statement needs an episode with a benefit that the run did not resolve.
+	if (scored.length > 2 && passed < episodes) {
 		const points = scored.map(({ row, run, name }) => ({ series: row.id, x: 100 * run.beneficial_use.episodes / row.tasks_per_run, y: passRate(row, run), name }));
-		const episodes = sum(scored, ({ run }) => run.beneficial_use.episodes), passed = sum(scored, ({ run }) => run.beneficial_use.passed), top = axis(Math.max(...points.map(point => point.x)));
-		const same = baseline ? 100 * sum(scored, ({ run }) => run.beneficial_use.baseline_passed) / (episodes * baseline.run_metrics.length) : null;
-		items.push({ id: 'use-outcome', short: 'Benefit and task success', relation: relate(points, 'runs'),
+		const top = axis(Math.max(...points.map(point => point.x))), relation = relate(points, 'runs');
+		const same = baseline ? 100 - 100 * sum(scored, ({ run }) => run.beneficial_use.baseline_passed) / (episodes * baseline.run_metrics.length) : null;
+		items.push({ id: 'use-outcome', short: 'Benefit and task success', relation,
 			title: 'Useful memory does not guarantee task success.',
-			body: ['Memory helped the agent make progress on tasks that still failed.',
-				'Beneficial use and pass rate were only weakly related across runs.',
+			body: ['In some episodes, memory helps the agent, but the task still fails.',
+				...related(relation, 'Across runs, beneficial use and pass rate'),
 				'Measure memory use and task success separately.'],
-			summary: 'A benchmark based only on task pass rate cannot fully evaluate agent memory.',
-			stats: [[share(100 * passed / episodes, 1), 'pass rate of episodes with a benefit'], ...(same === null ? [] : [[share(same, 1), 'no-memory pass rate on the same tasks']])],
+			summary: 'A benchmark that measures only the task pass rate cannot fully evaluate agent memory.',
+			stats: [[share(100 - 100 * passed / episodes, 1), 'of episodes with a benefit still fail'], ...(same === null ? [] : [[share(same, 1), 'of no-memory attempts at the same tasks fail']])],
 			figure: { type: 'scatter', band, points, y: passAxis(),
 				x: linearAxis('Episodes with a benefit', '% of episodes', 0, top.top, top.ticks, value => share(value, 1), value => `${trim(value)}%`) },
 			caption: `Each point is one run of ${count(memory[0].tasks_per_run)} tasks. The pass-rate axis starts at ${low}%.` });
@@ -98,7 +107,7 @@ export function conclusions(rows) {
 	const groups = memory.map(row => {
 		const tokens = formBreakdown(row, 'cost'), positive = formBreakdown(row, 'positive');
 		if (!tokens || !positive) return null;
-		const forms = tokens.parts.filter(part => part.key !== 'other').map(part => ({ label: part.label, route: part.route,
+		const forms = tokens.parts.filter(part => part.key !== 'other').map(part => ({ label: part.label, route: part.route, copy: part.key === 'copy',
 			tokens: 100 * part.share, benefit: 100 * (positive.parts.find(other => other.key === part.key)?.share || 0) }))
 			.filter(form => form.tokens >= .1 || form.benefit > 0).sort((a, b) => b.benefit - a.benefit);
 		return forms.length > 1 ? { row, forms } : null;
@@ -109,29 +118,28 @@ export function conclusions(rows) {
 		const most = range(top.map(form => form.benefit), share), cost = range(top.map(form => form.tokens), share);
 		items.push({ id: 'form-benefit', short: 'Benefit by memory form', headline: [most, `of positive verdicts, from forms using ${cost} of the tokens`],
 			chip: 'Concentration', title: 'Most benefit comes from a small share of the text.',
-			body: ['In systems with multiple memory forms, most positive verdicts come from a small part of the delivered text.',
+			body: ['In systems with more than one memory form, most positive verdicts come from a small part of the delivered text.',
 				`The leading forms are ${names(top)}.`,
-				'Previews and catalogs can guide the agent to full content. Low direct benefit does not mean they are unnecessary.'],
-			summary: 'The format of memory content matters.',
+				'Previews and catalogs can guide the agent to full content. A low direct benefit does not mean that they are unnecessary.'],
+			summary: 'Memory form matters. More text does not mean more benefit.',
 			stats: [[most, 'of positive verdicts, from the leading form'], [cost, 'of delivered tokens, from that form']],
 			figure: { type: 'dumbbell', groups },
-			caption: 'Each row is one delivered form, with the most beneficial form first. Systems with one form are not shown.' });
+			caption: `Each row is one delivered form, with the most beneficial form first.${groups.some(group => group.forms.some(form => form.copy)) ? ' A copy of a visible entry is neutral by rule, so it has no positive verdicts.' : ''} Systems with one form are not shown.` });
 	}
 
 	// 4: new information among unused relevant entries motivates processing after
 	// retrieval. The reports do not test whether that intervention improves use.
-	if (runs.every(({ run }) => run.relevant_use?.relevant > 0 && run.relevant_use?.unused > 0 && Number.isFinite(run.relevant_use?.unused_novel))) {
-		const total = (row, key) => sum(row.run_metrics, run => run.relevant_use[key]);
+	if (use) {
 		const bars = memory.map(row => ({ row, value: 100 * total(row, 'unused_novel') / total(row, 'unused'),
 			runs: row.run_metrics.map(run => 100 * run.relevant_use.unused_novel / run.relevant_use.unused) })).sort((a, b) => a.value - b.value);
 		const novel = range(bars.map(bar => bar.value), share);
 		items.push({ id: 'retrieval-use', short: 'From retrieval to action', headline: [novel, 'of unused, relevant entries contain new information'],
 			chip: 'Design priority', title: 'Turn retrieved memory into guidance for the current task.',
-			body: ['Relevant memories often remain unused, even when they add new information.',
-				'Remove unrelated and repeated content. Turn useful details into a check, procedure, or next action for the current task.',
-				'Test whether the agent acts on that guidance.'],
-			summary: 'Make useful action the goal of memory design.',
-			stats: [[range(memory.map(row => 100 * total(row, 'unused') / total(row, 'relevant')), share), 'of relevant entries go unused'],
+			body: ['Relevant entries often remain unused, even when they contain new information.',
+				'Remove unrelated and repeated content. Turn useful details into a check, a procedure, or the next action for the current task.',
+				'Then test whether the agent acts on that guidance.'],
+			summary: 'Make useful action, not only retrieval, the goal of memory design.',
+			stats: [[unused, 'of relevant entries go unused'],
 				[novel, 'of unused, relevant entries contain new information']],
 			figure: { type: 'bars', bars, top: 100, ticks: [0, 25, 50, 75, 100], format: value => share(value, 1), tick: share },
 			caption: 'Bars show the share of unused, relevant entries that contain new information. Dots show individual runs. This evidence suggests a design priority; it does not test the proposed change.' });
@@ -217,8 +225,8 @@ export function conclusionsView(rows, escape) {
 	const body = items.map(item => `<li class="conclusion tone-${item.tone}" id="conclusion-${item.id}">
 		<div class="conclusion-text"><p class="conclusion-kicker"><span class="conclusion-number">${item.number}</span><span class="relation-chip">${escape(item.chip)}</span>${item.relation ? `<span class="relation-rho">ρ = ${signed(item.relation.rho)} · ${count(item.relation.n)} ${escape(item.relation.unit)}</span>` : ''}</p>
 			<h3>${escape(item.title)}</h3>${item.body.map(text => `<p>${escape(text)}</p>`).join('')}
-			<dl class="conclusion-stats">${item.stats.map(([value, label]) => `<div><dt>${escape(value)}</dt><dd>${escape(label)}</dd></div>`).join('')}</dl>
-			<p class="conclusion-summary"><svg class="conclusion-summary-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M9 18h6M9 21h6M8.1 14.2a6 6 0 1 1 7.8 0C14.7 15.2 14 16.3 14 18h-4c0-1.7-.7-2.8-1.9-3.8Z"/></svg><span>${escape(item.summary)}</span></p></div>
+			<dl class="conclusion-stats">${item.stats.map(([value, label], slot) => `<div style="--i:${slot}"><dt>${escape(value)}</dt><dd>${escape(label)}</dd></div>`).join('')}</dl>
+			<p class="conclusion-summary"><svg class="conclusion-summary-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M9 18h6M9 21h6M8.1 14.2a6 6 0 1 1 7.8 0C14.7 15.2 14 16.3 14 18h-4c0-1.7-.7-2.8-1.9-3.8Z"/></svg><span><span class="sr-only">Takeaway: </span>${escape(item.summary)}</span></p></div>
 		<figure class="conclusion-figure" aria-label="${escape(`Evidence: ${item.title}`)}">${figure(item)}<figcaption>${escape(item.caption)}</figcaption>${item.figure.type === 'scatter' ? valueTable(item.figure, series, item.relation, escape) : ''}</figure>
 	</li>`).join('');
 	const numbers = ['', 'One conclusion', 'Two conclusions', 'Three conclusions', 'Four conclusions'];

@@ -35,7 +35,8 @@ html:has(.conclusions-view:not([hidden])) { scroll-padding-top: 0; }
 .results-page .conclusion h3, .results-page .conclusion-summary { margin: 0 0 14px; color: var(--text); font: 400 clamp(24px, 2.4vw, 30px)/1.22 var(--serif); letter-spacing: -.025em; text-wrap: balance; }
 .results-page .conclusion-text > p:not(.conclusion-kicker, .conclusion-summary) { max-width: 46ch; margin: 0 0 8px; font-size: 15px; line-height: 1.6; color: var(--text-2); }
 .results-page .conclusion-summary { display: flex; align-items: flex-start; gap: 12px; margin: 22px 0 0; padding-top: 18px; border-top: 1px solid var(--line); }
-.conclusion-summary-icon { flex: none; width: .85em; height: .85em; margin-top: .15em; color: var(--use); }
+.conclusion-summary-icon { flex: none; width: .85em; height: .85em; margin-top: .15em; color: var(--use); transition: scale .2s, filter .2s; }
+.conclusion-summary:hover .conclusion-summary-icon { scale: 1.1; filter: drop-shadow(0 0 5px color-mix(in srgb, var(--use) 60%, transparent)); }
 .conclusion-stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px 24px; margin: 22px 0 0; padding-top: 18px; border-top: 1px solid var(--line); }
 .conclusion-stats dt { color: var(--text); font: 400 26px/1.15 var(--serif); letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
 .conclusion-stats dd { margin: 4px 0 0; font-size: 12px; line-height: 1.5; color: var(--text-3); }
@@ -127,11 +128,16 @@ html:has(.conclusions-view:not([hidden])) { scroll-padding-top: 0; }
 /* The head and index enter with the view. Each chart waits until it scrolls into
    view, then draws in reading order: points from left to right, then the guides. */
 @keyframes dot-pop { from { opacity: 0; scale: 0; } }
+@keyframes lamp-on { from { color: var(--text-3); scale: .8; } 55% { scale: 1.12; filter: drop-shadow(0 0 6px color-mix(in srgb, var(--use) 70%, transparent)); } }
 .is-entering .conclusions-head { animation: profile-rise .4s ease-out both; }
 .is-entering .index-card { animation: profile-rise .4s ease-out calc(80ms + var(--i) * 50ms) both; }
 .is-entering .index-meter i { animation: profile-grow .7s cubic-bezier(.2, .8, .2, 1) calc(320ms + var(--i) * 50ms) both; }
 .is-armed .conclusion:not(.is-shown) :is(.conclusion-text, .scatter-plot :is(.dot, svg, .scatter-band), .dumbbell-track > i, .bars-track > i) { opacity: 0; }
 .conclusion.is-shown .conclusion-text { animation: profile-rise .5s ease-out backwards; }
+/* The text column reads in order: statement, then its numbers, then the takeaway, whose lamp comes on last. */
+.conclusion.is-shown .conclusion-stats > div { animation: profile-rise .45s ease-out calc(260ms + var(--i) * 90ms) backwards; }
+.conclusion.is-shown .conclusion-summary { animation: profile-rise .5s ease-out .55s backwards; }
+.conclusion.is-shown .conclusion-summary-icon { animation: lamp-on .9s ease-out .95s backwards; }
 .conclusion.is-shown .scatter-plot .dot { animation: dot-pop .5s cubic-bezier(.2, .8, .2, 1) calc(120ms + var(--d) * 700ms) backwards; }
 .conclusion.is-shown .scatter-band { animation: results-fade .5s ease-out .1s backwards; }
 .conclusion.is-shown .scatter-plot svg { animation: profile-wipe .9s cubic-bezier(.2, .8, .2, 1) .6s backwards; }

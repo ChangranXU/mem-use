@@ -2,9 +2,105 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
-import { COLUMNS, DEFAULT_COLUMNS, VERDICTS, PROFILE_AXES, prepareRows, filterRows, sortRows, formatValue, formBreakdown, radarRadius, relation, runSummary, taskSeries, profileSelection } from '../assets/results-core.mjs';
+import { COLUMNS, DEFAULT_COLUMNS, VERDICTS, PROFILE_AXES, prepareRows, filterRows, sortRows, formatValue, formBreakdown, radarRadius, relation, runSummary, taskSeries, profileSelection, coverageSummary, formProfileSummary, metricValue } from '../assets/results-core.mjs';
 const dataset = JSON.parse(readFileSync(new URL('../data/results.json', import.meta.url)));
 const rows = prepareRows(dataset.rows);
+
+test('coverage and delivery yield average run ratios and preserve missing or zero denominators', () => {
+	const row = { tasks_per_run: 10, run_metrics: [
+		{ beneficial_use: { episodes: 2 }, beneficial_entries: 4, delivered_chars: 1000 },
+		{ beneficial_use: { episodes: 0 }, beneficial_entries: 0, delivered_chars: 9000 },
+		{},
+	] };
+	assert.deepEqual(coverageSummary(row, 'benefit_coverage'), { mean: 10, std: Math.sqrt(200), count: 2 });
+	assert.deepEqual(coverageSummary(row, 'delivery_yield'), { mean: 2000, std: Math.sqrt(8000000), count: 2 });
+	assert.equal(coverageSummary({ ...row, tasks_per_run: 0 }, 'benefit_coverage').mean, null);
+	assert.equal(coverageSummary({ run_metrics: [{ beneficial_entries: 0, delivered_chars: 0 }] }, 'delivery_yield').mean, null);
+	assert.equal(coverageSummary(rows.find(row => !row.profile), 'benefit_coverage').mean, null);
+});
+
+test('new table metrics agree with profile values across every configuration and sort numerically', async () => {
+	const { profileFlow } = await import('../assets/results-profile.mjs');
+	for (const row of rows.filter(row => row.profile)) for (const key of ['benefit_coverage', 'delivery_yield']) {
+		assert.equal(row[key], coverageSummary(row, key).mean);
+		const formatted = metricValue(row[key], key);
+		assert.ok(formatValue(row[key], COLUMNS.find(column => column.key === key), row).startsWith(formatted));
+		assert.ok(profileFlow(row, null, String).includes(`<strong>${formatted}</strong>`));
+	}
+	assert.equal(sortRows(rows, 'benefit_coverage', 'desc')[0].memory_system, 'TencentDB');
+	assert.equal(sortRows(rows, 'delivery_yield', 'desc')[0].memory_system, 'MemGovern');
+	assert.equal(sortRows(rows, 'delivery_yield', 'asc').at(-1).memory_system, 'No memory');
+});
+
+test('coverage charts label units, identify both systems, and do not cap delivery yield at 100', async () => {
+	const { profileFlow } = await import('../assets/results-profile.mjs');
+	const base = rows.find(row => row.profile);
+	const high = { ...base, run_metrics: [{ beneficial_entries: 2, delivered_chars: 1000, beneficial_use: { episodes: 1 } }] };
+	const html = profileFlow(high, base, String);
+	assert.ok(html.includes('beneficial entries / 1M delivered characters'));
+	assert.ok(html.includes('Whiskers: ± one SD across runs'));
+	assert.ok(html.includes('data-mark="delivery_yield-0" style="width:100%"'));
+	assert.ok(html.includes('>2000</span>'));
+	assert.ok(html.includes('class="key-system is-a"') && html.includes('class="key-system is-b"'));
+	for (const key of ['benefit_coverage', 'delivery_yield']) {
+		assert.ok(COLUMNS.find(column => column.key === key).label.length <= 18);
+	}
+});
+
+test('comparison choices exclude the primary and update after a swap or primary change', async () => {
+	const { comparisonRows } = await import('../assets/results-core.mjs');
+	const memory = rows.filter(row => row.profile), [a, b] = memory;
+	assert.ok(!comparisonRows(memory, a.id).some(row => row.id === a.id));
+	assert.ok(comparisonRows(memory, a.id).some(row => row.id === b.id));
+	assert.ok(comparisonRows(memory, b.id).some(row => row.id === a.id));
+	assert.equal(comparisonRows(memory, b.id).find(row => row.id === b.id), undefined);
+	const only = profileSelection(comparisonRows([a], a.id));
+	assert.equal(only.row, null);
+	assert.deepEqual(only.choices.memory_system, []);
+});
+
+test('within-form summaries include observed zeros, omit absent forms, and weight runs equally', () => {
+	const row = { forms: { items: [{ key: 'full', label: 'Full', route: 'A' }, { key: 'copy', label: 'Copy' }] }, run_metrics: [
+		{ form_profiles: { full: { profiled_spans: 1, benefit: 100 } } },
+		{ form_profiles: { full: { profiled_spans: 9, benefit: 0 } } }, {},
+	] };
+	assert.deepEqual(formProfileSummary(row), [{ key: 'full', label: 'Full', route: 'Agent-directed', mean: 50, std: Math.sqrt(5000), count: 2, spans: 10 }]);
+	for (const row of rows.filter(row => row.profile)) {
+		assert.ok(formProfileSummary(row).length);
+		for (const run of row.run_metrics) for (const form of Object.values(run.form_profiles)) {
+			assert.ok(form.profiled_spans > 0 && form.profiled_spans <= run.profiled_spans);
+			assert.ok(form.benefit >= 0 && form.benefit <= 100);
+		}
+	}
+	const single = rows.find(row => row.memory_system === 'MemoraX');
+	assert.ok(Math.abs(formProfileSummary(single)[0].mean - runSummary(single, 'benefit').mean) < 1e-10);
+});
+
+test('the benefit card shows each form on its own entries, and only there', async () => {
+	const { detailContent } = await import('../assets/results-detail.mjs');
+	const { percent, deviation } = await import('../assets/results-profile.mjs');
+	const row = rows.find(row => row.id === 'swe-memgovern'), card = formProfileSummary(row).find(form => form.key === 'full_card');
+	const html = detailContent(row, null, 'benefit', String, true);
+	assert.ok(html.includes('<th scope="col">Within form</th>'));
+	assert.ok(html.includes(`<td class="form-own">${percent(card.mean)} <small>${deviation(card.std)}</small></td>`));
+	for (const key of ['harm', 'relevance', 'positive', 'cost']) assert.ok(!detailContent(row, null, key, String, true).includes('Within form'));
+	// Automatic copies are never assessed, so they have no rate of their own.
+	const copies = { ...row, forms: { ...row.forms, items: [...row.forms.items, { key: 'copy', label: 'Copy', route: 'H, A' }], profile: { ...row.forms.profile, benefit: { ...row.forms.profile.benefit, copy: 1 } } } };
+	assert.ok(detailContent(copies, null, 'benefit', String, true).includes('<td class="form-own">—</td>'));
+});
+
+test('coverage details expose actual denominators and escape system and run labels', async () => {
+	const { detailContent } = await import('../assets/results-detail.mjs');
+	const escape = value => String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('"', '&quot;');
+	const row = rows.find(row => row.profile);
+	const hostile = { ...row, memory_system: '<script>system', run_metrics: row.run_metrics.map(run => ({ ...run, run: '<b>run' })) };
+	for (const key of ['benefit_coverage', 'delivery_yield']) {
+		const html = detailContent(hostile, row, key, escape);
+		assert.ok(!html.includes('<script>') && !html.includes('<b>run'));
+		assert.ok(html.includes('not a confidence interval'));
+		assert.ok(html.includes(key === 'benefit_coverage' ? 'All episodes' : 'Delivered characters'));
+	}
+});
 
 test('every view switch returns to the top and removes the previous view anchor', () => {
 	// Exercise the navigation controller without loading the page's unrelated DOM.
@@ -239,8 +335,8 @@ test('profile leads with verdicts, keeps every metric once, and draws run means 
 	const order = ['positive', 'negative', 'unresolved', 'neutral', 'relevance', 'corroboration', 'information_gain', 'acted_on', 'benefit', 'harm'];
 	const verdicts = order.slice(0, 4), axes = order.slice(4);
 	const cells = [...html.matchAll(/<button[^>]+data-row="([^"]+)" data-detail="(\w+)"[\s\S]*?<\/button>/g)];
-	assert.deepEqual(cells.map(cell => cell[2]), order);
-	for (const [button, id, key] of cells) {
+	assert.deepEqual(cells.map(cell => cell[2]), [...order, 'benefit_coverage', 'delivery_yield']);
+	for (const [button, id, key] of cells.filter(cell => order.includes(cell[2]))) {
 		assert.equal(id, row.id);
 		assert.ok(button.includes(`<strong>${percent(runSummary(row, key).mean)}</strong>`), key);
 	}
@@ -436,7 +532,7 @@ test('profile focus highlights related metrics and explains their relationship, 
 	assert.ok(cells.find(cell => cell.dataset.detail === 'benefit').classes.has('is-paired'));
 	listeners.focusout({ relatedTarget: repositoryLink });
 	assert.ok(cells.every(element => element.classes.size === 0));
-	assert.equal(hint.textContent, 'Select any metric for its meaning and memory-form breakdown.');
+	assert.equal(hint.textContent, 'Select any metric for its meaning and details.');
 });
 
 test('comparison details show each system’s own values, population, counterpart, and forms', async () => {
@@ -703,7 +799,9 @@ test('rank correlation shares tied ranks, drops missing pairs, and needs spread 
 	// More points cannot turn an observed strength label into a significance claim.
 	assert.deepEqual(relationStrength({ rho: .3, n: 20 }), relationStrength({ rho: .3, n: 400 }));
 	assert.deepEqual(relationStrength({ rho: .3, n: 400 }), { tone: 'positive', label: 'Weak positive relation' });
-	assert.deepEqual(relationStrength({ rho: 0, n: 20 }), { tone: 'none', label: 'No rank relation' });
+	assert.deepEqual(relationStrength({ rho: 0, n: 20 }), { tone: 'none', label: 'No clear relation' });
+	// Below 0.2 a label gives no direction: the sign of such a coefficient is not stable.
+	assert.deepEqual([.19, -.19, .2].map(rho => relationStrength({ rho }).label), ['No clear relation', 'No clear relation', 'Weak positive relation']);
 	assert.deepEqual(relationStrength({ rho: -.81, n: 20 }), { tone: 'negative', label: 'Strong negative relation' });
 	assert.equal(relationStrength({ rho: 1, n: 5 }).tone, 'positive');
 	assert.equal(relationStrength({ rho: null, n: 2 }).label, 'Not available');
@@ -736,24 +834,36 @@ test('conclusions are computed from the rows and name the kind of each relation'
 	const items = conclusions(rows);
 	assert.deepEqual(items.map(item => [item.number, item.id, item.tone, item.chip]), [
 		[1, 'relevance-benefit', 'positive', 'Moderate positive relation'],
-		[2, 'use-outcome', 'positive', 'Weak positive relation'],
+		[2, 'use-outcome', 'none', 'No clear relation'],
 		[3, 'form-benefit', 'plain', 'Concentration'],
 		[4, 'retrieval-use', 'plain', 'Design priority'],
 	]);
 	const by = Object.fromEntries(items.map(item => [item.id, item]));
 	assert.deepEqual(['relevance-benefit', 'use-outcome'].map(id => [by[id].relation.rho.toFixed(2), by[id].relation.n]), [['0.52', 400], ['0.11', 20]]);
 	assert.deepEqual(by['relevance-benefit'].headline, ['ρ = +0.52', 'Moderate positive relation']);
-	// Marginal span shares are not conditional probabilities of use given relevance.
-	assert.deepEqual(by['relevance-benefit'].stats, [['1.9–7.0%', 'of episodes have a benefit'], ['0.4–4.1%', 'of delivered entries lead to action']]);
+	// The unused share uses joint entry counts; a ratio of marginal span shares is not a conditional rate.
+	assert.deepEqual(by['relevance-benefit'].stats, [['51–80%', 'of relevant entries go unused'], ['0.4–4.1%', 'of delivered entries lead to action']]);
+	// A relation sentence repeats the computed strength, never a handwritten one.
+	assert.equal(by['relevance-benefit'].body[0], 'Across task windows, relevance and benefit have a moderate positive relation.');
+	assert.equal(by['use-outcome'].body[1], 'Across runs, beneficial use and pass rate have no clear relation.');
+	// Takeaways use the page's terms: retrieval, pass rate, memory form, and action.
+	assert.deepEqual(items.map(item => item.summary), [
+		'A benchmark that measures only retrieval cannot fully evaluate agent memory.',
+		'A benchmark that measures only the task pass rate cannot fully evaluate agent memory.',
+		'Memory form matters. More text does not mean more benefit.',
+		'Make useful action, not only retrieval, the goal of memory design.',
+	]);
 	assert.deepEqual(by['form-benefit'].headline, ['72–96%', 'of positive verdicts, from forms using 2–13% of the tokens']);
 	assert.deepEqual(by['form-benefit'].stats.map(stat => stat[0]), ['72–96%', '2–13%']);
 	// Each system lists its most beneficial form first; the text names those forms and the largest ones.
 	assert.deepEqual(by['form-benefit'].figure.groups.map(group => [group.row.id, group.forms.length, group.forms[0].label]),
 		[['swe-memgovern', 2, 'Full card'], ['swe-mem0-local-global', 3, 'Task recall'], ['swe-mem0-local', 3, 'Task recall'], ['swe-tencentdb', 6, 'Full skill']]);
 	assert.ok(by['form-benefit'].body.includes('The leading forms are Full card, Task recall, and Full skill.'));
-	// 323 of 422 beneficial-use episodes passed; four no-memory runs passed 1,260 of those 1,688 attempts.
-	assert.deepEqual(by['use-outcome'].stats.map(stat => stat[0]), ['76.5%', '74.6%']);
-	assert.ok(by['use-outcome'].body.includes('Memory helped the agent make progress on tasks that still failed.'));
+	// 99 of 422 beneficial-use episodes failed; four no-memory runs failed 428 of those 1,688 attempts.
+	assert.deepEqual(by['use-outcome'].stats, [['23.5%', 'of episodes with a benefit still fail'], ['25.4%', 'of no-memory attempts at the same tasks fail']]);
+	assert.ok(by['use-outcome'].body.includes('In some episodes, memory helps the agent, but the task still fails.'));
+	// Copies are neutral by rule, so the caption says why their rows have no positive verdicts.
+	assert.ok(by['form-benefit'].caption.includes('A copy of a visible entry is neutral by rule'));
 	assert.deepEqual(by['use-outcome'].figure.band, { from: 71.8, to: 75, label: 'No-memory runs: 71.8–75.0%' });
 	// Conditional shares use entry counts, pooled across runs; dots use each run's counts.
 	const retrieval = by['retrieval-use'];
@@ -788,7 +898,7 @@ test('conclusions leave out what the rows cannot support instead of assuming it'
 	const alone = conclusions(memory);
 	assert.deepEqual(ids(alone), ['relevance-benefit', 'use-outcome', 'form-benefit', 'retrieval-use']);
 	assert.equal(alone[1].figure.band, null);
-	assert.deepEqual(alone[1].stats.map(stat => stat[0]), ['76.5%']);
+	assert.deepEqual(alone[1].stats.map(stat => stat[0]), ['23.5%']);
 	// Rows without retained outcomes keep the profile conclusions, without the outcome readings.
 	const bare = conclusions(memory.map(row => ({ ...row, run_metrics: row.run_metrics.map(({ passed, delivered_tokens, beneficial_entries, beneficial_use, relevant_use, ...run }) => run) })));
 	assert.deepEqual(ids(bare), ['relevance-benefit', 'form-benefit']);
@@ -799,6 +909,12 @@ test('conclusions leave out what the rows cannot support instead of assuming it'
 	incomplete[0].run_metrics[0].relevant_use = { relevant: 0, unused: 0, unused_novel: 0 };
 	assert.ok(!ids(conclusions(incomplete)).includes('retrieval-use'));
 	assert.deepEqual(bare.map(item => item.stats.length), [1, 2]);
+	// Without a failed episode among those with a benefit, the outcome statement has no evidence.
+	const resolved = conclusions(rows.map(row => row.profile ? { ...row, run_metrics: row.run_metrics.map(run => ({ ...run, beneficial_use: { ...run.beneficial_use, passed: run.beneficial_use.episodes } })) } : row));
+	assert.ok(!ids(resolved).includes('use-outcome'));
+	// A cohort without a rank relation gets no relation sentence.
+	const flat = conclusions(memory.map(row => ({ ...row, run_metrics: row.run_metrics.map(run => ({ ...run, windows: run.windows.map(part => ({ ...part, profile: { ...part.profile, benefit: 0 } })) })) })));
+	assert.deepEqual(flat[0].body, ['But the agent acts on only a small share of the delivered entries.', 'Relevance to the task does not guarantee useful action.']);
 	assert.deepEqual(conclusions(rows.filter(row => !row.profile)), []);
 	assert.equal(conclusionsView([], String), '');
 });
@@ -816,6 +932,7 @@ test('conclusions view links each summary card to its evidence and escapes row t
 	assert.equal(html.match(/class="bars-run" style/g).length, 20);
 	assert.equal(html.match(/class="dumbbell-row/g).length, 14);
 	assert.match(html, /Four conclusions from 5 memory configurations and 10,000 episodes\./);
+	assert.equal(html.match(/<span class="sr-only">Takeaway: <\/span>/g).length, 4);
 	const unsafe = rows.map(row => ({ ...row, id: `${row.id}"x`, memory_system: `<img src=x>${row.memory_system}` }));
 	const escaped = conclusionsView(unsafe, escape);
 	assert.ok(!escaped.includes('<img') && !escaped.includes('"x"'));

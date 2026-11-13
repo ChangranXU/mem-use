@@ -1,4 +1,8 @@
 export const VERDICTS = ['positive', 'negative', 'neutral', 'unresolved'];
+export const COVERAGE_METRICS = [
+	{ key: 'benefit_coverage', label: 'Benefit coverage', type: 'percent', description: 'Episodes with at least one beneficial entry / all episodes.' },
+	{ key: 'delivery_yield', label: 'Delivery yield', type: 'number', description: 'Beneficial entries per million characters of delivered memory text.' },
+].map(column => ({ ...column, group: 'Coverage and delivery' }));
 export const COLUMNS = [
 	{ key: 'memory_system', label: 'Memory system', group: 'Configuration', type: 'text' },
 	{ key: 'harness', label: 'Harness', group: 'Configuration', type: 'text' },
@@ -16,6 +20,7 @@ export const COLUMNS = [
 		['benefit', 'Benefit', 'Acted on, with observed benefit.'],
 		['harm', 'Harm', 'Acted on, with observed harm.'],
 	].map(([key, label, description]) => ({ key, label, description, group: 'Six-axis profile', type: 'percent' })),
+	...COVERAGE_METRICS,
 	{ key: 'model', label: 'Model', group: 'Configuration', type: 'text' },
 	{ key: 'thinking_effort', label: 'Thinking effort', group: 'Configuration', type: 'text' },
 	{ key: 'benchmark', label: 'Benchmark', group: 'Configuration', type: 'text' },
@@ -35,6 +40,8 @@ const RELATIONS = {
 	acted_on: 'Established use, whether its effect is known or unknown.',
 	benefit: 'Any helpful entry makes the span positive, unless one harmed.',
 	harm: 'Any harmful entry makes the span negative.',
+	benefit_coverage: 'Counts each episode with observed benefit once, including episodes with no delivery in the denominator.',
+	delivery_yield: 'Counts beneficial entries against all recorded characters of delivered memory text, including repeated and empty deliveries.',
 };
 const DELIVERY = 'Describes what arrived; it never decides a verdict.';
 export function relation(key) {
@@ -73,6 +80,7 @@ export function prepareRows(rows) {
 	return rows.map(row => {
 		const verdictTotal = row.verdicts ? VERDICTS.reduce((sum, key) => sum + row.verdicts[key], 0) : 0;
 		return { ...row, ...row.profile, verdict_total: verdictTotal,
+			...Object.fromEntries(COVERAGE_METRICS.map(({ key }) => [key, coverageSummary(row, key).mean])),
 			...Object.fromEntries(VERDICTS.map(key => [key, verdictTotal ? 100 * row.verdicts[key] / verdictTotal : null])) };
 	});
 }
@@ -97,6 +105,24 @@ function summarize(measurements) {
 	return { mean, std, count };
 }
 export const runSummary = (row, key) => summarize((row.run_metrics || []).map(run => measurement(run, key)));
+// These denominators answer reach and delivery yield, independently of the
+// entry profile. Zero deliveries or absent observations remain unavailable.
+export function coverageSummary(row, key) {
+	return summarize((row.run_metrics || []).map(run => {
+		const numerator = key === 'benefit_coverage' ? run.beneficial_use?.episodes : run.beneficial_entries;
+		const denominator = key === 'benefit_coverage' ? row.tasks_per_run : run.delivered_chars;
+		return Number.isFinite(numerator) && denominator > 0 ? numerator * (key === 'benefit_coverage' ? 100 : 1e6) / denominator : null;
+	}));
+}
+export const metricValue = (value, key) => Number.isFinite(value) ? `${value.toFixed(2)}${key === 'benefit_coverage' ? '%' : ''}` : '—';
+export const metricDeviation = (std, key) => Number.isFinite(std) ? `± ${std.toFixed(2)}${key === 'benefit_coverage' ? ' pp' : ''}` : 'SD unavailable';
+export function formProfileSummary(row) {
+	return (row.forms?.items || []).map(form => {
+		const observations = (row.run_metrics || []).map(run => run.form_profiles?.[form.key]).filter(value => value?.profiled_spans > 0);
+		return { ...form, route: ROUTES[form.route] || '', ...summarize(observations.map(value => value.benefit)),
+			spans: observations.reduce((sum, value) => sum + value.profiled_spans, 0) };
+	}).filter(form => form.spans > 0);
+}
 // Runs take their tasks in one fixed order, so a window of consecutive tasks is
 // summarized across runs like the whole run. A window with no spans stays missing.
 // A widening triangular kernel introduces each neighbor with zero weight, so
@@ -142,9 +168,10 @@ export function spearman(pairs) {
 }
 // Describe the observed coefficient, not statistical significance. Runs repeat
 // the same tasks, and windows share runs, so point count is not independent N.
+// Below 0.2 the sign is not stable: one system more or less can reverse it.
 export function relationStrength({ rho }) {
 	if (!Number.isFinite(rho)) return { tone: 'none', label: 'Not available' };
-	if (rho === 0) return { tone: 'none', label: 'No rank relation' };
+	if (Math.abs(rho) < .2) return { tone: 'none', label: 'No clear relation' };
 	return { tone: rho > 0 ? 'positive' : 'negative', label: `${Math.abs(rho) >= .7 ? 'Strong' : Math.abs(rho) >= .4 ? 'Moderate' : 'Weak'} ${rho > 0 ? 'positive' : 'negative'} relation` };
 }
 export function filterRows(rows, filters, systems, query = '') {
@@ -155,6 +182,7 @@ export function filterRows(rows, filters, systems, query = '') {
 }
 // Cascading choices only describe recorded configurations. Keeping a still-valid
 // downstream choice avoids silently changing the model when switching systems.
+export const comparisonRows = (rows, primaryId) => rows.filter(row => row.id !== primaryId);
 export function profileSelection(rows, selected = {}) {
 	let candidates = rows;
 	const choices = {};
@@ -175,6 +203,7 @@ export function sortRows(rows, key, direction) {
 }
 export function formatValue(value, column, row = {}) {
 	if (value == null || (typeof value === 'number' && !Number.isFinite(value))) return '—';
+	if (column.group === 'Coverage and delivery') return `${metricValue(value, column.key)} ${metricDeviation(coverageSummary(row, column.key).std, column.key)}`;
 	if (column.key === 'pass_rate' && Number.isFinite(row.pass_rate_std)) return `${value.toFixed(1)}% ± ${row.pass_rate_std.toFixed(1)} pp`;
 	if (column.type === 'percent') return `${value.toFixed(2)}%`;
 	if (column.type === 'currency') return `$${value.toFixed(8)}${Number.isFinite(row.cost_change_percent) ? ` (Δ ${row.cost_change_percent >= 0 ? '+' : ''}${row.cost_change_percent.toFixed(2)}%)` : ''}`;

@@ -12,6 +12,17 @@ module = run_path(Path(__file__).parents[1] / "site/data/run_statistics.py")
 summarize_run, task_windows, TASK_WINDOW = module["summarize_run"], module["task_windows"], module["TASK_WINDOW"]
 
 
+def test_form_profiles_use_the_present_forms_own_entries(monkeypatch):
+    data = Path(__file__).parents[1] / "site/data"
+    monkeypatch.syspath_prepend(str(data))
+    within_form = run_path(data / "delivered_forms.py")["within_form"]
+    flags = {"m1": {"benefit": 1}, "m2": {"benefit": 0}, "m3": {"benefit": 0}}
+    forms = {"m1": "full", "m2": "full", "m3": "catalog"}
+    assert within_form(flags, forms) == {"full": 0.5, "catalog": 0.0}
+    # An absent or unassessed form has no observation, not a zero share.
+    assert within_form({"m1": None}, {"m1": "copy"}) == {}
+
+
 def test_run_statistics_keep_span_weight_and_verdict_population():
     result = summarize_run([
         operation([_signals(inf="acted_on", pe="improved")] * 2, verdict="positive"),
@@ -73,10 +84,13 @@ def test_run_outcomes_join_tasks_by_position_and_keep_baseline_attempts(monkeypa
     }
     tasks = ["t0", "t1", "t2"]
     result = run_outcomes(report, tasks, {"t1", "t2"}, [{"t1"}, {"t0"}, {"t1", "t2"}])
-    assert result == {"passed": 2, "delivered_tokens": 44, "beneficial_entries": 3,
+    assert result == {"passed": 2, "delivered_tokens": 44, "delivered_chars": None, "beneficial_entries": 3,
                       "relevant_use": {"relevant": 3, "unused": 0, "unused_novel": 0},
                       "beneficial_use": {"episodes": 1, "passed": 1, "baseline_passed": 2}}
     assert run_outcomes(report, tasks, set(), [])["beneficial_use"] == {"episodes": 1, "passed": 0, "baseline_passed": 0}
+    for op, chars in zip(report["operations"], [121, 23, 31, 9]):
+        op["delivery_cost"]["content_chars_total"] = chars
+    assert run_outcomes(report, tasks, set(), [])["delivered_chars"] == 184
     with pytest.raises(AssertionError):
         run_outcomes(report, ["t0", "t1", "other"], set(), [])
     with pytest.raises(AssertionError):

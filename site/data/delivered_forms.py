@@ -96,10 +96,20 @@ def entry_flags(op: dict) -> dict[str, dict]:
     return out
 
 
+def within_form(flags: dict[str, dict], forms: dict[str, str]) -> dict[str, float]:
+    """A mixed span gives each present form its own entry denominator."""
+    grouped: dict[str, list[int]] = defaultdict(list)
+    for entry, counts in flags.items():
+        if counts is not None:
+            grouped[forms[entry]].append(counts["benefit"])
+    return {key: sum(values) / len(values) for key, values in grouped.items()}
+
+
 def main() -> None:
     batch = json.loads(Path(sys.argv[1] if len(sys.argv) > 1 else BATCH).read_text())
     split = lambda: {"verdicts": defaultdict(lambda: defaultdict(float)),  # noqa: E731
-                     "profile": defaultdict(lambda: defaultdict(float)), "profiled": 0}
+                     "profile": defaultdict(lambda: defaultdict(float)), "profiled": 0,
+                     "within_form": defaultdict(lambda: {"spans": 0, "sum": 0.0})}
     acc = defaultdict(lambda: {**split(), "tokens": defaultdict(float), "unclassified": 0, "runs": {}})
     dataset = json.loads(RESULTS.read_text())
     tasks = {row["id"]: row["tasks_per_run"] for row in dataset["rows"]}
@@ -137,6 +147,9 @@ def main() -> None:
             for part in parts:
                 if whole:
                     part["profiled"] += 1
+                    for key, value in within_form(flags, forms).items():
+                        part["within_form"][key]["spans"] += 1
+                        part["within_form"][key]["sum"] += value
                     for i, counts in flags.items():
                         for axis, key in AXES.items():
                             part["profile"][axis][forms[i]] += counts[key] / whole["n_entries"]
@@ -156,8 +169,12 @@ def main() -> None:
         assert a["profiled"] == row["profiled_spans"], (row["id"], a["profiled"])
         assert row["task_window"] == TASK_WINDOW, row["id"]
         for run in row["run_metrics"]:
+            within: dict[str, dict] = defaultdict(lambda: {"spans": 0, "sum": 0.0})
             for index, window in enumerate(run["windows"]):
                 part = a["runs"][run["run"]][index]
+                for key, values in part["within_form"].items():
+                    within[key]["spans"] += values["spans"]
+                    within[key]["sum"] += values["sum"]
                 assert part["profiled"] == window["profiled_spans"], (row["id"], run["run"], index)
                 window["forms"] = shares(part)
                 for verdict, count in window["verdicts"].items():
@@ -165,6 +182,9 @@ def main() -> None:
                 for axis, value in window["profile"].items():
                     if value is not None:
                         assert abs(sum(window["forms"]["profile"][axis].values()) - value) < 1e-6, (row["id"], run["run"], index, axis)
+            run["form_profiles"] = {key: {"profiled_spans": values["spans"],
+                                          "benefit": 100 * values["sum"] / values["spans"]}
+                                    for key, values in within.items()}
         if system == "memorax":
             # The supplementary row's whole-run forms are curated; only its windows are derived.
             whole = shares(a)

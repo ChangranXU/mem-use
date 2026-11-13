@@ -148,6 +148,30 @@ caps their length. Entrance animations play when `results.mjs` adds
 their new order and profile marks (`data-mark`) from their previous extent, so a
 new selection shows what changed. Reduced-motion preferences disable all of them.
 
+### Coverage and delivery
+
+The B selector excludes the primary configuration. If a primary change selects
+the current B configuration, B returns to **No comparison**. Swap keeps two
+distinct selections.
+
+Profile also shows **Benefit coverage** (episodes with observed benefit / all
+episodes) and **Delivery yield** (beneficial entries per million recorded characters
+of memory text delivered to the task agent). Both are available under Table →
+Columns → Coverage and delivery, with numeric sorting and per-run denominator
+details. These use run means and sample SD, including in the table. Delivery yield
+excludes memory-side processing and cannot compare total token efficiency when
+cloud usage is unreported. See [data definitions](data/README.md#profile-coverage-and-delivery).
+
+Each card includes a bar chart with a legend and ± one SD whiskers. A and B share
+a scale within each card; coverage and delivery yield use separate units and
+scales. The section appears as it enters the viewport. Selection changes reuse
+keyed bar transitions, and reduced motion shows the charts immediately.
+
+The Benefit detail card adds a **Within form** column to its form table: the
+share of a form's own entries that have a benefit (`formProfileSummary()`, mean
+± sample SD across runs). The additive points depend on how many entries a form
+has; this rate does not. Automatic copies are not assessed and show a dash.
+
 ## Conclusions view
 
 The Conclusions view states what holds across every memory configuration of the
@@ -155,15 +179,20 @@ selected benchmark. The table compares systems and the profile explains one
 configuration; conclusions do neither. Table search and filters do not apply.
 
 - Keep only the conclusions that matter most to a reader who selects or builds
-  a memory system. Lead with the limits of recall and task pass rate, then show
+  a memory system. Lead with the limits of retrieval and task pass rate, then show
   why memory form matters and how to improve the transition from retrieval to use.
+  Write "retrieval", not "recall": Task recall is the name of a memory form.
   `conclusions()` in `results-conclusions.mjs` owns these four.
 - Compute every number from `data/results.json`. Do not write a result into the
   text by hand. A conclusion that the rows cannot support is left out, not shown
   as zero.
 - Do not relate two measures when one contains the other. Benefit requires use,
   so Acted on and Benefit are not independent. Ratios of marginal span shares
-  are not conditional rates. Show the action share directly.
+  are not conditional rates. Show the action share directly, and take the unused
+  share of relevant entries from the joint entry counts.
+- A sentence that names a relation takes its strength from `relationStrength()`.
+  The outcome conclusion needs an episode with a benefit that still failed; its
+  statistics give failure shares, with the no-memory attempts at the same tasks.
 - Pass rates use exact resolved counts; the reported means are rounded.
   A weak relation does not prove that memory has no effect.
 - The design conclusion measures new information among unused relevant entries.
@@ -174,12 +203,14 @@ configuration; conclusions do neither. Table search and filters do not apply.
   Label the recommendation as a design priority: the data motivate processing
   after retrieval but do not test that intervention.
 - The form conclusion names the forms from the data. It shows where positive
-  verdicts concentrate; it does not prove that a form causes benefit.
+  verdicts concentrate; it does not prove that a form causes benefit. Copies of
+  visible entries are neutral by rule; the caption says so when a copy row shows.
 - A conclusion is a correlation, a concentration, or a comparison. Correlations
   use the Spearman rank correlation (`spearman()` in `results-core.mjs`), which
   needs no assumption about scale. `relationStrength()` describes |ρ|: 0.7 strong,
-  0.4 moderate, otherwise weak. Zero has no rank relation. These labels are not
-  significance tests: runs repeat tasks, and windows share runs.
+  0.4 moderate, 0.2 weak. Below 0.2 the label is "No clear relation" and gives no
+  direction: a coefficient that small can change sign when one system is left out.
+  These labels are not significance tests: runs repeat tasks, and windows share runs.
 - Write close to ASD-STE100: short sentences, active voice, and consistent terms.
   Keep one topic in each sentence and one main point in each conclusion.
   Retain necessary research terms. Say what was observed without causal claims.
@@ -188,9 +219,10 @@ configuration; conclusions do neither. Table search and filters do not apply.
   beside the view's scope statement.
   End each text column with a takeaway below its statistics. Use the same font
   and size as the conclusion heading, with a decorative lightbulb before it.
-  Keep benchmark comparisons generic.
+  Keep benchmark comparisons generic. Use the page's terms in a takeaway
+  (retrieval, pass rate, memory form, action) and claim only what its chart shows.
 - Tone names the kind of relation, not an outcome: steel (`--deliver`) for a
-  positive relation, clay (`--accent`) for a negative one, grey for zero or missing
+  positive relation, clay (`--accent`) for a negative one, grey for no clear or missing
   correlation, ochre (`--use`) for a conclusion that is not a correlation.
 - Scatter points are positioned HTML elements, so they keep their size at every
   width; guide lines stretch in an SVG over the same plot. Systems
@@ -207,8 +239,9 @@ configuration; conclusions do neither. Table search and filters do not apply.
   Legend chips highlight one system on hover or focus and pin it on selection.
   The pointer reads the nearest point.
 - The head and cards enter with the view. Each chart draws when it scrolls into
-  view: points from left to right, then the guides. Reduced-motion preferences
-  show everything at once.
+  view: points from left to right, then the guides. The text column follows in
+  reading order: statement, statistics, then the takeaway, whose lightbulb comes
+  on last. Reduced-motion preferences show everything at once.
 
 Edit the HTML files, preview the site, and check local links and command examples
 before publishing. Keep commands and flags the same as the

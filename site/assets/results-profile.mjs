@@ -1,6 +1,6 @@
 // Verdicts lead the profile as one whole; entry shares follow on a shared axis,
 // without implying a funnel between independent shares and span-level outcomes.
-import { COLUMNS, relation, runSummary } from './results-core.mjs';
+import { COLUMNS, COVERAGE_METRICS, relation, runSummary, coverageSummary, metricValue, metricDeviation } from './results-core.mjs';
 
 const byKey = Object.fromEntries(COLUMNS.map(column => [column.key, column]));
 const OUTCOMES = ['positive', 'negative', 'unresolved', 'neutral'];
@@ -12,12 +12,31 @@ const external = '<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d=
 
 // Most shares are a few percent, so each chart ends at a round value just above
 // its largest reading. A missing or all-zero chart keeps the full 0–100%.
-export function axis(max) {
+export function axis(max, limit = 100) {
 	if (!(max > 0)) return { top: 100, ticks: [0, 25, 50, 75, 100] };
-	const raw = Math.min(100, max) / 4, power = 10 ** Math.floor(Math.log10(raw));
+	const raw = Math.min(limit, max) / 4, power = 10 ** Math.floor(Math.log10(raw));
 	const step = [1, 2, 2.5, 5, 10].find(multiple => multiple * power >= raw) * power;
-	const ticks = Array.from({ length: Math.ceil(Math.min(100, max) / step - 1e-9) + 1 }, (_, index) => +(index * step).toPrecision(6));
+	const ticks = Array.from({ length: Math.ceil(Math.min(limit, max) / step - 1e-9) + 1 }, (_, index) => +(index * step).toPrecision(6));
 	return { top: ticks.at(-1), ticks };
+}
+
+function contextSections(items, escape) {
+	const comparing = items.length > 1, row = items[0], other = items[1];
+	const marker = index => `<i class="config-marker" title="${escape(items[index].memory_system)}" aria-hidden="true">${index ? 'B' : 'A'}</i>`;
+	const heading = (eyebrow, title, text) => `<div class="profile-section-head"><div><p class="profile-eyebrow">${eyebrow}</p><h3>${title}</h3><p>${text}</p></div></div>`;
+	const cards = COVERAGE_METRICS.map(({ key, label, description }, slot) => {
+		const readings = items.map(item => coverageSummary(item, key));
+		const coverage = key === 'benefit_coverage';
+		const scale = axis(Math.max(0, ...readings.map(value => (value.mean || 0) + (value.std || 0))), coverage ? 100 : Infinity);
+		const position = value => +Math.max(0, Math.min(100, 100 * value / scale.top)).toFixed(4);
+		const chart = `<span class="context-chart" style="--ticks:${scale.ticks.length - 1}" aria-hidden="true"><span class="row-track">${readings.map(({ mean, std }, index) => `<span class="entry-bar is-${index ? 'b' : 'a'}">${mean > 0 ? `<i data-mark="${key}-${index}" style="width:${position(mean)}%"></i>` : ''}${Number.isFinite(mean) && Number.isFinite(std) ? `<span class="whisker" style="left:${position(mean - std)}%;width:${+(position(mean + std) - position(mean - std)).toFixed(4)}%"></span>` : ''}</span>`).join('')}</span><span class="ticks">${scale.ticks.map(tick => `<span style="left:${100 * tick / scale.top}%">${tick}${coverage ? '%' : ''}</span>`).join('')}</span></span>`;
+		const accessible = `${label}: ${items.map((item, index) => `${item.memory_system}, ${metricValue(readings[index].mean, key)}, ${metricDeviation(readings[index].std, key)} across ${readings[index].count} observed runs`).join("; ")}. Show details`;
+		const unit = key === 'benefit_coverage' ? 'of all episodes' : 'beneficial entries / 1M delivered characters';
+		return `<button type="button" class="profile-cell context-card" style="--i:${10 + slot}" data-row="${escape(row.id)}" data-detail="${key}"${other ? ` data-compare="${escape(other.id)}"` : ''} aria-haspopup="dialog" aria-expanded="false" aria-label="${escape(accessible)}"><span class="cell-name">${label}</span><span class="cell-text">${description}</span><span class="cell-readings">${readings.map(({ mean, std }, index) => `<span class="reading is-${index ? 'b' : 'a'}">${comparing ? marker(index) : ''}<strong>${metricValue(mean, key)}</strong><small>${metricDeviation(std, key)}</small></span>`).join('')}</span>${chart}<span class="context-unit">${unit}</span></button>`;
+	}).join('');
+	const legend = `<p class="chart-key context-key">${items.map((item, index) => `<span class="key-system is-${index ? 'b' : 'a'}">${comparing ? marker(index) : ''}<i class="key-bar" aria-hidden="true"></i>${escape(item.memory_system)}</span>`).join('')}<span class="key-sd"><i aria-hidden="true"></i>Whiskers: ± one SD across runs</span></p>`;
+	const populations = items.map((item, index) => `<div class="population-row is-${index ? 'b' : 'a'}"><span>${comparing ? marker(index) : ''}${escape(item.memory_system)}</span><span><b>${count(item.profiled_spans)}</b> profiled</span><span><b>${count(item.automatic_neutral)}</b> automatic copies</span><span><b>${count(item.empty_spans)}</b> empty</span></div>`).join('');
+	return `<section class="profile-context-section${comparing ? ' is-compare' : ''}" aria-label="Coverage and delivery">${heading('Coverage and delivery', 'How many episodes benefit, and from how much text?', 'Coverage counts the episodes with a benefit. Yield compares the beneficial entries with the quantity of delivered text.')}<div class="context-grid">${cards}</div>${legend}<p class="profile-rule">Each chart has its own scale and unit. A benefit is an observed contribution to the agent’s work. It does not mean that the task passed. Delivery yield counts all recorded characters, including repeated copies and the text of empty results. It does not include memory processing or cloud calls. Unreported usage stays unknown.</p><details class="profile-populations"><summary>Which spans enter the profile?</summary>${populations}<p>The six axes use only the nonempty spans that the judge assessed. Automatic copies and empty results still count as delivered text.</p></details></section>`;
 }
 
 export function profileFlow(row, other, escape) {
@@ -61,13 +80,15 @@ export function profileFlow(row, other, escape) {
 				<div class="verdict-grid">${OUTCOMES.map(key => cell(key, 'spans', 'tile')).join('')}</div></div>
 			<p class="profile-rule">Harm takes precedence over benefit. Task success does not determine a memory verdict.</p>
 		</section>
-		<section class="profile-entries${other ? ' is-compare' : ''}" aria-label="Entry profile">${head('Entry profile', 'What arrived, and what the agent used', 'Six independent shares of delivered entries, on one scale.', '% of entries')}
+		<section class="profile-entries${other ? ' is-compare' : ''}" aria-label="Entry profile">${head('Entry profile', 'What arrived, and what the agent used', 'Six entry shares, averaged within spans and then across runs, on one scale.', '% of entries')}
 			<div class="entry-chart" style="--ticks:${entries.ticks.length - 1}"><div class="entry-axis" aria-hidden="true"><span></span>${scale(entries)}<span>Mean ± SD</span>${other ? '<span>A − B</span>' : ''}</div>
 				${GROUPS.map(([group, text, keys]) => `<section aria-label="${group} entries"><h4><b>${group}</b>${text}</h4>${keys.map(key => cell(key, 'entries', 'row', bars(key))).join('')}</section>`).join('')}</div>
 			${legend}
+			<p class="profile-rule">Corroboration and information gain require relevance. Benefit and harm require acted-on influence.</p>
 		</section>
-		<div class="profile-guide"><p data-profile-hint>Select any metric for its meaning and memory-form breakdown.</p></div>
-		<footer class="profile-footnote"><p>Delivery and use are independent entry shares, not stages of a funnel.</p><a href="concepts.html">How verdicts work <span aria-hidden="true">↗</span></a></footer>`;
+		${contextSections(items, escape)}
+		<div class="profile-guide"><p data-profile-hint>Select any metric for its meaning and details.</p></div>
+		<footer class="profile-footnote"><p>Entry shares, benefit coverage, and delivery yield answer different questions.</p><a href="concepts.html">How verdicts work <span aria-hidden="true">↗</span></a></footer>`;
 }
 
 // Related axes and verdicts stay discoverable with both a pointer and a keyboard.
@@ -79,7 +100,7 @@ export function bindProfiles(root, onOpen) {
 			element.classList.toggle('is-paired', Boolean(pair) && element.dataset.detail === pair);
 		}
 		for (const hint of root.querySelectorAll('[data-profile-hint]')) {
-			hint.textContent = key ? `${byKey[key].label}${pair ? ` ↔ ${byKey[pair].label}` : ''}. ${relation(key).text}` : 'Select any metric for its meaning and memory-form breakdown.';
+			hint.textContent = key ? `${byKey[key].label}${pair ? ` ↔ ${byKey[pair].label}` : ''}. ${relation(key).text}` : 'Select any metric for its meaning and details.';
 		}
 	};
 	const target = element => element?.closest?.('[data-detail]')?.dataset.detail || null;
@@ -89,4 +110,17 @@ export function bindProfiles(root, onOpen) {
 	root.addEventListener('focusout', event => link(root.contains(event.relatedTarget) ? target(event.relatedTarget) : null));
 	// A strip segment opens the same card as the verdict it draws.
 	root.addEventListener('click', event => { const key = target(event.target), cell = key && root.querySelector(`.profile-cell[data-detail="${key}"]`); if (cell) onOpen(cell); });
+}
+
+// The added context sits below the first screen; draw it when it is reached.
+export function revealProfileContext(root, animate) {
+	const sections = root.querySelectorAll('.profile-context-section');
+	if (!animate) { sections.forEach(section => section.classList.add('is-shown')); return null; }
+	const observer = new IntersectionObserver(entries => {
+		for (const entry of entries) if (entry.isIntersecting) {
+			entry.target.classList.add('is-shown'); observer.unobserve(entry.target);
+		}
+	}, { threshold: .1 });
+	sections.forEach(section => observer.observe(section));
+	return observer;
 }

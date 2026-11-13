@@ -1,5 +1,5 @@
 // A comparison keeps each system's population and memory-form breakdown separate.
-import { COLUMNS, VERDICTS, formBreakdown, formSeries, relation, runSummary, taskSeries } from './results-core.mjs';
+import { COLUMNS, VERDICTS, formBreakdown, formProfileSummary, formSeries, relation, runSummary, taskSeries, coverageSummary, metricValue, metricDeviation } from './results-core.mjs';
 import { percent, deviation, axis } from './results-profile.mjs';
 
 const byKey = Object.fromEntries(COLUMNS.map(column => [column.key, column]));
@@ -88,12 +88,24 @@ export function detailChart(row, other, key, escape, acrossRuns = false, smooth 
 
 export function detailContent(row, other, key, escape, acrossRuns = false) {
 	const column = byKey[key], cost = key === 'cost', verdict = VERDICTS.includes(key);
+	if (column.group === 'Coverage and delivery') {
+		const coverage = key === 'benefit_coverage';
+		const value = number => Number.isFinite(number) ? number.toLocaleString('en-US') : '—';
+		const body = [row, other].filter(Boolean).map((item, index) => {
+			const stats = coverageSummary(item, key);
+			return `<section class="detail-system is-${index ? 'b' : 'a'}" aria-label="${escape(item.memory_system)}"><h3 class="detail-system-name">${other ? `<i>${index ? 'B' : 'A'}</i> ` : ''}${escape(item.memory_system)}</h3><p class="detail-configuration">${escape([item.harness, item.model, item.thinking_effort && `${item.thinking_effort} effort`].filter(Boolean).join(' · '))}</p><p class="detail-total"><span class="detail-reading"><strong>${metricValue(stats.mean, key)}</strong><small>${metricDeviation(stats.std, key)}</small></span><span>Mean ± sample SD across ${stats.count} observed runs${coverage ? '' : ' · beneficial entries / 1M delivered characters'}</span></p><table class="form-list"><thead><tr><th scope="col">Run</th><th scope="col">${coverage ? 'Episodes with benefit' : 'Beneficial entries'}</th><th scope="col">${coverage ? 'All episodes' : 'Delivered characters'}</th></tr></thead><tbody>${(item.run_metrics || []).map(run => `<tr><th scope="row">${escape(run.run)}</th><td>${value(coverage ? run.beneficial_use?.episodes : run.beneficial_entries)}</td><td>${value(coverage ? item.tasks_per_run : run.delivered_chars)}</td></tr>`).join('')}</tbody></table></section>`;
+		}).join('');
+		return `<div class="detail-head"><div><p class="detail-kicker">Coverage and delivery</p><h2 id="form-detail-title">${column.label}</h2><p class="detail-meaning">${column.description}</p></div><button type="button" class="detail-close" aria-label="Close" autofocus>${closeIcon}</button></div><div class="detail-body"><div class="${other ? 'detail-comparison' : ''}">${body}</div><p class="detail-note">${coverage ? 'An episode counts one time, even if several entries helped. Episodes with no delivery stay in the denominator. An observed benefit is not an increase in the benchmark pass rate.' : 'For each run, divide the number of beneficial entries by all recorded characters of delivered memory text. Then calculate the mean across runs. Copies and empty deliveries keep their text volume. The measure includes delivered memory text only. It does not include retrieval, extraction, or cloud processing for any system. Unreported usage stays unknown. Systems divide memory into entries of different sizes. Use this measure to describe delivered text, not to rank overall quality or total processing cost. A run with no delivered text has no yield value.'} Missing measurements stay unavailable. SD shows variation across runs. It is not a confidence interval.</p></div>`;
+	}
 	const { pair, text } = cost ? {} : relation(key);
 	const note = NOTES[key] || 'Each profiled span weighs equally, so form contributions add up to the axis value.';
 	const heading = other ? 'h4' : 'h3';
 	const meaning = `<p class="detail-meaning">${escape(MEANINGS[key] || column.description)}</p>`;
 	const content = item => {
 		const breakdown = formBreakdown(item, key);
+		// A form's additive points depend on how many entries it has; its own rate does not.
+		const own = key === 'benefit' ? Object.fromEntries(formProfileSummary(item).map(form => [form.key, form])) : null;
+		const within = part => own[part.key] ? `${percent(own[part.key].mean)} <small>${deviation(own[part.key].std)}</small>` : '—';
 		const stats = acrossRuns ? runSummary(item, key) : null;
 		const headline = cost ? `$${item.cost.toFixed(8)}` : percent(stats ? stats.mean : item[key]);
 		const lead = stats ? `Mean ± sample standard deviation across ${stats.count} observed runs` : cost ? 'mean cost per episode' : verdict ? `of spans with a verdict (${item.verdicts[key].toLocaleString('en-US')} of ${item.verdict_total.toLocaleString('en-US')})` : 'mean share of entries per profiled span';
@@ -104,7 +116,8 @@ export function detailContent(row, other, key, escape, acrossRuns = false) {
 		const forms = breakdown ? `<${heading}>${cost ? 'Delivered memory tokens by memory form' : acrossRuns ? 'Pooled by memory form' : 'By memory form'}</${heading}>
 			${acrossRuns ? `<p class="detail-pooled">Pooled share: <strong>${percent(breakdown.total)}</strong>${verdict ? ` · ${item.verdicts[key].toLocaleString('en-US')} of ${item.verdict_total.toLocaleString('en-US')} spans` : ''}</p>` : ''}
 			<div class="form-bar" aria-hidden="true">${breakdown.parts.map(part => `<span style="flex-grow:${part.share};background:${formColor(part)}"></span>`).join('')}</div>
-			<table class="form-list"><thead><tr><th scope="col">Form</th>${cost ? '' : '<th scope="col">Points</th>'}<th scope="col">Share</th></tr></thead><tbody>${breakdown.parts.map(part => `<tr><th scope="row"><span class="form-swatch" style="background:${formColor(part)}"></span><span>${escape(part.label)}${part.route ? `<small>${escape(part.route)}</small>` : ''}</span></th>${cost ? '' : `<td>${amount(part.value)}</td>`}<td>${share(part.share)}</td></tr>`).join('')}</tbody></table>
+			<table class="form-list"><thead><tr><th scope="col">Form</th>${cost ? '' : '<th scope="col">Points</th>'}<th scope="col">Share</th>${own ? '<th scope="col">Within form</th>' : ''}</tr></thead><tbody>${breakdown.parts.map(part => `<tr><th scope="row"><span class="form-swatch" style="background:${formColor(part)}"></span><span>${escape(part.label)}${part.route ? `<small>${escape(part.route)}</small>` : ''}</span></th>${cost ? '' : `<td>${amount(part.value)}</td>`}<td>${share(part.share)}</td>${own ? `<td class="form-own">${within(part)}</td>` : ''}</tr>`).join('')}</tbody></table>
+			${own ? '<p class="detail-pooled">Within form: the share of the form’s own entries that have a benefit, in the spans that contain the form. Mean ± sample SD across runs.</p>' : ''}
 			` : other ? `<p class="detail-note">${item[key] === 0 ? 'No entries or spans contributed to this metric.' : 'Memory-form breakdown unavailable.'}</p>` : '';
 		return `<p class="detail-total"><span class="detail-reading"><strong>${headline}</strong>${stats ? `<small>${deviation(stats.std)}</small>` : ''}</span><span>${escape(lead)}</span></p>${cost && item.notes ? `<p class="detail-note">${escape(item.notes)}</p>` : ''}${related}${forms}`;
 	};

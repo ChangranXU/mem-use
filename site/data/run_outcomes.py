@@ -71,9 +71,13 @@ def run_outcomes(report: dict[str, Any], tasks: list[str], resolved: set[str], b
         if profile and profile["counts"]["benefit"]:
             beneficial_entries += profile["counts"]["benefit"]
             beneficial.add(task[op["episode_execution_id"]])
+    # Keep recorded placement characters separate from the chars/4 token estimate.
+    # A missing counter makes the delivery yield unavailable, never zero.
+    chars = [(op.get("delivery_cost") or {}).get("content_chars_total") for op in report["operations"]]
     return {
         "passed": len(resolved),
         "delivered_tokens": sum((op.get("delivery_cost") or {}).get("approx_tokens_total") or 0 for op in report["operations"]),
+        "delivered_chars": sum(chars) if all(isinstance(value, int) and value >= 0 for value in chars) else None,
         "beneficial_entries": beneficial_entries,
         "relevant_use": relevant_use(report["operations"]),
         "beneficial_use": {

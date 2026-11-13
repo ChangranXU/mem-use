@@ -159,6 +159,37 @@ a pooled share need not equal the mean of the run shares.
 
 ## Run outcomes
 
+### Profile coverage and delivery
+
+The Profile view and optional Table columns use two additional run summaries:
+
+- **Benefit coverage:** episodes with at least one beneficial entry divided by
+  all episodes, including those without memory deliveries. An episode counts once.
+- **Delivery yield:** beneficial entry assessments per million recorded characters
+  of memory text delivered to the task agent. All selected deliveries count,
+  including automatic copies and empty-result text. Retrieval, extraction, and
+  cloud processing tokens are excluded for every system. Unreported processing
+  usage remains unknown; this is not total token efficiency or dollar cost.
+
+Both display the arithmetic mean and sample SD of the per-run ratios. A missing
+measurement or zero denominator is unavailable, not zero. Delivery yield also
+depends on entry granularity and is a descriptive measure, not an overall ranking.
+
+`delivered_forms.py` also writes each run's `form_profiles`: a `profiled_spans`
+count and `benefit` percentage for every assessed form. Within each profiled span,
+divide beneficial entries of a form by all entries of that form. Average over
+spans containing that form. The Benefit detail card displays the mean and sample
+SD across observed runs in its **Within form** column. Missing forms do not contribute zero observations. Mixed spans can contribute
+to multiple forms. This differs from the existing additive form contributions,
+which retain the whole-span denominator. Previews and catalogs can support later
+reads whose benefit is assessed on the fuller delivery.
+
+Regenerate form fields with `uv run python site/data/delivered_forms.py` and
+recorded character totals with `uv run python site/data/run_outcomes.py`; source
+reports remain read-only. This preserves the existing profile and outcome values.
+
+### Task outcomes
+
 The Conclusions view compares memory use with task results and examines unused relevant entries.
 A memory verdict never uses the task result; these measurements only relate the
 two afterwards. `run_outcomes.py` adds them to each `run_metrics` entry, read-only
@@ -177,6 +208,9 @@ Run it after `run_statistics.py`, which rebuilds `run_metrics`.
   the run, empty deliveries included. `beneficial_entries` sums the profile's
   benefit count over its profiled spans. MemGovern's totals reproduce the
   paper's 50.50 beneficial entries per million delivered tokens.
+- `delivered_chars` sums `delivery_cost.content_chars_total` over all spans.
+  A missing counter makes this total unavailable. Profile and Table delivery
+  yield use these recorded characters, without a character-to-token estimate.
 - `relevant_use` retains joint entry counts from profiled spans: `relevant`
   counts relevance `true`, `unused` counts those with influence `none`, and
   `unused_novel` counts that subset with novelty `novel`. Selection, reference,
@@ -243,7 +277,8 @@ rows; no UI code change is needed for another cohort.
 
 - `harness` is the agent runner and version. It is separate from the benchmark's
   scoring harness.
-- `profile` contains percentages on a 0–100 scale for six independent axes.
+- `profile` contains percentages on a 0–100 scale for six axes. Corroboration
+  and information gain require relevance; benefit and harm require acted-on use.
   Preserve full available precision. The page rounds only for display.
 - `run_metrics` contains one measurement per run for the Profile view's mean
   and sample SD; retain each run's profile means and verdict/population counts.

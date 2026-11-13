@@ -199,6 +199,11 @@
 .form-list tbody th small { display: block; font-size: 12px; font-weight: 400; color: var(--text-3); }
 .form-list td { padding-left: 16px; text-align: right; white-space: nowrap; }
 .form-list td:last-child { color: var(--text-3); }
+/* The within-form rate is a second reading, so the share before it stays quiet. */
+.form-list td:has(+ .form-own) { color: var(--text-3); }
+.form-list td.form-own { color: var(--text-2); }
+.form-own small { display: block; font-size: 11px; color: var(--text-3); }
+.results-page .form-list + .detail-pooled { margin: 10px 0 0; }
 .form-swatch { flex: none; width: 10px; height: 10px; margin-top: 6px; border-radius: 2px; }
 .results-page .detail-note { margin: 20px 0 0; padding-top: 16px; border-top: 1px solid var(--line); font-size: 12px; line-height: 1.6; color: var(--text-3); }
 @media (max-width: 480px) {

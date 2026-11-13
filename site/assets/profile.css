@@ -63,6 +63,25 @@
 .flow-versus small { color: var(--text-3); font: 400 14px var(--serif); letter-spacing: 0; }
 .profile-outcomes { padding: 12px 0 36px; }
 .profile-entries { padding: 32px 0 24px; border-top: 1px solid var(--line); }
+.profile-context-section { padding: 32px 0; border-top: 1px solid var(--line); }
+.context-grid { display: grid; align-items: start; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+.profile-cell.context-card { display: grid; align-content: start; gap: 12px; padding: 24px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg-raised); }
+.context-card .reading strong { font-size: 32px; }
+.context-card .cell-readings { margin-top: 8px; }
+.is-compare .context-card .reading strong { color: color-mix(in srgb, var(--c) 82%, var(--text)); }
+.context-unit { color: var(--text-3); font-size: 11px; }
+.context-chart { display: grid; gap: 6px; margin-top: 8px; }
+.context-chart .row-track { grid-area: auto; margin: 0; min-height: 28px; padding-block: 8px; gap: 8px; }
+.context-chart .entry-bar i { background: var(--c); }
+.context-chart .ticks { margin-inline: 0; }
+.results-page .context-key { border: 0; padding-inline: 0; }
+.context-key .key-bar { background: var(--c); }
+.profile-populations { margin: 20px 0 0; border: 1px solid var(--line); border-radius: 10px; background: transparent; }
+.profile-populations > summary { font-size: 13px; }
+.population-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 20px; padding: 12px 20px; border-top: 1px solid var(--line); color: var(--text-3); font-size: 12px; font-variant-numeric: tabular-nums; }
+.population-row > span:first-child { display: inline-flex; align-items: center; gap: 8px; margin-right: auto; color: var(--text); }
+.population-row b { color: var(--text-2); font-weight: 500; }
+.results-page .profile-populations p { padding: 0 20px 16px; margin: 10px 0 0; color: var(--text-3); font-size: 12px; }
 .profile-section-head { display: flex; align-items: end; justify-content: space-between; gap: 16px; margin-bottom: 22px; }
 .results-page .profile-section-head h3 { margin: 0; font: 400 26px/1.25 var(--serif); letter-spacing: -.025em; color: var(--text); }
 .results-page .profile-section-head p:not(.profile-eyebrow) { margin: 8px 0 0; font-size: 13px; line-height: 1.6; color: var(--text-3); }
@@ -262,6 +281,11 @@
 .is-entering :is(.lens, .verdict-chart .ticks) { animation: results-fade .4s ease-out .45s both; }
 .is-entering .entry-bar i { transform-origin: left; animation: profile-grow .6s cubic-bezier(.2, .8, .2, 1) calc(260ms + var(--i) * 45ms) both; }
 .is-entering .whisker { animation: results-fade .3s ease-out calc(700ms + var(--i) * 45ms) both; }
+.profile-context-section:not(.is-shown) { opacity: 0; }
+.is-entering .profile-context-section :is(.profile-section-head, .profile-cell) { animation: none; }
+.is-entering .profile-context-section.is-shown { animation: profile-rise .4s ease-out both; }
+.is-entering .profile-context-section.is-shown .entry-bar i { transform-origin: left; animation: profile-grow .7s cubic-bezier(.2, .8, .2, 1) .15s both; }
+.is-entering .profile-context-section.is-shown .whisker { animation: results-fade .3s ease-out .65s both; }
 .is-updating :is(.flow-head, .reading, .cell-delta, .ticks, .lens, .whisker, .chart-key) { animation: results-fade .35s ease-out both; }
 
 @media (max-width: 1100px) {
@@ -275,6 +299,8 @@
 	.is-compare .tile:nth-child(3) { border-radius: 0 0 0 11px; }
 }
 @media (max-width: 760px) {
+	.context-grid { grid-template-columns: 1fr; }
+	.context-card { padding: 20px 16px; }
 	[data-results-view]:not([data-results-view="table"]) .results-controls { grid-template-columns: 1fr; gap: 16px; }
 	.profile-pick { grid-template-columns: 1fr; gap: 20px; margin: 24px 0; }
 	.profile-pick-footer { margin: 0; flex-wrap: wrap; gap: 4px; }
@@ -303,6 +329,7 @@
 	.key-sd, .trend-sd { margin-left: 0; }
 }
 @media (prefers-reduced-motion: reduce) {
+	.profile-context-section { opacity: 1; }
 	.profile-view *, .profile-view *::before, .profile-view *::after, .detail-trend * { animation: none !important; transition: none !important; }
 	.trend-plot g { clip-path: none; }
 }

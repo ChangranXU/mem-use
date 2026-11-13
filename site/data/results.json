@@ -1166,7 +1166,18 @@
             "relevant": 353,
             "unused": 193,
             "unused_novel": 112
-          }
+          },
+          "form_profiles": {
+            "search_preview": {
+              "profiled_spans": 505,
+              "benefit": 0.019801980198019802
+            },
+            "full_card": {
+              "profiled_spans": 176,
+              "benefit": 12.5
+            }
+          },
+          "delivered_chars": 1636742
         },
         {
           "run": "run2",
@@ -2205,7 +2216,18 @@
             "relevant": 291,
             "unused": 142,
             "unused_novel": 86
-          }
+          },
+          "form_profiles": {
+            "search_preview": {
+              "profiled_spans": 511,
+              "benefit": 0.0
+            },
+            "full_card": {
+              "profiled_spans": 176,
+              "benefit": 9.659090909090908
+            }
+          },
+          "delivered_chars": 1655671
         },
         {
           "run": "run3",
@@ -3251,7 +3273,18 @@
             "relevant": 302,
             "unused": 144,
             "unused_novel": 85
-          }
+          },
+          "form_profiles": {
+            "search_preview": {
+              "profiled_spans": 529,
+              "benefit": 0.01890359168241966
+            },
+            "full_card": {
+              "profiled_spans": 181,
+              "benefit": 12.707182320441989
+            }
+          },
+          "delivered_chars": 1714454
         },
         {
           "run": "run4",
@@ -4295,7 +4328,18 @@
             "relevant": 301,
             "unused": 161,
             "unused_novel": 94
-          }
+          },
+          "form_profiles": {
+            "search_preview": {
+              "profiled_spans": 511,
+              "benefit": 0.019569471624266144
+            },
+            "full_card": {
+              "profiled_spans": 177,
+              "benefit": 10.734463276836157
+            }
+          },
+          "delivered_chars": 1651457
         }
       ],
       "task_window": 25
@@ -5413,7 +5457,18 @@
             "relevant": 116,
             "unused": 93,
             "unused_novel": 45
-          }
+          },
+          "form_profiles": {
+            "task_recall": {
+              "profiled_spans": 374,
+              "benefit": 0.4832993803582038
+            },
+            "search_result": {
+              "profiled_spans": 456,
+              "benefit": 0.06853070175438597
+            }
+          },
+          "delivered_chars": 21466950
         },
         {
           "run": "run2",
@@ -6455,7 +6510,18 @@
             "relevant": 166,
             "unused": 129,
             "unused_novel": 68
-          }
+          },
+          "form_profiles": {
+            "task_recall": {
+              "profiled_spans": 402,
+              "benefit": 0.7383716338940219
+            },
+            "search_result": {
+              "profiled_spans": 454,
+              "benefit": 0.03303964757709252
+            }
+          },
+          "delivered_chars": 22429795
         },
         {
           "run": "run3",
@@ -7461,7 +7527,18 @@
             "relevant": 136,
             "unused": 108,
             "unused_novel": 53
-          }
+          },
+          "form_profiles": {
+            "task_recall": {
+              "profiled_spans": 358,
+              "benefit": 0.5359359758801099
+            },
+            "search_result": {
+              "profiled_spans": 459,
+              "benefit": 0.06808278867102396
+            }
+          },
+          "delivered_chars": 20631386
         },
         {
           "run": "run4",
@@ -8480,7 +8557,18 @@
             "relevant": 153,
             "unused": 125,
             "unused_novel": 59
-          }
+          },
+          "form_profiles": {
+            "search_result": {
+              "profiled_spans": 468,
+              "benefit": 0.021367521367521368
+            },
+            "task_recall": {
+              "profiled_spans": 340,
+              "benefit": 0.6220821661998133
+            }
+          },
+          "delivered_chars": 19907921
         }
       ],
       "task_window": 25
@@ -9624,7 +9712,18 @@
             "relevant": 148,
             "unused": 106,
             "unused_novel": 52
-          }
+          },
+          "form_profiles": {
+            "task_recall": {
+              "profiled_spans": 400,
+              "benefit": 0.4761904761904762
+            },
+            "search_result": {
+              "profiled_spans": 459,
+              "benefit": 0.08714596949891068
+            }
+          },
+          "delivered_chars": 23149598
         },
         {
           "run": "run2",
@@ -10680,7 +10779,18 @@
             "relevant": 150,
             "unused": 123,
             "unused_novel": 57
-          }
+          },
+          "form_profiles": {
+            "task_recall": {
+              "profiled_spans": 382,
+              "benefit": 0.6357516828721017
+            },
+            "search_result": {
+              "profiled_spans": 456,
+              "benefit": 0.1023391812865497
+            }
+          },
+          "delivered_chars": 21740952
         },
         {
           "run": "run3",
@@ -11742,7 +11852,18 @@
             "relevant": 143,
             "unused": 105,
             "unused_novel": 48
-          }
+          },
+          "form_profiles": {
+            "task_recall": {
+              "profiled_spans": 390,
+              "benefit": 0.8978428978428977
+            },
+            "search_result": {
+              "profiled_spans": 457,
+              "benefit": 0.1012035010940919
+            }
+          },
+          "delivered_chars": 22355674
         },
         {
           "run": "run4",
@@ -12762,7 +12883,18 @@
             "relevant": 130,
             "unused": 106,
             "unused_novel": 55
-          }
+          },
+          "form_profiles": {
+            "task_recall": {
+              "profiled_spans": 350,
+              "benefit": 0.6479591836734694
+            },
+            "search_result": {
+              "profiled_spans": 459,
+              "benefit": 0.0462962962962963
+            }
+          },
+          "delivered_chars": 20524495
         }
       ],
       "task_window": 25
@@ -12854,8 +12986,8 @@
             "full_skill": 1.0
           },
           "neutral": {
-            "scene_index": 1310.25,
             "persona": 601.75,
+            "scene_index": 1310.25,
             "skill_catalog": 1986.0,
             "full_skill": 750.0,
             "skill_search_preview": 515.0,
@@ -12972,8 +13104,8 @@
                   "positive": {},
                   "negative": {},
                   "neutral": {
-                    "scene_index": 17.666667,
                     "persona": 6.333333,
+                    "scene_index": 17.666667,
                     "skill_catalog": 23.0,
                     "full_skill": 7.0,
                     "skill_search_preview": 3.0
@@ -14113,7 +14245,34 @@
             "relevant": 687,
             "unused": 597,
             "unused_novel": 557
-          }
+          },
+          "form_profiles": {
+            "persona": {
+              "profiled_spans": 499,
+              "benefit": 0.0
+            },
+            "scene_index": {
+              "profiled_spans": 499,
+              "benefit": 0.0
+            },
+            "skill_catalog": {
+              "profiled_spans": 498,
+              "benefit": 0.0
+            },
+            "full_skill": {
+              "profiled_spans": 184,
+              "benefit": 15.217391304347826
+            },
+            "skill_search_preview": {
+              "profiled_spans": 95,
+              "benefit": 0.0
+            },
+            "scene_content": {
+              "profiled_spans": 2,
+              "benefit": 0.0
+            }
+          },
+          "delivered_chars": 45288781
         },
         {
           "run": "run2",
@@ -14160,8 +14319,8 @@
                   },
                   "negative": {},
                   "neutral": {
-                    "scene_index": 12.0,
                     "persona": 12.0,
+                    "scene_index": 12.0,
                     "skill_catalog": 23.0,
                     "scene_content": 13.0,
                     "full_skill": 7.0,
@@ -14221,8 +14380,8 @@
                   "negative": {},
                   "neutral": {
                     "skill_catalog": 24.0,
-                    "scene_index": 12.5,
                     "persona": 12.5,
+                    "scene_index": 12.5,
                     "scene_content": 13.0,
                     "full_skill": 9.0,
                     "skill_search_preview": 9.0
@@ -14289,8 +14448,8 @@
                   "negative": {},
                   "neutral": {
                     "skill_catalog": 25.0,
-                    "scene_index": 12.5,
                     "persona": 12.5,
+                    "scene_index": 12.5,
                     "full_skill": 5.0,
                     "scene_content": 12.0,
                     "skill_search_preview": 3.0
@@ -14358,8 +14517,8 @@
                   "negative": {},
                   "neutral": {
                     "skill_catalog": 25.0,
-                    "scene_index": 12.5,
                     "persona": 12.5,
+                    "scene_index": 12.5,
                     "scene_content": 11.0,
                     "skill_search_preview": 8.0,
                     "full_skill": 5.0
@@ -14427,8 +14586,8 @@
                   "negative": {},
                   "neutral": {
                     "skill_catalog": 25.0,
-                    "scene_index": 12.5,
                     "persona": 12.5,
+                    "scene_index": 12.5,
                     "full_skill": 16.0,
                     "scene_content": 13.0,
                     "skill_search_preview": 7.0
@@ -14490,8 +14649,8 @@
                   "negative": {},
                   "neutral": {
                     "skill_catalog": 25.0,
-                    "scene_index": 12.5,
                     "persona": 12.5,
+                    "scene_index": 12.5,
                     "scene_content": 16.0,
                     "full_skill": 8.0,
                     "skill_search_preview": 7.0
@@ -14558,8 +14717,8 @@
                   "negative": {},
                   "neutral": {
                     "skill_catalog": 25.0,
-                    "scene_index": 12.5,
                     "persona": 12.5,
+                    "scene_index": 12.5,
                     "full_skill": 12.0,
                     "skill_search_preview": 6.0,
                     "scene_content": 14.0
@@ -14625,8 +14784,8 @@
                   "negative": {},
                   "neutral": {
                     "skill_catalog": 25.0,
-                    "scene_index": 13.5,
                     "persona": 12.5,
+                    "scene_index": 13.5,
                     "full_skill": 13.0,
                     "scene_content": 17.0,
                     "skill_search_preview": 9.0,
@@ -14695,8 +14854,8 @@
                   "negative": {},
                   "neutral": {
                     "skill_catalog": 25.0,
-                    "scene_index": 12.5,
                     "persona": 12.5,
+                    "scene_index": 12.5,
                     "scene_content": 17.0,
                     "full_skill": 14.0,
                     "skill_search_preview": 8.0
@@ -14765,8 +14924,8 @@
                   "negative": {},
                   "neutral": {
                     "skill_catalog": 25.0,
-                    "scene_index": 11.5,
                     "persona": 11.5,
+                    "scene_index": 11.5,
                     "full_skill": 9.0,
                     "scene_content": 17.0,
                     "skill_search_preview": 6.0
@@ -14833,8 +14992,8 @@
                   "negative": {},
                   "neutral": {
                     "skill_catalog": 25.0,
-                    "scene_index": 12.5,
                     "persona": 12.5,
+                    "scene_index": 12.5,
                     "skill_search_preview": 8.0,
                     "scene_content": 13.0,
                     "full_skill": 5.0
@@ -14893,8 +15052,8 @@
                   "negative": {},
                   "neutral": {
                     "skill_catalog": 25.0,
-                    "scene_index": 12.5,
                     "persona": 12.5,
+                    "scene_index": 12.5,
                     "full_skill": 6.0,
                     "scene_content": 17.0,
                     "skill_search_preview": 3.0
@@ -14951,8 +15110,8 @@
                   "negative": {},
                   "neutral": {
                     "skill_catalog": 24.0,
-                    "scene_index": 12.0,
                     "persona": 12.0,
+                    "scene_index": 12.0,
                     "skill_search_preview": 4.0,
                     "scene_content": 13.0,
                     "full_skill": 7.0
@@ -15024,8 +15183,8 @@
                   "negative": {},
                   "neutral": {
                     "skill_catalog": 24.0,
-                    "scene_index": 11.5,
                     "persona": 11.5,
+                    "scene_index": 11.5,
                     "scene_content": 12.0,
                     "full_skill": 7.0,
                     "skill_search_preview": 5.0
@@ -15098,8 +15257,8 @@
                   "negative": {},
                   "neutral": {
                     "skill_catalog": 24.0,
-                    "scene_index": 12.5,
                     "persona": 12.5,
+                    "scene_index": 12.5,
                     "scene_content": 11.0,
                     "full_skill": 15.0,
                     "skill_search_preview": 8.0
@@ -15169,8 +15328,8 @@
                   },
                   "neutral": {
                     "skill_catalog": 25.0,
-                    "scene_index": 12.5,
                     "persona": 12.5,
+                    "scene_index": 12.5,
                     "scene_content": 14.0,
                     "full_skill": 10.0,
                     "skill_search_preview": 7.0
@@ -15237,8 +15396,8 @@
                   "negative": {},
                   "neutral": {
                     "skill_catalog": 25.0,
-                    "scene_index": 12.5,
                     "persona": 12.5,
+                    "scene_index": 12.5,
                     "full_skill": 12.0,
                     "scene_content": 15.0,
                     "skill_search_preview": 4.0
@@ -15298,8 +15457,8 @@
                   "negative": {},
                   "neutral": {
                     "skill_catalog": 25.0,
-                    "scene_index": 12.5,
                     "persona": 12.5,
+                    "scene_index": 12.5,
                     "scene_content": 11.0,
                     "full_skill": 17.0,
                     "skill_search_preview": 10.0
@@ -15364,8 +15523,8 @@
                   "negative": {},
                   "neutral": {
                     "skill_catalog": 24.0,
-                    "scene_index": 12.0,
                     "persona": 12.0,
+                    "scene_index": 12.0,
                     "skill_search_preview": 11.0,
                     "full_skill": 11.0,
                     "scene_content": 15.0
@@ -15436,8 +15595,8 @@
                   "negative": {},
                   "neutral": {
                     "skill_catalog": 25.0,
-                    "scene_index": 12.5,
                     "persona": 12.5,
+                    "scene_index": 12.5,
                     "scene_content": 18.0,
                     "skill_search_preview": 10.0,
                     "full_skill": 14.0
@@ -15490,7 +15649,34 @@
             "relevant": 1380,
             "unused": 891,
             "unused_novel": 814
-          }
+          },
+          "form_profiles": {
+            "persona": {
+              "profiled_spans": 499,
+              "benefit": 0.6012024048096193
+            },
+            "scene_index": {
+              "profiled_spans": 500,
+              "benefit": 0.0
+            },
+            "skill_catalog": {
+              "profiled_spans": 498,
+              "benefit": 0.0
+            },
+            "scene_content": {
+              "profiled_spans": 291,
+              "benefit": 2.0618556701030926
+            },
+            "full_skill": {
+              "profiled_spans": 239,
+              "benefit": 12.133891213389122
+            },
+            "skill_search_preview": {
+              "profiled_spans": 140,
+              "benefit": 0.08403361344537814
+            }
+          },
+          "delivered_chars": 44842921
         },
         {
           "run": "run3",
@@ -15535,8 +15721,8 @@
                   "positive": {},
                   "negative": {},
                   "neutral": {
-                    "scene_index": 16.916667,
                     "persona": 6.083333,
+                    "scene_index": 16.916667,
                     "skill_catalog": 23.0,
                     "full_skill": 14.0,
                     "skill_search_preview": 5.0,
@@ -16879,7 +17065,34 @@
             "relevant": 1296,
             "unused": 957,
             "unused_novel": 817
-          }
+          },
+          "form_profiles": {
+            "persona": {
+              "profiled_spans": 499,
+              "benefit": 0.40080160320641284
+            },
+            "scene_index": {
+              "profiled_spans": 500,
+              "benefit": 0.0
+            },
+            "skill_catalog": {
+              "profiled_spans": 498,
+              "benefit": 0.0
+            },
+            "full_skill": {
+              "profiled_spans": 285,
+              "benefit": 11.929824561403509
+            },
+            "skill_search_preview": {
+              "profiled_spans": 176,
+              "benefit": 0.056818181818181816
+            },
+            "scene_content": {
+              "profiled_spans": 117,
+              "benefit": 2.5641025641025643
+            }
+          },
+          "delivered_chars": 49617328
         },
         {
           "run": "run4",
@@ -16925,8 +17138,8 @@
                   "negative": {},
                   "neutral": {
                     "skill_catalog": 24.0,
-                    "scene_index": 17.666667,
                     "persona": 6.333333,
+                    "scene_index": 17.666667,
                     "full_skill": 4.0,
                     "skill_search_preview": 2.0
                   },
@@ -18122,7 +18335,34 @@
             "relevant": 755,
             "unused": 646,
             "unused_novel": 579
-          }
+          },
+          "form_profiles": {
+            "skill_catalog": {
+              "profiled_spans": 499,
+              "benefit": 0.0
+            },
+            "persona": {
+              "profiled_spans": 499,
+              "benefit": 0.0
+            },
+            "scene_index": {
+              "profiled_spans": 499,
+              "benefit": 0.0
+            },
+            "full_skill": {
+              "profiled_spans": 204,
+              "benefit": 15.686274509803921
+            },
+            "skill_search_preview": {
+              "profiled_spans": 111,
+              "benefit": 0.09009009009009009
+            },
+            "scene_content": {
+              "profiled_spans": 6,
+              "benefit": 0.0
+            }
+          },
+          "delivered_chars": 45733740
         }
       ],
       "task_window": 25,
@@ -19115,7 +19355,14 @@
             "relevant": 46,
             "unused": 25,
             "unused_novel": 15
-          }
+          },
+          "form_profiles": {
+            "search_result": {
+              "profiled_spans": 357,
+              "benefit": 0.3948245965052688
+            }
+          },
+          "delivered_chars": 1318641
         },
         {
           "run": "run2",
@@ -19990,7 +20237,14 @@
             "relevant": 38,
             "unused": 28,
             "unused_novel": 25
-          }
+          },
+          "form_profiles": {
+            "search_result": {
+              "profiled_spans": 366,
+              "benefit": 0.2717061323618701
+            }
+          },
+          "delivered_chars": 1358718
         },
         {
           "run": "run3",
@@ -20885,7 +21139,14 @@
             "relevant": 41,
             "unused": 23,
             "unused_novel": 21
-          }
+          },
+          "form_profiles": {
+            "search_result": {
+              "profiled_spans": 368,
+              "benefit": 0.2848947550034506
+            }
+          },
+          "delivered_chars": 1394939
         },
         {
           "run": "run4",
@@ -21778,7 +22039,14 @@
             "relevant": 46,
             "unused": 27,
             "unused_novel": 24
-          }
+          },
+          "form_profiles": {
+            "search_result": {
+              "profiled_spans": 370,
+              "benefit": 0.3188643188643189
+            }
+          },
+          "delivered_chars": 1389468
         }
       ],
       "task_window": 25

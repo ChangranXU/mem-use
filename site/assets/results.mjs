@@ -1,8 +1,8 @@
 import { enhanceSelects } from './results-select.mjs';
-import { profileFlow, bindProfiles } from './results-profile.mjs';
+import { profileFlow, bindProfiles, revealProfileContext } from './results-profile.mjs';
 import { detailContent, detailChart } from './results-detail.mjs';
 import { conclusionsView, bindConclusions, revealConclusions } from './results-conclusions.mjs';
-import { COLUMNS, DEFAULT_COLUMNS, VERDICTS, prepareRows, filterRows, sortRows, formatValue, formBreakdown, profileSelection } from './results-core.mjs';
+import { COLUMNS, DEFAULT_COLUMNS, VERDICTS, prepareRows, filterRows, sortRows, formatValue, formBreakdown, profileSelection, comparisonRows } from './results-core.mjs';
 const $ = selector => document.querySelector(selector);
 const byKey = Object.fromEntries(COLUMNS.map(column => [column.key, column]));
 const escape = value => String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
@@ -107,7 +107,7 @@ function tableValue(row, column) {
 // The no-memory row is labelled as the reference for cost changes.
 const rowTag = row => row.profile ? '' : 'Baseline';
 // Verdicts and profile axes have a meaning and a counterpart to show, even at zero.
-const explained = column => VERDICTS.includes(column.key) || column.group === 'Six-axis profile';
+const explained = column => VERDICTS.includes(column.key) || ['Six-axis profile', 'Coverage and delivery'].includes(column.group);
 function cellContent(row, column) {
 	const value = tableValue(row, column);
 	if (column.key === 'memory_system') {
@@ -333,15 +333,17 @@ function renderResults() {
 	if (profile && items.length) {
 		// The ids retain complete configurations, including when both use the same system.
 		const picked = items.find(row => row.id === profileId) || items[0];
-		const other = items.find(row => row.id === compareId) || null;
+		const comparisons = comparisonRows(items, picked.id);
+		const other = comparisons.find(row => row.id === compareId) || null;
 		profileId = picked.id; compareId = other ? other.id : '';
 		renderProfileSelectors('primary', items, picked);
-		renderProfileSelectors('comparison', items, other);
+		renderProfileSelectors('comparison', comparisons, other);
 		$('#profile-swap').hidden = !other;
 		$('.profile-pick-footer').hidden = !other;
 		const describe = row => `${row.memory_system}, ${row.harness}, ${row.model}, ${row.thinking_effort} effort`;
 		$('#profile-status').textContent = other ? `Comparing ${describe(picked)} with ${describe(other)}.` : `Showing ${describe(picked)}.`;
 		flow.innerHTML = profileFlow(picked, other, escape);
+		revealObserver = revealProfileContext(flow, motion.matches && entering);
 	} else if (view === 'conclusions') {
 		// Dataset order keeps each system's colour and marker, whatever the table's sort.
 		section.innerHTML = conclusionsView(cohort, escape);
@@ -373,12 +375,13 @@ function renderResults() {
 				['Unused memory', 'Unused means no action, selection, or reference attributed to the entry. Unknown influence does not count as unused.'],
 				['New information', 'The entry adds information absent from the agent’s prior context. This is the judge’s novelty assessment.'],
 				['Cost', 'Mean recorded USD for each episode. Judging is excluded; unreported charges are unknown.']]
-			: profile ? [['Summary', 'Mean ± sample standard deviation across observed runs. SD is in percentage points (pp).'],
+			: profile ? [['Summary', 'Mean ± sample standard deviation across observed runs. Percentage SDs are in percentage points (pp); delivery-yield SD uses beneficial entries per million characters.'],
 				['Verdicts', 'Each run uses spans with a verdict, including automatic neutral copies.'],
-				['Profile', 'Each run averages entry shares over its profiled spans. The six axes are independent.'],
+				['Profile', 'Each run averages entry shares over its profiled spans. Corroboration and information gain require relevance; benefit and harm require acted-on influence.'],
 				['Scale', 'The magnified strip enlarges the start of the full strip linearly. Entry bars share the axis printed above them; whiskers show ± one SD, clipped to it.'],
 				...(compareId ? [['Difference', 'A − B uses unrounded run means, in percentage points. It does not indicate statistical significance.']] : [])]
 			: [['Verdicts', 'Share of spans with a verdict. Select an underlined value for its meaning and its split by memory form.'],
+				['Coverage and delivery', 'Selectable columns show mean ± sample SD across runs. Coverage counts episodes with observed benefit / all episodes; delivery yield counts beneficial entries per million recorded characters of memory text delivered to the task agent. Memory-side processing is excluded; unreported cloud usage remains unknown.'],
 				['Pass rate', 'Mean ± sample standard deviation across runs, in percentage points.'],
 				['Cost', 'Mean recorded USD per episode. Δ is the change from the no-memory baseline. Judging is excluded; unreported charges are unknown.']]),
 	];
@@ -438,7 +441,8 @@ try {
 			const key = event.target.dataset.profileField;
 			if (!key) return;
 			const previous = rows.find(row => row.id === (side === 'primary' ? profileId : compareId));
-			const { row } = profileSelection(visibleRows(), { ...previous, [key]: event.target.value });
+			const candidates = side === 'comparison' ? comparisonRows(visibleRows(), profileId) : visibleRows();
+			const { row } = profileSelection(candidates, { ...previous, [key]: event.target.value });
 			if (side === 'primary') profileId = row?.id || null;
 			else compareId = key === 'memory_system' && !event.target.value ? '' : row?.id || '';
 			renderResults();
