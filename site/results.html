@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Results · MemUse</title>
-<meta name="description" content="Compare memory systems by memory use, task pass rate, and cost. Filter configurations, choose columns, and sort each metric.">
+<meta name="description" content="Compare memory systems by memory use, task pass rate, and cost. Sort and filter the table, or explore a system’s verdicts and the delivery and use evidence behind them.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap">
@@ -13,6 +13,7 @@
 <link rel="stylesheet" href="assets/landing.css">
 <link rel="stylesheet" href="assets/results.css">
 <link rel="stylesheet" href="assets/radar.css">
+<link rel="stylesheet" href="assets/profile.css">
 <script>try { const t = localStorage.getItem('theme'); if (t) document.documentElement.dataset.theme = t; } catch {}</script>
 </head>
 <body class="landing results-page">
@@ -20,27 +21,37 @@
 <main class="content landing-content" id="main">
 <div class="landing-wrap">
 	<div class="results-heading"><div><h1>Results</h1><p>Compare memory use, task outcomes, and cost.</p></div><a class="text-link" href="paper.html">Read the study <span aria-hidden="true">↗</span></a></div>
-	<div class="results-toolbar">
+	<div class="results-controls"><div class="results-toolbar">
 		<label class="benchmark-picker">Benchmark<select id="benchmark" aria-label="Benchmark" disabled><option>Loading…</option></select></label>
 		<div class="results-actions">
-			<div class="view-switch" role="group" aria-label="View"><button type="button" data-view="table" aria-pressed="true"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M3 15h18"/></svg>Table</button><button type="button" data-view="radar" aria-pressed="false"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 8 5v8l-8 5-8-5V8z"/><path d="m12 8 4 3-1 5H9l-1-5z"/></svg>Radar</button></div>
+			<label class="result-search"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="result-query" type="search" aria-label="Search configurations" placeholder="Search configurations…"></label>
 			<details class="toolbar-menu" id="filters-menu"><summary><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h18l-7 8v6l-4 2v-8z"/></svg>Filters <span id="filter-count"></span><svg class="i menu-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg></summary><div class="menu-panel filters-panel"><div class="filter-selects"><label>Harness<select id="harness" aria-label="Harness"></select></label><label>Model<select id="model" aria-label="Model"></select></label><label>Thinking effort<select id="thinking_effort" aria-label="Thinking effort"></select></label></div><fieldset><legend>Memory systems</legend><div id="system-options" class="checkbox-grid"></div></fieldset><button id="clear-filters" class="quiet-button" type="button">Clear filters</button></div></details>
 			<details class="toolbar-menu" id="columns-menu"><summary><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16M15 4v16"/></svg>Columns <span id="column-count"></span><svg class="i menu-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg></summary><div class="menu-panel columns-panel"><div id="column-options"></div><button id="default-columns" class="quiet-button" type="button">Restore default columns</button></div></details>
 		</div>
 	</div>
-	<div class="results-subbar"><p id="rows-summary" role="status">Loading results…</p><label class="result-search"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="result-query" type="search" aria-label="Search configurations" placeholder="Search configurations…"></label><button id="reset-results" class="quiet-button" type="button">Reset</button></div>
+	<div class="results-subbar"><div class="view-switch" role="group" aria-label="View"><button type="button" data-view="table" aria-pressed="true"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M3 15h18"/></svg>Table</button><button type="button" data-view="profile" aria-pressed="false"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18"/><circle cx="15" cy="6" r="2" fill="currentColor"/><circle cx="8" cy="12" r="2" fill="currentColor"/><circle cx="18" cy="18" r="2" fill="currentColor"/></svg>Profile</button></div><p id="rows-summary" role="status">Loading results…</p><button id="reset-results" class="quiet-button" type="button">Reset</button></div>
+	</div>
 	<div id="results-error" class="results-empty" hidden><h2>Results could not be loaded.</h2><p>Refresh the page to try again, or read the <a href="paper.html">paper results</a>.</p></div>
 	<div id="empty-results" class="results-empty" hidden><h2>No matching configurations.</h2><p>Change the filters or clear your search.</p><button type="button" id="empty-reset" class="landing-button">Reset filters</button></div>
-	<section id="table-view" aria-label="Results table"><div class="results-table-wrap" tabindex="0" aria-label="Scroll results table horizontally"><table class="results-table"><caption class="sr-only">Memory-system results. Select any column heading to sort in ascending or descending order.</caption><colgroup id="results-cols"></colgroup><thead id="results-head"></thead><tbody id="results-body"></tbody></table></div><p class="table-hint" id="sort-summary"></p></section>
-	<section id="radar-view" class="radar-view" aria-labelledby="radar-heading" hidden>
-		<div class="radar-card">
-			<div class="radar-head"><div><h2 id="radar-heading">Six-axis memory profile</h2><p>Mean entry share per profiled span. Select a memory system to highlight it; select a point to split it by memory form.</p></div><div class="radar-legend" role="group" aria-label="Highlight a memory system"></div></div>
-			<div class="radar-body"><div class="radar-chart"></div><div class="radar-values-wrap" tabindex="0" aria-label="Profile values"><table class="radar-values"></table></div></div>
+	<section id="table-view" aria-label="Results table"><div class="results-table-frame"><div class="results-table-wrap" tabindex="0" aria-label="Scroll results table horizontally"><table class="results-table"><caption class="sr-only">Memory-system results. Select any column heading to sort in ascending or descending order.</caption><colgroup id="results-cols"></colgroup><thead id="results-head"></thead><tbody id="results-body"></tbody></table></div></div><p class="table-hint" id="sort-summary"></p></section>
+	<section id="profile-view" class="profile-view" aria-label="Memory profile" hidden>
+		<div class="profile-pick">
+			<fieldset class="profile-config is-a" id="profile-primary"><legend><span class="config-marker">A</span>Primary configuration</legend>
+				<label><span class="sr-only">Memory system</span><select id="profile-system" data-profile-field="memory_system" aria-label="Memory system"></select></label>
+				<details class="profile-settings"><summary><span data-config-summary></span><span class="config-edit">Configure <svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg></span></summary><div class="profile-config-fields"><label>Harness<select data-profile-field="harness" aria-label="Primary harness"></select></label><label>Model<select data-profile-field="model" aria-label="Primary model"></select></label><label>Thinking effort<select data-profile-field="thinking_effort" aria-label="Primary thinking effort"></select></label></div></details>
+			</fieldset>
+			<fieldset class="profile-config is-b" id="profile-comparison"><legend><span class="config-marker">B</span>Comparison <span class="config-optional">optional</span></legend>
+				<label><span class="sr-only">Memory system</span><select id="profile-compare" data-profile-field="memory_system" aria-label="Compare with"></select></label>
+				<details class="profile-settings" hidden><summary><span data-config-summary></span><span class="config-edit">Configure <svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg></span></summary><div class="profile-config-fields"><label>Harness<select data-profile-field="harness" aria-label="Comparison harness"></select></label><label>Model<select data-profile-field="model" aria-label="Comparison model"></select></label><label>Thinking effort<select data-profile-field="thinking_effort" aria-label="Comparison thinking effort"></select></label></div></details>
+				<p class="profile-compare-hint">Add a configuration to compare results side by side.</p>
+			</fieldset>
+			<div class="profile-pick-footer" hidden><p>Each configuration is independent. Differences show A − B.</p><button type="button" id="profile-swap" class="profile-swap" hidden><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h16m-4-4 4 4-4 4M20 16H4m4-4-4 4 4 4"/></svg>Swap configurations</button></div>
 		</div>
-		<p class="table-hint" id="radar-note"></p>
+		<p id="profile-status" class="sr-only" role="status"></p>
+		<article id="profile-flow" class="profile-flow"></article>
 	</section>
-	<p class="data-scope" id="data-scope"></p>
-	<div id="form-detail" class="form-detail" role="dialog" aria-labelledby="form-detail-title" tabindex="-1" hidden></div>
+	<dl class="results-notes" id="results-notes" aria-label="About these results"></dl>
+	<dialog id="form-detail" class="form-detail" aria-labelledby="form-detail-title"></dialog>
 </div>
 </main>
 <footer class="landing-footer landing-wrap"><a class="footer-brand" href="index.html">MemUse</a><p>Evaluate agent memory at its point of use.</p><nav aria-label="Footer"><a href="tutorial.html">Documentation</a><a href="paper.html">Paper</a><a href="https://github.com/ChangranXU/mem-use">GitHub</a></nav></footer>

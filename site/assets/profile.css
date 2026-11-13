@@ -1,0 +1,311 @@
+/* Verdict colours describe outcomes; comparison colours identify configurations.
+   Entry axes add two quiet hues: steel for what arrived, ochre for established use,
+   so only Benefit and Harm carry the outcome colours. */
+:root { --deliver: #4f7396; --use: #b07a26; }
+:root[data-theme="dark"] { --deliver: #8fb3d6; --use: #e0ac55; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --deliver: #8fb3d6; --use: #e0ac55; } }
+.t-relevance, .t-corroboration, .t-information_gain { --v: var(--deliver); }
+.t-acted_on { --v: var(--use); }
+.v-positive, .t-positive, .t-benefit { --v: var(--good); }
+.v-negative, .t-negative, .t-harm { --v: var(--bad); }
+.v-unresolved, .t-unresolved { --v: var(--violet); }
+.is-a { --c: var(--cat-1); }
+.is-b { --c: var(--cat-2); }
+.results-actions[hidden], .profile-pick-footer[hidden], .profile-settings[hidden], .profile-compare-hint[hidden] { display: none; }
+[data-results-view="profile"] .results-heading { padding-block: 32px 24px; }
+[data-results-view="profile"] .results-heading h1 { font-size: clamp(40px, 4vw, 48px); }
+[data-results-view="profile"] .results-controls { display: grid; grid-template-columns: minmax(200px, 280px) 1fr; align-items: end; gap: 24px; padding-bottom: 20px; border-bottom: 1px solid var(--line); }
+[data-results-view="profile"] .results-toolbar { padding-bottom: 0; border-bottom: 0; }
+[data-results-view="profile"] .results-subbar { margin: 0; }
+[data-results-view="profile"] .benchmark-picker { width: 100%; min-width: 0; }
+
+/* Keep system selection in reach; reveal detailed configuration on demand. */
+.profile-pick { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 0 40px; margin: 24px 0; }
+.results-page .profile-config { min-width: 0; margin: 0; }
+.profile-config legend { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.config-marker, .detail-system-name i { display: inline-grid; place-items: center; flex: none; width: 20px; height: 20px; border: 1px solid color-mix(in srgb, var(--c) 35%, var(--line)); border-radius: 4px; background: color-mix(in srgb, var(--c) 7%, var(--bg)); color: var(--c); font: 500 10px/1 var(--sans); }
+.profile-config .config-optional { margin-left: auto; font-weight: 400; color: var(--text-3); }
+.results-page .profile-pick label { display: grid; gap: 6px; min-width: 0; font-size: 12px; }
+.profile-config-fields { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) minmax(0, .8fr); gap: 10px; padding-top: 10px; }
+.profile-pick .result-select-trigger { min-width: 0; max-width: 100%; margin: 0; border-radius: 7px; }
+.profile-config > label .result-select-trigger { min-height: 48px; font-size: 16px; }
+.profile-pick .result-select-trigger > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.profile-pick .result-select-trigger:disabled { color: var(--text-3); background: transparent; cursor: default; }
+.profile-settings { margin: 4px 0 0; border: 0; border-radius: 0; background: transparent; overflow: visible; }
+.profile-settings > summary { justify-content: space-between; gap: 14px; min-height: 40px; padding: 8px 0; font-size: 12px; font-weight: 400; color: var(--text-3); }
+.profile-settings > summary::before { display: none; }
+.profile-settings > summary:is(:hover, :focus-visible), .profile-settings[open] > summary { background: transparent; color: var(--text); }
+.profile-settings > summary > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.config-edit { display: inline-flex; flex: none; align-items: center; gap: 5px; color: var(--text-2); }
+.config-edit svg { width: 12px; transition: transform .2s; }
+.profile-settings[open] .config-edit svg { transform: rotate(180deg); }
+.results-page .profile-compare-hint { margin: 12px 0 0; color: var(--text-3); font-size: 12px; line-height: 1.6; }
+.profile-pick-footer { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 12px; }
+.results-page .profile-pick-footer p { margin: 0; font-size: 12px; line-height: 1.6; color: var(--text-3); }
+.profile-swap { display: inline-flex; align-items: center; justify-content: center; flex: none; gap: 8px; min-height: 40px; padding: 8px 0 8px 12px; border: 0; background: transparent; color: var(--text-2); font-size: 12px; cursor: pointer; }
+.profile-swap:hover { color: var(--accent); }
+.profile-swap[hidden] { display: none; }
+
+/* An open report shares the landing page's type and warm paper surfaces. */
+.profile-flow { --neutral: color-mix(in srgb, var(--text-3) 40%, var(--bg-raised)); --ink: color-mix(in srgb, var(--text) 55%, var(--bg)); border-top: 1px solid var(--line-strong); }
+.t-neutral { --v: var(--neutral); }
+.flow-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 20px; padding: 24px 0; }
+.results-page .profile-eyebrow { margin: 0 0 10px; color: var(--text-3); font: 500 11px/1.5 var(--sans); letter-spacing: .09em; text-transform: uppercase; }
+.results-page .flow-head h2 { margin: 0; font: 400 clamp(30px, 3vw, 40px)/1.2 var(--serif); letter-spacing: -.03em; }
+.landing-content .flow-head h2 a { display: inline-flex; align-items: center; gap: 9px; }
+.landing-content .flow-head h2 a:hover { color: var(--accent); }
+.flow-head h2 svg { width: 16px; height: 16px; color: var(--text-3); }
+.results-page .profile-context p { margin: 10px 0 0; font-size: 12px; line-height: 1.7; color: var(--text-3); }
+.profile-scope { display: grid; gap: 6px; padding-left: 24px; border-left: 1px solid var(--line); font-size: 13px; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.profile-scope small { font-size: 12px; color: var(--text-3); }
+.flow-versus { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; }
+.flow-versus > span { display: inline-flex; align-items: center; gap: 10px; }
+.flow-versus small { color: var(--text-3); font: 400 14px var(--serif); letter-spacing: 0; }
+.profile-outcomes { padding: 12px 0 36px; }
+.profile-entries { padding: 32px 0 24px; border-top: 1px solid var(--line); }
+.profile-section-head { display: flex; align-items: end; justify-content: space-between; gap: 16px; margin-bottom: 22px; }
+.results-page .profile-section-head h3 { margin: 0; font: 400 26px/1.25 var(--serif); letter-spacing: -.025em; color: var(--text); }
+.results-page .profile-section-head p:not(.profile-eyebrow) { margin: 8px 0 0; font-size: 13px; line-height: 1.6; color: var(--text-3); }
+.profile-unit { flex: none; font: 400 11px/1.9 var(--mono); color: var(--text-3); white-space: nowrap; }
+
+/* One whole, then its first few percent magnified: neutral spans dominate every system. */
+.verdict-card { border: 1px solid var(--line); border-radius: 12px; background: var(--bg-raised); }
+.verdict-chart { padding: 22px 24px 18px; }
+.results-page .strip-caption, .ticks, .lens-note, .entry-axis { font-size: 11px; line-height: 1.5; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.results-page .strip-caption { display: flex; justify-content: space-between; margin: 0 0 8px; }
+.strips { display: grid; gap: 6px; }
+.strip { display: flex; align-items: center; gap: 10px; }
+.strip-track { display: flex; flex: 1; min-width: 0; height: 8px; overflow: hidden; border-radius: 4px; }
+.strip-track:empty { background: var(--line); }
+.seg { flex: 0 0 0; min-width: 0; background: var(--v); cursor: pointer; transition: opacity .18s; }
+.is-zoom .strip-track { gap: 0; height: 18px; background: var(--neutral); }
+.is-zoom .seg { flex: none; }
+.verdict-chart:has(.seg:is(.is-linked, .is-paired)) .seg:not(.is-linked, .is-paired) { opacity: .3; }
+.lens { position: relative; height: 40px; margin: 3px 0; }
+.lens svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.lens path { fill: none; stroke: color-mix(in srgb, var(--text-3) 45%, transparent); vector-effect: non-scaling-stroke; }
+.lens .lens-area { fill: color-mix(in srgb, var(--text-3) 9%, transparent); stroke: none; }
+.lens-note { position: absolute; left: 12px; bottom: 6px; white-space: nowrap; }
+.ticks { position: relative; display: block; height: 17px; }
+.ticks > span { position: absolute; top: 0; transform: translateX(-50%); white-space: nowrap; }
+.ticks > span:first-child { transform: none; }
+.ticks > span:last-child { transform: translateX(-100%); }
+.verdict-chart .ticks { margin-top: 6px; }
+.is-compare .verdict-chart :is(.strip-caption, .lens, .ticks) { margin-left: 30px; }
+.verdict-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-top: 1px solid var(--line); }
+
+/* Tiles and rows are the same control: a reading that opens its detail card. */
+.profile-cell { position: relative; min-width: 0; width: 100%; border: 0; border-radius: 0; background: transparent; color: var(--text-2); font: inherit; text-align: left; cursor: pointer; transition: background .18s, box-shadow .18s; }
+.profile-cell:hover, .profile-cell.is-linked, .profile-cell[aria-expanded="true"] { background: color-mix(in srgb, var(--v, var(--accent)) 6%, transparent); }
+.profile-cell.is-paired { background: color-mix(in srgb, var(--v, var(--accent)) 9%, transparent); box-shadow: inset 0 -2px var(--v, var(--accent)); }
+.profile-cell:focus-visible { z-index: 1; outline: 2px solid var(--accent); outline-offset: -2px; }
+.cell-label { display: grid; gap: 4px; min-width: 0; }
+.cell-name { display: flex; align-items: center; gap: 9px; font-size: 14px; font-weight: 500; color: var(--text); }
+.cell-text { font-size: 12px; line-height: 1.5; color: var(--text-3); }
+.cell-readings { display: grid; gap: 4px; }
+.reading { display: flex; align-items: baseline; gap: 8px; font-variant-numeric: tabular-nums; }
+.reading strong { color: var(--text); font: 400 26px/1.15 var(--serif); letter-spacing: -.03em; }
+.reading small { color: var(--text-3); font: 400 11px/1.4 var(--sans); white-space: nowrap; }
+.reading .config-marker { align-self: center; width: 17px; height: 17px; font-size: 9px; }
+.cell-delta { font: 500 12px/1.5 var(--sans); color: var(--text-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cell-delta > span { margin-right: 4px; color: var(--text-3); font-weight: 400; }
+.tile { display: grid; align-content: start; gap: 10px; padding: 20px 24px 22px; }
+.tile + .tile { border-left: 1px solid var(--line); }
+.tile:first-child { border-radius: 0 0 0 11px; }
+.tile:last-child { border-radius: 0 0 11px 0; }
+.tile .cell-label { display: contents; }
+.tile .cell-name::before { content: ""; flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--v); }
+.tile .cell-text { order: 1; }
+.tile .reading:only-child strong { font-size: clamp(32px, 3vw, 40px); }
+.tile .reading:only-child { flex-wrap: wrap; }
+
+/* Six rows share one printed axis, so a relevant share can be read against a used one. */
+.entry-chart { --cols: minmax(150px, 230px) minmax(0, 1fr) 150px; --areas: "label track readings"; }
+.is-compare .entry-chart { --cols: minmax(150px, 220px) minmax(0, 1fr) 196px 96px; --areas: "label track readings delta"; }
+.entry-axis, .row { display: grid; grid-template-columns: var(--cols); align-items: center; column-gap: 28px; padding-inline: 12px; }
+.entry-axis > :nth-child(n+3) { text-align: right; }
+.results-page .entry-chart h4 { margin: 0; padding: 18px 12px 10px; color: var(--text-3); font: 400 12px/1.5 var(--sans); letter-spacing: 0; text-transform: none; }
+.entry-chart h4 b { margin-right: 10px; color: var(--text); font-weight: 600; }
+.row { grid-template-areas: var(--areas); padding-block: 14px; border-top: 1px solid var(--line); }
+.row.is-paired { box-shadow: inset 2px 0 var(--v, var(--accent)); }
+.row .cell-label { grid-area: label; }
+.row .cell-readings { grid-area: readings; justify-items: end; }
+.row .cell-delta { grid-area: delta; text-align: right; }
+.row .cell-delta > span { display: none; }
+.is-compare .row .reading { display: grid; grid-template-columns: 17px 84px 78px; align-items: baseline; text-align: right; }
+.is-compare .row .reading strong { font-size: 22px; }
+/* A reading takes its bar's colour, nudged toward the text colour so it stays legible. */
+.row .reading strong { color: color-mix(in srgb, var(--v, var(--text)) 88%, var(--text)); }
+.is-compare .row .reading strong { color: color-mix(in srgb, var(--c) 82%, var(--text)); }
+.is-compare .row .reading small { text-align: left; }
+.row-track { grid-area: track; align-self: stretch; display: grid; align-content: center; gap: 4px; min-height: 30px; margin-block: -14px; border-right: 1px solid var(--line); background: repeating-linear-gradient(90deg, var(--line) 0 1px, transparent 1px calc(100% / var(--ticks))); }
+.entry-bar { position: relative; display: block; height: 10px; }
+.entry-bar i { display: block; height: 100%; border-radius: 0 4px 4px 0; background: linear-gradient(90deg, color-mix(in srgb, var(--v, var(--ink)) 72%, var(--bg-raised)), var(--v, var(--ink))); }
+.is-compare .entry-bar i { background: var(--c); }
+.is-compare .is-b :is(.entry-bar i, .key-bar), .is-compare .entry-bar.is-b i { background-image: repeating-linear-gradient(120deg, transparent 0 5px, rgb(255 255 255 / .38) 5px 7px); }
+.whisker { position: absolute; top: 50%; height: 1px; background: var(--text); transform: translateY(-50%); }
+.whisker::before, .whisker::after { content: ""; position: absolute; top: -4px; width: 1px; height: 9px; background: var(--text); }
+.whisker::before { left: 0; }
+.whisker::after { right: 0; }
+.results-page .chart-key { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 22px; margin: 0; padding: 14px 12px 0; border-top: 1px solid var(--line); color: var(--text-3); font-size: 12px; line-height: 1.5; }
+.key-system, .key-sd { display: inline-flex; align-items: center; gap: 8px; }
+.key-system { color: var(--text-2); }
+.key-bar { width: 22px; height: 8px; border-radius: 0 3px 3px 0; background: var(--c); }
+.key-sd { margin-left: auto; }
+.key-sd i { width: 20px; height: 9px; border-inline: 1px solid currentColor; background: linear-gradient(currentColor, currentColor) center / 100% 1px no-repeat; }
+
+/* The explanation follows the reader: it floats over whichever chart is in view. */
+.profile-guide { position: sticky; bottom: 16px; z-index: 5; width: fit-content; max-width: 100%; margin: 4px auto 20px; padding: 9px 20px; border: 1px solid var(--line-strong); border-radius: 999px; background: color-mix(in srgb, var(--bg-raised) 94%, transparent); box-shadow: 0 8px 28px rgb(0 0 0 / .14); backdrop-filter: blur(8px); }
+.results-page .profile-guide p { margin: 0; font-size: 13px; line-height: 1.5; color: var(--text); text-align: center; text-wrap: balance; }
+@media (hover: none) { .profile-guide { position: static; } }
+.results-page .profile-rule { margin: 12px 0 0; color: var(--text-3); font-size: 12px; line-height: 1.6; }
+.profile-footnote { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 12px; padding: 18px 0 0; border-top: 1px solid var(--line); font-size: 12px; color: var(--text-3); }
+.results-page .profile-footnote p { margin: 0; font-size: inherit; }
+.landing-content .profile-footnote a { color: var(--text-2); }
+.profile-footnote a:hover { text-decoration: underline; text-underline-offset: 4px; }
+
+/* The detail card's trend: one plot on shared axes. Its marks stay hidden until the
+   reader scrolls to it, then grow in task order. */
+.detail-trend { margin-top: 20px; border-top: 1px solid var(--line); }
+.detail-trend-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; margin: 18px 0 10px; }
+.detail-trend-head h3 { margin: 0; }
+/* Smoothing is a compact pill: label, a track filled to the value, and its reading. */
+.trend-control { display: grid; grid-template-columns: auto minmax(80px, 1fr) 4.5ch; align-items: center; gap: 8px; flex: 0 1 224px; margin-left: auto; padding: 5px 12px 5px 14px; border: 1px solid var(--line); border-radius: 999px; background: var(--bg-raised); color: var(--text-3); font: 500 11px/1 var(--sans); transition: border-color .18s, background .18s; }
+.trend-control:hover, .trend-control:focus-within { border-color: var(--line-strong); }
+.trend-control[data-on] { border-color: color-mix(in srgb, var(--accent) 35%, var(--line)); background: color-mix(in srgb, var(--accent) 5%, var(--bg-raised)); }
+.trend-control output { justify-self: end; padding: 3px 6px; border-radius: 5px; background: var(--bg-muted); color: var(--text-3); font: 500 10.5px/1 var(--mono); font-variant-numeric: tabular-nums; transition: color .18s, background .18s; }
+.trend-control[data-on] output { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); }
+.trend-control input { width: 100%; height: 20px; margin: 0; background: transparent; cursor: pointer; -webkit-appearance: none; appearance: none; }
+.trend-control input::-webkit-slider-runnable-track { height: 4px; border-radius: 2px; background: linear-gradient(var(--accent), var(--accent)) 0 / var(--fill, 0%) 100% no-repeat, var(--line-strong); }
+.trend-control input::-moz-range-track { height: 4px; border-radius: 2px; background: var(--line-strong); }
+.trend-control input::-moz-range-progress { height: 4px; border-radius: 2px; background: var(--accent); }
+.trend-control input::-webkit-slider-thumb { width: 14px; height: 14px; margin-top: -5px; border: 2px solid var(--accent); border-radius: 50%; background: var(--bg-raised); box-shadow: 0 1px 3px rgb(0 0 0 / .18); transition: transform .15s, box-shadow .15s; -webkit-appearance: none; appearance: none; }
+.trend-control input::-moz-range-thumb { box-sizing: border-box; width: 14px; height: 14px; border: 2px solid var(--accent); border-radius: 50%; background: var(--bg-raised); box-shadow: 0 1px 3px rgb(0 0 0 / .18); transition: transform .15s, box-shadow .15s; }
+.trend-control input:hover::-webkit-slider-thumb, .trend-control input:active::-webkit-slider-thumb { transform: scale(1.15); }
+.trend-control input:hover::-moz-range-thumb, .trend-control input:active::-moz-range-thumb { transform: scale(1.15); }
+.trend-control input:focus { outline: none; }
+.trend-control input:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 28%, transparent); }
+.trend-control input:focus-visible::-moz-range-thumb { box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 28%, transparent); }
+.trend { display: grid; grid-template-columns: 6ch minmax(0, 1fr); gap: 6px 10px; margin-top: 16px; font-size: 11px; line-height: 1.5; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.trend-y { position: relative; clip-path: inset(-10px -20px -10px -20px); }
+.trend-y .is-leaving { pointer-events: none; }
+.trend-y > span { position: absolute; right: 0; transform: translateY(50%); white-space: nowrap; }
+.trend-plot { position: relative; height: 168px; }
+/* Gridlines are elements, so they slide with their labels when the axis rescales. */
+.trend-grid { position: absolute; left: 0; right: 0; height: 0; border-top: 1px solid var(--line); pointer-events: none; }
+.trend-grid[data-tick="0"] { border-top-color: var(--line-strong); }
+.trend-plot svg { display: block; width: 100%; height: 100%; overflow: visible; clip-path: inset(-10px); }
+/* Rescaling stretches marks from the baseline, as the axis does. */
+.trend-plot g { transform-box: view-box; transform-origin: 50% 100%; }
+.trend-plot .trend-ghost { pointer-events: none; }
+.trend-plot g, .trend-swatch { --mark: var(--c, var(--v, var(--text-2))); }
+.trend-plot path { fill: none; stroke: var(--mark); stroke-width: 2; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.trend-plot .trend-band { fill: var(--mark); stroke: none; opacity: .14; pointer-events: none; }
+.trend-plot .trend-line { pointer-events: none; }
+.trend-plot .trend-hit { stroke: transparent; stroke-width: 14; pointer-events: stroke; cursor: pointer; }
+.trend-plot .trend-dot { stroke-width: 7; stroke-linecap: round; cursor: pointer; transition: stroke-width .15s ease; }
+.trend-plot .trend-dot.is-hover { stroke-width: 11; }
+.trend-form-series .trend-band { opacity: .1; }
+.trend-form-series .trend-dot { stroke-width: 4; }
+.trend-form-series .trend-dot.is-hover { stroke-width: 8; }
+.trend-plot .is-b .trend-line { stroke-dasharray: 5 4; }
+.trend-plot rect { fill: transparent; }
+.trend-plot rect.is-hover { fill: color-mix(in srgb, var(--text-3) 8%, transparent); }
+/* The crosshair and its readout follow the window under the pointer. */
+.trend-guide { position: absolute; top: 0; bottom: 0; width: 0; border-left: 1px dashed color-mix(in srgb, var(--text-3) 70%, transparent); opacity: 0; pointer-events: none; transition: left .12s ease-out, opacity .15s; }
+.trend-guide.is-visible { opacity: 1; }
+.trend-tip { position: absolute; top: 6px; left: var(--x); z-index: 2; display: grid; gap: 4px; width: max-content; max-width: min(280px, 70vw); padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: 8px; background: color-mix(in srgb, var(--bg-raised) 96%, transparent); box-shadow: 0 8px 24px rgb(0 0 0 / .12); backdrop-filter: blur(6px); color: var(--text-2); font-size: 11px; line-height: 1.4; transform: translateX(10px); pointer-events: none; animation: results-fade .12s ease-out; }
+.trend-tip.is-left { transform: translateX(calc(-100% - 10px)); }
+.trend-tip[hidden] { display: none; }
+.trend-tip strong { color: var(--text); font-weight: 600; }
+.trend-tip > span { display: grid; grid-template-columns: 14px minmax(0, 1fr) auto; align-items: center; gap: 6px 8px; }
+.trend-tip > span > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A row names its curve's colour (a form's inline colour wins), and its swatch inherits it. */
+.trend-tip > span { --mark: var(--c, var(--v, var(--text-2))); }
+.trend-tip .trend-swatch { --mark: inherit; width: 12px; }
+.trend-tip em { color: var(--text); font-style: normal; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.trend .ticks, .trend-x { grid-column: 2; }
+.trend-x { text-align: center; }
+.results-page .detail-trend .chart-key { margin-top: 12px; padding-inline: 0; }
+.trend-legend { padding: 4px 6px; border: 1px solid transparent; border-radius: 6px; background: none; font: inherit; cursor: pointer; }
+.trend-legend:hover, .trend-legend[aria-pressed="true"] { border-color: var(--line-strong); background: var(--bg-muted); color: var(--text); }
+.trend-legend:focus-visible, .trend-reset:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.detail-trend [data-curve] { transition: opacity .15s ease; }
+.detail-trend g.is-muted { opacity: .15; }
+.trend-legend.is-muted { opacity: .5; }
+/* While one curve is in focus, the other legend entries recede. */
+.detail-trend:not([data-selected=""]) .trend-legend[aria-pressed="false"] { opacity: .5; }
+.detail-trend:not([data-selected=""]) .trend-legend[aria-pressed="false"]:hover { opacity: 1; }
+.trend-actions { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-top: 10px; }
+.results-page .trend-actions p { min-height: 3em; margin: 0; color: var(--text-3); font-size: 11px; line-height: 1.5; }
+.trend-reset { flex: none; padding: 4px 0; border: 0; background: none; color: var(--text-2); font: 12px var(--sans); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+.trend-reset[aria-disabled="true"] { opacity: .45; cursor: default; }
+.trend-swatch { width: 22px; border-top: 2px solid var(--mark); }
+.is-b > .trend-swatch { border-top-style: dashed; }
+.trend-sd { margin-left: auto; color: var(--text-3); }
+.trend-sd .trend-swatch { height: 9px; border: 0; background: var(--text-3); opacity: .3; }
+.trend-plot g { clip-path: inset(0 100% 0 0); }
+/* Both ends are insets, so the edge moves smoothly; the margin keeps end dots whole. */
+@keyframes trend-grow { from { clip-path: inset(-8px 100% -8px -8px); } }
+.trend-plot.is-shown g { clip-path: inset(-8px); animation: trend-grow 1.4s cubic-bezier(.3, .6, .3, 1) both; }
+.trend-plot.is-adjusting g { animation: none; }
+
+/* A first view draws each chart in; a new selection glides its marks from the old values. */
+@keyframes results-fade { from { opacity: 0; } }
+@keyframes profile-rise { from { opacity: 0; transform: translateY(8px); } }
+@keyframes profile-grow { from { transform: scaleX(0); } }
+@keyframes profile-wipe { from { clip-path: inset(0 100% 0 0); } }
+.is-entering :is(.flow-head, .profile-section-head, .verdict-card, .profile-guide, .entry-axis, .entry-chart h4) { animation: profile-rise .4s ease-out both; }
+.is-entering .profile-cell { animation: profile-rise .4s ease-out calc(120ms + var(--i) * 45ms) both; }
+.is-entering .strip-track { animation: profile-wipe .7s cubic-bezier(.2, .8, .2, 1) .15s both; }
+.is-entering .is-zoom .strip-track { animation-delay: .55s; }
+.is-entering :is(.lens, .verdict-chart .ticks) { animation: results-fade .4s ease-out .45s both; }
+.is-entering .entry-bar i { transform-origin: left; animation: profile-grow .6s cubic-bezier(.2, .8, .2, 1) calc(260ms + var(--i) * 45ms) both; }
+.is-entering .whisker { animation: results-fade .3s ease-out calc(700ms + var(--i) * 45ms) both; }
+.is-updating :is(.flow-head, .reading, .cell-delta, .ticks, .lens, .whisker, .chart-key) { animation: results-fade .35s ease-out both; }
+
+@media (max-width: 1100px) {
+	.profile-pick { gap: 0 24px; }
+	.profile-config-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+	.profile-config-fields > label:first-child { grid-column: 1 / -1; }
+	.is-compare .verdict-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+	.is-compare .tile:nth-child(3) { border-left: 0; }
+	.is-compare .tile:nth-child(n+3) { border-top: 1px solid var(--line); }
+	.is-compare .tile:first-child, .is-compare .tile:nth-child(2) { border-radius: 0; }
+	.is-compare .tile:nth-child(3) { border-radius: 0 0 0 11px; }
+}
+@media (max-width: 760px) {
+	[data-results-view="profile"] .results-controls { grid-template-columns: 1fr; gap: 16px; }
+	.profile-pick { grid-template-columns: 1fr; gap: 20px; margin: 24px 0; }
+	.profile-pick-footer { margin: 0; flex-wrap: wrap; gap: 4px; }
+	.profile-swap { padding-left: 0; }
+	.flow-head { padding: 26px 0 22px; }
+	.profile-scope { width: 100%; padding: 0; border: 0; display: flex; flex-wrap: wrap; gap: 8px 16px; }
+	.results-page .profile-section-head h3 { font-size: 24px; }
+	.verdict-chart { padding: 18px 16px 14px; }
+	.verdict-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+	.tile { padding: 16px; }
+	.tile:nth-child(3) { border-left: 0; }
+	.tile:nth-child(n+3) { border-top: 1px solid var(--line); }
+	.tile:first-child, .tile:nth-child(2) { border-radius: 0; }
+	.tile:nth-child(3) { border-radius: 0 0 0 11px; }
+	.lens-note { font-size: 10px; }
+	.entry-chart, .is-compare .entry-chart { --cols: minmax(0, 1fr) auto; --areas: "label readings" "track track"; }
+	.is-compare .entry-chart { --areas: "label label" "track track" "readings delta"; }
+	.entry-axis { display: block; padding-inline: 0; }
+	.entry-axis > :not(.ticks) { display: none; }
+	.results-page .entry-chart h4, .results-page .chart-key { padding-inline: 0; }
+	.row { row-gap: 10px; padding-inline: 0; }
+	.row-track { margin-block: 0; }
+	.is-compare .row .cell-readings { justify-items: start; }
+	.is-compare .row .cell-delta { align-self: end; }
+	.is-compare .row .cell-delta > span { display: inline; }
+	.key-sd, .trend-sd { margin-left: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+	.profile-view *, .profile-view *::before, .profile-view *::after, .detail-trend * { animation: none !important; transition: none !important; }
+	.trend-plot g { clip-path: none; }
+}
+@media (max-width: 480px) {
+	.trend-control { flex-basis: 100%; margin-left: 0; }
+}

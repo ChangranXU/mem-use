@@ -76,5 +76,5 @@ export function enhanceSelects(selects) {
 	document.addEventListener('click', event => { if (active && !active.button.contains(event.target) && !menu.contains(event.target)) close(); });
 	addEventListener('resize', position);
 	addEventListener('scroll', position, { capture: true, passive: true });
-	return { sync() { controls.forEach(({ select, button, label }) => { const value = select.selectedOptions[0]?.text || ''; button.firstElementChild.textContent = value; button.setAttribute('aria-label', `${label}: ${value}`); }); } };
+	return { sync() { controls.forEach(({ select, button, label }) => { const value = select.selectedOptions[0]?.text || ''; button.disabled = select.disabled; button.firstElementChild.textContent = value; button.setAttribute('aria-label', `${label}: ${value}`); }); } };
 }

@@ -1,5 +1,5 @@
 import { prepareRows, PROFILE_AXES } from './results-core.mjs';
-import { renderRadar, bindRadar } from './results-radar.mjs';
+import { renderRadar, bindRadar, radarSeries } from './results-radar.mjs';
 
 const escape = value => String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
 const percent = value => `${value > 0 && value < 0.01 ? value.toPrecision(2) : value.toFixed(2)}%`;
@@ -88,7 +88,7 @@ try {
 	const response = await fetch('data/results.json');
 	if (!response.ok) throw new Error('Profiles unavailable');
 	const data = await response.json();
-	const series = prepareRows(data.rows).filter(row => row.profile).map((row, slot) => ({ id: row.id, label: row.memory_system, slot, row }));
+	const series = radarSeries(prepareRows(data.rows).filter(row => row.cohort === 'paper' && row.profile));
 	let selected = null;
 	const draw = () => renderRadar(profiles, series, selected, escape);
 	bindRadar(profiles, {
@@ -101,8 +101,8 @@ try {
 			const axis = PROFILE_AXES.find(axis => axis.key === point.dataset.detail);
 			activePoint = point;
 			point.setAttribute('aria-expanded', 'true');
-			dialog.querySelector('.profile-detail-body').innerHTML = `<h2 id="profile-detail-title">${escape(axis.label)}</h2><p>${escape(axis.description)}</p>
-				${series.map(item => `<div class="paper-axis-row${item.id === point.dataset.row ? ' is-selected' : ''}" style="--c:var(--cat-${item.slot + 1})"><div><span>${escape(item.label)}</span><strong>${percent(item.row[axis.key])}</strong></div><div class="paper-axis-track"><span style="width:${item.row[axis.key]}%"></span></div></div>`).join('')}
+			dialog.querySelector('.profile-detail-body').innerHTML = `<h2 id="profile-detail-title">${escape(axis.label)}</h2><p>${escape(axis.description)} Mean entry share, with equal weight per profiled span.</p>
+				${series.map(item => `<div class="paper-axis-row${item.id === point.dataset.row ? ' is-selected' : ''}" style="--c:var(--cat-${item.hue})"><div><span>${escape(item.label)}</span><strong>${percent(item.row[axis.key])}</strong></div><div class="paper-axis-track"><span style="width:${item.row[axis.key]}%"></span></div></div>`).join('')}
 				<p class="paper-note">Linear scale, 0–100%.${axis.key === 'harm' ? ' Lower harm is better.' : ''}</p>`;
 			dialog.showModal();
 		},

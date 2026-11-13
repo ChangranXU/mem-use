@@ -1,10 +1,11 @@
-// Six-axis profile radar on the paper's scale (fig. experiment-comparison):
-// one log ring per decade, 0.001% at the centre, axes clockwise from relevance.
+// The Paper page's six-axis radar on the paper's logarithmic scale, 0.001% to 100%
+// (fig. experiment-comparison): one ring per decade, axes clockwise from relevance.
+// The Results page draws the same values as per-system cards; see results-profile.mjs.
 import { PROFILE_AXES, RADAR_FLOOR, radarRadius } from './results-core.mjs';
 
 const R = 150;
 const RINGS = [0.01, 0.1, 1, 10, 100];
-const SHAPES = ['circle', 'triangle', 'diamond', 'square'];
+const SHAPES = ['circle', 'triangle', 'diamond', 'square', 'cross'];
 const LABELS = { information_gain: ['Information', 'gain'], harm: ['Harm', 'lower is better'] };
 const at = (index, radius) => {
 	const angle = -Math.PI / 2 + index * Math.PI / 3;
@@ -18,10 +19,27 @@ export function markerPath(shape, x, y, size = 5) {
 	const s = size;
 	if (shape === 'triangle') return `M${round(x)} ${round(y - s * 1.25)}L${round(x + s * 1.15)} ${round(y + s * .85)}H${round(x - s * 1.15)}Z`;
 	if (shape === 'diamond') return `M${round(x)} ${round(y - s * 1.3)}L${round(x + s * 1.3)} ${round(y)}L${round(x)} ${round(y + s * 1.3)}L${round(x - s * 1.3)} ${round(y)}Z`;
+	if (shape === 'cross') return `M${round(x - s * .45)} ${round(y - s * 1.2)}h${round(s * .9)}v${round(s * .75)}h${round(s * .75)}v${round(s * .9)}h${round(-s * .75)}v${round(s * .75)}h${round(-s * .9)}v${round(-s * .75)}h${round(-s * .75)}v${round(-s * .9)}h${round(s * .75)}Z`;
 	if (shape === 'square') return `M${round(x - s)} ${round(y - s)}h${2 * s}v${2 * s}h${-2 * s}Z`;
 	return `M${round(x - s)} ${round(y)}a${s} ${s} 0 1 0 ${2 * s} 0a${s} ${s} 0 1 0 ${-2 * s} 0`;
 }
-const swatch = item => `<svg class="radar-swatch" viewBox="-12 -8 24 16" aria-hidden="true" style="--c:var(--cat-${item.slot + 1})"><path d="M-11 0H11"/><path class="radar-mark" d="${markerPath(SHAPES[item.slot % SHAPES.length], 0, 0, 4)}"/></svg>`;
+// Overlapping polygons are compared all-pairs, where seven hues cannot all stay
+// apart under colour-vision deficiency. Variants of one system (Mem0 L and L+G)
+// share a hue and differ by dash and marker, so at most four hues appear: blue,
+// yellow, magenta, green, the subset that best separates all pairs in both themes.
+const HUES = [1, 4, 5, 6];
+const family = row => row.memory_system.replace(/\s*\(.*\)$/, '');
+export function radarSeries(rows) {
+	const families = [...new Set(rows.map(family))];
+	return rows.map((row, index) => ({
+		id: row.id, label: row.memory_system, row,
+		hue: HUES[families.indexOf(family(row)) % HUES.length],
+		shape: SHAPES[index % SHAPES.length],
+		dashed: rows.slice(0, index).some(other => family(other) === family(row)),
+	}));
+}
+const style = item => `style="--c:var(--cat-${item.hue})"`;
+const swatch = item => `<svg class="radar-swatch${item.dashed ? ' is-dashed' : ''}" viewBox="-12 -8 24 16" aria-hidden="true" ${style(item)}><path d="M-11 0H11"/><path class="radar-mark" d="${markerPath(item.shape, 0, 0, 4)}"/></svg>`;
 
 function grid() {
 	const rings = RINGS.map((value, ring) => {
@@ -41,26 +59,34 @@ function grid() {
 	return `<g aria-hidden="true">${rings}${spokes}${labels}</g>`;
 }
 
-// series: [{ id, label, slot, row }]; selected: the legend's pinned series id, or null.
-export function renderRadar(root, series, selected, escape) {
+// series: radarSeries(rows) entries; selected: the legend's pinned series id, or null.
+function frame(series, selected, escape) {
 	const pinned = series.some(item => item.id === selected) ? selected : null;
 	// The selected series draws last, so its line and markers sit on top.
 	const ordered = [...series.filter(item => item.id !== pinned), ...series.filter(item => item.id === pinned)];
-	const data = item => `data-series="${escape(item.id)}" style="--c:var(--cat-${item.slot + 1})"`;
+	const data = item => `data-series="${escape(item.id)}" ${style(item)}`;
+	const group = (item, body) => `<g class="radar-series${item.id === pinned ? ' is-selected' : ''}${item.dashed ? ' is-dashed' : ''}" ${data(item)}>${body}</g>`;
+	const point = (item, axis, x, y) => {
+		const value = item.row[axis.key];
+		return `<g class="radar-point" tabindex="0" role="button" aria-haspopup="dialog" aria-expanded="false" data-row="${escape(item.id)}" data-detail="${axis.key}" data-x="${round(x)}" data-y="${round(y)}" aria-label="${escape(`${axis.label} for ${item.label}: ${percent(value)}`)}" data-tip="${escape(`${item.label} · ${axis.label} ${percent(value)}`)}"><circle class="radar-ring-focus" cx="${round(x)}" cy="${round(y)}" r="9"/><path class="radar-mark" d="${markerPath(item.shape, x, y)}"/></g>`;
+	};
+	return { pinned, ordered, data, group, point };
+}
+function renderKeys(root, series, { pinned, data }, escape) {
 	const attrs = item => `${data(item)}${item.id === pinned ? ' class="is-selected"' : ''}`;
-	const group = (item, body) => `<g class="radar-series${item.id === pinned ? ' is-selected' : ''}" ${data(item)}>${body}</g>`;
+	root.querySelector('.radar-legend').innerHTML = series.map(item => `<button type="button" class="radar-key" data-series="${escape(item.id)}" ${style(item)} aria-pressed="${item.id === pinned}">${swatch(item)}<span>${escape(item.label)}</span></button>`).join('');
+	root.querySelector('.radar-values').innerHTML = series.length
+		? `<caption class="sr-only">Six-axis profile values in percent</caption><thead><tr><th scope="col">Axis</th>${series.map(item => `<th scope="col" ${attrs(item)}>${swatch(item)}${item.row.official_url ? `<a href="${escape(item.row.official_url)}" target="_blank" rel="noopener noreferrer" title="Official repository (opens in a new tab)">${escape(item.label)}</a>` : `<span>${escape(item.label)}</span>`}</th>`).join('')}</tr></thead><tbody>${PROFILE_AXES.map(axis => `<tr><th scope="row"${axis.key === 'harm' ? ' class="is-inverse"' : ''}>${escape(axis.label)}</th>${series.map(item => `<td ${attrs(item)}>${percent(item.row[axis.key])}</td>`).join('')}</tr>`).join('')}</tbody>`
+		: '';
+}
+export function renderRadar(root, series, selected, escape) {
+	const view = frame(series, selected, escape), { pinned, ordered, group, point } = view;
 	const vertices = new Map(ordered.map(item => [item.id, PROFILE_AXES.map((axis, i) => at(i, radarRadius(item.row[axis.key])))]));
 	// Areas sit under every marker, so no series covers another's points.
 	const areas = ordered.map(item => group(item, `<polygon class="radar-area" points="${vertices.get(item.id).map(point => point.map(round).join(',')).join(' ')}"/>`)).join('');
-	const points = ordered.map(item => group(item, PROFILE_AXES.map((axis, i) => {
-		const [x, y] = vertices.get(item.id)[i], value = item.row[axis.key];
-		return `<g class="radar-point" tabindex="0" role="button" aria-haspopup="dialog" aria-expanded="false" data-row="${escape(item.id)}" data-detail="${axis.key}" data-x="${round(x)}" data-y="${round(y)}" aria-label="${escape(`${axis.label} for ${item.label}: ${percent(value)}`)}" data-tip="${escape(`${item.label} · ${axis.label} ${percent(value)}`)}"><circle class="radar-ring-focus" cx="${round(x)}" cy="${round(y)}" r="9"/><path class="radar-mark" d="${markerPath(SHAPES[item.slot % SHAPES.length], x, y)}"/></g>`;
-	}).join(''))).join('');
+	const points = ordered.map(item => group(item, PROFILE_AXES.map((axis, i) => point(item, axis, ...vertices.get(item.id)[i])).join(''))).join('');
 	root.querySelector('.radar-chart').innerHTML = `<svg class="radar" viewBox="-250 -205 500 410" role="group" aria-labelledby="radar-title"${pinned ? ` data-selected="${escape(pinned)}"` : ''}><title id="radar-title">Six-axis memory profiles on a logarithmic scale from ${RADAR_FLOOR}% to 100%</title>${grid()}${areas}${points}</svg><div class="radar-tooltip" role="presentation" hidden></div>`;
-	root.querySelector('.radar-legend').innerHTML = series.map(item => `<button type="button" class="radar-key" data-series="${escape(item.id)}" style="--c:var(--cat-${item.slot + 1})" aria-pressed="${item.id === pinned}">${swatch(item)}<span>${escape(item.label)}</span></button>`).join('');
-	root.querySelector('.radar-values').innerHTML = series.length
-		? `<caption class="sr-only">Six-axis profile values in percent</caption><thead><tr><th scope="col">Axis</th>${series.map(item => `<th scope="col" ${attrs(item)}>${swatch(item)}<span>${escape(item.label)}</span></th>`).join('')}</tr></thead><tbody>${PROFILE_AXES.map(axis => `<tr><th scope="row"${axis.key === 'harm' ? ' class="is-inverse"' : ''}>${escape(axis.label)}</th>${series.map(item => `<td ${attrs(item)}>${percent(item.row[axis.key])}</td>`).join('')}</tr>`).join('')}</tbody>`
-		: '';
+	renderKeys(root, series, view, escape);
 }
 
 // The pointer selects the nearest marker, not whichever shape is drawn on top.

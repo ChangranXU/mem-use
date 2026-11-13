@@ -5,7 +5,8 @@ carry no form field, so a form comes from the span's placement slot in its
 prepared evidence and the entry's key shape. Profile axes are means of
 per-span entry shares, so they split exactly by form. A span verdict is
 credited to the entries that decided it; delivered tokens split by exposed
-characters. USD cost cannot be split by form and is not.
+characters. USD cost cannot be split by form and is not. Verdict and profile
+splits are also kept per run and window of consecutive tasks.
 
 Usage: uv run python site/data/delivered_forms.py [batch.json]
 The batch and its reports are read only.
@@ -20,6 +21,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from injudge.profiles import span_profile  # noqa: E402
+from run_statistics import MEMORAX, MEMORAX_REPORTS, TASK_WINDOW, task_positions  # noqa: E402
+from util import atomic_write  # noqa: E402
 
 BATCH = Path("/Volumes/T9/eval-result/batches/20261023-091032-b21f276d-gold-resume/batch.json")
 RESULTS = Path(__file__).with_name("results.json")
@@ -58,6 +61,8 @@ def placements(run_dir: Path) -> dict[str, tuple[str, str]]:
 
 
 def form(system: str, slot: str, first: str, key: str) -> str:
+    if system == "memorax":  # every judged span is an agent-directed search result
+        return "search_result"
     if system == "memgovern":
         return "full_card" if first.startswith("=") else "search_preview" if slot else "other"
     if system == "mem0":
@@ -93,14 +98,20 @@ def entry_flags(op: dict) -> dict[str, dict]:
 
 def main() -> None:
     batch = json.loads(Path(sys.argv[1] if len(sys.argv) > 1 else BATCH).read_text())
-    acc = defaultdict(lambda: {"tokens": defaultdict(float), "verdicts": defaultdict(lambda: defaultdict(float)),
-                               "profile": defaultdict(lambda: defaultdict(float)), "profiled": 0, "unclassified": 0})
-    for run in batch["runs"]:
-        system, row = run["integration"], ROWS[(run["integration"], run["setting"])]
-        out = Path(run["output"])
+    split = lambda: {"verdicts": defaultdict(lambda: defaultdict(float)),  # noqa: E731
+                     "profile": defaultdict(lambda: defaultdict(float)), "profiled": 0}
+    acc = defaultdict(lambda: {**split(), "tokens": defaultdict(float), "unclassified": 0, "runs": {}})
+    dataset = json.loads(RESULTS.read_text())
+    tasks = {row["id"]: row["tasks_per_run"] for row in dataset["rows"]}
+    sources = [(run["integration"], ROWS[(run["integration"], run["setting"])], run["run"], Path(run["output"])) for run in batch["runs"]]
+    sources += [("memorax", "swe-memorax", path.split("/")[0], MEMORAX / path) for path in MEMORAX_REPORTS]
+    systems = {row: system for system, row, _, _ in sources}
+    for system, row, run, out in sources:
         report = json.loads((out / "injudge-report.json").read_text())
-        slots, a = placements(out), acc[row]
+        slots, a, position = placements(out), acc[row], task_positions(report, tasks[row])
+        windows = a["runs"][run] = defaultdict(split)
         for op in report["operations"]:
+            parts = (a, windows[position[op["episode_execution_id"]] // TASK_WINDOW])
             memories = op.get("memories") or []
             slot, first = slots.get(op["operation_id"], ("", ""))
             if op.get("auto") == "no_eligible_step":
@@ -122,27 +133,52 @@ def main() -> None:
                 continue
             flags = entry_flags(op)
             whole = span_profile(op)
-            if whole:
-                a["profiled"] += 1
-                for i, counts in flags.items():
-                    for axis, key in AXES.items():
-                        a["profile"][axis][forms[i]] += counts[key] / whole["n_entries"]
             chosen = deciding(op, {i: c for i, c in flags.items() if c}) if whole else set(forms)
-            for i in chosen:
-                a["verdicts"][op["verdict"]][forms[i]] += 1 / len(chosen)
-    dataset = json.loads(RESULTS.read_text())
+            for part in parts:
+                if whole:
+                    part["profiled"] += 1
+                    for i, counts in flags.items():
+                        for axis, key in AXES.items():
+                            part["profile"][axis][forms[i]] += counts[key] / whole["n_entries"]
+                for i in chosen:
+                    part["verdicts"][op["verdict"]][forms[i]] += 1 / len(chosen)
+
+    def shares(part: dict) -> dict:
+        return {
+            "verdicts": {v: {k: round(n, 6) for k, n in part["verdicts"][v].items() if n} for v in ("positive", "negative", "neutral", "unresolved")},
+            "profile": {axis: {k: round(100 * n / part["profiled"], 8) for k, n in part["profile"][axis].items() if n} for axis in AXES},
+        }
+
     for row in dataset["rows"]:
         if row["id"] not in acc:
             continue
-        a, system = acc[row["id"]], next(s for (s, _), r in ROWS.items() if r == row["id"])
+        a, system = acc[row["id"]], systems[row["id"]]
         assert a["profiled"] == row["profiled_spans"], (row["id"], a["profiled"])
+        assert row["task_window"] == TASK_WINDOW, row["id"]
+        for run in row["run_metrics"]:
+            for index, window in enumerate(run["windows"]):
+                part = a["runs"][run["run"]][index]
+                assert part["profiled"] == window["profiled_spans"], (row["id"], run["run"], index)
+                window["forms"] = shares(part)
+                for verdict, count in window["verdicts"].items():
+                    assert abs(sum(window["forms"]["verdicts"][verdict].values()) - count) < 1e-3, (row["id"], run["run"], index, verdict)
+                for axis, value in window["profile"].items():
+                    if value is not None:
+                        assert abs(sum(window["forms"]["profile"][axis].values()) - value) < 1e-6, (row["id"], run["run"], index, axis)
+        if system == "memorax":
+            # The supplementary row's whole-run forms are curated; only its windows are derived.
+            whole = shares(a)
+            for kind in ("verdicts", "profile"):
+                for key, split in row["forms"][kind].items():
+                    assert all(abs(whole[kind][key].get(k, 0) - n) < 1e-6 for k, n in split.items()), (row["id"], key)
+            row["forms"].pop("windows", None)
+            continue
         used = {f for f, n in a["tokens"].items() if n} | {f for v in a["verdicts"].values() for f, n in v.items() if n}
         catalog = [f for f in (*FORMS[system], COPY, OTHER) if f[0] in used]
         tokens = sum(a["tokens"].values())
         row["forms"] = {
             "items": [{"key": k, "label": label, "route": route} for k, label, route in catalog],
-            "verdicts": {v: {k: round(n, 6) for k, n in a["verdicts"][v].items() if n} for v in ("positive", "negative", "neutral", "unresolved")},
-            "profile": {axis: {k: round(100 * n / a["profiled"], 8) for k, n in a["profile"][axis].items() if n} for axis in AXES},
+            **shares(a),
             "delivered_tokens": {k: round(100 * n / tokens, 6) for k, n in a["tokens"].items() if n},
         }
         for verdict, count in row["verdicts"].items():
@@ -150,7 +186,7 @@ def main() -> None:
         for axis, value in row["profile"].items():
             assert abs(sum(row["forms"]["profile"][axis].values()) - value) < 1e-6, (row["id"], axis)
         print(row["id"], "unclassified judged spans:", a["unclassified"], "tokens:", round(tokens))
-    RESULTS.write_text(json.dumps(dataset, indent=2, ensure_ascii=False) + "\n")
+    atomic_write(RESULTS, json.dumps(dataset, indent=2, ensure_ascii=False) + "\n")
 
 
 if __name__ == "__main__":
