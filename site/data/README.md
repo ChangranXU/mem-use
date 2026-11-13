@@ -126,9 +126,10 @@ listed above with:
 ```bash
 uv run python site/data/run_statistics.py
 uv run python site/data/delivered_forms.py
+uv run python site/data/run_outcomes.py
 ```
 
-The script checks that the per-run populations and counts reproduce the curated
+The first script checks that the per-run populations and counts reproduce the curated
 pooled totals and that span-weighted run profiles reproduce the pooled axes.
 `runSummary()` in `results-core.mjs` computes the displayed mean and sample SD
 from these measurements, without rounding intermediate values. Plot whiskers
@@ -155,6 +156,49 @@ available windows. Zero strength restores the original windows exactly.
 The table, Paper page, and memory-form breakdowns retain pooled span weighting.
 Profile details explicitly label those breakdowns and their pooled share, since
 a pooled share need not equal the mean of the run shares.
+
+## Run outcomes
+
+The Conclusions view compares memory use with task results and examines unused relevant entries.
+A memory verdict never uses the task result; these measurements only relate the
+two afterwards. `run_outcomes.py` adds them to each `run_metrics` entry, read-only
+from the same reports and each run's `evaluation/summary.json`:
+
+```bash
+uv run python site/data/run_outcomes.py
+```
+
+Run it after `run_statistics.py`, which rebuilds `run_metrics`.
+
+- `passed` is the run's resolved count. The no-memory row gets `run_metrics`
+  with `run` and `passed` only. The script checks that the runs add up to each
+  row's `passed`.
+- `delivered_tokens` sums `delivery_cost.approx_tokens_total` over every span of
+  the run, empty deliveries included. `beneficial_entries` sums the profile's
+  benefit count over its profiled spans. MemGovern's totals reproduce the
+  paper's 50.50 beneficial entries per million delivered tokens.
+- `relevant_use` retains joint entry counts from profiled spans: `relevant`
+  counts relevance `true`, `unused` counts those with influence `none`, and
+  `unused_novel` counts that subset with novelty `novel`. Selection, reference,
+  and unknown influence never count as unused. Unknown novelty remains in the
+  unused denominator but does not count as novel.
+  Pooled paper counts reproduce `tab:use-effects` in the paper appendix:
+  MemGovern 1,247 relevant / 640 unused / 377 novel among unused;
+  Mem0 (L+G) 571 / 455 / 225; Mem0 (L) 571 / 440 / 212;
+  TencentDB 4,118 / 3,091 / 2,767. MemoraX adds 171 / 103 / 85.
+  These are entry counts, not averages of span shares. The design recommendation
+  follows the paper's conclusion; its effect has not been tested in these runs.
+- `beneficial_use.episodes` counts the tasks with one or more beneficial entries,
+  and `passed` how many of those the run resolved. `baseline_passed` counts the
+  no-memory runs' resolved attempts at the same tasks, out of four attempts for
+  each task. A task without a resolved patch counts as failed, as in the pass rate.
+  The paper reports 383 such episodes with a harness result in its four
+  configurations, 89 of them failed. This count is 384, with 90 not resolved,
+  which is consistent with one episode that has no harness result.
+- Every run takes the tasks of `memory-bridge/benchmarks/swebench/data/full/exposure-merge.txt`
+  in file order. TencentDB and MemoraX recordings carry no task id, so an
+  episode's task comes from its position. The script checks each recorded id
+  against that order.
 
 ## Delivered forms
 
@@ -216,5 +260,9 @@ rows; no UI code change is needed for another cohort.
 
 Record the source and any accounting differences before adding a new cohort.
 Do not mix incompatible costs or profile definitions under the same metric.
+- Run `run_outcomes.py` for the new runs, so the Conclusions view includes the
+  configuration. Without those fields the view leaves out the conclusions that
+  need them.
+
 Run `node --test site/tests/results.test.mjs` after changes.
 For extraction changes, also run `uv run pytest tests/test_site_run_statistics.py -q`.

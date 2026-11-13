@@ -209,17 +209,18 @@
 	.form-list td { padding-left: 8px; }
 }
 
-/* Table / profile view switch: one segmented control whose thumb slides to the pressed side. */
-.view-switch { position: relative; display: inline-grid; grid-template-columns: 1fr 1fr; min-height: 44px; padding: 3px; border: 1px solid var(--line-strong); border-radius: 9px; background: var(--bg); }
-.view-switch::before { content: ""; position: absolute; inset: 3px auto 3px 3px; width: calc(50% - 3px); border-radius: 6px; background: var(--landing-surface); transition: transform .28s cubic-bezier(.2, .8, .2, 1); }
+/* Table / profile / conclusions view switch: one segmented control whose thumb slides to the pressed side. */
+.view-switch { position: relative; display: inline-grid; grid-template-columns: repeat(3, minmax(0, 1fr)); min-height: 44px; padding: 3px; border: 1px solid var(--line-strong); border-radius: 9px; background: var(--bg); }
+.view-switch::before { content: ""; position: absolute; inset: 3px auto 3px 3px; width: calc((100% - 6px) / 3); border-radius: 6px; background: var(--landing-surface); transition: transform .28s cubic-bezier(.2, .8, .2, 1); }
 .view-switch[data-view="profile"]::before { transform: translateX(100%); }
+.view-switch[data-view="conclusions"]::before { transform: translateX(200%); }
 .view-switch button { position: relative; display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 0 16px; border: 0; border-radius: 6px; background: none; color: var(--text-3); font: 14px var(--sans); cursor: pointer; transition: color .15s; }
 .view-switch button:hover { color: var(--text); }
 .view-switch button[aria-pressed="true"] { color: var(--text); font-weight: 500; }
 .view-switch button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .toolbar-menu[hidden] { display: none; }
 
-@media (max-width: 600px) { .results-subbar .view-switch { flex: 1 0 100%; } }
+@media (max-width: 600px) { .results-subbar .view-switch { flex: 1 0 100%; } .view-switch button { padding-inline: 8px; } .view-switch svg { display: none; } }
 
 /* Panels open from their trigger; a view change fades its rows in. */
 @keyframes results-pop { from { opacity: 0; transform: translateY(-4px) scale(.985); } }

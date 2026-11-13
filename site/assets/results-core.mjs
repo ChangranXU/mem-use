@@ -123,6 +123,30 @@ export function taskSeries(row, key, smooth = 0, form = null) {
 			return spans ? sample.reduce((sum, { part, weight }) => sum + measurement(part, key, form) * population(part, key) * weight, 0) / spans : null;
 		})) }));
 }
+// Rank correlation makes no assumption about scale, so shares, counts, and costs
+// compare alike; ties share their mean rank. A missing value drops its pair.
+export function spearman(pairs) {
+	const points = pairs.filter(pair => pair.every(Number.isFinite)), n = points.length;
+	const ranks = column => {
+		const order = points.map((point, index) => [point[column], index]).sort((a, b) => a[0] - b[0]), rank = [];
+		for (let start = 0, end; start < n; start = end) {
+			for (end = start; end < n && order[end][0] === order[start][0];) end++;
+			for (let i = start; i < end; i++) rank[order[i][1]] = (start + end + 1) / 2;
+		}
+		return rank;
+	};
+	const x = ranks(0), y = ranks(1), mean = (n + 1) / 2;
+	const product = (a, b) => a.reduce((sum, value, i) => sum + (value - mean) * (b[i] - mean), 0);
+	const spread = Math.sqrt(product(x, x) * product(y, y));
+	return { rho: n > 2 && spread ? product(x, y) / spread : null, n };
+}
+// Describe the observed coefficient, not statistical significance. Runs repeat
+// the same tasks, and windows share runs, so point count is not independent N.
+export function relationStrength({ rho }) {
+	if (!Number.isFinite(rho)) return { tone: 'none', label: 'Not available' };
+	if (rho === 0) return { tone: 'none', label: 'No rank relation' };
+	return { tone: rho > 0 ? 'positive' : 'negative', label: `${Math.abs(rho) >= .7 ? 'Strong' : Math.abs(rho) >= .4 ? 'Moderate' : 'Weak'} ${rho > 0 ? 'positive' : 'negative'} relation` };
+}
 export function filterRows(rows, filters, systems, query = '') {
 	const terms = query.toLowerCase().trim().split(/\s+/).filter(Boolean);
 	return rows.filter(row => Object.entries(filters).every(([key, value]) => !value || row[key] === value)

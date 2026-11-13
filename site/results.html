@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Results · MemUse</title>
-<meta name="description" content="Compare memory systems by memory use, task pass rate, and cost. Sort and filter the table, or explore a system’s verdicts and the delivery and use evidence behind them.">
+<meta name="description" content="Compare memory systems by memory use, task pass rate, and cost. Sort and filter the table, explore a system’s verdicts and the evidence behind them, or read the conclusions with their charts.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap">
@@ -14,6 +14,7 @@
 <link rel="stylesheet" href="assets/results.css">
 <link rel="stylesheet" href="assets/radar.css">
 <link rel="stylesheet" href="assets/profile.css">
+<link rel="stylesheet" href="assets/conclusions.css">
 <script>try { const t = localStorage.getItem('theme'); if (t) document.documentElement.dataset.theme = t; } catch {}</script>
 </head>
 <body class="landing results-page">
@@ -29,7 +30,7 @@
 			<details class="toolbar-menu" id="columns-menu"><summary><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16M15 4v16"/></svg>Columns <span id="column-count"></span><svg class="i menu-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg></summary><div class="menu-panel columns-panel"><div id="column-options"></div><button id="default-columns" class="quiet-button" type="button">Restore default columns</button></div></details>
 		</div>
 	</div>
-	<div class="results-subbar"><div class="view-switch" role="group" aria-label="View"><button type="button" data-view="table" aria-pressed="true"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M3 15h18"/></svg>Table</button><button type="button" data-view="profile" aria-pressed="false"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18"/><circle cx="15" cy="6" r="2" fill="currentColor"/><circle cx="8" cy="12" r="2" fill="currentColor"/><circle cx="18" cy="18" r="2" fill="currentColor"/></svg>Profile</button></div><p id="rows-summary" role="status">Loading results…</p><button id="reset-results" class="quiet-button" type="button">Reset</button></div>
+	<div class="results-subbar"><div class="view-switch" role="group" aria-label="View"><button type="button" data-view="table" aria-pressed="true"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M3 15h18"/></svg>Table</button><button type="button" data-view="profile" aria-pressed="false"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18"/><circle cx="15" cy="6" r="2" fill="currentColor"/><circle cx="8" cy="12" r="2" fill="currentColor"/><circle cx="18" cy="18" r="2" fill="currentColor"/></svg>Profile</button><button type="button" data-view="conclusions" aria-pressed="false"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4v16h16"/><circle cx="9" cy="14" r="1.4" fill="currentColor"/><circle cx="13" cy="10" r="1.4" fill="currentColor"/><circle cx="18" cy="7" r="1.4" fill="currentColor"/></svg>Conclusions</button></div><p id="rows-summary" role="status">Loading results…</p><button id="reset-results" class="quiet-button" type="button">Reset</button></div>
 	</div>
 	<div id="results-error" class="results-empty" hidden><h2>Results could not be loaded.</h2><p>Refresh the page to try again, or read the <a href="paper.html">paper results</a>.</p></div>
 	<div id="empty-results" class="results-empty" hidden><h2>No matching configurations.</h2><p>Change the filters or clear your search.</p><button type="button" id="empty-reset" class="landing-button">Reset filters</button></div>
@@ -50,6 +51,7 @@
 		<p id="profile-status" class="sr-only" role="status"></p>
 		<article id="profile-flow" class="profile-flow"></article>
 	</section>
+	<section id="conclusions-view" class="conclusions-view" aria-label="Conclusions" hidden></section>
 	<dl class="results-notes" id="results-notes" aria-label="About these results"></dl>
 	<dialog id="form-detail" class="form-detail" aria-labelledby="form-detail-title"></dialog>
 </div>

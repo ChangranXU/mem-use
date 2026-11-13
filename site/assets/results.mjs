@@ -1,6 +1,7 @@
 import { enhanceSelects } from './results-select.mjs';
 import { profileFlow, bindProfiles } from './results-profile.mjs';
 import { detailContent, detailChart } from './results-detail.mjs';
+import { conclusionsView, bindConclusions, revealConclusions } from './results-conclusions.mjs';
 import { COLUMNS, DEFAULT_COLUMNS, VERDICTS, prepareRows, filterRows, sortRows, formatValue, formBreakdown, profileSelection } from './results-core.mjs';
 const $ = selector => document.querySelector(selector);
 const byKey = Object.fromEntries(COLUMNS.map(column => [column.key, column]));
@@ -8,7 +9,9 @@ const escape = value => String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;
 let rows = [], systems = new Set(), shown = new Set(DEFAULT_COLUMNS);
 let filters = { benchmark: '', harness: '', model: '', thinking_effort: '' };
 let sortKey = 'pass_rate', sortDirection = 'desc', selectorMenus;
-let view = new URLSearchParams(location.search).get('view') === 'profile' ? 'profile' : 'table';
+const VIEWS = ['table', 'profile', 'conclusions'];
+let view = VIEWS.find(name => name === new URLSearchParams(location.search).get('view')) || 'table';
+let revealObserver = null;
 // The profile shows one system, optionally against another; both are row ids.
 let profileId = null, compareId = '';
 const display = (row, key) => formatValue(row[key], byKey[key], row);
@@ -22,11 +25,11 @@ function availableRows() {
 	return view === 'profile' ? rows.filter(row => row.profile) : rows;
 }
 function visibleRows() {
-	// Profile configurations are independent; the table's configuration filters
-	// must not constrain either profile picker.
-	const profile = view === 'profile';
-	const scope = profile ? { benchmark: filters.benchmark } : filters;
-	return sortRows(filterRows(availableRows(), scope, profile ? new Set(rows.map(row => row.memory_system)) : systems, profile ? '' : $('#result-query').value), sortKey, sortDirection);
+	// Profile configurations are independent, and conclusions describe the whole
+	// benchmark; the table's configuration filters must not constrain either.
+	const report = view !== 'table';
+	const scope = report ? { benchmark: filters.benchmark } : filters;
+	return sortRows(filterRows(availableRows(), scope, report ? new Set(rows.map(row => row.memory_system)) : systems, report ? '' : $('#result-query').value), sortKey, sortDirection);
 }
 function renderProfileSelectors(side, items, row) {
 	const { choices } = profileSelection(items, row || {});
@@ -307,26 +310,26 @@ const motion = matchMedia('(prefers-reduced-motion: no-preference)');
 let entering = true;
 function renderResults() {
 	closeDetail(false);
-	const items = visibleRows(), profile = view === 'profile';
+	const items = visibleRows(), profile = view === 'profile', report = view !== 'table';
 	document.body.dataset.resultsView = view;
 	const cohort = rows.filter(row => row.benchmark === filters.benchmark);
-	$('#rows-summary').textContent = profile ? `${items.length} configurations available` : `Showing ${items.length} of ${availableRows().filter(row => row.benchmark === filters.benchmark).length} configurations`;
-	const active = (profile ? 0 : ['harness', 'model', 'thinking_effort'].filter(key => filters[key]).length) + (availableRows().some(row => !systems.has(row.memory_system)) ? 1 : 0);
+	$('#rows-summary').textContent = view === 'conclusions' ? `From ${items.filter(row => row.profile).length} memory configurations` : profile ? `${items.length} configurations available` : `Showing ${items.length} of ${availableRows().filter(row => row.benchmark === filters.benchmark).length} configurations`;
+	const active = (report ? 0 : ['harness', 'model', 'thinking_effort'].filter(key => filters[key]).length) + (availableRows().some(row => !systems.has(row.memory_system)) ? 1 : 0);
 	$('#filter-count').textContent = active || '';
 	$('#column-count').textContent = shown.size;
 	$('#empty-results').hidden = items.length > 0;
 	const switcher = document.querySelector('.view-switch');
 	switcher.dataset.view = view;
 	switcher.querySelectorAll('button').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.view === view)));
-	$('#columns-menu').hidden = profile;
-	$('.results-actions').hidden = profile;
-	$('.filter-selects').hidden = profile;
-	const section = $(profile ? '#profile-view' : '#table-view');
+	$('#columns-menu').hidden = report;
+	$('.results-actions').hidden = report;
+	$('.filter-selects').hidden = report;
+	const section = $(`#${view}-view`);
 	const before = !entering && !profile && motion.matches ? new Map([...$('#results-body').rows].map(tr => [tr.dataset.id, tr.getBoundingClientRect().top])) : null;
 	const flow = $('#profile-flow');
 	const marks = !entering && profile && motion.matches ? new Map([...flow.querySelectorAll('[data-mark]')].map(mark => [mark.dataset.mark, mark.getBoundingClientRect()])) : null;
-	$('#table-view').hidden = profile || !items.length;
-	$('#profile-view').hidden = !profile || !items.length;
+	for (const name of VIEWS) $(`#${name}-view`).hidden = view !== name || !items.length;
+	revealObserver?.disconnect(); revealObserver = null;
 	if (profile && items.length) {
 		// The ids retain complete configurations, including when both use the same system.
 		const picked = items.find(row => row.id === profileId) || items[0];
@@ -339,7 +342,11 @@ function renderResults() {
 		const describe = row => `${row.memory_system}, ${row.harness}, ${row.model}, ${row.thinking_effort} effort`;
 		$('#profile-status').textContent = other ? `Comparing ${describe(picked)} with ${describe(other)}.` : `Showing ${describe(picked)}.`;
 		flow.innerHTML = profileFlow(picked, other, escape);
-	} else if (!profile) renderTable(items);
+	} else if (view === 'conclusions') {
+		// Dataset order keeps each system's colour and marker, whatever the table's sort.
+		section.innerHTML = conclusionsView(cohort, escape);
+		revealObserver = revealConclusions(section, motion.matches);
+	} else if (!report) renderTable(items);
 	selectorMenus?.sync();
 	$('#sort-summary').textContent = `Sorted by ${byKey[sortKey].label.toLowerCase()}, ${sortDirection === 'asc' ? 'ascending' : 'descending'}. Select a heading to change the order.`;
 	section.classList.remove('is-entering', 'is-updating');
@@ -358,7 +365,15 @@ function renderResults() {
 	const runs = [...new Set(cohort.map(row => row.runs))], tasks = [...new Set(cohort.map(row => row.tasks_per_run))];
 	const notes = [
 		['Scope', runs.length === 1 && tasks.length === 1 ? `${runs[0]} runs × ${tasks[0]} tasks per configuration.` : 'Run and task counts vary by configuration.'],
-		...(profile ? [['Summary', 'Mean ± sample standard deviation across observed runs. SD is in percentage points (pp).'],
+		...(view === 'conclusions' ? [['Relation', 'ρ is the Spearman rank correlation. At +1 the two values increase together. At −1 one value decreases when the other increases.'],
+				['Strength', 'Labels describe the observed correlation. They are not significance tests. Runs repeat the same tasks, and windows share runs.'],
+				['Cause', 'The relations are observations of recorded runs. They do not show that memory causes a task result.'],
+				['Benefit', 'Benefit and harm are judge assessments of the use of an entry. The pass rate comes from the benchmark harness.'],
+				['Entry shares', 'Relevance, action, and benefit shares average the delivered entries within each span, then give each span equal weight.'],
+				['Unused memory', 'Unused means no action, selection, or reference attributed to the entry. Unknown influence does not count as unused.'],
+				['New information', 'The entry adds information absent from the agent’s prior context. This is the judge’s novelty assessment.'],
+				['Cost', 'Mean recorded USD for each episode. Judging is excluded; unreported charges are unknown.']]
+			: profile ? [['Summary', 'Mean ± sample standard deviation across observed runs. SD is in percentage points (pp).'],
 				['Verdicts', 'Each run uses spans with a verdict, including automatic neutral copies.'],
 				['Profile', 'Each run averages entry shares over its profiled spans. The six axes are independent.'],
 				['Scale', 'The magnified strip enlarges the start of the full strip linearly. Entry bars share the axis printed above them; whiskers show ± one SD, clipped to it.'],
@@ -373,9 +388,12 @@ function setView(next) {
 	view = next; entering = true;
 	renderSystemOptions();
 	const url = new URL(location.href);
-	if (view === 'profile') url.searchParams.set('view', 'profile'); else url.searchParams.delete('view');
+	if (view === 'table') url.searchParams.delete('view'); else url.searchParams.set('view', view);
+	url.hash = '';
 	history.replaceState(null, '', url);
 	renderResults();
+	// Reset after layout changes so the new view starts at its heading.
+	window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
 }
 function clearFilters() {
 	for (const key of ['harness', 'model', 'thinking_effort']) { filters[key] = ''; $(`#${key}`).value = ''; }
@@ -414,6 +432,7 @@ try {
 	$('#results-body').addEventListener('click', event => { const button = event.target.closest('.cell-detail'); if (button) openDetail(button); });
 	document.querySelector('.view-switch').addEventListener('click', event => { const button = event.target.closest('[data-view]'); if (button && button.dataset.view !== view) setView(button.dataset.view); });
 	bindProfiles($('#profile-view'), openDetail);
+	bindConclusions($('#conclusions-view'));
 	for (const side of ['primary', 'comparison']) {
 		$(`#profile-${side}`).addEventListener('change', event => {
 			const key = event.target.dataset.profileField;
@@ -452,6 +471,8 @@ try {
 	document.addEventListener('click', event => { if (event.target.closest('.result-select-menu')) return; document.querySelectorAll('.toolbar-menu[open]').forEach(menu => { if (!menu.contains(event.target)) menu.open = false; }); });
 	document.addEventListener('keydown', event => { if (event.key === 'Escape' && !detail.open) document.querySelectorAll('.toolbar-menu[open]').forEach(menu => { menu.open = false; menu.querySelector('summary').focus(); }); });
 	renderResults();
+	// Conclusion targets exist only after the asynchronous data load.
+	if (view === 'conclusions' && location.hash) document.getElementById(location.hash.slice(1))?.scrollIntoView({ block: 'start', behavior: 'instant' });
 } catch (error) {
 	$('#results-error').hidden = false; $('#table-view').hidden = true;
 	$('#rows-summary').textContent = 'Results unavailable';

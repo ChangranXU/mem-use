@@ -1153,7 +1153,20 @@
                 }
               }
             }
-          ]
+          ],
+          "passed": 370,
+          "delivered_tokens": 408915,
+          "beneficial_entries": 23,
+          "beneficial_use": {
+            "episodes": 21,
+            "passed": 17,
+            "baseline_passed": 66
+          },
+          "relevant_use": {
+            "relevant": 353,
+            "unused": 193,
+            "unused_novel": 112
+          }
         },
         {
           "run": "run2",
@@ -2179,7 +2192,20 @@
                 }
               }
             }
-          ]
+          ],
+          "passed": 363,
+          "delivered_tokens": 413649,
+          "beneficial_entries": 17,
+          "beneficial_use": {
+            "episodes": 17,
+            "passed": 11,
+            "baseline_passed": 49
+          },
+          "relevant_use": {
+            "relevant": 291,
+            "unused": 142,
+            "unused_novel": 86
+          }
         },
         {
           "run": "run3",
@@ -3212,7 +3238,20 @@
                 }
               }
             }
-          ]
+          ],
+          "passed": 368,
+          "delivered_tokens": 428340,
+          "beneficial_entries": 24,
+          "beneficial_use": {
+            "episodes": 23,
+            "passed": 19,
+            "baseline_passed": 67
+          },
+          "relevant_use": {
+            "relevant": 302,
+            "unused": 144,
+            "unused_novel": 85
+          }
         },
         {
           "run": "run4",
@@ -4243,7 +4282,20 @@
                 }
               }
             }
-          ]
+          ],
+          "passed": 366,
+          "delivered_tokens": 412604,
+          "beneficial_entries": 20,
+          "beneficial_use": {
+            "episodes": 19,
+            "passed": 14,
+            "baseline_passed": 53
+          },
+          "relevant_use": {
+            "relevant": 301,
+            "unused": 161,
+            "unused_novel": 94
+          }
         }
       ],
       "task_window": 25
@@ -5348,7 +5400,20 @@
                 }
               }
             }
-          ]
+          ],
+          "passed": 367,
+          "delivered_tokens": 5366371,
+          "beneficial_entries": 20,
+          "beneficial_use": {
+            "episodes": 16,
+            "passed": 14,
+            "baseline_passed": 56
+          },
+          "relevant_use": {
+            "relevant": 116,
+            "unused": 93,
+            "unused_novel": 45
+          }
         },
         {
           "run": "run2",
@@ -6377,7 +6442,20 @@
                 }
               }
             }
-          ]
+          ],
+          "passed": 359,
+          "delivered_tokens": 5607076,
+          "beneficial_entries": 26,
+          "beneficial_use": {
+            "episodes": 22,
+            "passed": 15,
+            "baseline_passed": 63
+          },
+          "relevant_use": {
+            "relevant": 166,
+            "unused": 129,
+            "unused_novel": 68
+          }
         },
         {
           "run": "run3",
@@ -7370,7 +7448,20 @@
                 }
               }
             }
-          ]
+          ],
+          "passed": 366,
+          "delivered_tokens": 5157477,
+          "beneficial_entries": 21,
+          "beneficial_use": {
+            "episodes": 19,
+            "passed": 14,
+            "baseline_passed": 55
+          },
+          "relevant_use": {
+            "relevant": 136,
+            "unused": 108,
+            "unused_novel": 53
+          }
         },
         {
           "run": "run4",
@@ -8376,7 +8467,20 @@
                 }
               }
             }
-          ]
+          ],
+          "passed": 362,
+          "delivered_tokens": 4976623,
+          "beneficial_entries": 19,
+          "beneficial_use": {
+            "episodes": 16,
+            "passed": 12,
+            "baseline_passed": 42
+          },
+          "relevant_use": {
+            "relevant": 153,
+            "unused": 125,
+            "unused_novel": 59
+          }
         }
       ],
       "task_window": 25
@@ -9507,7 +9611,20 @@
                 }
               }
             }
-          ]
+          ],
+          "passed": 363,
+          "delivered_tokens": 5786983,
+          "beneficial_entries": 23,
+          "beneficial_use": {
+            "episodes": 19,
+            "passed": 14,
+            "baseline_passed": 59
+          },
+          "relevant_use": {
+            "relevant": 148,
+            "unused": 106,
+            "unused_novel": 52
+          }
         },
         {
           "run": "run2",
@@ -10550,7 +10667,20 @@
                 }
               }
             }
-          ]
+          ],
+          "passed": 366,
+          "delivered_tokens": 5434863,
+          "beneficial_entries": 28,
+          "beneficial_use": {
+            "episodes": 24,
+            "passed": 17,
+            "baseline_passed": 62
+          },
+          "relevant_use": {
+            "relevant": 150,
+            "unused": 123,
+            "unused_novel": 57
+          }
         },
         {
           "run": "run3",
@@ -11599,7 +11729,20 @@
                 }
               }
             }
-          ]
+          ],
+          "passed": 366,
+          "delivered_tokens": 5588534,
+          "beneficial_entries": 36,
+          "beneficial_use": {
+            "episodes": 28,
+            "passed": 21,
+            "baseline_passed": 82
+          },
+          "relevant_use": {
+            "relevant": 143,
+            "unused": 105,
+            "unused_novel": 48
+          }
         },
         {
           "run": "run4",
@@ -12606,7 +12749,20 @@
                 }
               }
             }
-          ]
+          ],
+          "passed": 360,
+          "delivered_tokens": 5130746,
+          "beneficial_entries": 21,
+          "beneficial_use": {
+            "episodes": 19,
+            "passed": 14,
+            "baseline_passed": 56
+          },
+          "relevant_use": {
+            "relevant": 130,
+            "unused": 106,
+            "unused_novel": 55
+          }
         }
       ],
       "task_window": 25
@@ -13944,7 +14100,20 @@
                 }
               }
             }
-          ]
+          ],
+          "passed": 369,
+          "delivered_tokens": 11321838,
+          "beneficial_entries": 28,
+          "beneficial_use": {
+            "episodes": 28,
+            "passed": 23,
+            "baseline_passed": 84
+          },
+          "relevant_use": {
+            "relevant": 687,
+            "unused": 597,
+            "unused_novel": 557
+          }
         },
         {
           "run": "run2",
@@ -15308,7 +15477,20 @@
                 }
               }
             }
-          ]
+          ],
+          "passed": 360,
+          "delivered_tokens": 11210237,
+          "beneficial_entries": 40,
+          "beneficial_use": {
+            "episodes": 38,
+            "passed": 32,
+            "baseline_passed": 120
+          },
+          "relevant_use": {
+            "relevant": 1380,
+            "unused": 891,
+            "unused_novel": 814
+          }
         },
         {
           "run": "run3",
@@ -16684,7 +16866,20 @@
                 }
               }
             }
-          ]
+          ],
+          "passed": 361,
+          "delivered_tokens": 12403842,
+          "beneficial_entries": 41,
+          "beneficial_use": {
+            "episodes": 41,
+            "passed": 31,
+            "baseline_passed": 122
+          },
+          "relevant_use": {
+            "relevant": 1296,
+            "unused": 957,
+            "unused_novel": 817
+          }
         },
         {
           "run": "run4",
@@ -17914,7 +18109,20 @@
                 }
               }
             }
-          ]
+          ],
+          "passed": 363,
+          "delivered_tokens": 11433067,
+          "beneficial_entries": 34,
+          "beneficial_use": {
+            "episodes": 34,
+            "passed": 26,
+            "baseline_passed": 109
+          },
+          "relevant_use": {
+            "relevant": 755,
+            "unused": 646,
+            "unused_novel": 579
+          }
         }
       ],
       "task_window": 25,
@@ -18894,7 +19102,20 @@
                 }
               }
             }
-          ]
+          ],
+          "passed": 362,
+          "delivered_tokens": 329557,
+          "beneficial_entries": 12,
+          "beneficial_use": {
+            "episodes": 12,
+            "passed": 10,
+            "baseline_passed": 39
+          },
+          "relevant_use": {
+            "relevant": 46,
+            "unused": 25,
+            "unused_novel": 15
+          }
         },
         {
           "run": "run2",
@@ -19756,7 +19977,20 @@
                 }
               }
             }
-          ]
+          ],
+          "passed": 363,
+          "delivered_tokens": 339577,
+          "beneficial_entries": 9,
+          "beneficial_use": {
+            "episodes": 7,
+            "passed": 5,
+            "baseline_passed": 20
+          },
+          "relevant_use": {
+            "relevant": 38,
+            "unused": 28,
+            "unused_novel": 25
+          }
         },
         {
           "run": "run3",
@@ -20638,7 +20872,20 @@
                 }
               }
             }
-          ]
+          ],
+          "passed": 364,
+          "delivered_tokens": 348634,
+          "beneficial_entries": 9,
+          "beneficial_use": {
+            "episodes": 9,
+            "passed": 7,
+            "baseline_passed": 28
+          },
+          "relevant_use": {
+            "relevant": 41,
+            "unused": 23,
+            "unused_novel": 21
+          }
         },
         {
           "run": "run4",
@@ -21518,7 +21765,20 @@
                 }
               }
             }
-          ]
+          ],
+          "passed": 359,
+          "delivered_tokens": 347247,
+          "beneficial_entries": 10,
+          "beneficial_use": {
+            "episodes": 10,
+            "passed": 7,
+            "baseline_passed": 28
+          },
+          "relevant_use": {
+            "relevant": 46,
+            "unused": 27,
+            "unused_novel": 24
+          }
         }
       ],
       "task_window": 25
@@ -21543,7 +21803,25 @@
       "pass_rate": 73.0,
       "pass_rate_std": 1.5,
       "cost_change_percent": null,
-      "cohort": "paper"
+      "cohort": "paper",
+      "run_metrics": [
+        {
+          "run": "run1",
+          "passed": 375
+        },
+        {
+          "run": "run2",
+          "passed": 360
+        },
+        {
+          "run": "run3",
+          "passed": 365
+        },
+        {
+          "run": "run4",
+          "passed": 359
+        }
+      ]
     }
   ]
 }
