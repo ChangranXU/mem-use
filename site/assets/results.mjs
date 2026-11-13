@@ -365,8 +365,7 @@ function renderResults() {
 				...(compareId ? [['Difference', 'A − B uses unrounded run means, in percentage points. It does not indicate statistical significance.']] : [])]
 			: [['Verdicts', 'Share of spans with a verdict. Select an underlined value for its meaning and its split by memory form.'],
 				['Pass rate', 'Mean ± sample standard deviation across runs, in percentage points.'],
-				['Cost', 'Mean recorded USD per episode. Δ is the change from the no-memory baseline. Judging is excluded; unreported charges are unknown.'],
-				...items.filter(row => row.notes).map(row => [`${row.memory_system} accounting`, row.notes])]),
+				['Cost', 'Mean recorded USD per episode. Δ is the change from the no-memory baseline. Judging is excluded; unreported charges are unknown.']]),
 	];
 	$('#results-notes').innerHTML = notes.map(([term, text]) => `<dt>${escape(term)}</dt><dd>${escape(text)}</dd>`).join('');
 }
